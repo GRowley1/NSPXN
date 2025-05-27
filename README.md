@@ -1,0 +1,1 @@
+NSPXN - AI Generated Appraisals
