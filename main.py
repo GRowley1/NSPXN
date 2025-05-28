@@ -10,7 +10,13 @@ app = FastAPI()
 # Enable CORS for any domain
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],
+    allow_origins = [
+    "http://nspxn.com",
+    "https://nspxn.com",  # ✅ Add this!
+    "http://localhost:3000",
+    "https://*.nspxn.com"
+]
+,
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
