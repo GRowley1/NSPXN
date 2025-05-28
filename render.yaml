@@ -3,7 +3,7 @@ services:
     name: nspxn-ai-estimator
     runtime: python
     buildCommand: ""
-    startCommand: bash -c "uvicorn main:app --host 0.0.0.0 --port $PORT"
+    startCommand: bash -c "gunicorn main:app --bind 0.0.0.0:$PORT"
     envVars:
       - key: PYTHON_VERSION
         value: 3.10
