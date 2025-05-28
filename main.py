@@ -22,19 +22,32 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-# Simulated damage detection
-def detect_damage(image: Image.Image) -> List[str]:
-    return [
-        "Detected dent on front bumper",
-        "Scuff marks on right fender"
-    ]
+import random
 
-# Simulated estimate generation
+# Updated mock damage detection
+def detect_damage(image: Image.Image) -> List[str]:
+    damage_types = [
+        "Dent on front bumper",
+        "Scuff on right fender",
+        "Crack in headlamp",
+        "Scratch on hood",
+        "Dent on driver-side door",
+        "Broken mirror",
+        "Rear bumper gouge",
+        "Quarter panel scrape"
+    ]
+    # Randomly return 1-2 damages per image
+    return random.sample(damage_types, k=random.randint(1, 2))
+
+# Updated mock estimate calculation
 def generate_estimate(detections: List[str], vehicle_info: str) -> dict:
+    unique_damages = list(set(detections))
+    base_price = 300
+    cost = base_price + len(unique_damages) * 200
     return {
         "vehicle_info": vehicle_info,
-        "damage_summary": detections,
-        "estimated_cost": "$1,200 - $1,500"
+        "damage_summary": unique_damages,
+        "estimated_cost": f"${cost:,} - ${cost + 300:,}"
     }
 
 @app.post("/analyze")
