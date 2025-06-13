@@ -65,23 +65,54 @@ async def vision_review(
         else:
             texts.append(f"⚠️ Skipped unsupported file: {file.filename}")
 
-    prompt = f"""You are an AI auto damage auditor. Review the uploaded estimate against the damage photos.
-Flag any discrepancies or missing documentation. Also confirm compliance with these client rules: {client_rules}"""
+    # Combine everything into one user message with vision
+    vision_message = {
+        "role": "user",
+        "content": []
+    }
 
-    messages = [{"role": "system", "content": prompt}]
     if texts:
-        messages.append({ "role": "user", "content": "\n\n".join(texts) })
+        vision_message["content"].append({
+            "type": "text",
+            "text": "\n\n".join(texts)
+        })
     if images:
-        messages.append({ "role": "user", "content": images })
+        vision_message["content"].extend(images)
+
+    prompt = f"""You are an AI auto damage auditor. Review the uploaded estimate against the damage photos.
+Flag any discrepancies or missing documentation. Confirm compliance with these client rules: {client_rules}"""
 
     try:
         response = openai.ChatCompletion.create(
             model="gpt-4o",
-            messages=messages,
+            messages=[
+                {"role": "system", "content": prompt},
+                vision_message
+            ],
             max_tokens=1500
         )
-        gpt_output = response.choices[0].message.content
-        return { "gpt_output": gpt_output or "⚠️ GPT returned no output." }
+
+        gpt_output = response.choices[0].message.content or "⚠️ GPT returned no output."
+
+        # Simple field extraction (optional: improve with regex later)
+        def extract_between(label):
+            lower = label.lower()
+            for line in gpt_output.splitlines():
+                if lower in line.lower():
+                    return line.split(":")[-1].strip()
+            return "N/A"
+
+        return {
+            "gpt_output": gpt_output,
+            "claim_number": extract_between("Claim"),
+            "vin": extract_between("VIN"),
+            "vehicle": extract_between("Vehicle"),
+            "score": extract_between("Score") or "N/A"
+        }
+
     except Exception as e:
         print("❌ GPT Error:", str(e))
-        return JSONResponse(status_code=500, content={"error": str(e), "gpt_output": "⚠️ AI review failed."})
+        return JSONResponse(
+            status_code=500,
+            content={"error": str(e), "gpt_output": "⚠️ AI review failed."}
+        )
