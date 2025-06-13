@@ -25,15 +25,18 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-# Utility to extract text from PDFs
+# Utilities for extracting text
 def extract_text_from_pdf(file):
     pdf = PdfReader(file)
     return "\n".join(page.extract_text() or "" for page in pdf.pages)
 
-# Utility to extract text from DOCX
 def extract_text_from_docx(file):
     doc = Document(file)
     return "\n".join(p.text for p in doc.paragraphs)
+
+@app.get("/")
+async def root():
+    return {"status": "ok"}
 
 @app.post("/vision-review")
 async def vision_review(
@@ -63,9 +66,9 @@ async def vision_review(
         else:
             texts.append(f"⚠️ Skipped unsupported file: {file.filename}")
 
-    prompt = f"""You are an AI auditor. Compare these estimate documents to the uploaded vehicle damage photos. 
-Highlight any mismatches between visual damage and written repair line items. 
-Then check compliance with the following client rules: {client_rules}"""
+    prompt = f"""You are an AI auto damage auditor. Review the following estimate(s) against the uploaded vehicle damage photos. 
+Identify any mismatches between visual damage and written estimates. 
+Also evaluate whether the estimate complies with the provided client rules: {client_rules}"""
 
     messages = [{"role": "system", "content": prompt}]
     if texts:
@@ -79,10 +82,8 @@ Then check compliance with the following client rules: {client_rules}"""
             messages=messages,
             max_tokens=1500
         )
-        return { "gpt_output": response.choices[0].message.content }
+        gpt_output = response.choices[0].message.content
+        return { "gpt_output": gpt_output }
     except Exception as e:
-        return JSONResponse(status_code=500, content={ "error": str(e) })
-
-@app.get("/")
-async def root():
-    return { "status": "ok" }
+        print("❌ GPT Error:", str(e))
+        return JSONResponse(status_code=500, content={"error": str(e), "gpt_output": "⚠️ AI review failed."})
