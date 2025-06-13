@@ -65,7 +65,6 @@ async def vision_review(
         else:
             texts.append(f"⚠️ Skipped unsupported file: {file.filename}")
 
-    # Combine everything into one user message with vision
     vision_message = {
         "role": "user",
         "content": []
@@ -94,7 +93,6 @@ Flag any discrepancies or missing documentation. Confirm compliance with these c
 
         gpt_output = response.choices[0].message.content or "⚠️ GPT returned no output."
 
-        # Simple field extraction (optional: improve with regex later)
         def extract_between(label):
             lower = label.lower()
             for line in gpt_output.splitlines():
