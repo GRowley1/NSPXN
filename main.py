@@ -7,9 +7,10 @@ import openai
 import base64
 import io
 import os
-openai.api_key = os.getenv("OPENAI_API_KEY")
 from PyPDF2 import PdfReader
 from docx import Document
+
+openai.api_key = os.getenv("OPENAI_API_KEY")
 
 app = FastAPI()
 
@@ -83,6 +84,10 @@ async def vision_review(
 Flag any discrepancies or missing documentation. Confirm compliance with these client rules: {client_rules}"""
 
     try:
+        print("📤 Sending to GPT...")
+        print("Prompt:", prompt)
+        print("Vision Message Content:", vision_message)
+
         response = openai.ChatCompletion.create(
             model="gpt-4o",
             messages=[
@@ -91,6 +96,8 @@ Flag any discrepancies or missing documentation. Confirm compliance with these c
             ],
             max_tokens=1500
         )
+
+        print("✅ GPT Raw Response:", response)
 
         gpt_output = response.choices[0].message.content or "⚠️ GPT returned no output."
 
