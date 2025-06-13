@@ -6,6 +6,7 @@ from typing import List
 import openai
 import base64
 import io
+import os
 from PyPDF2 import PdfReader
 from docx import Document
 
@@ -25,7 +26,6 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-# Utilities for extracting text
 def extract_text_from_pdf(file):
     pdf = PdfReader(file)
     return "\n".join(page.extract_text() or "" for page in pdf.pages)
@@ -44,12 +44,14 @@ async def vision_review(
     client_rules: str = Form(...),
     file_number: str = Form(...)
 ):
+    print("🔐 OpenAI Key starts with:", os.getenv("OPENAI_API_KEY")[:10])
     images = []
     texts = []
 
     for file in files:
         content = await file.read()
         name = file.filename.lower()
+        print(f"📄 Processing file: {name}")
 
         if name.endswith((".jpg", ".jpeg", ".png")):
             b64 = base64.b64encode(content).decode("utf-8")
@@ -58,17 +60,24 @@ async def vision_review(
                 "image_url": { "url": f"data:image/jpeg;base64,{b64}" }
             })
         elif name.endswith(".pdf"):
-            texts.append(extract_text_from_pdf(io.BytesIO(content)))
+            extracted = extract_text_from_pdf(io.BytesIO(content))
+            texts.append(extracted)
         elif name.endswith(".docx"):
-            texts.append(extract_text_from_docx(io.BytesIO(content)))
+            extracted = extract_text_from_docx(io.BytesIO(content))
+            texts.append(extracted)
         elif name.endswith(".txt"):
-            texts.append(content.decode("utf-8", errors="ignore"))
+            decoded = content.decode("utf-8", errors="ignore")
+            texts.append(decoded)
         else:
-            texts.append(f"⚠️ Skipped unsupported file: {file.filename}")
+            skipped = f"⚠️ Skipped unsupported file: {file.filename}"
+            texts.append(skipped)
+            print(skipped)
 
-    prompt = f"""You are an AI auto damage auditor. Review the following estimate(s) against the uploaded vehicle damage photos. 
-Identify any mismatches between visual damage and written estimates. 
-Also evaluate whether the estimate complies with the provided client rules: {client_rules}"""
+    print("📥 Files received - Texts:", len(texts), "Images:", len(images))
+
+    prompt = f"""You are an AI auto damage auditor. Compare the following estimate text with the uploaded vehicle damage photos. 
+Note any discrepancies between visible damage and written line items. Then verify if the estimate follows client rules:
+{client_rules}"""
 
     messages = [{"role": "system", "content": prompt}]
     if texts:
@@ -76,14 +85,18 @@ Also evaluate whether the estimate complies with the provided client rules: {cli
     if images:
         messages.append({ "role": "user", "content": images })
 
+    print("🧠 Sending prompt to GPT...")
     try:
         response = openai.ChatCompletion.create(
             model="gpt-4o",
             messages=messages,
             max_tokens=1500
         )
-        gpt_output = response.choices[0].message.content
-        return { "gpt_output": gpt_output }
+        print("✅ GPT response received.")
+        output = response.choices[0].message.content
+        if not output:
+            output = "⚠️ GPT returned an empty response."
+        return { "gpt_output": output }
     except Exception as e:
         print("❌ GPT Error:", str(e))
-        return JSONResponse(status_code=500, content={"error": str(e), "gpt_output": "⚠️ AI review failed."})
+        return JSONResponse(status_code=500, content={"error": str(e), "gpt_output": "⚠️ AI review failed. Please try again."})
