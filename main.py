@@ -147,7 +147,7 @@ def download_pdf(file_number: str = ""):
 
     pdf.set_font("Arial", "", 12)
     pdf.cell(0, 10, f"Date: {datetime.today().strftime('%B %d, %Y')}", ln=True)
-    pdf.cell(0, 10, f"Claim #: {file_number}", ln=True)
+    pdf.cell(0, 10, f"Claim #: {claim_number}", ln=True)
     pdf.cell(0, 10, f"VIN: 1HGCM82633A123456", ln=True)
     pdf.cell(0, 10, f"Vehicle: 2014 Honda Accord EX-L, 158,000 miles", ln=True)
     pdf.cell(0, 10, f"Compliance Score: 87%", ln=True)
