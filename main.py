@@ -88,7 +88,7 @@ async def vision_review(
                 {"role": "system", "content": prompt},
                 {"role": "user", "content": vision_input}
             ],
-            max_tokens=1500
+            max_tokens=3500
         )
 
         print("✅ GPT response received.")
