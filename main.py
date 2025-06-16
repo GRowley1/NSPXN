@@ -2,14 +2,14 @@ from fastapi import FastAPI, File, UploadFile, Form
 from fastapi.responses import JSONResponse
 from fastapi.middleware.cors import CORSMiddleware
 from typing import List
-import openai
+from openai import OpenAI
 import base64
 import io
 import os
 from PyPDF2 import PdfReader
 from docx import Document
 
-openai.api_key = os.getenv("OPENAI_API_KEY")
+client = OpenAI()  # Assumes OPENAI_API_KEY is set in environment
 
 app = FastAPI()
 
@@ -51,11 +51,11 @@ async def vision_review(
         content = await file.read()
         name = file.filename.lower()
 
-        if file.content_type.startswith("image/"):
+        if name.endswith((".jpg", ".jpeg", ".png")):
             b64 = base64.b64encode(content).decode("utf-8")
             images.append({
                 "type": "image_url",
-                "image_url": { "url": f"data:{file.content_type};base64,{b64}" }
+                "image_url": { "url": f"data:image/jpeg;base64,{b64}" }
             })
         elif name.endswith(".pdf"):
             texts.append(extract_text_from_pdf(io.BytesIO(content)))
@@ -66,32 +66,34 @@ async def vision_review(
         else:
             texts.append(f"⚠️ Skipped unsupported file: {file.filename}")
 
-    combined_text = "\n\n".join(texts).strip()
-    if not combined_text and not images:
-        return JSONResponse(status_code=400, content={"error": "No readable text or images found."})
+    vision_message = {
+        "role": "user",
+        "content": []
+    }
 
-    vision_input = []
-    if combined_text:
-        vision_input.append({
+    if texts:
+        vision_message["content"].append({
             "type": "text",
-            "text": f"""Estimate & Client Rules:\n\n{combined_text}\n\nClient Rules:\n{client_rules}"""
+            "text": "\n\n".join(texts)
         })
-    vision_input.extend(images)
+    if images:
+        vision_message["content"].extend(images)
 
-    prompt = "You are an AI auto damage auditor. Review the uploaded estimate and photos for accuracy. Flag issues and assess compliance with the provided rules."
+    prompt = f"""You are an AI auto damage auditor. Review the uploaded estimate against the damage photos.
+Flag any discrepancies or missing documentation. Confirm compliance with these client rules: {client_rules}"""
 
     try:
-        print("📤 Sending prompt to OpenAI...")
-        response = openai.ChatCompletion.create(
+        print("📤 Sending to GPT...")
+
+        response = client.chat.completions.create(
             model="gpt-4o",
             messages=[
                 {"role": "system", "content": prompt},
-                {"role": "user", "content": vision_input}
+                vision_message
             ],
             max_tokens=3500
         )
 
-        print("✅ GPT response received.")
         gpt_output = response.choices[0].message.content or "⚠️ GPT returned no output."
 
         def extract_between(label):
