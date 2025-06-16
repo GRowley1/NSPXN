@@ -1,4 +1,3 @@
-
 from fastapi import FastAPI, File, UploadFile, Form
 from fastapi.responses import JSONResponse
 from fastapi.middleware.cors import CORSMiddleware
@@ -52,11 +51,11 @@ async def vision_review(
         content = await file.read()
         name = file.filename.lower()
 
-        if name.endswith((".jpg", ".jpeg", ".png")):
+        if file.content_type.startswith("image/"):
             b64 = base64.b64encode(content).decode("utf-8")
             images.append({
                 "type": "image_url",
-                "image_url": { "url": f"data:image/jpeg;base64,{b64}" }
+                "image_url": { "url": f"data:{file.content_type};base64,{b64}" }
             })
         elif name.endswith(".pdf"):
             texts.append(extract_text_from_pdf(io.BytesIO(content)))
@@ -67,38 +66,32 @@ async def vision_review(
         else:
             texts.append(f"⚠️ Skipped unsupported file: {file.filename}")
 
-    vision_message = {
-        "role": "user",
-        "content": []
-    }
+    combined_text = "\n\n".join(texts).strip()
+    if not combined_text and not images:
+        return JSONResponse(status_code=400, content={"error": "No readable text or images found."})
 
-    if texts:
-        vision_message["content"].append({
+    vision_input = []
+    if combined_text:
+        vision_input.append({
             "type": "text",
-            "text": "\n\n".join(texts)
+            "text": f"""Estimate & Client Rules:\n\n{combined_text}\n\nClient Rules:\n{client_rules}"""
         })
-    if images:
-        vision_message["content"].extend(images)
+    vision_input.extend(images)
 
-    prompt = f"""You are an AI auto damage auditor. Review the uploaded estimate against the damage photos.
-Flag any discrepancies or missing documentation. Confirm compliance with these client rules: {client_rules}"""
+    prompt = "You are an AI auto damage auditor. Review the uploaded estimate and photos for accuracy. Flag issues and assess compliance with the provided rules."
 
     try:
-        print("📤 Sending to GPT...")
-        print("Prompt:", prompt)
-        print("Vision Message Content:", vision_message)
-
+        print("📤 Sending prompt to OpenAI...")
         response = openai.ChatCompletion.create(
             model="gpt-4o",
             messages=[
                 {"role": "system", "content": prompt},
-                vision_message
+                {"role": "user", "content": vision_input}
             ],
             max_tokens=1500
         )
 
-        print("✅ GPT Raw Response:", response)
-
+        print("✅ GPT response received.")
         gpt_output = response.choices[0].message.content or "⚠️ GPT returned no output."
 
         def extract_between(label):
