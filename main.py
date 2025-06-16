@@ -119,6 +119,6 @@ def create_pdf_report(data, pdf_path):
     pdf.cell(0, 10, f"Vehicle: {data['vehicle']}", ln=True)
     pdf.cell(0, 10, f"Compliance Score: {data['score']}", ln=True)
     pdf.ln(10)
-    pdf.multi_cell(0, 10, "AI Review Summary:\n" + gpt_output)
-{data['gpt_output']}")
+    pdf.multi_cell(0, 10, f"""AI Review Summary:
+    {data['gpt_output']}""")
     pdf.output(pdf_path)
