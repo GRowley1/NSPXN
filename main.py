@@ -130,13 +130,14 @@ Then summarize findings and rule violations based on the following rules:
         msg["Subject"] = f"AI Review: {claim_number}"
         msg["From"] = "noreply@nspxn.com"
         msg["To"] = "info@nspxn.com"
-        msg.set_content(f"AI Review for {claim_number}\n\n{gpt_output}")
+        msg.set_content(f"AI Review for {ia_company}\n\n{gpt_output}")
         with smtplib.SMTP_SSL("mail.tierra.net", 465) as smtp:
             smtp.login("info@nspxn.com", "grr2025GRR")
             smtp.send_message(msg)
 
         return {
             "gpt_output": gpt_output,
+            "file_number": file_number,
             "claim_number": claim_number,
             "vin": vin,
             "vehicle": vehicle,
