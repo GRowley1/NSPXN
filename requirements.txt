@@ -4,4 +4,4 @@ openai
 python-multipart
 PyPDF2
 fpdf
-docx
+python-docx
