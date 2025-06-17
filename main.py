@@ -12,6 +12,7 @@ from docx import Document
 import re
 from fpdf import FPDF
 from datetime import datetime
+import csv
 
 client = OpenAI()
 
@@ -25,9 +26,6 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-REPORTS_DIR = "reports"
-os.makedirs(REPORTS_DIR, exist_ok=True)
-
 def extract_text_from_pdf(file):
     pdf = PdfReader(file)
     return "\n".join(page.extract_text() or "" for page in pdf.pages)
@@ -40,6 +38,25 @@ def extract_field(label, text):
     pattern = re.compile(rf"{label}[:\s-]*([^\n\r]+)", re.IGNORECASE)
     match = pattern.search(text)
     return match.group(1).strip() if match else "N/A"
+
+def log_submission(data):
+    log_file = "audit_log.csv"
+    headers = ["Date", "Claim #", "VIN", "Vehicle", "Compliance Score", "File Number", "IA Company"]
+    log_entry = [
+        datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+        data.get("claim_number", "N/A"),
+        data.get("vin", "N/A"),
+        data.get("vehicle", "N/A"),
+        data.get("score", "N/A"),
+        data.get("file_number", "N/A"),
+        data.get("ia_company", "N/A")
+    ]
+    file_exists = os.path.exists(log_file)
+    with open(log_file, "a", newline="") as csvfile:
+        writer = csv.writer(csvfile)
+        if not file_exists:
+            writer.writerow(headers)
+        writer.writerow(log_entry)
 
 @app.post("/vision-review")
 async def vision_review(
@@ -91,8 +108,7 @@ VIN: (from estimate or photos)
 Vehicle: (make, model, mileage from estimate)
 Compliance Score: (0–100%)
 Then summarize findings and rule violations based on the following rules:
-{client_rules}
-"""
+{client_rules}"""
 
     try:
         response = client.chat.completions.create(
@@ -103,52 +119,21 @@ Then summarize findings and rule violations based on the following rules:
             ],
             max_tokens=3500
         )
-
         gpt_output = response.choices[0].message.content or "⚠️ GPT returned no output."
-
-        claim = extract_field("Claim", gpt_output)
-        vin = extract_field("VIN", gpt_output)
-        vehicle = extract_field("Vehicle", gpt_output)
-        score = extract_field("Compliance Score", gpt_output)
-
-        # Save PDF
-        pdf = FPDF()
-        pdf.add_page()
-        pdf.set_font("Arial", size=12)
-        pdf.set_title("NSPXN.com AI Review Report")
-
-        pdf.set_font("Arial", style="B", size=16)
-        pdf.cell(200, 10, "NSPXN.com AI Review Report", ln=True, align="C")
-        pdf.set_font("Arial", size=12)
-        pdf.cell(200, 10, f"Date: {datetime.today().strftime('%B %d, %Y')}", ln=True)
-        pdf.cell(200, 10, f"IA Company: {ia_company}", ln=True)
-
-        pdf.ln(5)
-        pdf.set_font("Arial", style="B", size=14)
-        pdf.cell(200, 10, "AI Review Summary:", ln=True)
-        pdf.set_font("Arial", size=12)
-        pdf.multi_cell(0, 10, gpt_output)
-
-        filepath = os.path.join(REPORTS_DIR, f"{file_number}.pdf")
-        pdf.output(filepath)
-
-        return {
+        result = {
             "gpt_output": gpt_output,
-            "claim_number": claim,
-            "vin": vin,
-            "vehicle": vehicle,
-            "score": score
+            "claim_number": extract_field("Claim", gpt_output),
+            "vin": extract_field("VIN", gpt_output),
+            "vehicle": extract_field("Vehicle", gpt_output),
+            "score": extract_field("Compliance Score", gpt_output),
+            "file_number": file_number,
+            "ia_company": ia_company
         }
+        log_submission(result)
+        return result
 
     except Exception as e:
-        return JSONResponse(status_code=500, content={
-            "error": str(e),
-            "gpt_output": "⚠️ AI review failed."
-        })
-
-@app.get("/download-pdf")
-async def download_pdf(file_number: str):
-    filepath = os.path.join(REPORTS_DIR, f"{file_number}.pdf")
-    if os.path.exists(filepath):
-        return FileResponse(filepath, media_type="application/pdf", filename=f"{file_number}.pdf")
-    return JSONResponse(status_code=404, content={"error": "PDF not found"})
+        return JSONResponse(
+            status_code=500,
+            content={"error": str(e), "gpt_output": "⚠️ AI review failed."}
+        )
