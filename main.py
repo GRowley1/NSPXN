@@ -125,14 +125,14 @@ Then summarize findings and rule violations based on the following rules:
 
         pdf.set_font(style="B", size=14)
         pdf.cell(200, 10, "NSPXN.com AI Review Report", ln=True, align="C")
-        pdf.set_font(style="", size=12)
+        pdf.set_font(style="Arial", size=12)
         pdf.cell(200, 10, f"Date: {datetime.now().strftime('%B %d, %Y')}", ln=True)
         pdf.cell(200, 10, f"IA Company: {ia_company}", ln=True)
 
         pdf.ln(5)
         pdf.set_font(style="B", size=12)
         pdf.cell(200, 10, "AI Review Summary:", ln=True)
-        pdf.set_font(style="", size=12)
+        pdf.set_font(style="Arial", size=12)
         pdf.multi_cell(0, 10, f"Claim #: {claim}\nVIN: {vin}\nVehicle: {vehicle}\nCompliance Score: {score}")
         pdf.ln(5)
         pdf.multi_cell(0, 10, gpt_output)
