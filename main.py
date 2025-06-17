@@ -1,12 +1,15 @@
+
 from fastapi import FastAPI, File, UploadFile, Form
 from fastapi.responses import JSONResponse, FileResponse
 from fastapi.middleware.cors import CORSMiddleware
 from typing import List
 from openai import OpenAI
+from fpdf import FPDF
 import base64
 import io
 import os
 import re
+from datetime import datetime
 from PyPDF2 import PdfReader
 from docx import Document
 
@@ -36,7 +39,7 @@ def extract_text_from_docx(file):
     return "\n".join(p.text for p in doc.paragraphs)
 
 def extract_field(label, text):
-    pattern = re.compile(rf"{label}\s*[:\-]\s*(.+)", re.IGNORECASE)
+    pattern = re.compile(rf"{label}[:\s-]*([^\n\r]+)", re.IGNORECASE)
     match = pattern.search(text)
     return match.group(1).strip() if match else "N/A"
 
@@ -46,16 +49,17 @@ async def root():
 
 @app.get("/download-pdf")
 async def download_pdf(file_number: str):
-    file_path = f"pdfs/{file_number}.pdf"
-    if os.path.exists(file_path):
-        return FileResponse(file_path, filename=f"{file_number}.pdf", media_type="application/pdf")
+    pdf_path = f"./{file_number}.pdf"
+    if os.path.exists(pdf_path):
+        return FileResponse(pdf_path, media_type="application/pdf", filename=f"{file_number}.pdf")
     return JSONResponse(status_code=404, content={"error": "PDF not found"})
 
 @app.post("/vision-review")
 async def vision_review(
     files: List[UploadFile] = File(...),
     client_rules: str = Form(...),
-    file_number: str = Form(...)
+    file_number: str = Form(...),
+    ia_company: str = Form(...)
 ):
     images = []
     texts = []
@@ -116,16 +120,42 @@ Then summarize findings and rule violations based on the following rules:
 
         gpt_output = response.choices[0].message.content or "⚠️ GPT returned no output."
 
+        claim_number = extract_field("Claim", gpt_output)
+        vin = extract_field("VIN", gpt_output)
+        vehicle = extract_field("Vehicle", gpt_output)
+        score = extract_field("Compliance Score", gpt_output)
+
+        pdf = FPDF()
+        pdf.add_page()
+        pdf.set_font("Arial", size=12)
+
+        pdf.set_font("Arial", "B", 16)
+        pdf.cell(0, 10, "NSPXN.com AI Review Report", ln=True)
+        pdf.set_font("Arial", size=12)
+        pdf.cell(0, 10, f"Date: {datetime.now().strftime('%B %d, %Y')}", ln=True)
+        pdf.cell(0, 10, f"IA Company: {ia_company}", ln=True)
+        pdf.cell(0, 10, f"Claim #: {claim_number}", ln=True)
+        pdf.cell(0, 10, f"VIN: {vin}", ln=True)
+        pdf.cell(0, 10, f"Vehicle: {vehicle}", ln=True)
+        pdf.cell(0, 10, f"Compliance Score: {score}", ln=True)
+        pdf.ln(5)
+        pdf.set_font("Arial", "B", 14)
+        pdf.cell(0, 10, "AI Review Summary:", ln=True)
+        pdf.set_font("Arial", size=12)
+        pdf.multi_cell(0, 10, gpt_output)
+
+        pdf_path = f"./{file_number}.pdf"
+        pdf.output(pdf_path)
+
         return {
             "gpt_output": gpt_output,
-            "claim_number": extract_field("Claim", gpt_output),
-            "vin": extract_field("VIN", gpt_output),
-            "vehicle": extract_field("Vehicle", gpt_output),
-            "score": extract_field("Compliance Score", gpt_output)
+            "claim_number": claim_number,
+            "vin": vin,
+            "vehicle": vehicle,
+            "score": score
         }
 
     except Exception as e:
-        print("❌ GPT Error:", str(e))
         return JSONResponse(
             status_code=500,
             content={"error": str(e), "gpt_output": "⚠️ AI review failed."}
