@@ -1,7 +1,7 @@
 fastapi
 uvicorn
+openai
 python-multipart
 PyPDF2
-python-docx
-openai
 fpdf
+python-docx
