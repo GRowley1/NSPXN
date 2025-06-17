@@ -2,20 +2,15 @@ from fastapi import FastAPI, File, UploadFile, Form
 from fastapi.responses import JSONResponse, FileResponse
 from fastapi.middleware.cors import CORSMiddleware
 from typing import List
+import base64, io, os, re, smtplib
+from email.message import EmailMessage
 from openai import OpenAI
-import base64
-import io
-import os
 from PyPDF2 import PdfReader
 from docx import Document
-import re
-import smtplib
-from email.message import EmailMessage
 from fpdf import FPDF
 from datetime import datetime
 
 client = OpenAI()
-
 app = FastAPI()
 
 app.add_middleware(
@@ -39,31 +34,16 @@ def extract_field(label, text):
     match = pattern.search(text)
     return match.group(1).strip() if match else "N/A"
 
-def generate_pdf(data, ia_company):
-    pdf = FPDF()
-    pdf.add_page()
-    pdf.set_font("Arial", size=14)
-    pdf.set_text_color(0)
-    pdf.cell(200, 10, "NSPXN.com AI Review Report", ln=True, align="C")
-    pdf.set_font("Arial", size=12)
-    pdf.cell(200, 10, f"Date: {datetime.now().strftime('%B %d, %Y')}", ln=True)
-    pdf.cell(200, 10, f"IA Company: {ia_company}", ln=True)
-    pdf.cell(200, 10, "", ln=True)  # Blank line
-    pdf.multi_cell(0, 10, f"AI Review Summary:\n\n{data['gpt_output']}")
-    pdf_path = f"{data['claim_number'].replace(' ', '_') or data['file_number']}.pdf"
-    pdf.output(pdf_path)
-    return pdf_path
+@app.get("/")
+async def root():
+    return {"status": "ok"}
 
-def send_email_with_summary(subject, body):
-    msg = EmailMessage()
-    msg.set_content(body)
-    msg["Subject"] = subject
-    msg["From"] = "noreply@nspxn.com"
-    msg["To"] = "info@nspxn.com"
-
-    with smtplib.SMTP_SSL("mail.tierra.net", 465) as smtp:
-        smtp.login("info@nspxn.com", "grr2025GRR")
-        smtp.send_message(msg)
+@app.get("/download-pdf")
+async def download_pdf(file_number: str):
+    pdf_path = f"{file_number}.pdf"
+    if os.path.exists(pdf_path):
+        return FileResponse(pdf_path, media_type='application/pdf', filename=pdf_path)
+    return JSONResponse(status_code=404, content={"detail": "Not Found"})
 
 @app.post("/vision-review")
 async def vision_review(
@@ -72,13 +52,10 @@ async def vision_review(
     file_number: str = Form(...),
     ia_company: str = Form(...)
 ):
-    images = []
-    texts = []
-
+    images, texts = [], []
     for file in files:
         content = await file.read()
         name = file.filename.lower()
-
         if name.endswith((".jpg", ".jpeg", ".png")):
             b64 = base64.b64encode(content).decode("utf-8")
             images.append({
@@ -91,19 +68,10 @@ async def vision_review(
             texts.append(extract_text_from_docx(io.BytesIO(content)))
         elif name.endswith(".txt"):
             texts.append(content.decode("utf-8", errors="ignore"))
-        else:
-            texts.append(f"⚠️ Skipped unsupported file: {file.filename}")
 
-    vision_message = {
-        "role": "user",
-        "content": []
-    }
-
+    vision_message = {"role": "user", "content": []}
     if texts:
-        vision_message["content"].append({
-            "type": "text",
-            "text": "\n\n".join(texts)
-        })
+        vision_message["content"].append({"type": "text", "text": "\n\n".join(texts)})
     if images:
         vision_message["content"].extend(images)
 
@@ -116,8 +84,7 @@ Vehicle: (make, model, mileage from estimate)
 Compliance Score: (0–100%)
 
 Then summarize findings and rule violations based on the following rules:
-{client_rules}
-"""
+{client_rules}"""
 
     try:
         response = client.chat.completions.create(
@@ -135,13 +102,34 @@ Then summarize findings and rule violations based on the following rules:
         vehicle = extract_field("Vehicle", gpt_output)
         score = extract_field("Compliance Score", gpt_output)
 
-        pdf_path = generate_pdf({
-            "gpt_output": gpt_output,
-            "claim_number": claim_number,
-            "file_number": file_number
-        }, ia_company)
+        # Send Email
+        email_msg = EmailMessage()
+        email_msg.set_content(gpt_output)
+        email_msg["Subject"] = f"Claim #: {claim_number}"
+        email_msg["From"] = "noreply@nspxn.com"
+        email_msg["To"] = "info@nspxn.com"
+        with smtplib.SMTP_SSL("mail.tierra.net", 465) as smtp:
+            smtp.login("info@nspxn.com", "grr2025GRR")
+            smtp.send_message(email_msg)
 
-        send_email_with_summary(subject=f"Claim #: {claim_number}", body=gpt_output)
+        # Generate PDF
+        pdf = FPDF()
+        pdf.add_page()
+        pdf.set_font("Arial", size=12)
+        pdf.set_text_color(0, 0, 0)
+        pdf.cell(200, 10, txt="NSPXN.com AI Review Report", ln=True, align='C')
+        pdf.ln(5)
+        pdf.cell(200, 10, txt=f"Date: {datetime.now().strftime('%B %d, %Y')}", ln=True)
+        pdf.cell(200, 10, txt=f"IA Company: {ia_company}", ln=True)
+        pdf.cell(200, 10, txt=f"Claim #: {claim_number}", ln=True)
+        pdf.cell(200, 10, txt=f"VIN: {vin}", ln=True)
+        pdf.cell(200, 10, txt=f"Vehicle: {vehicle}", ln=True)
+        pdf.cell(200, 10, txt=f"Compliance Score: {score}", ln=True)
+        pdf.ln(10)
+        pdf.multi_cell(0, 10, f"AI Review Summary:
+{gpt_output}")
+        pdf_path = f"{file_number}.pdf"
+        pdf.output(pdf_path)
 
         return {
             "gpt_output": gpt_output,
@@ -152,7 +140,4 @@ Then summarize findings and rule violations based on the following rules:
         }
 
     except Exception as e:
-        return JSONResponse(
-            status_code=500,
-            content={"error": str(e), "gpt_output": "⚠️ AI review failed."}
-        )
+        return JSONResponse(status_code=500, content={"error": str(e), "gpt_output": "⚠️ AI review failed."})
