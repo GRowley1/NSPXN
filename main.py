@@ -1,22 +1,32 @@
+
 from fastapi import FastAPI, File, UploadFile, Form
 from fastapi.responses import JSONResponse, FileResponse
 from fastapi.middleware.cors import CORSMiddleware
 from typing import List
 from openai import OpenAI
-import base64, io, os, re, csv
+import base64
+import io
+import os
 from PyPDF2 import PdfReader
 from docx import Document
+import re
+from fpdf import FPDF
+from datetime import datetime
 
 client = OpenAI()
+
 app = FastAPI()
 
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["http://nspxn.com", "https://nspxn.com", "http://localhost:3000", "https://*.nspxn.com"],
+    allow_origins=["*"],
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+REPORTS_DIR = "reports"
+os.makedirs(REPORTS_DIR, exist_ok=True)
 
 def extract_text_from_pdf(file):
     pdf = PdfReader(file)
@@ -31,31 +41,26 @@ def extract_field(label, text):
     match = pattern.search(text)
     return match.group(1).strip() if match else "N/A"
 
-@app.get("/")
-async def root():
-    return {"status": "ok"}
-
-@app.get("/download-log")
-async def download_log():
-    log_path = "submissions.csv"
-    if os.path.exists(log_path):
-        return FileResponse(log_path, media_type='text/csv', filename="submissions.csv")
-    return JSONResponse(status_code=404, content={"error": "Log file not found."})
-
 @app.post("/vision-review")
 async def vision_review(
     files: List[UploadFile] = File(...),
     client_rules: str = Form(...),
-    file_number: str = Form(...)
+    file_number: str = Form(...),
+    ia_company: str = Form(...)
 ):
     images = []
     texts = []
+
     for file in files:
         content = await file.read()
         name = file.filename.lower()
+
         if name.endswith((".jpg", ".jpeg", ".png")):
             b64 = base64.b64encode(content).decode("utf-8")
-            images.append({"type": "image_url", "image_url": { "url": f"data:image/jpeg;base64,{b64}" }})
+            images.append({
+                "type": "image_url",
+                "image_url": { "url": f"data:image/jpeg;base64,{b64}" }
+            })
         elif name.endswith(".pdf"):
             texts.append(extract_text_from_pdf(io.BytesIO(content)))
         elif name.endswith(".docx"):
@@ -65,9 +70,16 @@ async def vision_review(
         else:
             texts.append(f"⚠️ Skipped unsupported file: {file.filename}")
 
-    vision_message = {"role": "user", "content": []}
+    vision_message = {
+        "role": "user",
+        "content": []
+    }
+
     if texts:
-        vision_message["content"].append({"type": "text", "text": "\n\n".join(texts)})
+        vision_message["content"].append({
+            "type": "text",
+            "text": "\n\n".join(texts)
+        })
     if images:
         vision_message["content"].extend(images)
 
@@ -78,7 +90,6 @@ Claim #: (from estimate)
 VIN: (from estimate or photos)
 Vehicle: (make, model, mileage from estimate)
 Compliance Score: (0–100%)
-
 Then summarize findings and rule violations based on the following rules:
 {client_rules}
 """
@@ -86,28 +97,58 @@ Then summarize findings and rule violations based on the following rules:
     try:
         response = client.chat.completions.create(
             model="gpt-4o",
-            messages=[{"role": "system", "content": prompt}, vision_message],
+            messages=[
+                {"role": "system", "content": prompt},
+                vision_message
+            ],
             max_tokens=3500
         )
+
         gpt_output = response.choices[0].message.content or "⚠️ GPT returned no output."
 
-        claim_number = extract_field("Claim", gpt_output)
+        claim = extract_field("Claim", gpt_output)
         vin = extract_field("VIN", gpt_output)
         vehicle = extract_field("Vehicle", gpt_output)
         score = extract_field("Compliance Score", gpt_output)
 
-        with open("submissions.csv", mode="a", newline="", encoding="utf-8") as file:
-            writer = csv.writer(file)
-            writer.writerow([file_number, claim_number, vin, vehicle, score])
+        # Save PDF
+        pdf = FPDF()
+        pdf.add_page()
+        pdf.set_font("Arial", size=12)
+        pdf.set_title("NSPXN.com AI Review Report")
+
+        pdf.set_font("Arial", style="B", size=16)
+        pdf.cell(200, 10, "NSPXN.com AI Review Report", ln=True, align="C")
+        pdf.set_font("Arial", size=12)
+        pdf.cell(200, 10, f"Date: {datetime.today().strftime('%B %d, %Y')}", ln=True)
+        pdf.cell(200, 10, f"IA Company: {ia_company}", ln=True)
+
+        pdf.ln(5)
+        pdf.set_font("Arial", style="B", size=14)
+        pdf.cell(200, 10, "AI Review Summary:", ln=True)
+        pdf.set_font("Arial", size=12)
+        pdf.multi_cell(0, 10, gpt_output)
+
+        filepath = os.path.join(REPORTS_DIR, f"{file_number}.pdf")
+        pdf.output(filepath)
 
         return {
             "gpt_output": gpt_output,
-            "claim_number": claim_number,
+            "claim_number": claim,
             "vin": vin,
             "vehicle": vehicle,
             "score": score
         }
 
     except Exception as e:
-        print("❌ GPT Error:", str(e))
-        return JSONResponse(status_code=500, content={"error": str(e), "gpt_output": "⚠️ AI review failed."})
+        return JSONResponse(status_code=500, content={
+            "error": str(e),
+            "gpt_output": "⚠️ AI review failed."
+        })
+
+@app.get("/download-pdf")
+async def download_pdf(file_number: str):
+    filepath = os.path.join(REPORTS_DIR, f"{file_number}.pdf")
+    if os.path.exists(filepath):
+        return FileResponse(filepath, media_type="application/pdf", filename=f"{file_number}.pdf")
+    return JSONResponse(status_code=404, content={"error": "PDF not found"})
