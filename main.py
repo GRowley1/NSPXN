@@ -1,3 +1,19 @@
+import csv
+from datetime import datetime
+
+def log_submission(claim, vin, vehicle, score, ia_company, file_number):
+    with open("submissions.csv", "a", newline="") as csvfile:
+        writer = csv.writer(csvfile)
+        writer.writerow([
+            datetime.utcnow().isoformat(),
+            file_number,
+            ia_company,
+            claim,
+            vin,
+            vehicle,
+            score
+        ])
+
 
 from fastapi import FastAPI, File, UploadFile, Form
 from fastapi.responses import JSONResponse, FileResponse
@@ -131,6 +147,15 @@ Then summarize findings and rule violations based on the following rules:
 
         filepath = os.path.join(REPORTS_DIR, f"{file_number}.pdf")
         pdf.output(filepath)
+
+        log_submission(
+            extract_field("Claim", gpt_output),
+            extract_field("VIN", gpt_output),
+            extract_field("Vehicle", gpt_output),
+            extract_field("Compliance Score", gpt_output),
+            ia_company,
+            file_number
+        )
 
         return {
             "gpt_output": gpt_output,
