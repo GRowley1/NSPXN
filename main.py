@@ -1,6 +1,6 @@
 
 from fastapi import FastAPI, File, UploadFile, Form
-from fastapi.responses import JSONResponse, FileResponse
+from fastapi.responses import JSONResponse
 from fastapi.middleware.cors import CORSMiddleware
 from typing import List
 from openai import OpenAI
@@ -9,8 +9,7 @@ import io
 import os
 from PyPDF2 import PdfReader
 from docx import Document
-from fpdf import FPDF
-from datetime import datetime
+import re
 
 client = OpenAI()
 
@@ -37,6 +36,11 @@ def extract_text_from_docx(file):
     doc = Document(file)
     return "\n".join(p.text for p in doc.paragraphs)
 
+def extract_field(label, text):
+    pattern = re.compile(rf"{label}[:\s-]*([^\n\r]+)", re.IGNORECASE)
+    match = pattern.search(text)
+    return match.group(1).strip() if match else "N/A"
+
 @app.get("/")
 async def root():
     return {"status": "ok"}
@@ -45,8 +49,7 @@ async def root():
 async def vision_review(
     files: List[UploadFile] = File(...),
     client_rules: str = Form(...),
-    file_number: str = Form(...),
-    ia_company: str = Form(...)
+    file_number: str = Form(...)
 ):
     images = []
     texts = []
@@ -83,8 +86,17 @@ async def vision_review(
     if images:
         vision_message["content"].extend(images)
 
-    prompt = f"""You are an AI auto damage auditor. Review the uploaded estimate against the damage photos.
-Flag any discrepancies or missing documentation. Confirm compliance with these client rules: {client_rules}"""
+    prompt = f"""You are an AI auto damage auditor.
+Compare the estimate against the damage photos.
+At the top of your response, always include:
+Claim #: (from estimate)
+VIN: (from estimate or photos)
+Vehicle: (make, model, mileage from estimate)
+Compliance Score: (0–100%)
+
+Then summarize findings and rule violations based on the following rules:
+{client_rules}
+"""
 
     try:
         response = client.chat.completions.create(
@@ -98,53 +110,17 @@ Flag any discrepancies or missing documentation. Confirm compliance with these c
 
         gpt_output = response.choices[0].message.content or "⚠️ GPT returned no output."
 
-        def extract_between(label):
-            lower = label.lower()
-            for line in gpt_output.splitlines():
-                if lower in line.lower():
-                    return line.split(":")[-1].strip()
-            return "N/A"
-
-        claim = extract_between("Claim")
-        vin = extract_between("VIN")
-        vehicle = extract_between("Vehicle")
-        score = extract_between("Score")
-
-        filename = f"review_{file_number}.pdf"
-        pdf = FPDF()
-        pdf.add_page()
-        pdf.set_font("Arial", "B", 14)
-        pdf.cell(0, 10, "NSPXN.com AI Review Report", ln=True)
-        pdf.set_font("Arial", "", 12)
-        pdf.cell(0, 10, f"Date: {datetime.now().strftime('%B %d, %Y')}", ln=True)
-        pdf.cell(0, 10, f"IA Company: {ia_company}", ln=True)
-        pdf.cell(0, 10, f"Claim #: {claim}", ln=True)
-        pdf.cell(0, 10, f"VIN: {vin}", ln=True)
-        pdf.cell(0, 10, f"Vehicle: {vehicle}", ln=True)
-        pdf.cell(0, 10, f"Compliance Score: {score}", ln=True)
-        pdf.ln(10)
-        pdf.multi_cell(0, 10, f"AI Review Summary:\n{gpt_output}")
-        pdf.output(f"/tmp/{filename}")
-
         return {
             "gpt_output": gpt_output,
-            "claim_number": claim,
-            "vin": vin,
-            "vehicle": vehicle,
-            "score": score or "N/A",
-            "ia_company": ia_company,
-            "pdf_filename": filename
+            "claim_number": extract_field("Claim", gpt_output),
+            "vin": extract_field("VIN", gpt_output),
+            "vehicle": extract_field("Vehicle", gpt_output),
+            "score": extract_field("Compliance Score", gpt_output)
         }
 
     except Exception as e:
+        print("❌ GPT Error:", str(e))
         return JSONResponse(
             status_code=500,
             content={"error": str(e), "gpt_output": "⚠️ AI review failed."}
         )
-
-@app.get("/download-pdf")
-async def download_pdf(file_number: str):
-    filepath = f"/tmp/review_{file_number}.pdf"
-    if os.path.exists(filepath):
-        return FileResponse(path=filepath, media_type='application/pdf', filename=os.path.basename(filepath))
-    return JSONResponse(status_code=404, content={"error": "File not found"})
