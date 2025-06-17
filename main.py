@@ -9,9 +9,10 @@ import os
 from PyPDF2 import PdfReader
 from docx import Document
 import re
-from fpdf import FPDF
 import smtplib
 from email.message import EmailMessage
+from fpdf import FPDF
+from datetime import datetime
 
 client = OpenAI()
 
@@ -38,22 +39,31 @@ def extract_field(label, text):
     match = pattern.search(text)
     return match.group(1).strip() if match else "N/A"
 
-@app.post("/send-email")
-async def send_email(subject: str = Form(...), body: str = Form(...)):
-    try:
-        msg = EmailMessage()
-        msg.set_content(body)
-        msg["Subject"] = subject
-        msg["From"] = "noreply@nspxn.com"
-        msg["To"] = "info@nspxn.com"
+def generate_pdf(data, ia_company):
+    pdf = FPDF()
+    pdf.add_page()
+    pdf.set_font("Arial", size=14)
+    pdf.set_text_color(0)
+    pdf.cell(200, 10, "NSPXN.com AI Review Report", ln=True, align="C")
+    pdf.set_font("Arial", size=12)
+    pdf.cell(200, 10, f"Date: {datetime.now().strftime('%B %d, %Y')}", ln=True)
+    pdf.cell(200, 10, f"IA Company: {ia_company}", ln=True)
+    pdf.cell(200, 10, "", ln=True)  # Blank line
+    pdf.multi_cell(0, 10, f"AI Review Summary:\n\n{data['gpt_output']}")
+    pdf_path = f"{data['claim_number'].replace(' ', '_') or data['file_number']}.pdf"
+    pdf.output(pdf_path)
+    return pdf_path
 
-        with smtplib.SMTP_SSL("mail.tierra.net", 465) as smtp:
-            smtp.login("info@nspxn.com", "grr2025GRR")
-            smtp.send_message(msg)
+def send_email_with_summary(subject, body):
+    msg = EmailMessage()
+    msg.set_content(body)
+    msg["Subject"] = subject
+    msg["From"] = "noreply@nspxn.com"
+    msg["To"] = "info@nspxn.com"
 
-        return {"status": "Email sent"}
-    except Exception as e:
-        return JSONResponse(status_code=500, content={"error": str(e)})
+    with smtplib.SMTP_SSL("mail.tierra.net", 465) as smtp:
+        smtp.login("info@nspxn.com", "grr2025GRR")
+        smtp.send_message(msg)
 
 @app.post("/vision-review")
 async def vision_review(
@@ -120,16 +130,18 @@ Then summarize findings and rule violations based on the following rules:
         )
 
         gpt_output = response.choices[0].message.content or "⚠️ GPT returned no output."
-
         claim_number = extract_field("Claim", gpt_output)
         vin = extract_field("VIN", gpt_output)
         vehicle = extract_field("Vehicle", gpt_output)
         score = extract_field("Compliance Score", gpt_output)
 
-        # Save GPT Output to txt for PDF generation
-        os.makedirs("reviews", exist_ok=True)
-        with open(f"reviews/{file_number}.txt", "w", encoding="utf-8") as f:
-            f.write(gpt_output)
+        pdf_path = generate_pdf({
+            "gpt_output": gpt_output,
+            "claim_number": claim_number,
+            "file_number": file_number
+        }, ia_company)
+
+        send_email_with_summary(subject=f"Claim #: {claim_number}", body=gpt_output)
 
         return {
             "gpt_output": gpt_output,
@@ -144,25 +156,3 @@ Then summarize findings and rule violations based on the following rules:
             status_code=500,
             content={"error": str(e), "gpt_output": "⚠️ AI review failed."}
         )
-
-@app.get("/download-pdf")
-async def download_pdf(file_number: str):
-    try:
-        text_path = f"reviews/{file_number}.txt"
-        if not os.path.exists(text_path):
-            return JSONResponse(status_code=404, content={"error": "Review not found."})
-
-        with open(text_path, "r", encoding="utf-8") as f:
-            content = f.read()
-
-        pdf_path = f"reviews/{file_number}.pdf"
-        pdf = FPDF()
-        pdf.add_page()
-        pdf.set_auto_page_break(auto=True, margin=15)
-        pdf.set_font("Arial", size=12)
-        pdf.multi_cell(0, 10, content)
-        pdf.output(pdf_path)
-
-        return FileResponse(pdf_path, media_type='application/pdf', filename=f"{file_number}.pdf")
-    except Exception as e:
-        return JSONResponse(status_code=500, content={"error": str(e)})
