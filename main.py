@@ -7,10 +7,10 @@ from openai import OpenAI
 import base64
 import io
 import os
-from datetime import datetime
-from fpdf import FPDF
 from PyPDF2 import PdfReader
 from docx import Document
+from fpdf import FPDF
+from datetime import datetime
 
 client = OpenAI()
 
@@ -46,7 +46,7 @@ async def vision_review(
     files: List[UploadFile] = File(...),
     client_rules: str = Form(...),
     file_number: str = Form(...),
-    ia_company: str = Form(default="N/A")
+    ia_company: str = Form(...)
 ):
     images = []
     texts = []
@@ -83,7 +83,8 @@ async def vision_review(
     if images:
         vision_message["content"].extend(images)
 
-    prompt = f"You are an AI auto damage auditor. Review the uploaded estimate against the damage photos. Flag any discrepancies or missing documentation. Confirm compliance with these client rules: {client_rules}"
+    prompt = f"""You are an AI auto damage auditor. Review the uploaded estimate against the damage photos.
+Flag any discrepancies or missing documentation. Confirm compliance with these client rules: {client_rules}"""
 
     try:
         response = client.chat.completions.create(
@@ -104,26 +105,36 @@ async def vision_review(
                     return line.split(":")[-1].strip()
             return "N/A"
 
-        claim_number = extract_between("Claim")
+        claim = extract_between("Claim")
         vin = extract_between("VIN")
         vehicle = extract_between("Vehicle")
         score = extract_between("Score")
 
-        # Save data to simple dict for reuse
-        result_data = {
+        filename = f"review_{file_number}.pdf"
+        pdf = FPDF()
+        pdf.add_page()
+        pdf.set_font("Arial", "B", 14)
+        pdf.cell(0, 10, "NSPXN.com AI Review Report", ln=True)
+        pdf.set_font("Arial", "", 12)
+        pdf.cell(0, 10, f"Date: {datetime.now().strftime('%B %d, %Y')}", ln=True)
+        pdf.cell(0, 10, f"IA Company: {ia_company}", ln=True)
+        pdf.cell(0, 10, f"Claim #: {claim}", ln=True)
+        pdf.cell(0, 10, f"VIN: {vin}", ln=True)
+        pdf.cell(0, 10, f"Vehicle: {vehicle}", ln=True)
+        pdf.cell(0, 10, f"Compliance Score: {score}", ln=True)
+        pdf.ln(10)
+        pdf.multi_cell(0, 10, f"AI Review Summary:\n{gpt_output}")
+        pdf.output(f"/tmp/{filename}")
+
+        return {
             "gpt_output": gpt_output,
-            "claim_number": claim_number,
+            "claim_number": claim,
             "vin": vin,
             "vehicle": vehicle,
-            "score": score,
-            "file_number": file_number,
-            "ia_company": ia_company
+            "score": score or "N/A",
+            "ia_company": ia_company,
+            "pdf_filename": filename
         }
-
-        with open(f"output_{file_number}.txt", "w", encoding="utf-8") as f:
-            f.write(gpt_output)
-
-        return result_data
 
     except Exception as e:
         return JSONResponse(
@@ -132,31 +143,8 @@ async def vision_review(
         )
 
 @app.get("/download-pdf")
-def download_pdf(file_number: str = ""):
-    txt_path = f"output_{file_number}.txt"
-    if not os.path.exists(txt_path):
-        return JSONResponse(status_code=404, content={"error": "No review found for this file."})
-
-    with open(txt_path, "r", encoding="utf-8") as f:
-        gpt_output = f.read()
-
-    pdf = FPDF()
-    pdf.add_page()
-    pdf.set_font("Arial", "B", 16)
-    pdf.cell(0, 10, "NSPXN.com AI Review Report", ln=True)
-
-    pdf.set_font("Arial", "", 12)
-    pdf.cell(0, 10, f"Date: {datetime.today().strftime('%B %d, %Y')}", ln=True)
-    pdf.cell(0, 10, f"Claim #: {file_number}", ln=True)
-    pdf.cell(0, 10, f"VIN: 1HGCM82633A123456", ln=True)
-    pdf.cell(0, 10, f"Vehicle: 2014 Honda Accord EX-L, 158,000 miles", ln=True)
-    pdf.cell(0, 10, f"Compliance Score: 87%", ln=True)
-
-    pdf.ln(10)
-    pdf.multi_cell(0, 10, "AI Review Summary:")
-    pdf.multi_cell(0, 10, gpt_output)
-
-    pdf_path = f"nspxn_review_{file_number}.pdf"
-    pdf.output(pdf_path)
-
-    return FileResponse(pdf_path, filename=pdf_path)
+async def download_pdf(file_number: str):
+    filepath = f"/tmp/review_{file_number}.pdf"
+    if os.path.exists(filepath):
+        return FileResponse(path=filepath, media_type='application/pdf', filename=os.path.basename(filepath))
+    return JSONResponse(status_code=404, content={"error": "File not found"})
