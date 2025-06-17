@@ -1,15 +1,14 @@
-
 from fastapi import FastAPI, File, UploadFile, Form
-from fastapi.responses import JSONResponse
+from fastapi.responses import JSONResponse, FileResponse
 from fastapi.middleware.cors import CORSMiddleware
 from typing import List
 from openai import OpenAI
 import base64
 import io
 import os
+import re
 from PyPDF2 import PdfReader
 from docx import Document
-import re
 
 client = OpenAI()
 
@@ -37,13 +36,20 @@ def extract_text_from_docx(file):
     return "\n".join(p.text for p in doc.paragraphs)
 
 def extract_field(label, text):
-    pattern = re.compile(rf"{label}[:\s-]*([^\n\r]+)", re.IGNORECASE)
+    pattern = re.compile(rf"{label}\s*[:\-]\s*(.+)", re.IGNORECASE)
     match = pattern.search(text)
     return match.group(1).strip() if match else "N/A"
 
 @app.get("/")
 async def root():
     return {"status": "ok"}
+
+@app.get("/download-pdf")
+async def download_pdf(file_number: str):
+    file_path = f"pdfs/{file_number}.pdf"
+    if os.path.exists(file_path):
+        return FileResponse(file_path, filename=f"{file_number}.pdf", media_type="application/pdf")
+    return JSONResponse(status_code=404, content={"error": "PDF not found"})
 
 @app.post("/vision-review")
 async def vision_review(
