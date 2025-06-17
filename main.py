@@ -13,7 +13,6 @@ import re
 import smtplib
 from email.message import EmailMessage
 from fpdf import FPDF
-from datetime import datetime
 
 client = OpenAI()
 
@@ -45,17 +44,6 @@ def extract_field(label, text):
     match = pattern.search(text)
     return match.group(1).strip() if match else "N/A"
 
-@app.get("/")
-async def root():
-    return {"status": "ok"}
-
-@app.get("/download-pdf")
-async def download_pdf(file_number: str):
-    pdf_path = f"{file_number}.pdf"
-    if os.path.exists(pdf_path):
-        return FileResponse(pdf_path, media_type="application/pdf", filename=pdf_path)
-    return JSONResponse(status_code=404, content={"detail": "Not Found"})
-
 @app.post("/vision-review")
 async def vision_review(
     files: List[UploadFile] = File(...),
@@ -69,32 +57,19 @@ async def vision_review(
     for file in files:
         content = await file.read()
         name = file.filename.lower()
-
         if name.endswith((".jpg", ".jpeg", ".png")):
             b64 = base64.b64encode(content).decode("utf-8")
-            images.append({
-                "type": "image_url",
-                "image_url": { "url": f"data:image/jpeg;base64,{b64}" }
-            })
+            images.append({"type": "image_url", "image_url": {"url": f"data:image/jpeg;base64,{b64}"}})
         elif name.endswith(".pdf"):
             texts.append(extract_text_from_pdf(io.BytesIO(content)))
         elif name.endswith(".docx"):
             texts.append(extract_text_from_docx(io.BytesIO(content)))
         elif name.endswith(".txt"):
             texts.append(content.decode("utf-8", errors="ignore"))
-        else:
-            texts.append(f"⚠️ Skipped unsupported file: {file.filename}")
 
-    vision_message = {
-        "role": "user",
-        "content": []
-    }
-
+    vision_message = {"role": "user", "content": []}
     if texts:
-        vision_message["content"].append({
-            "type": "text",
-            "text": "\n\n".join(texts)
-        })
+        vision_message["content"].append({"type": "text", "text": "\n\n".join(texts)})
     if images:
         vision_message["content"].extend(images)
 
@@ -113,13 +88,9 @@ Then summarize findings and rule violations based on the following rules:
     try:
         response = client.chat.completions.create(
             model="gpt-4o",
-            messages=[
-                {"role": "system", "content": prompt},
-                vision_message
-            ],
+            messages=[{"role": "system", "content": prompt}, vision_message],
             max_tokens=3500
         )
-
         gpt_output = response.choices[0].message.content or "⚠️ GPT returned no output."
 
         claim_number = extract_field("Claim", gpt_output)
@@ -127,18 +98,24 @@ Then summarize findings and rule violations based on the following rules:
         vehicle = extract_field("Vehicle", gpt_output)
         score = extract_field("Compliance Score", gpt_output)
 
-        # Generate PDF
         pdf = FPDF()
         pdf.add_page()
-        pdf.set_font("Arial", size=14)
-        pdf.multi_cell(0, 10, f"NSPXN.com AI Review Report\nDate: {datetime.now().strftime('%B %d, %Y')}\nIA Company: {ia_company}\n\nAI Review Summary:\nClaim #: {claim_number}\nVIN: {vin}\nVehicle: {vehicle}\nCompliance Score: {score}\n\n{gpt_output}")
-        pdf_path = f"{file_number}.pdf"
-        pdf.output(pdf_path)
+        pdf.set_font("Arial", size=12)
+        pdf.cell(200, 10, "NSPXN.com AI Review Report", ln=True, align="C")
+        pdf.ln(10)
+        pdf.cell(200, 10, f"IA Company: {ia_company}", ln=True)
+        pdf.cell(200, 10, f"Claim #: {claim_number}", ln=True)
+        pdf.cell(200, 10, f"VIN: {vin}", ln=True)
+        pdf.cell(200, 10, f"Vehicle: {vehicle}", ln=True)
+        pdf.cell(200, 10, f"Compliance Score: {score}", ln=True)
+        pdf.ln(10)
+        pdf.multi_cell(0, 10, f"AI Review Summary:\n{gpt_output}")
+        pdf_path = f"{file_number}_output.pdf"
+        pdf.output(pdf_path, "F")
 
-        # Send Email
         msg = EmailMessage()
-        msg.set_content(f"IA Company: {ia_company}\n\n{gpt_output}", charset='utf-8')
-        msg["Subject"] = f"Claim #: {claim_number}"
+        msg.set_content(gpt_output)
+        msg["Subject"] = claim_number
         msg["From"] = "noreply@nspxn.com"
         msg["To"] = "info@nspxn.com"
 
@@ -155,8 +132,4 @@ Then summarize findings and rule violations based on the following rules:
         }
 
     except Exception as e:
-        print("❌ GPT Error:", str(e))
-        return JSONResponse(
-            status_code=500,
-            content={"error": str(e), "gpt_output": "⚠️ AI review failed."}
-        )
+        return JSONResponse(status_code=500, content={"error": str(e), "gpt_output": "⚠️ AI review failed."})
