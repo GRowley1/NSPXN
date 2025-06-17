@@ -112,16 +112,35 @@ Then summarize findings and rule violations based on the following rules:
 
         pdf = FPDF()
         pdf.add_page()
-        pdf.set_font("Arial", size=12)
+        pdf.set_font("Helvetica", size=12)
         pdf.cell(200, 10, txt="NSPXN.com AI Review Report", ln=True, align='C')
         pdf.ln(5)
+        pdf.multi_cell(0, 10, f"File Number: {file_number}")
         pdf.multi_cell(0, 10, f"IA Company: {ia_company}")
         pdf.multi_cell(0, 10, f"Claim #: {claim_number}")
         pdf.multi_cell(0, 10, f"VIN: {vin}")
         pdf.multi_cell(0, 10, f"Vehicle: {vehicle}")
         pdf.multi_cell(0, 10, f"Compliance Score: {score}")
         pdf.ln(5)
-        pdf.multi_cell(0, 10, f"AI Review Summary:\n{gpt_output}")
+
+        lines = gpt_output.splitlines()
+        cleaned_lines = []
+        seen_fields = {"claim": False, "vin": False, "vehicle": False, "score": False, "file": False}
+
+        for line in lines:
+            lowered = line.lower()
+            if any(f in lowered for f in ["claim #", "vin", "vehicle", "compliance score", "file number"]):
+                for key in seen_fields:
+                    if key in lowered:
+                        if not seen_fields[key]:
+                            seen_fields[key] = True
+                            cleaned_lines.append(line)
+                        break
+            else:
+                cleaned_lines.append(line)
+
+        cleaned_output = "\n".join(cleaned_lines)
+        pdf.multi_cell(0, 10, f"AI Review Summary:\n{cleaned_output}")
 
         pdf_path = f"{file_number}.pdf"
         pdf.output(pdf_path)
@@ -130,7 +149,20 @@ Then summarize findings and rule violations based on the following rules:
         msg["Subject"] = f"AI Review: {claim_number}"
         msg["From"] = "noreply@nspxn.com"
         msg["To"] = "info@nspxn.com"
-        msg.set_content(f"AI Review for {ia_company}\n\n{gpt_output}")
+        email_body = f"""NSPXN.com AI Review Report
+
+File Number: {file_number}
+IA Company: {ia_company}
+Claim #: {claim_number}
+VIN: {vin}
+Vehicle: {vehicle}
+Compliance Score: {score}
+
+AI Review Summary:
+{cleaned_output}
+"""
+        msg.set_content(email_body.encode("utf-8", errors="ignore").decode("utf-8"))
+
         with smtplib.SMTP_SSL("mail.tierra.net", 465) as smtp:
             smtp.login("info@nspxn.com", "grr2025GRR")
             smtp.send_message(msg)
@@ -157,4 +189,3 @@ async def download_pdf(file_number: str):
     if os.path.exists(pdf_path):
         return FileResponse(path=pdf_path, media_type='application/pdf', filename=pdf_path)
     return JSONResponse(status_code=404, content={"detail": "Not Found"})
-    
