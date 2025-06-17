@@ -126,8 +126,7 @@ Then summarize findings and rule violations based on the following rules:
         pdf.cell(200, 10, txt=f"Vehicle: {vehicle}", ln=True)
         pdf.cell(200, 10, txt=f"Compliance Score: {score}", ln=True)
         pdf.ln(10)
-        pdf.multi_cell(0, 10, f"AI Review Summary:
-{gpt_output}")
+        pdf.multi_cell(0, 10, f"AI Review Summary:\n{data['gpt_output']}")
         pdf_path = f"{file_number}.pdf"
         pdf.output(pdf_path)
 
