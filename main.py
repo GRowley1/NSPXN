@@ -9,10 +9,11 @@ import io
 import os
 from PyPDF2 import PdfReader
 from docx import Document
-from fpdf import FPDF
 import re
 import smtplib
 from email.message import EmailMessage
+from fpdf import FPDF
+from datetime import datetime
 
 client = OpenAI()
 
@@ -50,9 +51,9 @@ async def root():
 
 @app.get("/download-pdf")
 async def download_pdf(file_number: str):
-    filename = f"{file_number}.pdf"
-    if os.path.exists(filename):
-        return FileResponse(filename, media_type='application/pdf', filename=filename)
+    pdf_path = f"{file_number}.pdf"
+    if os.path.exists(pdf_path):
+        return FileResponse(pdf_path, media_type="application/pdf", filename=pdf_path)
     return JSONResponse(status_code=404, content={"detail": "Not Found"})
 
 @app.post("/vision-review")
@@ -126,32 +127,18 @@ Then summarize findings and rule violations based on the following rules:
         vehicle = extract_field("Vehicle", gpt_output)
         score = extract_field("Compliance Score", gpt_output)
 
-        # PDF
-        filename = f"{file_number}.pdf"
+        # Generate PDF
         pdf = FPDF()
         pdf.add_page()
-        pdf.set_font("Arial", size=12)
-        pdf.cell(200, 10, txt="NSPXN.com AI Review Report", ln=True, align='C')
-        pdf.cell(200, 10, txt=f"IA Company: {ia_company}", ln=True)
-        pdf.cell(200, 10, txt=f"Claim #: {claim_number}", ln=True)
-        pdf.cell(200, 10, txt=f"VIN: {vin}", ln=True)
-        pdf.cell(200, 10, txt=f"Vehicle: {vehicle}", ln=True)
-        pdf.cell(200, 10, txt=f"Compliance Score: {score}", ln=True)
-        pdf.multi_cell(0, 10, f"\nAI Review Summary:\n{gpt_output}")
-        pdf.output(filename)
+        pdf.set_font("Arial", size=14)
+        pdf.multi_cell(0, 10, f"NSPXN.com AI Review Report\nDate: {datetime.now().strftime('%B %d, %Y')}\nIA Company: {ia_company}\n\nAI Review Summary:\nClaim #: {claim_number}\nVIN: {vin}\nVehicle: {vehicle}\nCompliance Score: {score}\n\n{gpt_output}")
+        pdf_path = f"{file_number}.pdf"
+        pdf.output(pdf_path)
 
-        # EMAIL
+        # Send Email
         msg = EmailMessage()
-        msg.set_content(f"""NSPXN.com AI Review Report
-IA Company: {ia_company}
-Claim #: {claim_number}
-VIN: {vin}
-Vehicle: {vehicle}
-Compliance Score: {score}
-
-AI Review Summary:
-{gpt_output}""")
-        msg["Subject"] = f"Claim #{claim_number}"
+        msg.set_content(f"IA Company: {ia_company}\n\n{gpt_output}", charset='utf-8')
+        msg["Subject"] = f"Claim #: {claim_number}"
         msg["From"] = "noreply@nspxn.com"
         msg["To"] = "info@nspxn.com"
 
