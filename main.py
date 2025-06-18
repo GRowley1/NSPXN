@@ -1,4 +1,3 @@
-
 from fastapi import FastAPI, File, UploadFile, Form
 from fastapi.responses import JSONResponse, FileResponse
 from fastapi.middleware.cors import CORSMiddleware
@@ -14,6 +13,11 @@ import smtplib
 from email.message import EmailMessage
 from fpdf import FPDF
 
+# ✅ OCR support
+from PIL import Image
+from pdf2image import convert_from_bytes
+import pytesseract
+
 client = OpenAI()
 
 app = FastAPI()
@@ -26,9 +30,27 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-def extract_text_from_pdf(file):
-    pdf = PdfReader(file)
-    return "\n".join(page.extract_text() or "" for page in pdf.pages)
+# ✅ Updated with OCR fallback
+def extract_text_from_pdf(file_bytes):
+    try:
+        pdf = PdfReader(io.BytesIO(file_bytes))
+        text = "\n".join(page.extract_text() or "" for page in pdf.pages)
+        if text.strip():
+            return text
+        # fallback to OCR
+        return extract_text_from_scanned_pdf(file_bytes)
+    except:
+        return extract_text_from_scanned_pdf(file_bytes)
+
+def extract_text_from_scanned_pdf(file_bytes):
+    try:
+        images = convert_from_bytes(file_bytes)
+        ocr_text = ""
+        for img in images:
+            ocr_text += pytesseract.image_to_string(img) + "\n"
+        return ocr_text
+    except Exception as e:
+        return f"⚠️ OCR failed: {e}"
 
 def extract_text_from_docx(file):
     doc = Document(file)
@@ -54,13 +76,16 @@ async def vision_review(
         name = file.filename.lower()
 
         if name.endswith((".jpg", ".jpeg", ".png")):
+            img = Image.open(io.BytesIO(content))
+            text = pytesseract.image_to_string(img)
+            texts.append(text)
             b64 = base64.b64encode(content).decode("utf-8")
             images.append({
                 "type": "image_url",
                 "image_url": { "url": f"data:image/jpeg;base64,{b64}" }
             })
         elif name.endswith(".pdf"):
-            texts.append(extract_text_from_pdf(io.BytesIO(content)))
+            texts.append(extract_text_from_pdf(content))
         elif name.endswith(".docx"):
             texts.append(extract_text_from_docx(io.BytesIO(content)))
         elif name.endswith(".txt"):
