@@ -149,14 +149,10 @@ Then summarize findings and rule violations based on the following rules:
         msg["Subject"] = f"AI Review: {claim_number}"
         msg["From"] = "noreply@nspxn.com"
         msg["To"] = "info@nspxn.com"
-        email_body = f"""NSPXN.com AI Review Report
+        email_body = f"""NSPXN.com AI4IA Review Report
 
 File Number: {file_number}
 IA Company: {ia_company}
-Claim #: {claim_number}
-VIN: {vin}
-Vehicle: {vehicle}
-Compliance Score: {score}
 
 AI Review Summary:
 {cleaned_output}
