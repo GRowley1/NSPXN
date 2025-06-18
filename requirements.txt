@@ -7,3 +7,4 @@ python-docx
 fpdf
 Pillow
 pdf2image
+pytesseract
