@@ -117,10 +117,6 @@ Then summarize findings and rule violations based on the following rules:
         pdf.ln(5)
         pdf.multi_cell(0, 10, f"File Number: {file_number}")
         pdf.multi_cell(0, 10, f"IA Company: {ia_company}")
-        pdf.multi_cell(0, 10, f"Claim #: {claim_number}")
-        pdf.multi_cell(0, 10, f"VIN: {vin}")
-        pdf.multi_cell(0, 10, f"Vehicle: {vehicle}")
-        pdf.multi_cell(0, 10, f"Compliance Score: {score}")
         pdf.ln(5)
 
         lines = gpt_output.splitlines()
@@ -140,13 +136,13 @@ Then summarize findings and rule violations based on the following rules:
                 cleaned_lines.append(line)
 
         cleaned_output = "\n".join(cleaned_lines)
-        pdf.multi_cell(0, 10, f"AI Review Summary:\n{cleaned_output}")
+        pdf.multi_cell(0, 10, f"AI4IA Review Summary:\n{cleaned_output}")
 
         pdf_path = f"{file_number}.pdf"
         pdf.output(pdf_path)
 
         msg = EmailMessage()
-        msg["Subject"] = f"AI Review: {claim_number}"
+        msg["Subject"] = f"AI4IA Review: {claim_number}"
         msg["From"] = "noreply@nspxn.com"
         msg["To"] = "info@nspxn.com"
         email_body = f"""NSPXN.com AI4IA Review Report
