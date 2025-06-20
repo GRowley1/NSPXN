@@ -12,10 +12,9 @@ import re
 import smtplib
 from email.message import EmailMessage
 from fpdf import FPDF
-from pdf2image import convert_from_bytes
-import pytesseract
 
 client = OpenAI()
+
 app = FastAPI()
 
 app.add_middleware(
@@ -29,13 +28,6 @@ app.add_middleware(
 def extract_text_from_pdf(file):
     pdf = PdfReader(file)
     return "\n".join(page.extract_text() or "" for page in pdf.pages)
-
-def extract_text_with_ocr(pdf_bytes):
-    try:
-        images = convert_from_bytes(pdf_bytes)
-        return "\n".join([pytesseract.image_to_string(img) for img in images])
-    except Exception:
-        return ""
 
 def extract_text_from_docx(file):
     doc = Document(file)
@@ -55,12 +47,10 @@ async def vision_review(
 ):
     images = []
     texts = []
-    file_descriptions = []
 
     for file in files:
         content = await file.read()
         name = file.filename.lower()
-        file_descriptions.append(name)
 
         if name.endswith((".jpg", ".jpeg", ".png")):
             b64 = base64.b64encode(content).decode("utf-8")
@@ -69,14 +59,7 @@ async def vision_review(
                 "image_url": { "url": f"data:image/jpeg;base64,{b64}" }
             })
         elif name.endswith(".pdf"):
-            text = extract_text_from_pdf(io.BytesIO(content))
-            if not text.strip():
-                text = extract_text_with_ocr(content)
-            if "kbb" in name:
-                text = "📄 KBB Private Party Valuation Included\n" + text
-            elif "jd power" in name or "jdpower" in name:
-                text = "📄 J.D. Power Valuation Document Included\n" + text
-            texts.append(text)
+            texts.append(extract_text_from_pdf(io.BytesIO(content)))
         elif name.endswith(".docx"):
             texts.append(extract_text_from_docx(io.BytesIO(content)))
         elif name.endswith(".txt"):
@@ -86,12 +69,7 @@ async def vision_review(
 
     vision_message = {
         "role": "user",
-        "content": [
-            {
-                "type": "text",
-                "text": f"Uploaded files: {', '.join(file_descriptions)}"
-            }
-        ]
+        "content": []
     }
 
     if texts:
@@ -103,9 +81,8 @@ async def vision_review(
         vision_message["content"].extend(images)
 
     prompt = f"""You are an AI auto damage auditor.
-Compare the estimate against the damage photos and valuation documents.
-If a KBB or JD Power valuation is present, reference it in your findings.
-Always start your response with:
+Compare the estimate against the damage photos.
+At the top of your response, always include:
 Claim #: (from estimate)
 VIN: (from estimate or photos)
 Vehicle: (make, model, mileage from estimate)
@@ -126,6 +103,7 @@ Then summarize findings and rule violations based on the following rules:
         )
 
         gpt_output = response.choices[0].message.content or "⚠️ GPT returned no output."
+
         claim_number = extract_field("Claim", gpt_output)
         vin = extract_field("VIN", gpt_output)
         vehicle = extract_field("Vehicle", gpt_output)
@@ -139,39 +117,29 @@ Then summarize findings and rule violations based on the following rules:
         pdf.multi_cell(0, 10, f"File Number: {file_number}")
         pdf.multi_cell(0, 10, f"IA Company: {ia_company}")
         pdf.ln(5)
+        pdf.multi_cell(0, 10, "AI4IA Review Summary:")
 
-        lines = gpt_output.splitlines()
-        cleaned_lines = []
-        seen_fields = {"claim": False, "vin": False, "vehicle": False, "score": False, "file": False}
-        for line in lines:
-            lowered = line.lower()
-            if any(f in lowered for f in ["claim #", "vin", "vehicle", "compliance score", "file number"]):
-                for key in seen_fields:
-                    if key in lowered and not seen_fields[key]:
-                        seen_fields[key] = True
-                        cleaned_lines.append(line)
-                        break
-            else:
-                cleaned_lines.append(line)
-        cleaned_output = "\n".join(cleaned_lines)
+        # Safe encode entire GPT output to avoid PDF rendering issues
+        encoded_output = gpt_output.encode("latin-1", "replace").decode("latin-1")
+        pdf.set_font("Helvetica", size=11)
+        pdf.multi_cell(0, 10, encoded_output)
 
-        pdf.multi_cell(0, 10, f"AI4IA Review Summary:\n{cleaned_output}")
         pdf_path = f"{file_number}.pdf"
         pdf.output(pdf_path)
 
-        # Email logic
         msg = EmailMessage()
         msg["Subject"] = f"AI4IA Review: {claim_number}"
         msg["From"] = "noreply@nspxn.com"
         msg["To"] = "info@nspxn.com"
-        msg.set_content(f"""NSPXN.com AI4IA Review Report
+        email_body = f"""NSPXN.com AI4IA Review Report
 
 File Number: {file_number}
 IA Company: {ia_company}
 
 AI Review Summary:
-{cleaned_output}
-""")
+{gpt_output}
+"""
+        msg.set_content(email_body.encode("utf-8", errors="ignore").decode("utf-8"))
 
         with smtplib.SMTP_SSL("mail.tierra.net", 465) as smtp:
             smtp.login("info@nspxn.com", "grr2025GRR")
