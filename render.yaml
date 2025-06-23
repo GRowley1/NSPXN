@@ -1,8 +1,14 @@
-
 services:
   - type: web
-    name: nspxn-ai-audit-debug
-    env: python
-    plan: free
-    buildCommand: pip install -r requirements.txt
-    startCommand: uvicorn main:app --host 0.0.0.0 --port 10000
+    name: nspxn-ai-review
+    runtime: python
+    plan: starter
+    build:
+      command: |
+        # Install system packages first
+        apt-get update && \
+        apt-get install -y poppler-utils tesseract-ocr && \
+        # Install python dependencies
+        pip install -r requirements.txt
+    start:
+      command: uvicorn main:app --host 0.0.0.0 --port $PORT
