@@ -18,20 +18,19 @@ from PIL import Image
 
 client = OpenAI()
 
-app = FastAPI()
 app.add_middleware(
     CORSMiddleware,
     allow_origins=[
         "https://nspxn.com",
         "https://www.nspxn.com",
         "http://nspxn.com",
-        "http://www.nspxn.com"
+        "http://www.nspxn.com",
+        "https://nspxn.onrender.com"  # ✅ Add this
     ],
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
 )
-
 def extract_text_from_pdf(file) -> str:
     """Extract text from PDF, fallback to OCR if pages contain images only."""
     reader = PdfReader(file)
