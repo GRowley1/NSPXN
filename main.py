@@ -116,16 +116,28 @@ async def vision_review(
     if images:
         vision_message["content"].extend(images)
 
-    prompt = f"""You are an AI auto damage auditor.
-Compare the estimate against the damage photos.
+prompt = f"""
+You are an AI auto damage auditor. You must review the uploaded estimate and associated documents (PDF, DOCX, images).
 At the top of your response, always include:
-Claim #: (from estimate)
-VIN: (from estimate or photos)
-Vehicle: (make, model, mileage from estimate)
-Compliance Score: (0–100%)
+
+Claim #: (from estimate)  
+VIN: (from estimate or photos)  
+Vehicle: (make, model, mileage from estimate)  
+Compliance Score: (0–100%)  
 
 Then summarize findings and rule violations based on the following rules:
 {client_rules}
+
+Important Clarification:
+- Treat any lines referring to "Description: Other (Add description to photo label)" or similar text as indicators of actual photo evidence, even if the wording is generic.
+- Acknowledge such mentions as part of the required photo documentation (for corners, damage areas, VIN confirmation, or others), unless the actual description contradicts this.
+
+Ensure your review clearly differentiates between:
+1. Photos explicitly confirmed.
+2. Photos inferred from lines like "Description: Other" or "Add description to photo label".
+3. Photos clearly missing (no mention at all).
+
+Format the review accordingly.
 """
 
     try:
