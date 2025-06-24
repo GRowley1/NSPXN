@@ -25,8 +25,7 @@ app.add_middleware(
         "https://nspxn.com",
         "https://www.nspxn.com",
         "http://nspxn.com",
-        "http://www.nspxn.com",
-        "https://nspxn.onrender.com"  # ✅ Add this
+        "http://www.nspxn.com"
     ],
     allow_credentials=True,
     allow_methods=["*"],
@@ -34,50 +33,42 @@ app.add_middleware(
 )
 
 def extract_text_from_pdf(file) -> str:
-    """Extract text from a PDF. Use OCR only for pages that contain no extractable text."""
+    """Extract text from PDF, fallback to OCR if pages contain images only."""
     reader = PdfReader(file)
     text_parts = []
-    ocr_needed_pages = []
-    page_number = 0
+    ocr_needed = False
 
-    # Try extracting text first
     for page in reader.pages:
-        page_number += 1
         page_text = page.extract_text()
         if page_text and page_text.strip():
             text_parts.append(page_text)
         else:
-            ocr_needed_pages.append(page_number)
+            ocr_needed = True
 
     combined_text = "\n".join(text_parts)
 
-    # Perform OCR only on pages that have no text
-    if ocr_needed_pages:
+    if ocr_needed:
         try:
-            # Reset pointer
             file.seek(0)
-            images = convert_from_bytes(file.read())
-            for idx, page_num in enumerate(ocr_needed_pages):
-                ocr_text = pytesseract.image_to_string(images[page_num - 1])
+            images = convert_from_bytes(file.read(), dpi=300)  # Higher DPI for better OCR
+            for img in images:
+                img = img.convert("RGB")  # Ensure RGB
+                ocr_text = pytesseract.image_to_string(img)
                 combined_text += ("\n" + ocr_text)
         except Exception as e:
-            print(f"❌ OCR error on pages {ocr_needed_pages}: {str(e)}")
+            print(f"❌ OCR error: {str(e)}")
             combined_text += "⚠️ OCR failed for some pages."
-
     return combined_text
-
 
 def extract_text_from_docx(file) -> str:
     doc = Document(file)
     return "\n".join(p.text for p in doc.paragraphs)
-
 
 def extract_field(label, text) -> str:
     """Extract fields like Claim #, VIN, Vehicle, Compliance Score."""
     pattern = re.compile(rf"{label}[:\s-]*([^\n\r]+)", re.IGNORECASE)
     match = pattern.search(text)
     return match.group(1).strip() if match else "N/A"
-
 
 @app.post("/vision-review")
 async def vision_review(
@@ -116,28 +107,21 @@ async def vision_review(
     if images:
         vision_message["content"].extend(images)
 
-prompt = f"""
+    prompt = f"""
 You are an AI auto damage auditor. You must review the uploaded estimate and associated documents (PDF, DOCX, images).
 At the top of your response, always include:
-
-Claim #: (from estimate)  
-VIN: (from estimate or photos)  
-Vehicle: (make, model, mileage from estimate)  
-Compliance Score: (0–100%)  
+Claim #: (from estimate)
+VIN: (from estimate or photos)
+Vehicle: (make, model, mileage from estimate)
+Compliance Score: (0–100%)
 
 Then summarize findings and rule violations based on the following rules:
 {client_rules}
 
 Important Clarification:
-- Treat any lines referring to "Description: Other (Add description to photo label)" or similar text as indicators of actual photo evidence, even if the wording is generic.
-- Acknowledge such mentions as part of the required photo documentation (for corners, damage areas, VIN confirmation, or others), unless the actual description contradicts this.
-
-Ensure your review clearly differentiates between:
-1. Photos explicitly confirmed.
-2. Photos inferred from lines like "Description: Other" or "Add description to photo label".
-3. Photos clearly missing (no mention at all).
-
-Format the review accordingly.
+- Treat any mentions of "Description: Other (Add description to photo label)" or similar text as evidence that a photo was taken.
+- Only mark photos as missing if NO mention (explicit or implicit) is found.
+- Clearly state if photos are inferred from such lines and acknowledge their presence accordingly.
 """
 
     try:
@@ -155,7 +139,7 @@ Format the review accordingly.
         vehicle = extract_field("Vehicle", gpt_output)
         score = extract_field("Compliance Score", gpt_output)
 
-        # Create PDF
+        # Create the PDF
         pdf = FPDF()
         pdf.add_page()
         pdf.set_font("Helvetica", size=12)
@@ -172,7 +156,7 @@ Format the review accordingly.
         pdf_path = f"{file_number}.pdf"
         pdf.output(pdf_path)
 
-        # Send Email
+        # Send the email
         msg = EmailMessage()
         msg["Subject"] = f"AI4IA Review: {claim_number}"
         msg["From"] = "noreply@nspxn.com"
@@ -210,4 +194,3 @@ async def download_pdf(file_number: str):
     if os.path.exists(pdf_path):
         return FileResponse(path=pdf_path, media_type='application/pdf', filename=pdf_path)
     return JSONResponse(status_code=404, content={"detail": "Not Found"})
-
