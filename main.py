@@ -82,13 +82,14 @@ async def vision_review(
     file_number: str = Form(...),
     ia_company: str = Form(...)
 ):
-    """Main review route."""
     images = []
     texts = []
     for file in files:
         content = await file.read()
         name = file.filename.lower()
+
         if name.endswith((".jpg", ".jpeg", ".png")):
+            # Add image for GPT review
             b64 = base64.b64encode(content).decode("utf-8")
             images.append({
                 "type": "image_url",
@@ -113,23 +114,25 @@ async def vision_review(
         vision_message["content"].extend(images)
 
     prompt = f"""
-You are an AI auto damage auditor. You must review the uploaded estimate and associated documents (PDF, DOCX, images).
-At the top of your response, always include:
-Claim #: (from estimate)
-VIN: (from estimate or photos)
-Vehicle: (make, model, mileage from estimate)
-Compliance Score: (0–100%)
+You are an AI auto damage auditor. You must review BOTH the uploaded documents and the actual uploaded images:
+- Compare the estimate text, photo descriptions, and actual image contents.
+- At the top of your response, always include:
+    Claim #: (from estimate)
+    VIN: (from estimate or photos)
+    Vehicle: (make, model, mileage from estimate)
+    Compliance Score: (0–100%)
 
 Then summarize findings and rule violations based on the following rules:
 {client_rules}
 
-Important Clarification:
-- Treat any mentions of "Description: Other (Add description to photo label)" or similar text as evidence that a photo was taken.
-- Only mark photos as missing if NO mention (explicit or implicit) is found.
-- Clearly state if photos are inferred from such lines and acknowledge their presence accordingly.
+IMPORTANT:
+1. Treat any mentions such as "Description: VIN - at Windshield", "Point of Impact: Right Front", "Left Rear measurement", "License plate measurement" or other photo labels as evidence that those photos were taken.
+2. Do NOT mark photos as missing if mentioned in any text description, unless BOTH text mentions and actual uploaded images clearly indicate the photo is NOT present.
+3. Additionally, review the actual uploaded images using OCR, regardless of their mentions in text, extracting any VINs, License Plates, Odometer Readings, and Damage Areas visible. Incorporate this evidence when making your final compliance review.
 """
+
     try:
-        response = openai.chat.completions.create(
+        response = client.chat.completions.create(
             model="gpt-4o",
             messages=[
                 {"role": "system", "content": prompt},
@@ -143,7 +146,7 @@ Important Clarification:
         vehicle = extract_field("Vehicle", gpt_output)
         score = extract_field("Compliance Score", gpt_output)
 
-        # ✅ Build the PDF
+        # Create the PDF
         pdf = FPDF()
         pdf.add_page()
         pdf.set_font("Helvetica", size=12)
@@ -160,7 +163,7 @@ Important Clarification:
         pdf_path = f"{file_number}.pdf"
         pdf.output(pdf_path)
 
-        # ✅ Email
+        # Send the email
         msg = EmailMessage()
         msg["Subject"] = f"AI4IA Review: {claim_number}"
         msg["From"] = "noreply@nspxn.com"
@@ -190,7 +193,6 @@ AI Review Summary:
     except Exception as e:
         print("❌ GPT Error:", str(e))
         return JSONResponse(status_code=500, content={"error": str(e), "gpt_output": "⚠️ AI review failed."})
-
 
 @app.get("/download-pdf")
 async def download_pdf(file_number: str):
