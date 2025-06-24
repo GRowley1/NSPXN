@@ -129,7 +129,7 @@ Then summarize findings and rule violations based on the following rules:
         pdf.ln(5)
         pdf.multi_cell(0, 10, "AI4IA Review Summary:", align='L')
         encoded_output = gpt_output.encode("latin-1", "replace").decode("latin-1")
-        pdf.set_font("Helvetica", size=11)
+        pdf.set_font("Helvetica", size=9)
         pdf.multi_cell(0, 10, encoded_output)
 
         pdf_path = f"{file_number}.pdf"
