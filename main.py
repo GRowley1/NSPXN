@@ -18,6 +18,10 @@ from PIL import Image
 
 client = OpenAI()
 
+@app.get("/")
+async def root():
+    return {"status": "ok"}
+
 app = FastAPI()
 
 app.add_middleware(
@@ -52,9 +56,8 @@ def extract_text_from_pdf(file) -> str:
     if ocr_needed:
         try:
             file.seek(0)
-            images = convert_from_bytes(file.read(), dpi=300)  # Higher DPI for better OCR
+            images = convert_from_bytes(file.read(), dpi=150, first_page=1, last_page=5)  # Limit pages
             for img in images:
-                img = img.convert("RGB")  # Ensure RGB
                 ocr_text = pytesseract.image_to_string(img)
                 combined_text += ("\n" + ocr_text)
         except Exception as e:
