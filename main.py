@@ -121,8 +121,8 @@ Then summarize findings and rule violations based on the following rules:
         # Create the PDF
         pdf = FPDF()
         pdf.add_page()
-        pdf.set_font("Helvetica", size=12)
-        pdf.cell(200, 10, txt="NSPXN.com AI Review Report", ln=True, align='C')
+        pdf.set_font("Helvetica", size=10)
+        pdf.cell(200, 10, txt="NSPXN.com AI4IA Review Report", ln=True, align='C')
         pdf.ln(5)
         pdf.multi_cell(0, 10, f"File Number: {file_number}")
         pdf.multi_cell(0, 10, f"IA Company: {ia_company}")
