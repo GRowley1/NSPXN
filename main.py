@@ -25,7 +25,8 @@ app.add_middleware(
         "https://nspxn.com",
         "https://www.nspxn.com",
         "http://nspxn.com",
-        "http://www.nspxn.com"
+        "http://www.nspxn.com",
+        "https://nspxn.onrender.com"  # ✅ Add this
     ],
     allow_credentials=True,
     allow_methods=["*"],
