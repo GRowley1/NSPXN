@@ -2,7 +2,7 @@ from fastapi import FastAPI, File, UploadFile, Form
 from fastapi.responses import JSONResponse, FileResponse
 from fastapi.middleware.cors import CORSMiddleware
 from typing import List
-from openai import OpenAI
+import openai
 import base64
 import io
 import os
@@ -16,10 +16,11 @@ from pdf2image import convert_from_bytes
 import pytesseract
 from PIL import Image
 
-# ✅ Instantiate the app FIRST
+# ✅ Set your OpenAI API key from environment variables
+openai.api_key = os.environ.get("OPENAI_API_KEY")
+
 app = FastAPI()
 
-# ✅ CORS middleware NEXT
 app.add_middleware(
     CORSMiddleware,
     allow_origins=[
@@ -34,30 +35,27 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-# ✅ Add the root route AFTER app declaration
 @app.get("/")
 async def root():
     return {"status": "ok"}
-    
+
 def extract_text_from_pdf(file) -> str:
     """Extract text from PDF, fallback to OCR if pages contain images only."""
     reader = PdfReader(file)
     text_parts = []
     ocr_needed = False
-
     for page in reader.pages:
         page_text = page.extract_text()
         if page_text and page_text.strip():
             text_parts.append(page_text)
         else:
             ocr_needed = True
-
     combined_text = "\n".join(text_parts)
 
     if ocr_needed:
         try:
             file.seek(0)
-            images = convert_from_bytes(file.read(), dpi=150, first_page=1, last_page=5)  # Limit pages
+            images = convert_from_bytes(file.read(), dpi=300)
             for img in images:
                 ocr_text = pytesseract.image_to_string(img)
                 combined_text += ("\n" + ocr_text)
@@ -67,6 +65,7 @@ def extract_text_from_pdf(file) -> str:
     return combined_text
 
 def extract_text_from_docx(file) -> str:
+    """Extract text from DOCX."""
     doc = Document(file)
     return "\n".join(p.text for p in doc.paragraphs)
 
@@ -83,12 +82,12 @@ async def vision_review(
     file_number: str = Form(...),
     ia_company: str = Form(...)
 ):
+    """Main review route."""
     images = []
     texts = []
     for file in files:
         content = await file.read()
         name = file.filename.lower()
-
         if name.endswith((".jpg", ".jpeg", ".png")):
             b64 = base64.b64encode(content).decode("utf-8")
             images.append({
@@ -129,9 +128,8 @@ Important Clarification:
 - Only mark photos as missing if NO mention (explicit or implicit) is found.
 - Clearly state if photos are inferred from such lines and acknowledge their presence accordingly.
 """
-
     try:
-        response = client.chat.completions.create(
+        response = openai.chat.completions.create(
             model="gpt-4o",
             messages=[
                 {"role": "system", "content": prompt},
@@ -145,7 +143,7 @@ Important Clarification:
         vehicle = extract_field("Vehicle", gpt_output)
         score = extract_field("Compliance Score", gpt_output)
 
-        # Create the PDF
+        # ✅ Build the PDF
         pdf = FPDF()
         pdf.add_page()
         pdf.set_font("Helvetica", size=12)
@@ -162,7 +160,7 @@ Important Clarification:
         pdf_path = f"{file_number}.pdf"
         pdf.output(pdf_path)
 
-        # Send the email
+        # ✅ Email
         msg = EmailMessage()
         msg["Subject"] = f"AI4IA Review: {claim_number}"
         msg["From"] = "noreply@nspxn.com"
@@ -196,7 +194,9 @@ AI Review Summary:
 
 @app.get("/download-pdf")
 async def download_pdf(file_number: str):
+    """Return the generated PDF for the given file number."""
     pdf_path = f"{file_number}.pdf"
     if os.path.exists(pdf_path):
         return FileResponse(path=pdf_path, media_type='application/pdf', filename=pdf_path)
     return JSONResponse(status_code=404, content={"detail": "Not Found"})
+
