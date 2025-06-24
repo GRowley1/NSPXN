@@ -16,14 +16,10 @@ from pdf2image import convert_from_bytes
 import pytesseract
 from PIL import Image
 
-client = OpenAI()
-
-@app.get("/")
-async def root():
-    return {"status": "ok"}
-
+# ✅ Instantiate the app FIRST
 app = FastAPI()
 
+# ✅ CORS middleware NEXT
 app.add_middleware(
     CORSMiddleware,
     allow_origins=[
@@ -31,13 +27,18 @@ app.add_middleware(
         "https://www.nspxn.com",
         "http://nspxn.com",
         "http://www.nspxn.com",
-        "https://nspxn.onrender.com"  # ✅ Added for your Render app
+        "https://nspxn.onrender.com"
     ],
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
 )
 
+# ✅ Add the root route AFTER app declaration
+@app.get("/")
+async def root():
+    return {"status": "ok"}
+    
 def extract_text_from_pdf(file) -> str:
     """Extract text from PDF, fallback to OCR if pages contain images only."""
     reader = PdfReader(file)
