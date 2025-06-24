@@ -34,30 +34,34 @@ app.add_middleware(
 )
 
 def extract_text_from_pdf(file) -> str:
-    """Extract text from PDF, fallback to OCR if pages contain images only."""
+    """Extract text from a PDF. Use OCR only for pages that contain no extractable text."""
     reader = PdfReader(file)
     text_parts = []
-    ocr_needed = False
+    ocr_needed_pages = []
+    page_number = 0
 
+    # Try extracting text first
     for page in reader.pages:
+        page_number += 1
         page_text = page.extract_text()
         if page_text and page_text.strip():
             text_parts.append(page_text)
         else:
-            ocr_needed = True
+            ocr_needed_pages.append(page_number)
 
     combined_text = "\n".join(text_parts)
 
-    if ocr_needed:
+    # Perform OCR only on pages that have no text
+    if ocr_needed_pages:
         try:
-            # Reset pointer to beginning
+            # Reset pointer
             file.seek(0)
             images = convert_from_bytes(file.read())
-            for img in images:
-                ocr_text = pytesseract.image_to_string(img)
+            for idx, page_num in enumerate(ocr_needed_pages):
+                ocr_text = pytesseract.image_to_string(images[page_num - 1])
                 combined_text += ("\n" + ocr_text)
         except Exception as e:
-            print(f"❌ OCR error: {str(e)}")
+            print(f"❌ OCR error on pages {ocr_needed_pages}: {str(e)}")
             combined_text += "⚠️ OCR failed for some pages."
 
     return combined_text
