@@ -2,7 +2,7 @@ from fastapi import FastAPI, File, UploadFile, Form
 from fastapi.responses import JSONResponse, FileResponse
 from fastapi.middleware.cors import CORSMiddleware
 from typing import List
-import openai
+from openai import OpenAI
 import base64
 import io
 import os
@@ -12,12 +12,9 @@ from email.message import EmailMessage
 from fpdf import FPDF
 from docx import Document
 from PyPDF2 import PdfReader
-from pdf2image import convert_from_bytes
-import pytesseract
-from PIL import Image
 
-# ✅ Set your OpenAI API key from environment variables
-openai.api_key = os.environ.get("OPENAI_API_KEY")
+# ✅ Ensure the GPT Client is properly defined
+client = OpenAI()
 
 app = FastAPI()
 
@@ -35,37 +32,18 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-@app.get("/")
-async def root():
-    return {"status": "ok"}
-
 def extract_text_from_pdf(file) -> str:
-    """Extract text from PDF, fallback to OCR if pages contain images only."""
+    """Extract text from PDF pages (no OCR)."""
     reader = PdfReader(file)
     text_parts = []
-    ocr_needed = False
     for page in reader.pages:
         page_text = page.extract_text()
         if page_text and page_text.strip():
             text_parts.append(page_text)
-        else:
-            ocr_needed = True
-    combined_text = "\n".join(text_parts)
-
-    if ocr_needed:
-        try:
-            file.seek(0)
-            images = convert_from_bytes(file.read(), dpi=300)
-            for img in images:
-                ocr_text = pytesseract.image_to_string(img)
-                combined_text += ("\n" + ocr_text)
-        except Exception as e:
-            print(f"❌ OCR error: {str(e)}")
-            combined_text += "⚠️ OCR failed for some pages."
-    return combined_text
+    return "\n".join(text_parts)
 
 def extract_text_from_docx(file) -> str:
-    """Extract text from DOCX."""
+    """Extract text from DOCX files."""
     doc = Document(file)
     return "\n".join(p.text for p in doc.paragraphs)
 
@@ -82,6 +60,7 @@ async def vision_review(
     file_number: str = Form(...),
     ia_company: str = Form(...)
 ):
+    """Perform AI review of the uploaded files."""
     images = []
     texts = []
     for file in files:
@@ -89,7 +68,6 @@ async def vision_review(
         name = file.filename.lower()
 
         if name.endswith((".jpg", ".jpeg", ".png")):
-            # Add image for GPT review
             b64 = base64.b64encode(content).decode("utf-8")
             images.append({
                 "type": "image_url",
@@ -114,23 +92,17 @@ async def vision_review(
         vision_message["content"].extend(images)
 
     prompt = f"""
-You are an AI auto damage auditor. You must review BOTH the uploaded documents and the actual uploaded images:
-- Compare the estimate text, photo descriptions, and actual image contents.
-- At the top of your response, always include:
-    Claim #: (from estimate)
-    VIN: (from estimate or photos)
-    Vehicle: (make, model, mileage from estimate)
-    Compliance Score: (0–100%)
+You are an AI auto damage auditor.
+Compare the estimate against the damage photos.
+At the top of your response, always include:
+Claim #: (from estimate)
+VIN: (from estimate or photos)
+Vehicle: (make, model, mileage from estimate)
+Compliance Score: (0–100%)
 
 Then summarize findings and rule violations based on the following rules:
 {client_rules}
-
-IMPORTANT:
-1. Treat any mentions such as "Description: VIN - at Windshield", "Point of Impact: Right Front", "Left Rear measurement", "License plate measurement" or other photo labels as evidence that those photos were taken.
-2. Do NOT mark photos as missing if mentioned in any text description, unless BOTH text mentions and actual uploaded images clearly indicate the photo is NOT present.
-3. Additionally, review the actual uploaded images using OCR, regardless of their mentions in text, extracting any VINs, License Plates, Odometer Readings, and Damage Areas visible. Incorporate this evidence when making your final compliance review.
 """
-
     try:
         response = client.chat.completions.create(
             model="gpt-4o",
@@ -194,11 +166,13 @@ AI Review Summary:
         print("❌ GPT Error:", str(e))
         return JSONResponse(status_code=500, content={"error": str(e), "gpt_output": "⚠️ AI review failed."})
 
+
 @app.get("/download-pdf")
 async def download_pdf(file_number: str):
-    """Return the generated PDF for the given file number."""
+    """Send generated PDF for download if available."""
     pdf_path = f"{file_number}.pdf"
     if os.path.exists(pdf_path):
         return FileResponse(path=pdf_path, media_type='application/pdf', filename=pdf_path)
     return JSONResponse(status_code=404, content={"detail": "Not Found"})
+
 
