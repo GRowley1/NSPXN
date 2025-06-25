@@ -15,6 +15,7 @@ from PyPDF2 import PdfReader
 from pdf2image import convert_from_bytes
 import pytesseract
 from PIL import Image
+import psutil  # ✅ Added for memory usage inspection
 
 client = OpenAI()
 app = FastAPI()
@@ -33,13 +34,17 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
+def print_memory_usage(stage: str):
+    """Helper to print memory usage for debugging."""
+    mem = psutil.virtual_memory()
+    print(f"📊 {stage} - Memory Usage: {mem.used / (1024**2):.2f} MB of {mem.total / (1024**2):.2f} MB.")
+
 def extract_text_from_pdf(file) -> str:
-    """Extract text from a PDF, using OCR only for pages that have no text."""
+    """Extract text from PDF, fallback to OCR if pages contain images only, skipping very large PDFs."""
     text_parts = []
     ocr_needed_pages = []
     reader = PdfReader(file)
 
-    # Try extracting text normally first
     for i, page in enumerate(reader.pages, 1):
         page_text = page.extract_text()
         if page_text and page_text.strip():
@@ -47,30 +52,28 @@ def extract_text_from_pdf(file) -> str:
         else:
             ocr_needed_pages.append(i)
 
-    combined_text = "\n".join(text_parts)
+    combined_text = '\n'.join(text_parts)
 
-    # Perform OCR if needed
     if ocr_needed_pages:
         try:
             file.seek(0)
-            images = convert_from_bytes(file.read(), dpi=300)
+            # Limit pages to a manageable chunk
+            images = convert_from_bytes(file.read(), dpi=150, first_page=1, last_page=min(5, len(reader.pages)))
             for idx, img in enumerate(images, 1):
                 if idx in ocr_needed_pages:
                     img = img.convert("RGB")  # Ensure RGB
                     ocr_text = pytesseract.image_to_string(img)
                     combined_text += ("\n" + ocr_text)
-
         except Exception as e:
-            error_message = f"⚠️ OCR failed for pages {ocr_needed_pages}: {str(e)}"
-            print(error_message)
-            combined_text += error_message
+            print(f"❌ OCR error for pages {ocr_needed_pages}: {str(e)}")
+            combined_text += "⚠️ OCR failed for some pages."
 
     return combined_text
 
 def extract_text_from_docx(file) -> str:
     """Extract text from DOCX files."""
     doc = Document(file)
-    return "\n".join(p.text for p in doc.paragraphs)
+    return '\n'.join(p.text for p in doc.paragraphs)
 
 def extract_field(label, text) -> str:
     """Extract fields like Claim #, VIN, Vehicle, Compliance Score."""
@@ -114,7 +117,7 @@ async def vision_review(
     if texts:
         vision_message["content"].append({
             "type": "text",
-            "text": "\n\n".join(texts)
+            "text": '\n\n'.join(texts)
         })
     if images:
         vision_message["content"].extend(images)
@@ -131,8 +134,8 @@ Compliance Score: (0–100%)
 Then summarize findings and rule violations based on the following rules:
 {client_rules}
 """
-
     try:
+        print_memory_usage("Before GPT Call")  # ✅ Monitor memory
         response = client.chat.completions.create(
             model="gpt-4o",
             messages=[
@@ -164,7 +167,7 @@ Then summarize findings and rule violations based on the following rules:
         pdf_path = f"{file_number}.pdf"
         pdf.output(pdf_path)
 
-        # Send the review via email
+        # Email the results
         msg = EmailMessage()
         msg["Subject"] = f"AI4IA Review: {claim_number}"
         msg["From"] = "noreply@nspxn.com"
@@ -182,6 +185,7 @@ AI Review Summary:
             smtp.login("info@nspxn.com", "grr2025GRR")
             smtp.send_message(msg)
 
+        print_memory_usage("After GPT Call")  # ✅ Monitor post-processing
         return {
             "gpt_output": gpt_output,
             "file_number": file_number,
@@ -192,22 +196,21 @@ AI Review Summary:
         }
 
     except Exception as e:
-        print("❌ GPT Error:", str(e))
-        return JSONResponse(status_code=500, content={"error": str(e), "gpt_output": "⚠️ AI review failed."})
-
+        print(f"❌ GPT Error: {str(e)}")  # Log error
+        return JSONResponse(status_code=500, content={"error": str(e), "gpt_output": "⚠️ AI review failed."}})
 
 @app.get("/download-pdf")
 async def download_pdf(file_number: str):
-    """Download the PDF for a specific review."""
+    """Download the review PDF for a specific file number."""
     pdf_path = f"{file_number}.pdf"
     if os.path.exists(pdf_path):
-        return FileResponse(path=pdf_path, media_type='application/pdf', filename=pdf_path)
+        return FileResponse(path=pdf_path, media_type="application/pdf", filename=pdf_path)
     return JSONResponse(status_code=404, content={"detail": "Not Found"})
 
 @app.get("/client-rules/{client_name}")
 async def get_client_rules(client_name: str):
     """Fetch the rules text for the selected client from its .docx file."""
-    rules_dir = "client_rules"  # Directory where .docx files reside
+    rules_dir = "client_rules"
     file_name = f"{client_name}.docx"
     file_path = os.path.join(rules_dir, file_name)
 
@@ -220,4 +223,5 @@ async def get_client_rules(client_name: str):
             return JSONResponse(status_code=500, content={"error": str(e)})
     else:
         return JSONResponse(status_code=404, content={"error": "Rules not found for this client."})
+
 
