@@ -204,4 +204,20 @@ async def download_pdf(file_number: str):
         return FileResponse(path=pdf_path, media_type='application/pdf', filename=pdf_path)
     return JSONResponse(status_code=404, content={"detail": "Not Found"})
 
+@app.get("/client-rules/{client_name}")
+async def get_client_rules(client_name: str):
+    """Fetch the rules text for the selected client from its .docx file."""
+    rules_dir = "client_rules"  # Directory where .docx files reside
+    file_name = f"{client_name}.docx"
+    file_path = os.path.join(rules_dir, file_name)
+
+    if os.path.exists(file_path):
+        try:
+            doc = Document(file_path)
+            text = '\n'.join([p.text for p in doc.paragraphs if p.text.strip()])
+            return {"text": text}
+        except Exception as e:
+            return JSONResponse(status_code=500, content={"error": str(e)}})
+    else:
+        return JSONResponse(status_code=404, content={"error": "Rules not found for this client."}})
 
