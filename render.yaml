@@ -5,8 +5,11 @@ services:
     plan: starter
     build:
       command: |
-        apt-get update && \
-        apt-get install -y poppler-utils tesseract-ocr && \
+        # Install python dependencies
         pip install -r requirements.txt
     start:
-      command: uvicorn main:app --host 0.0.0.0 --port $PORT
+      command: |
+        # Install system packages
+        apt-get update && \
+        apt-get install -y tesseract-ocr poppler-utils && \
+        uvicorn main:app --host 0.0.0.0 --port $PORT
