@@ -135,7 +135,7 @@ Then summarize findings and rule violations based on the following rules:
 {client_rules}
 """
 
-    try:
+try:
         response = client.chat.completions.create(
             model="gpt-4o",
             messages=[
