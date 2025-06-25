@@ -15,7 +15,6 @@ from PyPDF2 import PdfReader
 from pdf2image import convert_from_bytes
 import pytesseract
 from PIL import Image
-import psutil  # ✅ Added for memory usage inspection
 
 client = OpenAI()
 app = FastAPI()
