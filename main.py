@@ -197,7 +197,7 @@ AI Review Summary:
 
     except Exception as e:
         print(f"❌ GPT Error: {str(e)}")  # Log error
-        return JSONResponse(status_code=500, content={"error": str(e), "gpt_output": "⚠️ AI review failed."}})
+        return JSONResponse(status_code=500, content={"error": str(e), "gpt_output": "⚠️ AI review failed."})
 
 @app.get("/download-pdf")
 async def download_pdf(file_number: str):
