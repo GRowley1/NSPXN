@@ -119,10 +119,13 @@ async def vision_review(
     if images:
         vision_message["content"].extend(images)
 
-    prompt = f"""
-You are an AI auto damage auditor.
-Compare the estimate against the damage photos.
-At the top of your response, always include:
+prompt = f"""
+You are an AI auto damage auditor. You have access to both the text and images (or scans) uploaded:
+- Treat text mentions ("Description: Other (Add description to photo label)") and actual uploaded images equally as evidence.
+- Do NOT mark photos as missing if the text mentions or labels imply the photo was captured.
+- Acknowledge evidence as present if indicated by labels, text, or actual uploaded images.
+
+Compare the estimate against the damage photos and text. At the top of your response, always include:
 Claim #: (from estimate)
 VIN: (from estimate or photos)
 Vehicle: (make, model, mileage from estimate)
@@ -131,6 +134,7 @@ Compliance Score: (0–100%)
 Then summarize findings and rule violations based on the following rules:
 {client_rules}
 """
+
     try:
         response = client.chat.completions.create(
             model="gpt-4o",
