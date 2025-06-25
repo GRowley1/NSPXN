@@ -217,6 +217,7 @@ async def get_client_rules(client_name: str):
             text = '\n'.join([p.text for p in doc.paragraphs if p.text.strip()])
             return {"text": text}
         except Exception as e:
-            return JSONResponse(status_code=500, content={"error": str(e)}})
+            return JSONResponse(status_code=500, content={"error": str(e)})
     else:
-        return JSONResponse(status_code=404, content={"error": "Rules not found for this client."}})
+        return JSONResponse(status_code=404, content={"error": "Rules not found for this client."})
+
