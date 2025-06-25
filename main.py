@@ -33,11 +33,6 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-def print_memory_usage(stage: str):
-    """Helper to print memory usage for debugging."""
-    mem = psutil.virtual_memory()
-    print(f"📊 {stage} - Memory Usage: {mem.used / (1024**2):.2f} MB of {mem.total / (1024**2):.2f} MB.")
-
 def extract_text_from_pdf(file) -> str:
     """Extract text from PDF, fallback to OCR if pages contain images only, skipping very large PDFs."""
     text_parts = []
@@ -56,7 +51,6 @@ def extract_text_from_pdf(file) -> str:
     if ocr_needed_pages:
         try:
             file.seek(0)
-            # Limit pages to a manageable chunk
             images = convert_from_bytes(file.read(), dpi=150, first_page=1, last_page=min(5, len(reader.pages)))
             for idx, img in enumerate(images, 1):
                 if idx in ocr_needed_pages:
@@ -69,10 +63,12 @@ def extract_text_from_pdf(file) -> str:
 
     return combined_text
 
+
 def extract_text_from_docx(file) -> str:
     """Extract text from DOCX files."""
     doc = Document(file)
     return '\n'.join(p.text for p in doc.paragraphs)
+
 
 def extract_field(label, text) -> str:
     """Extract fields like Claim #, VIN, Vehicle, Compliance Score."""
@@ -80,9 +76,11 @@ def extract_field(label, text) -> str:
     match = pattern.search(text)
     return match.group(1).strip() if match else "N/A"
 
+
 @app.get("/")
 async def root():
     return {"status": "ok"}
+
 
 @app.post("/vision-review")
 async def vision_review(
@@ -134,7 +132,6 @@ Then summarize findings and rule violations based on the following rules:
 {client_rules}
 """
     try:
-        print_memory_usage("Before GPT Call")  # ✅ Monitor memory
         response = client.chat.completions.create(
             model="gpt-4o",
             messages=[
@@ -184,7 +181,6 @@ AI Review Summary:
             smtp.login("info@nspxn.com", "grr2025GRR")
             smtp.send_message(msg)
 
-        print_memory_usage("After GPT Call")  # ✅ Monitor post-processing
         return {
             "gpt_output": gpt_output,
             "file_number": file_number,
@@ -198,6 +194,7 @@ AI Review Summary:
         print(f"❌ GPT Error: {str(e)}")  # Log error
         return JSONResponse(status_code=500, content={"error": str(e), "gpt_output": "⚠️ AI review failed."})
 
+
 @app.get("/download-pdf")
 async def download_pdf(file_number: str):
     """Download the review PDF for a specific file number."""
@@ -205,6 +202,7 @@ async def download_pdf(file_number: str):
     if os.path.exists(pdf_path):
         return FileResponse(path=pdf_path, media_type="application/pdf", filename=pdf_path)
     return JSONResponse(status_code=404, content={"detail": "Not Found"})
+
 
 @app.get("/client-rules/{client_name}")
 async def get_client_rules(client_name: str):
