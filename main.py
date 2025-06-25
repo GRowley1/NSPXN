@@ -59,7 +59,7 @@ def extract_text_from_pdf(file) -> str:
             for page_num in ocr_needed_pages:
                 images = convert_from_bytes(
                     file.read(),
-                    dpi=150,  # ✅ Reduced DPI
+                    dpi=100,  # ✅ Reduced DPI
                     first_page=page_num,
                     last_page=page_num
                 )
