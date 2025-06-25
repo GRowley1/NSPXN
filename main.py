@@ -93,6 +93,7 @@ async def vision_review(
     """Perform AI review of uploaded files."""
     images = []
     texts = []
+    combined_text_for_checks = []
     for file in files:
         content = await file.read()
         name = file.filename.lower()
@@ -100,11 +101,17 @@ async def vision_review(
             b64 = base64.b64encode(content).decode("utf-8")
             images.append({"type": "image_url", "image_url": {"url": f"data:image/jpeg;base64,{b64}"}})
         elif name.endswith(".pdf"):
-            texts.append(extract_text_from_pdf(io.BytesIO(content)))
+            extracted = extract_text_from_pdf(io.BytesIO(content))
+            texts.append(extracted)
+            combined_text_for_checks.append(extracted)
         elif name.endswith(".docx"):
-            texts.append(extract_text_from_docx(io.BytesIO(content)))
+            extracted = extract_text_from_docx(io.BytesIO(content))
+            texts.append(extracted)
+            combined_text_for_checks.append(extracted)
         elif name.endswith(".txt"):
-            texts.append(content.decode("utf-8", errors="ignore"))
+            extracted = content.decode("utf-8", errors="ignore")
+            texts.append(extracted)
+            combined_text_for_checks.append(extracted)
         else:
             texts.append(f"⚠️ Skipped unsupported file: {file.filename}")
 
@@ -115,7 +122,7 @@ async def vision_review(
         vision_message["content"].extend(images)
 
     prompt = f"""
-You are an AI auto damage auditor. You have access to both the text and images (or scans) uploaded:
+You are an AI auto damage auditor. You have access to both the text and images (or scans) uploaded.
 - Treat text mentions ("Description: Other (Add description to photo label)") and actual uploaded images equally as evidence.
 - Do NOT mark photos as missing if the text mentions or labels imply the photo was captured.
 - Acknowledge evidence as present if indicated by labels, text, or actual uploaded images.
@@ -140,10 +147,18 @@ Then summarize findings and rule violations based on the following rules:
             max_tokens=3500
         )
         gpt_output = response.choices[0].message.content or "⚠️ GPT returned no output."
+
         claim_number = extract_field("Claim", gpt_output)
         vin = extract_field("VIN", gpt_output)
         vehicle = extract_field("Vehicle", gpt_output)
         score = extract_field("Compliance Score", gpt_output)
+
+        # ✅ Ensure mentions of certain photos are treated as evidence
+        combined_all_text = " ".join(combined_text_for_checks).lower()
+        keywords = ["description: vin", "description: registration", "description: odometer"]
+        for keyword in keywords:
+            if keyword in combined_all_text and keyword not in gpt_output.lower():
+                gpt_output += f"\n\nAdditional Note: {keyword.replace('description:', '').title()} was mentioned in the text, implying its photo was captured."
 
         # Create the PDF
         pdf = FPDF()
@@ -192,7 +207,6 @@ AI Review Summary:
     except Exception as e:
         print(f"❌ GPT Error: {str(e)}")  # Log error
         return JSONResponse(status_code=500, content={"error": str(e), "gpt_output": "⚠️ AI review failed."})
-
 
 @app.get("/download-pdf")
 async def download_pdf(file_number: str):
