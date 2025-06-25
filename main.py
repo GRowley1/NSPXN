@@ -16,9 +16,7 @@ from pdf2image import convert_from_bytes
 import pytesseract
 from PIL import Image
 
-# Initialize OpenAI Client
 client = OpenAI()
-
 app = FastAPI()
 
 app.add_middleware(
@@ -35,51 +33,44 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-
 def extract_text_from_pdf(file) -> str:
-    """Optimized text extraction from PDFs.
-       - Extracts embedded text when available.
-       - Only uses OCR (150 dpi) if needed.
-       - Processes pages one by one for lower RAM usage.
-    """
-    reader = PdfReader(file)
+    """Extract text from a PDF, using OCR only for pages that have no text."""
     text_parts = []
     ocr_needed_pages = []
-    page_number = 1
+    reader = PdfReader(file)
 
-    # First pass: Try extracting text
-    for page in reader.pages:
+    # Try extracting text normally first
+    for i, page in enumerate(reader.pages, 1):
         page_text = page.extract_text()
         if page_text and page_text.strip():
             text_parts.append(page_text)
         else:
-            ocr_needed_pages.append(page_number)
-        page_number += 1
+            ocr_needed_pages.append(i)
 
-    combined_text = '\n'.join(text_parts)
+    combined_text = "\n".join(text_parts)
 
-    # Second pass: Perform OCR only if needed
+    # Perform OCR if needed
     if ocr_needed_pages:
         try:
-            file.seek(0)  # Reset pointer
-            for page_number in ocr_needed_pages:
-                images = convert_from_bytes(file.read(), dpi=150, first_page=page_number, last_page=page_number)
-                for img in images:
+            file.seek(0)
+            images = convert_from_bytes(file.read(), dpi=300)
+            for idx, img in enumerate(images, 1):
+                if idx in ocr_needed_pages:
                     img = img.convert("RGB")  # Ensure RGB
                     ocr_text = pytesseract.image_to_string(img)
-                    combined_text += '\n' + ocr_text
+                    combined_text += ("\n" + ocr_text)
+
         except Exception as e:
-            print(f"❌ OCR error for page(s) {ocr_needed_pages}: {str(e)}")
-            combined_text += "⚠️ OCR failed for some pages."
+            error_message = f"⚠️ OCR failed for pages {ocr_needed_pages}: {str(e)}"
+            print(error_message)
+            combined_text += error_message
 
     return combined_text
-
 
 def extract_text_from_docx(file) -> str:
     """Extract text from DOCX files."""
     doc = Document(file)
     return "\n".join(p.text for p in doc.paragraphs)
-
 
 def extract_field(label, text) -> str:
     """Extract fields like Claim #, VIN, Vehicle, Compliance Score."""
@@ -87,6 +78,9 @@ def extract_field(label, text) -> str:
     match = pattern.search(text)
     return match.group(1).strip() if match else "N/A"
 
+@app.get("/")
+async def root():
+    return {"status": "ok"}
 
 @app.post("/vision-review")
 async def vision_review(
@@ -95,7 +89,6 @@ async def vision_review(
     file_number: str = Form(...),
     ia_company: str = Form(...)
 ):
-    """Perform AI review of files."""
     images = []
     texts = []
     for file in files:
@@ -137,12 +130,8 @@ Compliance Score: (0–100%)
 
 Then summarize findings and rule violations based on the following rules:
 {client_rules}
-
-Important Clarification:
-- If the text contains a statement like "Evaluation Method CCC" or "Evaluation Request # [number]", this satisfies the requirement for a CCC Evaluation Form and should NOT be treated as missing.
-- Acknowledge it explicitly in your review.
-- If a description mentions "Description: Other (Add description to photo label)" or similar text, consider this as evidence that a photo was taken, and do NOT mark it as missing.
 """
+
     try:
         response = client.chat.completions.create(
             model="gpt-4o",
@@ -175,7 +164,7 @@ Important Clarification:
         pdf_path = f"{file_number}.pdf"
         pdf.output(pdf_path)
 
-        # Send Email
+        # Send the review via email
         msg = EmailMessage()
         msg["Subject"] = f"AI4IA Review: {claim_number}"
         msg["From"] = "noreply@nspxn.com"
@@ -209,20 +198,10 @@ AI Review Summary:
 
 @app.get("/download-pdf")
 async def download_pdf(file_number: str):
-    """Download the generated PDF."""
+    """Download the PDF for a specific review."""
     pdf_path = f"{file_number}.pdf"
     if os.path.exists(pdf_path):
         return FileResponse(path=pdf_path, media_type='application/pdf', filename=pdf_path)
     return JSONResponse(status_code=404, content={"detail": "Not Found"})
 
-@app.get("/client-rules/{client_name}")
-async def get_client_rules(client_name: str):
-    """Serve the text of a specific client's rules from a DOCX file."""
-    try:
-        rules_file = os.path.join("client_rules", f"{client_name}.docx")
-        if not os.path.exists(rules_file):
-            return JSONResponse(status_code=404, content={"error": "Client rules not found."})
-        return {"text": extract_text_from_docx(rules_file)}
-    except Exception as e:
-        return JSONResponse(status_code=500, content={"error": str(e)})
 
