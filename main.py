@@ -206,4 +206,14 @@ async def download_pdf(file_number: str):
         return FileResponse(path=pdf_path, media_type='application/pdf', filename=pdf_path)
     return JSONResponse(status_code=404, content={"detail": "Not Found"})
 
+@app.get("/client-rules/{client_name}")
+async def get_client_rules(client_name: str):
+    """Serve the text of a specific client's rules from a DOCX file."""
+    try:
+        rules_file = os.path.join("client_rules", f"{client_name}.docx")
+        if not os.path.exists(rules_file):
+            return JSONResponse(status_code=404, content={"error": "Client rules not found."})
+        return {"text": extract_text_from_docx(rules_file)}
+    except Exception as e:
+        return JSONResponse(status_code=500, content={"error": str(e)})
 
