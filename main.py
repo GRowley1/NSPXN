@@ -33,8 +33,9 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
+
 def extract_text_from_pdf(file) -> str:
-    """Extract text from PDF, fallback to OCR if pages contain images only, skipping very large PDFs."""
+    """Extract text from PDF, fallback to OCR if pages contain images only."""
     text_parts = []
     ocr_needed_pages = []
     reader = PdfReader(file)
@@ -60,7 +61,6 @@ def extract_text_from_pdf(file) -> str:
         except Exception as e:
             print(f"❌ OCR error for pages {ocr_needed_pages}: {str(e)}")
             combined_text += "⚠️ OCR failed for some pages."
-
     return combined_text
 
 
@@ -79,6 +79,7 @@ def extract_field(label, text) -> str:
 
 @app.get("/")
 async def root():
+    """Health Check Endpoint."""
     return {"status": "ok"}
 
 
@@ -89,18 +90,15 @@ async def vision_review(
     file_number: str = Form(...),
     ia_company: str = Form(...)
 ):
+    """Perform AI review of uploaded files."""
     images = []
     texts = []
     for file in files:
         content = await file.read()
         name = file.filename.lower()
-
         if name.endswith((".jpg", ".jpeg", ".png")):
             b64 = base64.b64encode(content).decode("utf-8")
-            images.append({
-                "type": "image_url",
-                "image_url": {"url": f"data:image/jpeg;base64,{b64}"}
-            })
+            images.append({"type": "image_url", "image_url": {"url": f"data:image/jpeg;base64,{b64}"}})
         elif name.endswith(".pdf"):
             texts.append(extract_text_from_pdf(io.BytesIO(content)))
         elif name.endswith(".docx"):
@@ -112,14 +110,11 @@ async def vision_review(
 
     vision_message = {"role": "user", "content": []}
     if texts:
-        vision_message["content"].append({
-            "type": "text",
-            "text": '\n\n'.join(texts)
-        })
+        vision_message["content"].append({"type": "text", "text": '\n\n'.join(texts)})
     if images:
         vision_message["content"].extend(images)
 
-prompt = f"""
+    prompt = f"""
 You are an AI auto damage auditor. You have access to both the text and images (or scans) uploaded:
 - Treat text mentions ("Description: Other (Add description to photo label)") and actual uploaded images equally as evidence.
 - Do NOT mark photos as missing if the text mentions or labels imply the photo was captured.
@@ -135,7 +130,7 @@ Then summarize findings and rule violations based on the following rules:
 {client_rules}
 """
 
-try:
+    try:
         response = client.chat.completions.create(
             model="gpt-4o",
             messages=[
@@ -194,7 +189,7 @@ AI Review Summary:
             "score": score
         }
 
-except Exception as e:
+    except Exception as e:
         print(f"❌ GPT Error: {str(e)}")  # Log error
         return JSONResponse(status_code=500, content={"error": str(e), "gpt_output": "⚠️ AI review failed."})
 
@@ -224,5 +219,6 @@ async def get_client_rules(client_name: str):
             return JSONResponse(status_code=500, content={"error": str(e)})
     else:
         return JSONResponse(status_code=404, content={"error": "Rules not found for this client."})
+
 
 
