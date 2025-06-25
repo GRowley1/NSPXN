@@ -194,7 +194,7 @@ AI Review Summary:
             "score": score
         }
 
-    except Exception as e:
+except Exception as e:
         print(f"❌ GPT Error: {str(e)}")  # Log error
         return JSONResponse(status_code=500, content={"error": str(e), "gpt_output": "⚠️ AI review failed."})
 
