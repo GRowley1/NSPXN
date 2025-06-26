@@ -2,11 +2,10 @@ from fastapi import FastAPI, File, UploadFile, Form
 from fastapi.responses import JSONResponse, FileResponse
 from fastapi.middleware.cors import CORSMiddleware
 from typing import List
-from openai import OpenAI
-import base64
-import io
 import os
 import re
+import base64
+import io
 import smtplib
 from email.message import EmailMessage
 from fpdf import FPDF
@@ -15,8 +14,15 @@ from PyPDF2 import PdfReader
 from pdf2image import convert_from_bytes
 import pytesseract
 from PIL import Image
+from openai import OpenAI
 
-client = OpenAI()
+# ==========================
+# ✅ Ensure OPENAI_API_KEY is present
+# ==========================
+if "OPENAI_API_KEY" not in os.environ:
+    raise RuntimeError("❌ OPENAI_API_KEY environment variable is NOT set.")
+client = OpenAI(api_key=os.environ["OPENAI_API_KEY"])
+
 app = FastAPI()
 
 app.add_middleware(
@@ -33,14 +39,15 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-
+# ==========================
+# Text Extraction Methods
+# ==========================
 def extract_text_from_pdf(file) -> str:
-    """Extract text from PDF, using OCR for pages that have no embedded text (entire document)."""
+    """Extract text from PDF, using OCR for pages with no embedded text."""
     text_parts = []
     ocr_needed_pages = []
     reader = PdfReader(file)
 
-    # Identify pages that have no extractable text
     for i, page in enumerate(reader.pages, 1):
         page_text = page.extract_text()
         if page_text and page_text.strip():
@@ -53,26 +60,21 @@ def extract_text_from_pdf(file) -> str:
     if ocr_needed_pages:
         try:
             file.seek(0)
-            images = convert_from_bytes(file.read(), dpi=300)  # Higher DPI for better OCR
+            images = convert_from_bytes(file.read(), dpi=150, first_page=1, last_page=min(5, len(reader.pages)))
             for idx, img in enumerate(images, 1):
                 if idx in ocr_needed_pages:
                     img = img.convert("RGB")  # Ensure RGB
-                    ocr_text = pytesseract.image_to_string(img, lang="eng")  # Explicit language
+                    ocr_text = pytesseract.image_to_string(img, lang="eng")  # Explicitly use English
                     combined_text += ("\n" + ocr_text)
-
         except Exception as e:
-            import traceback
-            traceback.print_exc()
-            combined_text += "⚠️ OCR failed for some pages."
+            combined_text += f"\n⚠️ OCR failed for pages {ocr_needed_pages}: {str(e)}"
 
     return combined_text
-
 
 def extract_text_from_docx(file) -> str:
     """Extract text from DOCX files."""
     doc = Document(file)
     return '\n'.join(p.text for p in doc.paragraphs)
-
 
 def extract_field(label, text) -> str:
     """Extract fields like Claim #, VIN, Vehicle, Compliance Score."""
@@ -80,12 +82,13 @@ def extract_field(label, text) -> str:
     match = pattern.search(text)
     return match.group(1).strip() if match else "N/A"
 
-
+# ==========================
+# Route Definitions
+# ==========================
 @app.get("/")
 async def root():
     """Health Check Endpoint."""
     return {"status": "ok"}
-
 
 @app.post("/vision-review")
 async def vision_review(
@@ -123,22 +126,18 @@ async def vision_review(
         vision_message["content"].extend(images)
 
     prompt = f"""
-You are an AI auto damage auditor. You have access to both text and images (or scans). 
-
-IMPORTANT RULES:
-- Treat any mentions of "Description: Other (Add description to photo label)" as EVIDENCE that the corresponding photo was captured.
-- Treat mentions of "Clean Retail Value" or "NADA Value" or "Estimated Trade-In Value" in the text as CONFIRMATION that the required Clean Retail Value printout was included.
-- Do NOT mark photos as missing if text mentions or labels imply the photo was captured.
-- Do NOT claim the "Clean Retail Value" is missing if text mentions its presence.
+You are an AI auto damage auditor. You have access to both the text and images (or scans) uploaded:
+- Treat text mentions ("Description: Other (Add description to photo label)") and actual uploaded images equally as evidence.
+- Do NOT mark photos as missing if the text mentions or labels imply the photo was captured.
 - Acknowledge evidence as present if indicated by labels, text, or actual uploaded images.
 
-Perform a thorough review comparing the estimate against the damage photos and text. At the top of your response, ALWAYS include:
+Compare the estimate against the damage photos and text. At the top of your response, always include:
 Claim #: (from estimate)
 VIN: (from estimate or photos)
 Vehicle: (make, model, mileage from estimate)
 Compliance Score: (0–100%)
 
-Then summarize findings and rule violations based STRICTLY on the following rules:
+Then summarize findings and rule violations based on the following rules:
 {client_rules}
 """
 
@@ -157,7 +156,7 @@ Then summarize findings and rule violations based STRICTLY on the following rule
         vehicle = extract_field("Vehicle", gpt_output)
         score = extract_field("Compliance Score", gpt_output)
 
-        # Create the PDF
+        # ✅ Create the PDF
         pdf = FPDF()
         pdf.add_page()
         pdf.set_font("Helvetica", size=12)
@@ -174,7 +173,7 @@ Then summarize findings and rule violations based STRICTLY on the following rule
         pdf_path = f"{file_number}.pdf"
         pdf.output(pdf_path)
 
-        # Email the results
+        # ✅ Email Results
         msg = EmailMessage()
         msg["Subject"] = f"AI4IA Review: {claim_number}"
         msg["From"] = "noreply@nspxn.com"
@@ -189,7 +188,7 @@ AI Review Summary:
 """
         msg.set_content(email_body.encode("utf-8", errors="ignore").decode("utf-8"))
         with smtplib.SMTP_SSL("mail.tierra.net", 465) as smtp:
-            smtp.login("info@nspxn.com", "grr2025GRR")  # Ensure credentials configured
+            smtp.login("info@nspxn.com", "grr2025GRR")
             smtp.send_message(msg)
 
         return {
@@ -202,8 +201,7 @@ AI Review Summary:
         }
 
     except Exception as e:
-        import traceback
-        traceback.print_exc()
+        print(f"❌ GPT Error: {str(e)}")  # Log error
         return JSONResponse(status_code=500, content={"error": str(e), "gpt_output": "⚠️ AI review failed."})
 
 
@@ -232,6 +230,7 @@ async def get_client_rules(client_name: str):
             return JSONResponse(status_code=500, content={"error": str(e)})
     else:
         return JSONResponse(status_code=404, content={"error": "Rules not found for this client."})
+
 
 
 
