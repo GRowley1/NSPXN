@@ -16,9 +16,7 @@ from pdf2image import convert_from_bytes
 import pytesseract
 from PIL import Image
 
-# ✅ Initialize OpenAI Client
-client = OpenAI(api_key=os.environ.get("OPENAI_API_KEY"))
-
+client = OpenAI()
 app = FastAPI()
 
 app.add_middleware(
@@ -37,11 +35,12 @@ app.add_middleware(
 
 
 def extract_text_from_pdf(file) -> str:
-    """Extract text from PDF. Fallback to OCR if pages have no embedded text."""
+    """Extract text from PDF, using OCR for pages that have no embedded text (entire document)."""
     text_parts = []
     ocr_needed_pages = []
     reader = PdfReader(file)
 
+    # Identify pages that have no extractable text
     for i, page in enumerate(reader.pages, 1):
         page_text = page.extract_text()
         if page_text and page_text.strip():
@@ -54,13 +53,16 @@ def extract_text_from_pdf(file) -> str:
     if ocr_needed_pages:
         try:
             file.seek(0)
-            images = convert_from_bytes(file.read(), dpi=150)
+            images = convert_from_bytes(file.read(), dpi=300)  # Higher DPI for better OCR
             for idx, img in enumerate(images, 1):
                 if idx in ocr_needed_pages:
-                    img = img.convert("RGB")
-                    ocr_text = pytesseract.image_to_string(img, lang="eng")
+                    img = img.convert("RGB")  # Ensure RGB
+                    ocr_text = pytesseract.image_to_string(img, lang="eng")  # Explicit language
                     combined_text += ("\n" + ocr_text)
+
         except Exception as e:
+            import traceback
+            traceback.print_exc()
             combined_text += "⚠️ OCR failed for some pages."
 
     return combined_text
@@ -116,10 +118,7 @@ async def vision_review(
 
     vision_message = {"role": "user", "content": []}
     if texts:
-        vision_message["content"].append({
-            "type": "text",
-            "text": '\n\n'.join(texts)
-        })
+        vision_message["content"].append({"type": "text", "text": '\n\n'.join(texts)})
     if images:
         vision_message["content"].extend(images)
 
@@ -130,14 +129,15 @@ You are an AI auto damage auditor. You have access to both the text and images (
 - Acknowledge evidence as present if indicated by labels, text, or actual uploaded images.
 
 Compare the estimate against the damage photos and text. At the top of your response, always include:
-Claim #: (from estimate) 
-VIN: (from estimate or photos) 
-Vehicle: (make, model, mileage from estimate) 
+Claim #: (from estimate)
+VIN: (from estimate or photos)
+Vehicle: (make, model, mileage from estimate)
 Compliance Score: (0–100%)
 
 Then summarize findings and rule violations based on the following rules:
 {client_rules}
 """
+
     try:
         response = client.chat.completions.create(
             model="gpt-4o",
@@ -185,7 +185,7 @@ AI Review Summary:
 """
         msg.set_content(email_body.encode("utf-8", errors="ignore").decode("utf-8"))
         with smtplib.SMTP_SSL("mail.tierra.net", 465) as smtp:
-            smtp.login("info@nspxn.com", "grr2025GRR")
+            smtp.login("info@nspxn.com", "grr2025GRR")  # Ensure credentials configured
             smtp.send_message(msg)
 
         return {
@@ -198,7 +198,8 @@ AI Review Summary:
         }
 
     except Exception as e:
-        print(f"❌ GPT Error: {str(e)}")  # Log error
+        import traceback
+        traceback.print_exc()
         return JSONResponse(status_code=500, content={"error": str(e), "gpt_output": "⚠️ AI review failed."})
 
 
@@ -227,5 +228,6 @@ async def get_client_rules(client_name: str):
             return JSONResponse(status_code=500, content={"error": str(e)})
     else:
         return JSONResponse(status_code=404, content={"error": "Rules not found for this client."})
+
 
 
