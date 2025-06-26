@@ -34,34 +34,31 @@ app.add_middleware(
 )
 
 def extract_text_from_pdf(file) -> str:
-    """Extract text from PDF, fallback to OCR if pages contain images only, skipping pages already inferred."""
-    text_parts = []
-    ocr_needed_pages = []
+    """Extract text from every page by combining text-layer extraction with OCR of page images."""
+    combined_text = []
     reader = PdfReader(file)
 
-    for i, page in enumerate(reader.pages, 1):
-        page_text = page.extract_text()
-        if page_text and page_text.strip():
-            text_parts.append(page_text)
-        else:
-            ocr_needed_pages.append(i)
+    try:
+        # Reset the stream for pdf2image
+        file.seek(0)
+        images = convert_from_bytes(file.read(), dpi=300)
 
-    combined_text = '\n'.join(text_parts)
+        for page_number, page in enumerate(reader.pages, 1):
+            # 1️⃣ Extract text from text layer
+            page_text = page.extract_text() or ""
+            
+            # 2️⃣ Extract text from the rendered page image
+            img = images[page_number - 1].convert("RGB")  # Ensure RGB
+            ocr_text = pytesseract.image_to_string(img)
 
-    if ocr_needed_pages:
-        try:
-            file.seek(0)
-            images = convert_from_bytes(file.read(), dpi=150, first_page=1, last_page=min(5, len(reader.pages)))
-            for idx, img in enumerate(images, 1):
-                if idx in ocr_needed_pages:
-                    img = img.convert("RGB")  # Ensure RGB
-                    ocr_text = pytesseract.image_to_string(img)
-                    combined_text += ("\n" + ocr_text)
-        except Exception as e:
-            print(f"❌ OCR error for pages {ocr_needed_pages}: {str(e)}")
-            combined_text += "⚠️ OCR failed for some pages."
+            # 3️⃣ Combine both results
+            combined_text.append(page_text.strip() + '\n' + ocr_text.strip())
 
-    return combined_text
+    except Exception as e:
+        print(f"❌ OCR error during combined extraction: {str(e)}")
+        combined_text.append(f"⚠️ OCR failed for some pages.")
+
+    return '\n'.join(combined_text)
 
 def extract_text_from_docx(file) -> str:
     """Extract text from DOCX files."""
