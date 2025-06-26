@@ -16,11 +16,9 @@ from pdf2image import convert_from_bytes
 import pytesseract
 from PIL import Image
 
-# Initialize Client
 client = OpenAI()
 app = FastAPI()
 
-# CORS Configuration
 app.add_middleware(
     CORSMiddleware,
     allow_origins=[
@@ -36,7 +34,7 @@ app.add_middleware(
 )
 
 def extract_text_from_pdf(file) -> str:
-    """Extract text from a PDF, fallback to OCR if pages contain images only, skipping pages already inferred."""
+    """Extract text from PDF, fallback to OCR if pages contain images only, skipping pages already inferred."""
     text_parts = []
     ocr_needed_pages = []
     reader = PdfReader(file)
@@ -52,20 +50,15 @@ def extract_text_from_pdf(file) -> str:
 
     if ocr_needed_pages:
         try:
-            import pytesseract
-            from pdf2image import convert_from_bytes
             file.seek(0)
             images = convert_from_bytes(file.read(), dpi=150, first_page=1, last_page=min(5, len(reader.pages)))
-            
             for idx, img in enumerate(images, 1):
                 if idx in ocr_needed_pages:
                     img = img.convert("RGB")  # Ensure RGB
-                    ocr_text = pytesseract.image_to_string(img, lang="eng")  # Explicitly set language
+                    ocr_text = pytesseract.image_to_string(img)
                     combined_text += ("\n" + ocr_text)
-
         except Exception as e:
-            import traceback
-            traceback.print_exc()
+            print(f"❌ OCR error for pages {ocr_needed_pages}: {str(e)}")
             combined_text += "⚠️ OCR failed for some pages."
 
     return combined_text
@@ -99,13 +92,9 @@ async def vision_review(
     for file in files:
         content = await file.read()
         name = file.filename.lower()
-
         if name.endswith((".jpg", ".jpeg", ".png")):
             b64 = base64.b64encode(content).decode("utf-8")
-            images.append({
-                "type": "image_url",
-                "image_url": {"url": f"data:image/jpeg;base64,{b64}"}
-            })
+            images.append({"type": "image_url", "image_url": {"url": f"data:image/jpeg;base64,{b64}"}})
         elif name.endswith(".pdf"):
             texts.append(extract_text_from_pdf(io.BytesIO(content)))
         elif name.endswith(".docx"):
@@ -115,17 +104,30 @@ async def vision_review(
         else:
             texts.append(f"⚠️ Skipped unsupported file: {file.filename}")
 
-    vision_message = {"role": "user", "content": []}
-    if texts:
-        vision_message["content"].append({"type": "text", "text": '\n\n'.join(texts)})
-    if images:
-        vision_message["content"].extend(images)
+    combined_text_for_gpt = '\n\n'.join(texts)
+
+    inferred_photo_mentions = []
+    inferred_patterns = [
+        r"Description:\s*Other\s*\(Add description to photo label\)",
+        r"Label:\s*(VIN|Plate|Odometer|Damage|Impact)",
+        r"Photo ID:\s*(VIN|Plate|Odometer|Registration|Damage)"
+    ]
+    for pattern in inferred_patterns:
+        for match in re.finditer(pattern, combined_text_for_gpt, re.IGNORECASE):
+            inferred_photo_mentions.append(f"✅ Inferred Photo: {match.group(0)}")
+
+    inferred_photos_message = '\n'.join(inferred_photo_mentions)
 
     prompt = f"""
-You are an AI auto damage auditor. You have access to both the text and images (or scans) uploaded:
-- Treat text mentions ("Description: Other (Add description to photo label)") and actual uploaded images equally as evidence.
-- Do NOT mark photos as missing if the text mentions or labels imply the photo was captured.
+You are an AI auto damage auditor. You have access to both the text and images (or scans) uploaded.
+
+Important Instructions:
+- Treat text mentions ("Description: Other (Add description to photo label)" or lines like "Label: VIN") as evidence that the corresponding photo was captured.
+- Do NOT mark inferred photos as missing if text mentions imply their presence.
 - Acknowledge evidence as present if indicated by labels, text, or actual uploaded images.
+
+Additional inferred photo mentions:
+{inferred_photos_message}
 
 Compare the estimate against the damage photos and text. At the top of your response, always include:
 Claim #: (from estimate)
@@ -136,6 +138,12 @@ Compliance Score: (0–100%)
 Then summarize findings and rule violations based on the following rules:
 {client_rules}
 """
+
+    vision_message = {"role": "user", "content": []}
+    if texts:
+        vision_message["content"].append({"type": "text", "text": combined_text_for_gpt})
+    if images:
+        vision_message["content"].extend(images)
 
     try:
         response = client.chat.completions.create(
@@ -226,24 +234,3 @@ async def get_client_rules(client_name: str):
     else:
         return JSONResponse(status_code=404, content={"error": "Rules not found for this client."})
 
-@app.get("/ocr-test")
-async def ocr_test():
-    """Test if tesseract is available and working."""
-    try:
-        import pytesseract
-        from PIL import Image, ImageDraw, ImageFont
-        import tempfile
-
-        # Create a simple test image
-        temp_file = tempfile.NamedTemporaryFile(suffix=".png", delete=False)
-        img = Image.new("RGB", (300, 100), color="white")
-        draw = ImageDraw.Draw(img)
-        draw.text((10, 40), "TEST OCR", fill="black")
-        img.save(temp_file.name)
-
-        text = pytesseract.image_to_string(Image.open(temp_file.name))
-        os.remove(temp_file.name)
-
-        return {"ocr_result": text.strip()}
-    except Exception as e:
-        return {"error": str(e)}
