@@ -226,4 +226,24 @@ async def get_client_rules(client_name: str):
     else:
         return JSONResponse(status_code=404, content={"error": "Rules not found for this client."})
 
+@app.get("/ocr-test")
+async def ocr_test():
+    """Test if tesseract is available and working."""
+    try:
+        import pytesseract
+        from PIL import Image, ImageDraw, ImageFont
+        import tempfile
 
+        # Create a simple test image
+        temp_file = tempfile.NamedTemporaryFile(suffix=".png", delete=False)
+        img = Image.new("RGB", (300, 100), color="white")
+        draw = ImageDraw.Draw(img)
+        draw.text((10, 40), "TEST OCR", fill="black")
+        img.save(temp_file.name)
+
+        text = pytesseract.image_to_string(Image.open(temp_file.name))
+        os.remove(temp_file.name)
+
+        return {"ocr_result": text.strip()}
+    except Exception as e:
+        return {"error": str(e)}
