@@ -16,14 +16,11 @@ from pdf2image import convert_from_bytes
 import pytesseract
 from PIL import Image
 
-# ✅ Explicitly set the path for tesseract
-pytesseract.pytesseract.tesseract_cmd = '/usr/bin/tesseract'
+# ✅ Initialize OpenAI Client
+client = OpenAI(api_key=os.environ.get("OPENAI_API_KEY"))
 
-# Initialize Client
-client = OpenAI()
 app = FastAPI()
 
-# CORS Configuration
 app.add_middleware(
     CORSMiddleware,
     allow_origins=[
@@ -38,37 +35,42 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
+
 def extract_text_from_pdf(file) -> str:
-    """Extract text from every page, combining text-layer and OCR results."""
-    combined_text = []
-    try:
-        reader = PdfReader(file)
+    """Extract text from PDF. Fallback to OCR if pages have no embedded text."""
+    text_parts = []
+    ocr_needed_pages = []
+    reader = PdfReader(file)
 
-        # Read images for OCR
-        file.seek(0)
-        images = convert_from_bytes(file.read(), dpi=300)
+    for i, page in enumerate(reader.pages, 1):
+        page_text = page.extract_text()
+        if page_text and page_text.strip():
+            text_parts.append(page_text)
+        else:
+            ocr_needed_pages.append(i)
 
-        for page_number, page in enumerate(reader.pages, 1):
-            text_layer = page.extract_text() or ""
-            try:
-                img = images[page_number - 1].convert("RGB")
-                ocr_text = pytesseract.image_to_string(img, lang="eng")
-            except Exception as e:
-                print(f"❌ OCR error for page {page_number}: {str(e)}")
-                ocr_text = "⚠️ OCR failed for this page."
+    combined_text = '\n'.join(text_parts)
 
-            combined_page = text_layer.strip() + '\n' + ocr_text.strip()
-            combined_text.append(combined_page)
+    if ocr_needed_pages:
+        try:
+            file.seek(0)
+            images = convert_from_bytes(file.read(), dpi=150)
+            for idx, img in enumerate(images, 1):
+                if idx in ocr_needed_pages:
+                    img = img.convert("RGB")
+                    ocr_text = pytesseract.image_to_string(img, lang="eng")
+                    combined_text += ("\n" + ocr_text)
+        except Exception as e:
+            combined_text += "⚠️ OCR failed for some pages."
 
-    except Exception as e:
-        combined_text.append(f"⚠️ Failed to extract text from PDF: {str(e)}")
+    return combined_text
 
-    return '\n'.join(combined_text)
 
 def extract_text_from_docx(file) -> str:
     """Extract text from DOCX files."""
     doc = Document(file)
     return '\n'.join(p.text for p in doc.paragraphs)
+
 
 def extract_field(label, text) -> str:
     """Extract fields like Claim #, VIN, Vehicle, Compliance Score."""
@@ -76,10 +78,12 @@ def extract_field(label, text) -> str:
     match = pattern.search(text)
     return match.group(1).strip() if match else "N/A"
 
+
 @app.get("/")
 async def root():
     """Health Check Endpoint."""
     return {"status": "ok"}
+
 
 @app.post("/vision-review")
 async def vision_review(
@@ -112,7 +116,10 @@ async def vision_review(
 
     vision_message = {"role": "user", "content": []}
     if texts:
-        vision_message["content"].append({"type": "text", "text": '\n\n'.join(texts)})
+        vision_message["content"].append({
+            "type": "text",
+            "text": '\n\n'.join(texts)
+        })
     if images:
         vision_message["content"].extend(images)
 
@@ -123,15 +130,14 @@ You are an AI auto damage auditor. You have access to both the text and images (
 - Acknowledge evidence as present if indicated by labels, text, or actual uploaded images.
 
 Compare the estimate against the damage photos and text. At the top of your response, always include:
-Claim #: (from estimate)
-VIN: (from estimate or photos)
-Vehicle: (make, model, mileage from estimate)
+Claim #: (from estimate) 
+VIN: (from estimate or photos) 
+Vehicle: (make, model, mileage from estimate) 
 Compliance Score: (0–100%)
 
 Then summarize findings and rule violations based on the following rules:
 {client_rules}
 """
-
     try:
         response = client.chat.completions.create(
             model="gpt-4o",
@@ -203,6 +209,7 @@ async def download_pdf(file_number: str):
     if os.path.exists(pdf_path):
         return FileResponse(path=pdf_path, media_type="application/pdf", filename=pdf_path)
     return JSONResponse(status_code=404, content={"detail": "Not Found"})
+
 
 @app.get("/client-rules/{client_name}")
 async def get_client_rules(client_name: str):
