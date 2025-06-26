@@ -36,12 +36,11 @@ app.add_middleware(
 )
 
 def extract_text_from_pdf(file) -> str:
-    """Optimized text extraction from PDF with fallback OCR for pages that have no text."""
+    """Extract text from a PDF, fallback to OCR if pages contain images only, skipping pages already inferred."""
     text_parts = []
     ocr_needed_pages = []
     reader = PdfReader(file)
 
-    # 1️⃣ Extract text first
     for i, page in enumerate(reader.pages, 1):
         page_text = page.extract_text()
         if page_text and page_text.strip():
@@ -51,27 +50,22 @@ def extract_text_from_pdf(file) -> str:
 
     combined_text = '\n'.join(text_parts)
 
-    # 2️⃣ Perform OCR only for pages that have no text
     if ocr_needed_pages:
         try:
+            import pytesseract
+            from pdf2image import convert_from_bytes
             file.seek(0)
-
-            for page_num in ocr_needed_pages:
-                images = convert_from_bytes(
-                    file.read(),
-                    dpi=100,  # ✅ Reduced DPI
-                    first_page=page_num,
-                    last_page=page_num
-                )
-                for img in images:
+            images = convert_from_bytes(file.read(), dpi=150, first_page=1, last_page=min(5, len(reader.pages)))
+            
+            for idx, img in enumerate(images, 1):
+                if idx in ocr_needed_pages:
                     img = img.convert("RGB")  # Ensure RGB
-                    ocr_text = pytesseract.image_to_string(img)
+                    ocr_text = pytesseract.image_to_string(img, lang="eng")  # Explicitly set language
                     combined_text += ("\n" + ocr_text)
 
-            print(f"✅ OCR performed for pages: {ocr_needed_pages}")
-
         except Exception as e:
-            print(f"❌ OCR error for pages {ocr_needed_pages}: {str(e)}")
+            import traceback
+            traceback.print_exc()
             combined_text += "⚠️ OCR failed for some pages."
 
     return combined_text
