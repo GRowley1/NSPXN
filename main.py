@@ -123,18 +123,22 @@ async def vision_review(
         vision_message["content"].extend(images)
 
     prompt = f"""
-You are an AI auto damage auditor. You have access to both the text and images (or scans) uploaded:
-- Treat text mentions ("Description: Other (Add description to photo label)") and actual uploaded images equally as evidence.
-- Do NOT mark photos as missing if the text mentions or labels imply the photo was captured.
+You are an AI auto damage auditor. You have access to both text and images (or scans). 
+
+IMPORTANT RULES:
+- Treat any mentions of "Description: Other (Add description to photo label)" as EVIDENCE that the corresponding photo was captured.
+- Treat mentions of "Clean Retail Value" or "NADA Value" or "Estimated Trade-In Value" in the text as CONFIRMATION that the required Clean Retail Value printout was included.
+- Do NOT mark photos as missing if text mentions or labels imply the photo was captured.
+- Do NOT claim the "Clean Retail Value" is missing if text mentions its presence.
 - Acknowledge evidence as present if indicated by labels, text, or actual uploaded images.
 
-Compare the estimate against the damage photos and text. At the top of your response, always include:
+Perform a thorough review comparing the estimate against the damage photos and text. At the top of your response, ALWAYS include:
 Claim #: (from estimate)
 VIN: (from estimate or photos)
 Vehicle: (make, model, mileage from estimate)
 Compliance Score: (0–100%)
 
-Then summarize findings and rule violations based on the following rules:
+Then summarize findings and rule violations based STRICTLY on the following rules:
 {client_rules}
 """
 
