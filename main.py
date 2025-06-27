@@ -129,7 +129,7 @@ async def vision_review(
 You are an AI auto damage auditor. You have access to both text and images (or scans). 
 
 IMPORTANT RULES:
-- Treat mentions of "Clean Retail Value" or "NADA Value" or "Estimated Trade-In Value" in the text as CONFIRMATION that the required Clean Retail Value printout was included.
+- Treat mentions of "Clean Retail Value" or "NADA Value" or "Estimated Trade-In Value" or "Fair Market Range" in the text as CONFIRMATION that the required Clean Retail Value printout was included.
 - Do NOT mark photos as missing if text mentions or labels imply the photo was captured.
 - Do NOT claim the "Clean Retail Value" is missing if text mentions its presence.
 - Acknowledge evidence as present if indicated by labels, text, or actual uploaded images.
