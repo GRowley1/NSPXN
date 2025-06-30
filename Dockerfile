@@ -1,24 +1,24 @@
-# 1️⃣ Use a slim official Python base image
+# Use an official Python runtime as a base image
 FROM python:3.12-slim
 
-# 2️⃣ Install system dependencies
+# Install system dependencies needed for OCR
 RUN apt-get update && \
-    apt-get install -y \
-    tesseract-ocr \
-    tesseract-ocr-eng \
-    poppler-utils \
-    && rm -rf /var/lib/apt/lists/*
+    apt-get install -y tesseract-ocr poppler-utils libglib2.0-0 libsm6 libxrender1 libxext6 && \
+    apt-get clean && \
+    rm -rf /var/lib/apt/lists/*
 
-# 3️⃣ Install your Python dependencies
-COPY requirements.txt .
-RUN pip install --no-cache-dir -r requirements.txt
-
-# 4️⃣ Copy your app files
-COPY . /app
+# Set the working directory
 WORKDIR /app
 
-# 5️⃣ Expose the port
+# Copy project files into the container
+COPY . .
+
+# Install Python dependencies
+RUN pip install --no-cache-dir -r requirements.txt
+
+# Expose port for Render
+ENV PORT=10000
 EXPOSE 10000
 
-# 6️⃣ Command to run the app
+# Run the FastAPI app with Uvicorn
 CMD ["uvicorn", "main:app", "--host", "0.0.0.0", "--port", "10000"]
