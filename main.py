@@ -46,7 +46,7 @@ def extract_text_from_pdf(file) -> str:
     """Extract text from PDF, using OCR for every page including image-only pages."""
     try:
         file.seek(0)
-        images = convert_from_bytes(file.read(), dpi=300)
+        images = convert_from_bytes(file.read(), dpi=150)
         text_output = ""
         for i, img in enumerate(images, 1):
             img = img.convert("RGB")
