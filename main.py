@@ -43,33 +43,18 @@ app.add_middleware(
 # Text Extraction Methods
 # ==========================
 def extract_text_from_pdf(file) -> str:
-    """Extract text from PDF, using OCR for pages with no embedded text."""
-    text_parts = []
-    ocr_needed_pages = []
-    reader = PdfReader(file)
-
-    for i, page in enumerate(reader.pages, 1):
-        page_text = page.extract_text()
-        if page_text and page_text.strip():
-            text_parts.append(page_text)
-        else:
-            ocr_needed_pages.append(i)
-
-    combined_text = '\n'.join(text_parts)
-
-    if ocr_needed_pages:
-        try:
-            file.seek(0)
-            images = convert_from_bytes(file.read(), dpi=150, first_page=1, last_page=min(5, len(reader.pages)))
-            for idx, img in enumerate(images, 1):
-                if idx in ocr_needed_pages:
-                    img = img.convert("RGB")  # Ensure RGB
-                    ocr_text = pytesseract.image_to_string(img, lang="eng")  # Explicitly use English
-                    combined_text += ("\n" + ocr_text)
-        except Exception as e:
-            combined_text += f"\n⚠️ OCR failed for pages {ocr_needed_pages}: {str(e)}"
-
-    return combined_text
+    """Extract text from PDF, using OCR for every page including image-only pages."""
+    try:
+        file.seek(0)
+        images = convert_from_bytes(file.read(), dpi=300)
+        text_output = ""
+        for i, img in enumerate(images, 1):
+            img = img.convert("RGB")
+            ocr_text = pytesseract.image_to_string(img, lang="eng")
+            text_output += f"\n[Page {i}]\n" + ocr_text
+        return text_output
+    except Exception as e:
+        return f"\n\u274c OCR error during combined extraction: {str(e)}"
 
 def extract_text_from_docx(file) -> str:
     """Extract text from DOCX files."""
@@ -82,12 +67,8 @@ def extract_field(label, text) -> str:
     match = pattern.search(text)
     return match.group(1).strip() if match else "N/A"
 
-# ==========================
-# Route Definitions
-# ==========================
 @app.get("/")
 async def root():
-    """Health Check Endpoint."""
     return {"status": "ok"}
 
 @app.post("/vision-review")
@@ -97,19 +78,14 @@ async def vision_review(
     file_number: str = Form(...),
     ia_company: str = Form(...)
 ):
-    """Perform AI review of uploaded files."""
     images = []
     texts = []
     for file in files:
         content = await file.read()
         name = file.filename.lower()
-
         if name.endswith((".jpg", ".jpeg", ".png")):
             b64 = base64.b64encode(content).decode("utf-8")
-            images.append({
-                "type": "image_url",
-                "image_url": {"url": f"data:image/jpeg;base64,{b64}"}
-            })
+            images.append({"type": "image_url", "image_url": {"url": f"data:image/jpeg;base64,{b64}"}})
         elif name.endswith(".pdf"):
             texts.append(extract_text_from_pdf(io.BytesIO(content)))
         elif name.endswith(".docx"):
@@ -126,7 +102,7 @@ async def vision_review(
         vision_message["content"].extend(images)
 
     prompt = f"""
-You are an AI auto damage auditor. You have access to both text and images (or scans). 
+You are an AI auto damage auditor. You have access to both text and images (or scans).
 
 IMPORTANT RULES:
 - Treat mentions of "Clean Retail Value" or "NADA Value" or "Estimated Trade-In Value" or "Fair Market Range" in the text as CONFIRMATION that the required Clean Retail Value printout was included.
@@ -163,7 +139,6 @@ Then summarize findings and rule violations based STRICTLY on the following rule
         vehicle = extract_field("Vehicle", gpt_output)
         score = extract_field("Compliance Score", gpt_output)
 
-        # ✅ Create the PDF
         pdf = FPDF()
         pdf.add_page()
         pdf.set_font("Helvetica", size=12)
@@ -180,7 +155,6 @@ Then summarize findings and rule violations based STRICTLY on the following rule
         pdf_path = f"{file_number}.pdf"
         pdf.output(pdf_path)
 
-        # ✅ Email Results
         msg = EmailMessage()
         msg["Subject"] = f"AI4IA Review: {claim_number}"
         msg["From"] = "noreply@nspxn.com"
@@ -208,26 +182,20 @@ AI Review Summary:
         }
 
     except Exception as e:
-        print(f"❌ GPT Error: {str(e)}")  # Log error
         return JSONResponse(status_code=500, content={"error": str(e), "gpt_output": "⚠️ AI review failed."})
-
 
 @app.get("/download-pdf")
 async def download_pdf(file_number: str):
-    """Download the review PDF for a specific file number."""
     pdf_path = f"{file_number}.pdf"
     if os.path.exists(pdf_path):
         return FileResponse(path=pdf_path, media_type="application/pdf", filename=pdf_path)
     return JSONResponse(status_code=404, content={"detail": "Not Found"})
 
-
 @app.get("/client-rules/{client_name}")
 async def get_client_rules(client_name: str):
-    """Fetch the rules text for the selected client from its .docx file."""
     rules_dir = "client_rules"
     file_name = f"{client_name}.docx"
     file_path = os.path.join(rules_dir, file_name)
-
     if os.path.exists(file_path):
         try:
             doc = Document(file_path)
@@ -237,6 +205,7 @@ async def get_client_rules(client_name: str):
             return JSONResponse(status_code=500, content={"error": str(e)})
     else:
         return JSONResponse(status_code=404, content={"error": "Rules not found for this client."})
+
 
 
 
