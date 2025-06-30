@@ -138,7 +138,7 @@ Perform a thorough review comparing the estimate against the damage photos and t
 Claim #: (from estimate)
 VIN: (from estimate or photos)
 Vehicle: (make, model, mileage from estimate)
-Compliance Score: (0–100%)
+Compliance Score: (10–110%)
 
 Then summarize findings and rule violations based STRICTLY on the following rules:
 {client_rules}
