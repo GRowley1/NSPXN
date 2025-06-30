@@ -1,17 +1,6 @@
 services:
   - type: web
     name: nspxn-ai-review
-    runtime: python
+    env: docker
     plan: starter
-    build:
-      command: |
-        # Install required OS packages
-        apt-get update && \
-        apt-get install -y \
-            poppler-utils \
-            tesseract-ocr \
-            tesseract-ocr-eng \
-            tesseract-ocr-osd && \
-        pip install -r requirements.txt
-    start:
-      command: uvicorn main:app --host 0.0.0.0 --port $PORT
+    autoDeploy: true
