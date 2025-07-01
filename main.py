@@ -76,6 +76,8 @@ async def vision_review(
     ia_company: str = Form(...),
     appraiser_id: str = Form(...)
 ):
+    if not appraiser_id.strip():
+        return JSONResponse(status_code=400, content={"error": "Appraiser ID is required."})
     images = []
     texts = []
     for file in files:
