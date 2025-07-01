@@ -43,7 +43,6 @@ app.add_middleware(
 # Text Extraction Methods
 # ==========================
 def extract_text_from_pdf(file) -> str:
-    """Extract text from PDF, using OCR for every page including image-only pages."""
     try:
         file.seek(0)
         images = convert_from_bytes(file.read(), dpi=200)
@@ -54,15 +53,13 @@ def extract_text_from_pdf(file) -> str:
             text_output += f"\n[Page {i}]\n" + ocr_text
         return text_output
     except Exception as e:
-        return f"\n\u274c OCR error during combined extraction: {str(e)}"
+        return f"\n❌ OCR error during combined extraction: {str(e)}"
 
 def extract_text_from_docx(file) -> str:
-    """Extract text from DOCX files."""
     doc = Document(file)
     return '\n'.join(p.text for p in doc.paragraphs)
 
 def extract_field(label, text) -> str:
-    """Extract fields like Claim #, VIN, Vehicle, Compliance Score."""
     pattern = re.compile(rf"{label}[:\s-]*([^\n\r]+)", re.IGNORECASE)
     match = pattern.search(text)
     return match.group(1).strip() if match else "N/A"
@@ -76,7 +73,8 @@ async def vision_review(
     files: List[UploadFile] = File(...),
     client_rules: str = Form(...),
     file_number: str = Form(...),
-    ia_company: str = Form(...)
+    ia_company: str = Form(...),
+    appraiser_id: str = Form(...)
 ):
     images = []
     texts = []
@@ -146,6 +144,7 @@ Then summarize findings and rule violations based STRICTLY on the following rule
         pdf.ln(5)
         pdf.multi_cell(0, 10, f"File Number: {file_number}")
         pdf.multi_cell(0, 10, f"IA Company: {ia_company}")
+        pdf.multi_cell(0, 10, f"Appraiser ID #: {appraiser_id}")
         pdf.ln(5)
         pdf.multi_cell(0, 10, "AI-4-IA Review Summary:", align='L')
         encoded_output = gpt_output.encode("latin-1", "replace").decode("latin-1")
@@ -163,6 +162,7 @@ Then summarize findings and rule violations based STRICTLY on the following rule
 
 File Number: {file_number}
 IA Company: {ia_company}
+Appraiser ID #: {appraiser_id}
 
 AI Review Summary:
 {gpt_output}
@@ -205,7 +205,6 @@ async def get_client_rules(client_name: str):
             return JSONResponse(status_code=500, content={"error": str(e)})
     else:
         return JSONResponse(status_code=404, content={"error": "Rules not found for this client."})
-
 
 
 
