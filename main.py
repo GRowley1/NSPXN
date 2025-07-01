@@ -64,9 +64,6 @@ def extract_field(label, text) -> str:
     match = pattern.search(text)
     return match.group(1).strip() if match else "N/A"
 
-def extract_vins_from_text(text):
-    return re.findall(r"\b[A-HJ-NPR-Z0-9]{17}\b", text.upper())
-
 @app.get("/")
 async def root():
     return {"status": "ok"}
@@ -83,20 +80,14 @@ async def vision_review(
         return JSONResponse(status_code=400, content={"error": "Appraiser ID is required."})
     images = []
     texts = []
-    image_vins = []
-
     for file in files:
         content = await file.read()
         name = file.filename.lower()
         if name.endswith((".jpg", ".jpeg", ".png")):
-            img = Image.open(io.BytesIO(content)).convert("RGB")
-            ocr_text = pytesseract.image_to_string(img, lang="eng")
-            image_vins.extend(extract_vins_from_text(ocr_text))
             b64 = base64.b64encode(content).decode("utf-8")
             images.append({"type": "image_url", "image_url": {"url": f"data:image/jpeg;base64,{b64}"}})
         elif name.endswith(".pdf"):
-            text = extract_text_from_pdf(io.BytesIO(content))
-            texts.append(text)
+            texts.append(extract_text_from_pdf(io.BytesIO(content)))
         elif name.endswith(".docx"):
             texts.append(extract_text_from_docx(io.BytesIO(content)))
         elif name.endswith(".txt"):
@@ -106,27 +97,22 @@ async def vision_review(
 
     vision_message = {"role": "user", "content": []}
     if texts:
-        full_text = '\n\n'.join(texts)
-        vision_message["content"].append({"type": "text", "text": full_text})
+        vision_message["content"].append({"type": "text", "text": '\n\n'.join(texts)})
     if images:
         vision_message["content"].extend(images)
-
-    estimate_vins = extract_vins_from_text(full_text if texts else "")
-    vin_match = any(vin in estimate_vins for vin in image_vins)
-    vin_check_result = "✅ VIN in photos matches estimate." if vin_match else "❌ VIN mismatch or not found in images."
 
     prompt = f"""
 You are an AI auto damage auditor. You have access to both text and images (or scans).
 
 IMPORTANT RULES:
-- Treat mentions of \"Clean Retail Value\" or \"NADA Value\" or \"Estimated Trade-In Value\" or \"Fair Market Range\" in the text as CONFIRMATION that the required Clean Retail Value printout was included.
-- Treat mentions of \"CCC Advisor Report\" in the text as CONFIRMATION that the required Advisor Report printout was included.
+- Treat mentions of "Clean Retail Value" or "NADA Value" or "Estimated Trade-In Value" or "Fair Market Range" in the text as CONFIRMATION that the required Clean Retail Value printout was included.
+- Treat mentions of "CCC Advisor Report" in the text as CONFIRMATION that the required Advisor Report printout was included.
 - DO NOT mark photos as missing if any of the following conditions are met:
    - The label appears in the text
    - A visual appears in the uploaded documents
    - The text mentions CCC Advisor, which confirms inclusion of Advisor Report.
-- Do NOT claim the \"Clean Retail Value\" is missing if text mentions its presence.
-- Do NOT claim the \"Advisor Report\" is missing if text mentions its presence.
+- Do NOT claim the "Clean Retail Value" is missing if text mentions its presence.
+- Do NOT claim the "Advisor Report" is missing if text mentions its presence.
 - Acknowledge evidence as present if indicated by labels, text, or actual uploaded images.
 
 Perform a thorough review comparing the estimate against the damage photos and text. At the top of your response, ALWAYS include:
@@ -161,12 +147,11 @@ Then summarize findings and rule violations based STRICTLY on the following rule
         pdf.multi_cell(0, 10, f"File Number: {file_number}")
         pdf.multi_cell(0, 10, f"IA Company: {ia_company}")
         pdf.multi_cell(0, 10, f"Appraiser ID #: {appraiser_id}")
-        pdf.multi_cell(0, 10, vin_check_result)
         pdf.ln(5)
         pdf.multi_cell(0, 10, "AI-4-IA Review Summary:", align='L')
-        safe_output = gpt_output.replace("❌", "[X]").replace("✅", "[OK]").replace("⚠️", "[!]")
+        encoded_output = gpt_output.encode("latin-1", "replace").decode("latin-1")
         pdf.set_font("Helvetica", size=9)
-        pdf.multi_cell(0, 10, safe_output)
+        pdf.multi_cell(0, 10, encoded_output)
 
         pdf_path = f"{file_number}.pdf"
         pdf.output(pdf_path)
@@ -180,7 +165,6 @@ Then summarize findings and rule violations based STRICTLY on the following rule
 File Number: {file_number}
 IA Company: {ia_company}
 Appraiser ID #: {appraiser_id}
-{vin_check_result}
 
 AI Review Summary:
 {gpt_output}
@@ -196,8 +180,7 @@ AI Review Summary:
             "claim_number": claim_number,
             "vin": vin,
             "vehicle": vehicle,
-            "score": score,
-            "vin_check": vin_check_result
+            "score": score
         }
 
     except Exception as e:
@@ -224,6 +207,7 @@ async def get_client_rules(client_name: str):
             return JSONResponse(status_code=500, content={"error": str(e)})
     else:
         return JSONResponse(status_code=404, content={"error": "Rules not found for this client."})
+
 
 
 
