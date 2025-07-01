@@ -139,7 +139,7 @@ Then summarize findings and rule violations based STRICTLY on the following rule
 
         pdf = FPDF()
         pdf.add_page()
-        pdf.set_font("Helvetica", size=12)
+        pdf.set_font("Helvetica", size=11)
         pdf.cell(200, 10, txt="NSPXN.com AI Review Report", ln=True, align='C')
         pdf.ln(5)
         pdf.multi_cell(0, 10, f"File Number: {file_number}")
@@ -148,7 +148,7 @@ Then summarize findings and rule violations based STRICTLY on the following rule
         pdf.ln(5)
         pdf.multi_cell(0, 10, "AI-4-IA Review Summary:", align='L')
         encoded_output = gpt_output.encode("latin-1", "replace").decode("latin-1")
-        pdf.set_font("Helvetica", size=11)
+        pdf.set_font("Helvetica", size=9)
         pdf.multi_cell(0, 10, encoded_output)
 
         pdf_path = f"{file_number}.pdf"
