@@ -164,9 +164,9 @@ Then summarize findings and rule violations based STRICTLY on the following rule
         pdf.multi_cell(0, 10, vin_check_result)
         pdf.ln(5)
         pdf.multi_cell(0, 10, "AI-4-IA Review Summary:", align='L')
-        encoded_output = gpt_output.encode("latin-1", "replace").decode("latin-1")
+        safe_output = gpt_output.encode("ascii", "ignore").decode("ascii")
         pdf.set_font("Helvetica", size=9)
-        pdf.multi_cell(0, 10, encoded_output)
+        pdf.multi_cell(0, 10, safe_output)
 
         pdf_path = f"{file_number}.pdf"
         pdf.output(pdf_path)
