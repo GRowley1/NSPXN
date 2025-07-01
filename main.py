@@ -147,7 +147,7 @@ Then summarize findings and rule violations based STRICTLY on the following rule
         pdf.multi_cell(0, 10, f"File Number: {file_number}")
         pdf.multi_cell(0, 10, f"IA Company: {ia_company}")
         pdf.ln(5)
-        pdf.multi_cell(0, 10, "AI4IA Review Summary:", align='L')
+        pdf.multi_cell(0, 10, "AI-4-IA Review Summary:", align='L')
         encoded_output = gpt_output.encode("latin-1", "replace").decode("latin-1")
         pdf.set_font("Helvetica", size=11)
         pdf.multi_cell(0, 10, encoded_output)
@@ -156,7 +156,7 @@ Then summarize findings and rule violations based STRICTLY on the following rule
         pdf.output(pdf_path)
 
         msg = EmailMessage()
-        msg["Subject"] = f"AI4IA Review: {claim_number}"
+        msg["Subject"] = f"AI-4-IA Review: {claim_number}"
         msg["From"] = "noreply@nspxn.com"
         msg["To"] = "info@nspxn.com"
         email_body = f"""NSPXN.com AI4IA Review Report
