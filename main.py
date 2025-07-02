@@ -163,7 +163,7 @@ Then summarize findings and rule violations based STRICTLY on the following rule
         # ✅ Unicode-safe PDF output
         pdf = FPDF()
         pdf.add_page()
-        pdf.add_font("DejaVu", "", "/mnt/data/DejaVuSans.ttf", uni=True)
+        pdf.add_font("DejaVu", "", "DejaVuSans.ttf", uni=True)  # ✅ Correct relative path
         pdf.set_font("DejaVu", size=11)
         pdf.cell(200, 10, txt="NSPXN.com AI Review Report", ln=True, align='C')
         pdf.ln(5)
