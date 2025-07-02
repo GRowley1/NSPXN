@@ -131,6 +131,8 @@ IMPORTANT RULES:
 - Do NOT claim the "Clean Retail Value" is missing if text mentions its presence.
 - Do NOT claim the "Advisor Report" is missing if text mentions its presence.
 - Acknowledge evidence as present if indicated by labels, text, or actual uploaded images.
+- Evaluate the uploaded images directly to verify required photo types (e.g., four corners, damage area, VIN, odometer, etc.), even if the image *label* or description is generic or missing.
+- If visual evidence clearly shows a required element, count it as present, regardless of filename or caption.
 
 Perform a thorough review comparing the estimate against the damage photos and text. At the top of your response, ALWAYS include:
 Claim #: (from estimate)
