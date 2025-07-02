@@ -230,7 +230,7 @@ async def get_client_rules(client_name: str):
         except Exception as e:
             return JSONResponse(status_code=500, content={"error": str(e)})
     else:
-        return JSONResponse(status_code=404, content={"error": "Rules not found for this client."}
+        return JSONResponse(status_code=404, content={"error": "Rules not found for this client."})
 
 
 
