@@ -162,7 +162,8 @@ Then summarize findings and rule violations based STRICTLY on the following rule
 
         pdf = FPDF()
         pdf.add_page()
-        pdf.set_font("Helvetica", size=11)
+        pdf.add_font("DejaVu", "", "DejaVuSans.ttf", uni=True)
+        pdf.set_font("DejaVu", size=11)
         pdf.cell(200, 10, txt="NSPXN.com AI Review Report", ln=True, align='C')
         pdf.ln(5)
         pdf.multi_cell(0, 10, f"File Number: {file_number}")
@@ -171,8 +172,8 @@ Then summarize findings and rule violations based STRICTLY on the following rule
         pdf.multi_cell(0, 10, vin_validation)
         pdf.ln(5)
         pdf.multi_cell(0, 10, "AI-4-IA Review Summary:", align='L')
-        pdf.set_font("Helvetica", size=9)
-        pdf.multi_cell(0, 10, gpt_output.encode("latin-1", "replace").decode("latin-1"))
+        pdf.set_font("DejaVu", size=9)
+        pdf.multi_cell(0, 10, gpt_output)
 
         pdf_path = f"{file_number}.pdf"
         pdf.output(pdf_path)
@@ -231,6 +232,7 @@ async def get_client_rules(client_name: str):
             return JSONResponse(status_code=500, content={"error": str(e)})
     else:
         return JSONResponse(status_code=404, content={"error": "Rules not found for this client."})
+
 
 
 
