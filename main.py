@@ -10,13 +10,17 @@ import smtplib
 from email.message import EmailMessage
 from fpdf import FPDF
 from docx import Document
+from PyPDF2 import PdfReader
 from pdf2image import convert_from_bytes
 import pytesseract
 from PIL import Image
 from openai import OpenAI
 
+# ==========================
+# ✅ Ensure OPENAI_API_KEY is present
+# ==========================
 if "OPENAI_API_KEY" not in os.environ:
-    raise RuntimeError("\u274c OPENAI_API_KEY environment variable is NOT set.")
+    raise RuntimeError("❌ OPENAI_API_KEY environment variable is NOT set.")
 client = OpenAI(api_key=os.environ["OPENAI_API_KEY"])
 
 app = FastAPI()
@@ -35,6 +39,9 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
+# ==========================
+# Text Extraction Methods
+# ==========================
 def extract_text_from_pdf(file) -> str:
     try:
         file.seek(0)
@@ -46,7 +53,7 @@ def extract_text_from_pdf(file) -> str:
             text_output += f"\n[Page {i}]\n" + ocr_text
         return text_output
     except Exception as e:
-        return f"\n\u274c OCR error during combined extraction: {str(e)}"
+        return f"\n❌ OCR error during combined extraction: {str(e)}"
 
 def extract_text_from_docx(file) -> str:
     doc = Document(file)
@@ -57,18 +64,18 @@ def extract_field(label, text) -> str:
     match = pattern.search(text)
     return match.group(1).strip() if match else "N/A"
 
-def extract_possible_vins_from_images(image_bytes_list):
-    vins_found = set()
-    for img_bytes in image_bytes_list:
-        try:
-            image = Image.open(io.BytesIO(img_bytes)).convert("L")
-            bw = image.point(lambda x: 0 if x < 128 else 255, '1')
-            text = pytesseract.image_to_string(bw, config="--psm 6")
-            matches = re.findall(r"\b[A-HJ-NPR-Z0-9]{17}\b", text.upper())
-            vins_found.update(matches)
-        except Exception:
+def extract_vins_from_images(image_files: List[UploadFile]) -> List[str]:
+    vins = []
+    for file in image_files:
+        name = file.filename.lower()
+        if not name.endswith((".jpg", ".jpeg", ".png")):
             continue
-    return vins_found
+        image_bytes = io.BytesIO(file.file.read())
+        img = Image.open(image_bytes).convert("RGB")
+        ocr_text = pytesseract.image_to_string(img, lang="eng")
+        found = re.findall(r"\b[A-HJ-NPR-Z0-9]{17}\b", ocr_text)
+        vins.extend(found)
+    return vins
 
 @app.get("/")
 async def root():
@@ -87,13 +94,13 @@ async def vision_review(
 
     images = []
     texts = []
-    image_bytes_list = []
+    vin_photos = []
 
     for file in files:
         content = await file.read()
         name = file.filename.lower()
         if name.endswith((".jpg", ".jpeg", ".png")):
-            image_bytes_list.append(content)
+            vin_photos.append(file)
             b64 = base64.b64encode(content).decode("utf-8")
             images.append({"type": "image_url", "image_url": {"url": f"data:image/jpeg;base64,{b64}"}})
         elif name.endswith(".pdf"):
@@ -145,12 +152,13 @@ Then summarize findings and rule violations based STRICTLY on the following rule
         )
         gpt_output = response.choices[0].message.content or "⚠️ GPT returned no output."
         claim_number = extract_field("Claim", gpt_output)
-        vin = extract_field("VIN", gpt_output)
+        vin_text = extract_field("VIN", gpt_output)
+        vin_images = extract_vins_from_images(vin_photos)
+
+        vin_validation = "✅ VIN match confirmed in image(s)." if vin_text in vin_images else f"❌ VIN mismatch: estimate VIN '{vin_text}' not found in photos."
+
         vehicle = extract_field("Vehicle", gpt_output)
         score = extract_field("Compliance Score", gpt_output)
-
-        vins_found = extract_possible_vins_from_images(image_bytes_list)
-        vin_note = f"✅ VIN in photo matches estimate." if vin in vins_found else f"❌ VIN in photo does NOT match estimate."
 
         pdf = FPDF()
         pdf.add_page()
@@ -160,11 +168,11 @@ Then summarize findings and rule violations based STRICTLY on the following rule
         pdf.multi_cell(0, 10, f"File Number: {file_number}")
         pdf.multi_cell(0, 10, f"IA Company: {ia_company}")
         pdf.multi_cell(0, 10, f"Appraiser ID #: {appraiser_id}")
+        pdf.multi_cell(0, 10, vin_validation)
         pdf.ln(5)
         pdf.multi_cell(0, 10, "AI-4-IA Review Summary:", align='L')
         pdf.set_font("Helvetica", size=9)
-        safe_output = (gpt_output + f"\n\nVIN Match: {vin_note}").encode("ascii", "ignore").decode("ascii")
-        pdf.multi_cell(0, 10, safe_output)
+        pdf.multi_cell(0, 10, gpt_output.encode("latin-1", "replace").decode("latin-1"))
 
         pdf_path = f"{file_number}.pdf"
         pdf.output(pdf_path)
@@ -173,18 +181,17 @@ Then summarize findings and rule violations based STRICTLY on the following rule
         msg["Subject"] = f"AI-4-IA Review: {claim_number}"
         msg["From"] = "noreply@nspxn.com"
         msg["To"] = "info@nspxn.com"
-        msg.set_content(f"""NSPXN.com AI4IA Review Report
+        email_body = f"""NSPXN.com AI4IA Review Report
 
 File Number: {file_number}
 IA Company: {ia_company}
 Appraiser ID #: {appraiser_id}
+VIN Validation: {vin_validation}
 
 AI Review Summary:
 {gpt_output}
-
-VIN Match: {vin_note}
-""")
-
+"""
+        msg.set_content(email_body.encode("utf-8", errors="ignore").decode("utf-8"))
         with smtplib.SMTP_SSL("mail.tierra.net", 465) as smtp:
             smtp.login("info@nspxn.com", "grr2025GRR")
             smtp.send_message(msg)
@@ -193,10 +200,11 @@ VIN Match: {vin_note}
             "gpt_output": gpt_output,
             "file_number": file_number,
             "claim_number": claim_number,
-            "vin": vin,
+            "vin": vin_text,
+            "vin_images": vin_images,
             "vehicle": vehicle,
             "score": score,
-            "vin_match": vin_note
+            "vin_validation": vin_validation
         }
 
     except Exception as e:
@@ -222,8 +230,7 @@ async def get_client_rules(client_name: str):
         except Exception as e:
             return JSONResponse(status_code=500, content={"error": str(e)})
     else:
-        return JSONResponse(status_code=404, content={"error": "Rules not found for this client."})
-
+        return JSONResponse(status_code=404, content={"error": "Rules not found for this client."}
 
 
 
