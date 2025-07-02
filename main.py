@@ -64,31 +64,17 @@ def extract_field(label, text) -> str:
     match = pattern.search(text)
     return match.group(1).strip() if match else "N/A"
 
-def classify_image_type(ocr_text: str) -> str:
-    text = ocr_text.upper()
-    if re.search(r"\b[A-HJ-NPR-Z0-9]{17}\b", text):
-        return "VIN"
-    elif "ODO" in text or re.search(r"\d{5,6}\s?MI", text):
-        return "Odometer"
-    elif re.search(r"[A-Z]{3}\s?\d{4}", text):
-        return "License Plate"
-    elif "MFD" in text or "MANUFACTURE" in text:
-        return "Production Tag"
-    return "Uncategorized"
-
 def extract_vins_from_images(image_files: List[UploadFile]) -> List[str]:
     vins = []
     for file in image_files:
-        if not file.filename.lower().endswith((".jpg", ".jpeg", ".png")):
+        name = file.filename.lower()
+        if not name.endswith((".jpg", ".jpeg", ".png")):
             continue
         image_bytes = io.BytesIO(file.file.read())
         img = Image.open(image_bytes).convert("RGB")
         ocr_text = pytesseract.image_to_string(img, lang="eng")
         found = re.findall(r"\b[A-HJ-NPR-Z0-9]{17}\b", ocr_text)
-        if found:
-            vins.extend(found)
-        label = classify_image_type(ocr_text)
-        print(f"[Auto-Detected] {file.filename}: {label}")
+        vins.extend(found)
     return vins
 
 @app.get("/")
@@ -174,9 +160,11 @@ Then summarize findings and rule violations based STRICTLY on the following rule
         vehicle = extract_field("Vehicle", gpt_output)
         score = extract_field("Compliance Score", gpt_output)
 
+        # ✅ Unicode-safe PDF output
         pdf = FPDF()
         pdf.add_page()
-        pdf.set_font("Helvetica", size=11)
+        pdf.add_font("DejaVu", "", "/mnt/data/DejaVuSans.ttf", uni=True)
+        pdf.set_font("DejaVu", size=11)
         pdf.cell(200, 10, txt="NSPXN.com AI Review Report", ln=True, align='C')
         pdf.ln(5)
         pdf.multi_cell(0, 10, f"File Number: {file_number}")
@@ -185,8 +173,8 @@ Then summarize findings and rule violations based STRICTLY on the following rule
         pdf.multi_cell(0, 10, vin_validation)
         pdf.ln(5)
         pdf.multi_cell(0, 10, "AI-4-IA Review Summary:", align='L')
-        pdf.set_font("Helvetica", size=9)
-        pdf.multi_cell(0, 10, gpt_output.encode("latin-1", "replace").decode("latin-1"))
+        pdf.set_font("DejaVu", size=9)
+        pdf.multi_cell(0, 10, gpt_output)
 
         pdf_path = f"{file_number}.pdf"
         pdf.output(pdf_path)
