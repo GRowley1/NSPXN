@@ -58,21 +58,19 @@ def extract_field(label, text) -> str:
     match = pattern.search(text)
     return match.group(1).strip() if match else "N/A"
 
-def check_labor_and_tax_rates(text: str, client_rules: str) -> int:
-    score_adjustment = 0
+def check_labor_and_tax_logic(text: str, client_rules: str) -> int:
+    text_lower = text.lower()
+    rules_lower = client_rules.lower()
+    
+    labor_issue = bool(re.search(r"labor hours[:\s]*\d+", text_lower)) and re.search(r"labor rate[:\s]*\$?0+(\.00)?", text_lower)
+    tax_required = "utilize applicable tax rate" in rules_lower
+    tax_missing = not re.search(r"tax[:\s]*\$?\d+|\d+%", text_lower)
 
-    # Check for required labor rate rule and $0 rate
-    if re.search(r"utilize local prevailing labor rates", client_rules, re.IGNORECASE):
-        if re.search(r"labor hours[:\s]*\d+", text, re.IGNORECASE):
-            if re.search(r"labor rate[:\s]*\$?0+(\.00)?", text, re.IGNORECASE):
-                return -100
-
-    # Check for required tax and absence in estimate
-    if re.search(r"utilize applicable tax rate", client_rules, re.IGNORECASE):
-        if not re.search(r"tax[:\s]*\$?\d+|\d+%", text, re.IGNORECASE):
-            score_adjustment -= 50
-
-    return score_adjustment
+    if labor_issue:
+        return -100
+    if tax_required and tax_missing:
+        return -50
+    return 0
 
 @app.get("/")
 async def root():
@@ -109,7 +107,7 @@ async def vision_review(
 
     combined_text = '\n'.join(texts).lower()
     advisor_present = "ccc advisor report" in combined_text
-    advisor_hint = "\n\nCONFIRMED: CCC Advisor Report is included in the submitted estimate or supporting documents." if advisor_present else ""
+    advisor_hint = "\n\nThe CCC Advisor Report appears to be present based on document content." if advisor_present else ""
 
     vision_message = {"role": "user", "content": []}
     if texts:
@@ -122,14 +120,22 @@ You are an AI auto damage auditor. You have access to both text and images (or s
 
 IMPORTANT RULES:
 - Treat mentions of \"Clean Retail Value\" or \"NADA Value\" or \"Estimated Trade-In Value\" or \"Fair Market Range\" in the text as CONFIRMATION that the required Clean Retail Value printout was included.
-- Treat mentions of \"CCC Advisor Report\" in the text as CONFIRMATION that the required Advisor Report printout was included.
-- DO NOT mark photos as missing if any of the following conditions are met:
-   - The label appears in the text
-   - A visual appears in the uploaded documents
-   - The text mentions CCC Advisor, which confirms inclusion of Advisor Report.
 - Do NOT claim the \"Clean Retail Value\" is missing if text mentions its presence.
 - Do NOT claim the \"Advisor Report\" is missing if text mentions its presence.
-- Acknowledge evidence as present if indicated by labels, text, or actual uploaded images.
+- Treat mentions of \"CCC Advisor Report\" in the text or if OCR reveals it visually as CONFIRMATION that the required Advisor Report printout was included.
+- Utilize local prevailing labor rates.
+- Utilize applicable tax rate.
+
+PHOTO EVIDENCE RULES (OVERRIDE LABEL DEPENDENCY):
+- Do NOT rely on photo descriptions like “Other” to judge content.
+- Review image content directly — NOT just file names or descriptions.
+- If the following elements are *visibly present* in the uploaded images, they are considered COMPLIANT:
+    - 4-Corner Photos: If all four corners of the vehicle are captured from different angles, even without labels.
+    - Odometer Photo: If a dashboard or gauge cluster with a mileage reading is visible.
+    - VIN Plate: Visible on either the dashboard or driver’s door (counts as present).
+    - Manufacturer Data Plate: Typically found on the driver door jamb.
+    - License Plate: Clearly visible in any image.
+- Do not mark a photo as missing if it is visible in any image, regardless of the label or position.
 
 Perform a thorough review comparing the estimate against the damage photos and text. At the top of your response, ALWAYS include:
 Claim #: (from estimate)
@@ -152,7 +158,6 @@ Then summarize findings and rule violations based STRICTLY on the following rule
         )
         gpt_output = response.choices[0].message.content or "⚠️ GPT returned no output."
         claim_number = extract_field("Claim", gpt_output)
-        vin_text = extract_field("VIN", gpt_output)
         vehicle = extract_field("Vehicle", gpt_output)
         score = extract_field("Compliance Score", gpt_output)
 
@@ -161,7 +166,7 @@ Then summarize findings and rule violations based STRICTLY on the following rule
         except:
             score = 100
 
-        score_adj = check_labor_and_tax_rates(combined_text, client_rules)
+        score_adj = check_labor_and_tax_logic(combined_text, client_rules)
         score = max(0, score + score_adj) if score_adj > -100 else 0
 
         pdf = FPDF()
@@ -233,7 +238,6 @@ async def get_client_rules(client_name: str):
             return JSONResponse(status_code=500, content={"error": str(e)})
     else:
         return JSONResponse(status_code=404, content={"error": "Rules not found for this client."})
-
 
 
 
