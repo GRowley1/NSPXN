@@ -58,18 +58,18 @@ def extract_field(label, text) -> str:
     match = pattern.search(text)
     return match.group(1).strip() if match else "N/A"
 
-def adjust_score(text: str, client_rules: str, initial_score: int) -> int:
-    # Drop to 0% if labor hours exist and labor rate is $0.00
+def check_labor_and_tax_penalties(text: str, client_rules: str) -> int:
+    # 0% score if labor hours are present and labor rate is $0
     if re.search(r"labor hours[:\s]*\d+", text, re.IGNORECASE):
         if re.search(r"labor rate[:\s]*\$?0+(\.00)?", text, re.IGNORECASE):
-            return 0
+            return -100  # Critical penalty
 
-    # Deduct 50% if tax required in client rules and no tax found
+    # -50% if tax required but not found
     if re.search(r"require.*tax", client_rules, re.IGNORECASE):
         if not re.search(r"tax[:\s]*\$?\d+|\d+%", text, re.IGNORECASE):
-            return max(0, initial_score - 50)
+            return -50
 
-    return initial_score
+    return 0
 
 @app.get("/")
 async def root():
@@ -103,6 +103,8 @@ async def vision_review(
             texts.append(content.decode("utf-8", errors="ignore"))
         else:
             texts.append(f"\u26a0\ufe0f Skipped unsupported file: {file.filename}")
+
+    combined_text = '\n'.join(texts).lower()
 
     vision_message = {"role": "user", "content": []}
     if texts:
@@ -149,12 +151,12 @@ Then summarize findings and rule violations based STRICTLY on the following rule
         score = extract_field("Compliance Score", gpt_output)
 
         try:
-            score_val = int(score.strip('%'))
+            score = int(score.strip("%"))
         except:
-            score_val = 100
+            score = 100
 
-        combined_text = '\n'.join(texts).lower()
-        score_val = adjust_score(combined_text, client_rules, score_val)
+        penalty = check_labor_and_tax_penalties(combined_text, client_rules)
+        score = max(0, score + penalty) if penalty > -100 else 0
 
         pdf = FPDF()
         pdf.add_page()
@@ -165,7 +167,7 @@ Then summarize findings and rule violations based STRICTLY on the following rule
         pdf.multi_cell(0, 10, f"File Number: {file_number}")
         pdf.multi_cell(0, 10, f"IA Company: {ia_company}")
         pdf.multi_cell(0, 10, f"Appraiser ID #: {appraiser_id}")
-        pdf.multi_cell(0, 10, f"Final Adjusted Compliance Score: {score_val}%")
+        pdf.multi_cell(0, 10, f"Final Adjusted Compliance Score: {score}%")
         pdf.ln(5)
         pdf.multi_cell(0, 10, "AI-4-IA Review Summary:", align='L')
         pdf.set_font("DejaVu", size=9)
@@ -183,7 +185,7 @@ Then summarize findings and rule violations based STRICTLY on the following rule
 File Number: {file_number}
 IA Company: {ia_company}
 Appraiser ID #: {appraiser_id}
-Adjusted Compliance Score: {score_val}%
+Adjusted Compliance Score: {score}%
 
 AI Review Summary:
 {gpt_output}
@@ -198,7 +200,7 @@ AI Review Summary:
             "file_number": file_number,
             "claim_number": claim_number,
             "vehicle": vehicle,
-            "score": f"{score_val}%"
+            "score": f"{score}%"
         }
 
     except Exception as e:
@@ -225,6 +227,7 @@ async def get_client_rules(client_name: str):
             return JSONResponse(status_code=500, content={"error": str(e)})
     else:
         return JSONResponse(status_code=404, content={"error": "Rules not found for this client."})
+
 
 
 
