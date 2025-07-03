@@ -58,18 +58,27 @@ def extract_field(label, text) -> str:
     match = pattern.search(text)
     return match.group(1).strip() if match else "N/A"
 
-def check_labor_and_tax_logic(text: str, client_rules: str) -> int:
-    text_lower = text.lower()
-    rules_lower = client_rules.lower()
-    
-    labor_issue = bool(re.search(r"labor hours[:\s]*\d+", text_lower)) and re.search(r"labor rate[:\s]*\$?0+(\.00)?", text_lower)
-    tax_required = "utilize applicable tax rate" in rules_lower
-    tax_missing = not re.search(r"tax[:\s]*\$?\d+|\d+%", text_lower)
+def advisor_report_present(texts: List[str], image_files: List[UploadFile]) -> bool:
+    for t in texts:
+        if "ccc advisor report" in t.lower():
+            return True
+    for img in image_files:
+        if "advisor" in img.filename.lower():
+            return True
+        ocr = pytesseract.image_to_string(Image.open(io.BytesIO(img.file.read())), lang="eng")
+        if "advisor report" in ocr.lower():
+            return True
+    return False
 
-    if labor_issue:
-        return -100
-    if tax_required and tax_missing:
-        return -50
+def check_labor_and_tax_score(text: str, client_rules: str) -> int:
+    if re.search(r"labor hours[:\s]*\d+", text, re.IGNORECASE):
+        if re.search(r"labor rate[:\s]*\$?0+(\.00)?", text, re.IGNORECASE):
+            return -100
+
+    if re.search(r"utilize applicable tax rate", client_rules, re.IGNORECASE):
+        if not re.search(r"tax[:\s]*\$?\d+|\d+%", text, re.IGNORECASE):
+            return -50
+
     return 0
 
 @app.get("/")
@@ -89,11 +98,13 @@ async def vision_review(
 
     images = []
     texts = []
+    image_files = []
 
     for file in files:
         content = await file.read()
         name = file.filename.lower()
         if name.endswith((".jpg", ".jpeg", ".png")):
+            image_files.append(file)
             b64 = base64.b64encode(content).decode("utf-8")
             images.append({"type": "image_url", "image_url": {"url": f"data:image/jpeg;base64,{b64}"}})
         elif name.endswith(".pdf"):
@@ -106,8 +117,8 @@ async def vision_review(
             texts.append(f"⚠️ Skipped unsupported file: {file.filename}")
 
     combined_text = '\n'.join(texts).lower()
-    advisor_present = "ccc advisor report" in combined_text
-    advisor_hint = "\n\nThe CCC Advisor Report appears to be present based on document content." if advisor_present else ""
+    advisor_confirmed = advisor_report_present(texts, image_files)
+    advisor_hint = "\n\nCONFIRMED: CCC Advisor Report is included based on OCR or filename." if advisor_confirmed else ""
 
     vision_message = {"role": "user", "content": []}
     if texts:
@@ -120,24 +131,11 @@ You are an AI auto damage auditor. You have access to both text and images (or s
 
 IMPORTANT RULES:
 - Treat mentions of \"Clean Retail Value\" or \"NADA Value\" or \"Estimated Trade-In Value\" or \"Fair Market Range\" in the text as CONFIRMATION that the required Clean Retail Value printout was included.
+- Treat mentions of \"CCC Advisor Report\" in the text, OCR or filename as CONFIRMATION that the required Advisor Report printout was included.
 - Do NOT claim the \"Clean Retail Value\" is missing if text mentions its presence.
-- Do NOT claim the \"Advisor Report\" is missing if text mentions its presence.
-- Treat mentions of \"CCC Advisor Report\" in the text or if OCR reveals it visually as CONFIRMATION that the required Advisor Report printout was included.
-- Utilize local prevailing labor rates.
-- Utilize applicable tax rate.
+- Do NOT claim the \"Advisor Report\" is missing if OCR or filename mentions its presence.
 
-PHOTO EVIDENCE RULES (OVERRIDE LABEL DEPENDENCY):
-- Do NOT rely on photo descriptions like “Other” to judge content.
-- Review image content directly — NOT just file names or descriptions.
-- If the following elements are *visibly present* in the uploaded images, they are considered COMPLIANT:
-    - 4-Corner Photos: If all four corners of the vehicle are captured from different angles, even without labels.
-    - Odometer Photo: If a dashboard or gauge cluster with a mileage reading is visible.
-    - VIN Plate: Visible on either the dashboard or driver’s door (counts as present).
-    - Manufacturer Data Plate: Typically found on the driver door jamb.
-    - License Plate: Clearly visible in any image.
-- Do not mark a photo as missing if it is visible in any image, regardless of the label or position.
-
-Perform a thorough review comparing the estimate against the damage photos and text. At the top of your response, ALWAYS include:
+At the top of your response, ALWAYS include:
 Claim #: (from estimate)
 VIN: (from estimate or photos)
 Vehicle: (make, model, mileage from estimate)
@@ -166,7 +164,7 @@ Then summarize findings and rule violations based STRICTLY on the following rule
         except:
             score = 100
 
-        score_adj = check_labor_and_tax_logic(combined_text, client_rules)
+        score_adj = check_labor_and_tax_score(combined_text, client_rules)
         score = max(0, score + score_adj) if score_adj > -100 else 0
 
         pdf = FPDF()
@@ -238,10 +236,3 @@ async def get_client_rules(client_name: str):
             return JSONResponse(status_code=500, content={"error": str(e)})
     else:
         return JSONResponse(status_code=404, content={"error": "Rules not found for this client."})
-
-
-
-
-
-
-
