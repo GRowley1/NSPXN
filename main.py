@@ -58,18 +58,18 @@ def extract_field(label, text) -> str:
     match = pattern.search(text)
     return match.group(1).strip() if match else "N/A"
 
-def check_labor_and_tax_penalties(text: str, client_rules: str) -> int:
-    # 0% score if labor hours are present and labor rate is $0
+def check_labor_and_tax_rates(text: str, client_rules: str) -> int:
+    score_adjustment = 0
+
     if re.search(r"labor hours[:\s]*\d+", text, re.IGNORECASE):
         if re.search(r"labor rate[:\s]*\$?0+(\.00)?", text, re.IGNORECASE):
-            return -100  # Critical penalty
+            return -100
 
-    # -50% if tax required but not found
     if re.search(r"require.*tax", client_rules, re.IGNORECASE):
         if not re.search(r"tax[:\s]*\$?\d+|\d+%", text, re.IGNORECASE):
-            return -50
+            score_adjustment -= 50
 
-    return 0
+    return score_adjustment
 
 @app.get("/")
 async def root():
@@ -102,13 +102,15 @@ async def vision_review(
         elif name.endswith(".txt"):
             texts.append(content.decode("utf-8", errors="ignore"))
         else:
-            texts.append(f"\u26a0\ufe0f Skipped unsupported file: {file.filename}")
+            texts.append(f"⚠️ Skipped unsupported file: {file.filename}")
 
     combined_text = '\n'.join(texts).lower()
+    advisor_present = "ccc advisor report" in combined_text
+    advisor_hint = "\n\nCONFIRMED: CCC Advisor Report is included in the submitted estimate or supporting documents." if advisor_present else ""
 
     vision_message = {"role": "user", "content": []}
     if texts:
-        vision_message["content"].append({"type": "text", "text": '\n\n'.join(texts)})
+        vision_message["content"].append({"type": "text", "text": '\n\n'.join(texts) + advisor_hint})
     if images:
         vision_message["content"].extend(images)
 
@@ -145,8 +147,9 @@ Then summarize findings and rule violations based STRICTLY on the following rule
             ],
             max_tokens=3500
         )
-        gpt_output = response.choices[0].message.content or "\u26a0\ufe0f GPT returned no output."
+        gpt_output = response.choices[0].message.content or "⚠️ GPT returned no output."
         claim_number = extract_field("Claim", gpt_output)
+        vin_text = extract_field("VIN", gpt_output)
         vehicle = extract_field("Vehicle", gpt_output)
         score = extract_field("Compliance Score", gpt_output)
 
@@ -155,8 +158,8 @@ Then summarize findings and rule violations based STRICTLY on the following rule
         except:
             score = 100
 
-        penalty = check_labor_and_tax_penalties(combined_text, client_rules)
-        score = max(0, score + penalty) if penalty > -100 else 0
+        score_adj = check_labor_and_tax_rates(combined_text, client_rules)
+        score = max(0, score + score_adj) if score_adj > -100 else 0
 
         pdf = FPDF()
         pdf.add_page()
@@ -204,7 +207,7 @@ AI Review Summary:
         }
 
     except Exception as e:
-        return JSONResponse(status_code=500, content={"error": str(e), "gpt_output": "\u26a0\ufe0f AI review failed."})
+        return JSONResponse(status_code=500, content={"error": str(e), "gpt_output": "⚠️ AI review failed."})
 
 @app.get("/download-pdf")
 async def download_pdf(file_number: str):
