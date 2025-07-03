@@ -61,11 +61,14 @@ def extract_field(label, text) -> str:
 def check_labor_and_tax_rates(text: str, client_rules: str) -> int:
     score_adjustment = 0
 
-    if re.search(r"labor hours[:\s]*\d+", text, re.IGNORECASE):
-        if re.search(r"labor rate[:\s]*\$?0+(\.00)?", text, re.IGNORECASE):
-            return -100
+    # Check for required labor rate rule and $0 rate
+    if re.search(r"utilize local prevailing labor rates", client_rules, re.IGNORECASE):
+        if re.search(r"labor hours[:\s]*\d+", text, re.IGNORECASE):
+            if re.search(r"labor rate[:\s]*\$?0+(\.00)?", text, re.IGNORECASE):
+                return -100
 
-    if re.search(r"require.*tax", client_rules, re.IGNORECASE):
+    # Check for required tax and absence in estimate
+    if re.search(r"utilize applicable tax rate", client_rules, re.IGNORECASE):
         if not re.search(r"tax[:\s]*\$?\d+|\d+%", text, re.IGNORECASE):
             score_adjustment -= 50
 
