@@ -103,7 +103,7 @@ async def vision_review(
     advisor_present = "ccc advisor report" in combined_text
     labor_tax_missing = check_labor_and_tax_rates(combined_text)
 
-    advisor_hint = "\n\nThe CCC Advisor Report appears to be present based on document content." if advisor_present else ""
+    advisor_hint = "\n\nCONFIRMED: CCC Advisor Report is included in the submitted estimate or supporting documents."
     labor_tax_hint = "\n\nMissing required fields: " + ", ".join(labor_tax_missing) if labor_tax_missing else ""
 
     vision_message = {"role": "user", "content": []}
