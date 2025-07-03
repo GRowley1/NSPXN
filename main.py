@@ -16,11 +16,8 @@ import pytesseract
 from PIL import Image
 from openai import OpenAI
 
-# ==========================
-# ✅ Ensure OPENAI_API_KEY is present
-# ==========================
 if "OPENAI_API_KEY" not in os.environ:
-    raise RuntimeError("❌ OPENAI_API_KEY environment variable is NOT set.")
+    raise RuntimeError("\u274c OPENAI_API_KEY environment variable is NOT set.")
 client = OpenAI(api_key=os.environ["OPENAI_API_KEY"])
 
 app = FastAPI()
@@ -39,9 +36,6 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-# ==========================
-# Text Extraction Methods
-# ==========================
 def extract_text_from_pdf(file) -> str:
     try:
         file.seek(0)
@@ -53,7 +47,7 @@ def extract_text_from_pdf(file) -> str:
             text_output += f"\n[Page {i}]\n" + ocr_text
         return text_output
     except Exception as e:
-        return f"\n❌ OCR error during combined extraction: {str(e)}"
+        return f"\n\u274c OCR error during combined extraction: {str(e)}"
 
 def extract_text_from_docx(file) -> str:
     doc = Document(file)
@@ -64,18 +58,13 @@ def extract_field(label, text) -> str:
     match = pattern.search(text)
     return match.group(1).strip() if match else "N/A"
 
-def extract_vins_from_images(image_files: List[UploadFile]) -> List[str]:
-    vins = []
-    for file in image_files:
-        name = file.filename.lower()
-        if not name.endswith((".jpg", ".jpeg", ".png")):
-            continue
-        image_bytes = io.BytesIO(file.file.read())
-        img = Image.open(image_bytes).convert("RGB")
-        ocr_text = pytesseract.image_to_string(img, lang="eng")
-        found = re.findall(r"\b[A-HJ-NPR-Z0-9]{17}\b", ocr_text)
-        vins.extend(found)
-    return vins
+def check_labor_and_tax_rates(text: str) -> List[str]:
+    missing = []
+    if not re.search(r"labor rate[:\s]*\$?\d+", text, re.IGNORECASE):
+        missing.append("Labor Rate")
+    if not re.search(r"tax[:\s]*\$?\d+|\d+\%", text, re.IGNORECASE):
+        missing.append("Tax Rate")
+    return missing
 
 @app.get("/")
 async def root():
@@ -94,13 +83,11 @@ async def vision_review(
 
     images = []
     texts = []
-    vin_photos = []
 
     for file in files:
         content = await file.read()
         name = file.filename.lower()
         if name.endswith((".jpg", ".jpeg", ".png")):
-            vin_photos.append(file)
             b64 = base64.b64encode(content).decode("utf-8")
             images.append({"type": "image_url", "image_url": {"url": f"data:image/jpeg;base64,{b64}"}})
         elif name.endswith(".pdf"):
@@ -110,15 +97,18 @@ async def vision_review(
         elif name.endswith(".txt"):
             texts.append(content.decode("utf-8", errors="ignore"))
         else:
-            texts.append(f"⚠️ Skipped unsupported file: {file.filename}")
+            texts.append(f"\u26a0\ufe0f Skipped unsupported file: {file.filename}")
 
     combined_text = '\n'.join(texts).lower()
     advisor_present = "ccc advisor report" in combined_text
-    advisor_hint = "\n\nThe CCC Advisor Report appears to be present based on document content."
+    labor_tax_missing = check_labor_and_tax_rates(combined_text)
+
+    advisor_hint = "\n\nThe CCC Advisor Report appears to be present based on document content." if advisor_present else ""
+    labor_tax_hint = "\n\nMissing required fields: " + ", ".join(labor_tax_missing) if labor_tax_missing else ""
 
     vision_message = {"role": "user", "content": []}
     if texts:
-        vision_message["content"].append({"type": "text", "text": '\n\n'.join(texts) + (advisor_hint if advisor_present else "")})
+        vision_message["content"].append({"type": "text", "text": '\n\n'.join(texts) + advisor_hint + labor_tax_hint})
     if images:
         vision_message["content"].extend(images)
 
@@ -151,6 +141,7 @@ Compliance Score: (0–100%)
 Then summarize findings and rule violations based STRICTLY on the following rules:
 {client_rules}
 """
+
     try:
         response = client.chat.completions.create(
             model="gpt-4o",
@@ -160,27 +151,20 @@ Then summarize findings and rule violations based STRICTLY on the following rule
             ],
             max_tokens=3500
         )
-        gpt_output = response.choices[0].message.content or "⚠️ GPT returned no output."
+        gpt_output = response.choices[0].message.content or "\u26a0\ufe0f GPT returned no output."
         claim_number = extract_field("Claim", gpt_output)
-        vin_text = extract_field("VIN", gpt_output)
-        vin_images = extract_vins_from_images(vin_photos)
-
-        vin_validation = "✅ VIN match confirmed in image(s)." if vin_text in vin_images else f"❌ VIN mismatch: estimate VIN '{vin_text}' not found in photos."
-
         vehicle = extract_field("Vehicle", gpt_output)
         score = extract_field("Compliance Score", gpt_output)
 
-        # ✅ Unicode-safe PDF output
         pdf = FPDF()
         pdf.add_page()
-        pdf.add_font("DejaVu", "", "DejaVuSans.ttf", uni=True)  # ✅ Correct relative path
+        pdf.add_font("DejaVu", "", "DejaVuSans.ttf", uni=True)
         pdf.set_font("DejaVu", size=11)
         pdf.cell(200, 10, txt="NSPXN.com AI Review Report", ln=True, align='C')
         pdf.ln(5)
         pdf.multi_cell(0, 10, f"File Number: {file_number}")
         pdf.multi_cell(0, 10, f"IA Company: {ia_company}")
         pdf.multi_cell(0, 10, f"Appraiser ID #: {appraiser_id}")
-        pdf.multi_cell(0, 10, vin_validation)
         pdf.ln(5)
         pdf.multi_cell(0, 10, "AI-4-IA Review Summary:", align='L')
         pdf.set_font("DejaVu", size=9)
@@ -198,7 +182,6 @@ Then summarize findings and rule violations based STRICTLY on the following rule
 File Number: {file_number}
 IA Company: {ia_company}
 Appraiser ID #: {appraiser_id}
-VIN Validation: {vin_validation}
 
 AI Review Summary:
 {gpt_output}
@@ -212,15 +195,12 @@ AI Review Summary:
             "gpt_output": gpt_output,
             "file_number": file_number,
             "claim_number": claim_number,
-            "vin": vin_text,
-            "vin_images": vin_images,
             "vehicle": vehicle,
-            "score": score,
-            "vin_validation": vin_validation
+            "score": score
         }
 
     except Exception as e:
-        return JSONResponse(status_code=500, content={"error": str(e), "gpt_output": "⚠️ AI review failed."})
+        return JSONResponse(status_code=500, content={"error": str(e), "gpt_output": "\u26a0\ufe0f AI review failed."})
 
 @app.get("/download-pdf")
 async def download_pdf(file_number: str):
