@@ -58,20 +58,18 @@ def extract_field(label, text) -> str:
     match = pattern.search(text)
     return match.group(1).strip() if match else "N/A"
 
-def check_labor_and_tax_rates(text: str, client_rules: str) -> int:
-    score_adjustment = 0
-
-    # If labor hours present but labor rate is $0.00, drop to 0%
+def adjust_score(text: str, client_rules: str, initial_score: int) -> int:
+    # Drop to 0% if labor hours exist and labor rate is $0.00
     if re.search(r"labor hours[:\s]*\d+", text, re.IGNORECASE):
-        if re.search(r"labor rate[:\s]*\$?0+", text, re.IGNORECASE):
-            return -100  # Critical failure
+        if re.search(r"labor rate[:\s]*\$?0+(\.00)?", text, re.IGNORECASE):
+            return 0
 
-    # Penalize 50% if tax required but not found
+    # Deduct 50% if tax required in client rules and no tax found
     if re.search(r"require.*tax", client_rules, re.IGNORECASE):
         if not re.search(r"tax[:\s]*\$?\d+|\d+%", text, re.IGNORECASE):
-            score_adjustment -= 50
+            return max(0, initial_score - 50)
 
-    return score_adjustment
+    return initial_score
 
 @app.get("/")
 async def root():
@@ -106,19 +104,33 @@ async def vision_review(
         else:
             texts.append(f"\u26a0\ufe0f Skipped unsupported file: {file.filename}")
 
-    combined_text = '\n'.join(texts).lower()
-    advisor_present = "ccc advisor report" in combined_text
-    advisor_hint = "\n\nCONFIRMED: CCC Advisor Report is included in the submitted estimate or supporting documents."
-
     vision_message = {"role": "user", "content": []}
     if texts:
-        vision_message["content"].append({"type": "text", "text": '\n\n'.join(texts) + (advisor_hint if advisor_present else "")})
+        vision_message["content"].append({"type": "text", "text": '\n\n'.join(texts)})
     if images:
         vision_message["content"].extend(images)
 
     prompt = f"""
 You are an AI auto damage auditor. You have access to both text and images (or scans).
-[...prompt remains unchanged for brevity...]
+
+IMPORTANT RULES:
+- Treat mentions of \"Clean Retail Value\" or \"NADA Value\" or \"Estimated Trade-In Value\" or \"Fair Market Range\" in the text as CONFIRMATION that the required Clean Retail Value printout was included.
+- Treat mentions of \"CCC Advisor Report\" in the text as CONFIRMATION that the required Advisor Report printout was included.
+- DO NOT mark photos as missing if any of the following conditions are met:
+   - The label appears in the text
+   - A visual appears in the uploaded documents
+   - The text mentions CCC Advisor, which confirms inclusion of Advisor Report.
+- Do NOT claim the \"Clean Retail Value\" is missing if text mentions its presence.
+- Do NOT claim the \"Advisor Report\" is missing if text mentions its presence.
+- Acknowledge evidence as present if indicated by labels, text, or actual uploaded images.
+
+Perform a thorough review comparing the estimate against the damage photos and text. At the top of your response, ALWAYS include:
+Claim #: (from estimate)
+VIN: (from estimate or photos)
+Vehicle: (make, model, mileage from estimate)
+Compliance Score: (0–100%)
+
+Then summarize findings and rule violations based STRICTLY on the following rules:
 {client_rules}
 """
 
@@ -137,12 +149,12 @@ You are an AI auto damage auditor. You have access to both text and images (or s
         score = extract_field("Compliance Score", gpt_output)
 
         try:
-            score = int(score.strip("%"))
+            score_val = int(score.strip('%'))
         except:
-            score = 100
+            score_val = 100
 
-        score_adj = check_labor_and_tax_rates(combined_text, client_rules)
-        score = max(0, score + score_adj) if score_adj > -100 else 0
+        combined_text = '\n'.join(texts).lower()
+        score_val = adjust_score(combined_text, client_rules, score_val)
 
         pdf = FPDF()
         pdf.add_page()
@@ -153,7 +165,7 @@ You are an AI auto damage auditor. You have access to both text and images (or s
         pdf.multi_cell(0, 10, f"File Number: {file_number}")
         pdf.multi_cell(0, 10, f"IA Company: {ia_company}")
         pdf.multi_cell(0, 10, f"Appraiser ID #: {appraiser_id}")
-        pdf.multi_cell(0, 10, f"Final Adjusted Compliance Score: {score}%")
+        pdf.multi_cell(0, 10, f"Final Adjusted Compliance Score: {score_val}%")
         pdf.ln(5)
         pdf.multi_cell(0, 10, "AI-4-IA Review Summary:", align='L')
         pdf.set_font("DejaVu", size=9)
@@ -171,7 +183,7 @@ You are an AI auto damage auditor. You have access to both text and images (or s
 File Number: {file_number}
 IA Company: {ia_company}
 Appraiser ID #: {appraiser_id}
-Adjusted Compliance Score: {score}%
+Adjusted Compliance Score: {score_val}%
 
 AI Review Summary:
 {gpt_output}
@@ -186,7 +198,7 @@ AI Review Summary:
             "file_number": file_number,
             "claim_number": claim_number,
             "vehicle": vehicle,
-            "score": f"{score}%"
+            "score": f"{score_val}%"
         }
 
     except Exception as e:
