@@ -112,9 +112,13 @@ async def vision_review(
         else:
             texts.append(f"⚠️ Skipped unsupported file: {file.filename}")
 
+    combined_text = '\n'.join(texts).lower()
+    advisor_present = "ccc advisor report" in combined_text
+    advisor_hint = "\n\nThe CCC Advisor Report appears to be present based on document content."
+
     vision_message = {"role": "user", "content": []}
     if texts:
-        vision_message["content"].append({"type": "text", "text": '\n\n'.join(texts)})
+        vision_message["content"].append({"type": "text", "text": '\n\n'.join(texts) + (advisor_hint if advisor_present else "")})
     if images:
         vision_message["content"].extend(images)
 
@@ -123,9 +127,9 @@ You are an AI auto damage auditor. You have access to both text and images (or s
 
 IMPORTANT RULES:
 - Treat mentions of "Clean Retail Value" or "NADA Value" or "Estimated Trade-In Value" or "Fair Market Range" in the text as CONFIRMATION that the required Clean Retail Value printout was included.
-- Treat mentions of "CCC Advisor Report" in the text as CONFIRMATION that the required Advisor Report printout was included.
 - Do NOT claim the "Clean Retail Value" is missing if text mentions its presence.
 - Do NOT claim the "Advisor Report" is missing if text mentions its presence.
+- Treat mentions of "CCC Advisor Report" in the text or if OCR reveals it visually as CONFIRMATION that the required Advisor Report printout was included.
 
 PHOTO EVIDENCE RULES (OVERRIDE LABEL DEPENDENCY):
 - Do NOT rely on photo descriptions like “Other” to judge content.
