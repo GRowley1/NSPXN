@@ -127,23 +127,28 @@ async def vision_review(
         vision_message["content"].extend(images)
 
     prompt = f"""
-You are an AI auto damage auditor. You have access to both text and images (or scans).
+    You are an AI auto damage auditor. You have access to both text and images (or scans).
 
-IMPORTANT RULES:
-- Treat mentions of \"Clean Retail Value\" or \"NADA Value\" or \"Estimated Trade-In Value\" or \"Fair Market Range\" in the text as CONFIRMATION that the required Clean Retail Value printout was included.
-- Treat mentions of \"CCC Advisor Report\" in the text, OCR or filename as CONFIRMATION that the required Advisor Report printout was included.
-- Do NOT claim the \"Clean Retail Value\" is missing if text mentions its presence.
-- Do NOT claim the \"Advisor Report\" is missing if OCR or filename mentions its presence.
+    IMPORTANT RULES:
+    - If labor hours are present but the labor rate is $0 or missing, the Compliance Score must be set to 0%.
+    - If tax is required by client rules but no tax rate is found in the estimate, reduce the Compliance Score by 50%.
+    - Never assume compliance if required elements (like labor rate or taxes) are missing.
+    - Treat mentions of "Clean Retail Value", "NADA Value", or "Fair Market Range" as CONFIRMATION that the value was included.
+    - Treat mentions or OCR detection of "CCC Advisor Report" as CONFIRMATION that the Advisor Report was included.
+    - Do NOT rely on assumptions. Only acknowledge presence of documents or data when clearly present in text or visible in photos.
 
-At the top of your response, ALWAYS include:
-Claim #: (from estimate)
-VIN: (from estimate or photos)
-Vehicle: (make, model, mileage from estimate)
-Compliance Score: (0–100%)
+    PHOTO EVIDENCE RULES (override label dependency):
+    [...continue prompt as before...]
 
-Then summarize findings and rule violations based STRICTLY on the following rules:
-{client_rules}
-"""
+    At the top of your response, ALWAYS include:
+    Claim #: (from estimate)
+    VIN: (from estimate or photos)
+    Vehicle: (make, model, mileage from estimate)
+    Compliance Score: (0–100%)
+
+    Then summarize findings and rule violations based STRICTLY on the following rules:
+    {client_rules}
+    """
 
     try:
         response = client.chat.completions.create(
