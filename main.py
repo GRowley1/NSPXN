@@ -133,7 +133,7 @@ async def vision_review(
     - If labor hours are present but the labor rate is $0 or missing, the Compliance Score must be set to 0%.
     - If tax is required by client rules but no tax rate is found in the estimate, reduce the Compliance Score by 50%.
     - Never assume compliance if required elements (like labor rate or taxes) are missing.
-    - Treat mentions of "Clean Retail Value", "NADA Value", or "Fair Market Range" as CONFIRMATION that the value was included.
+    - Treat mentions or OCR detection of "Clean Retail Value", or "NADA Value", or "Fair Market Range", or "Estimated Trade-In Value", as CONFIRMATION that the value was included.
     - Treat mentions or OCR detection of "CCC Advisor Report" as CONFIRMATION that the Advisor Report was included.
     - Do NOT rely on assumptions. Only acknowledge presence of documents or data when clearly present in text or visible in photos.
 
