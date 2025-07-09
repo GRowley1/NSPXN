@@ -63,11 +63,26 @@ def advisor_report_present(texts: List[str], image_files: List[UploadFile]) -> b
         if "ccc advisor report" in t.lower():
             return True
     for img in image_files:
-        if "advisor" in img.filename.lower():
+        try:
+            ocr = pytesseract.image_to_string(Image.open(io.BytesIO(img.file.read())), lang="eng")
+            if "advisor report" in ocr.lower():
+                return True
+        except Exception:
+            continue
+    return False
+
+def clean_retail_present(texts: List[str], image_files: List[UploadFile]) -> bool:
+    terms = ["clean retail value", "trade-in value", "nada", "j.d. power", "retail value"]
+    for t in texts:
+        if any(term in t.lower() for term in terms):
             return True
-        ocr = pytesseract.image_to_string(Image.open(io.BytesIO(img.file.read())), lang="eng")
-        if "advisor report" in ocr.lower():
-            return True
+    for img in image_files:
+        try:
+            ocr = pytesseract.image_to_string(Image.open(io.BytesIO(img.file.read())), lang="eng")
+            if any(term in ocr.lower() for term in terms):
+                return True
+        except Exception:
+            continue
     return False
 
 def check_labor_and_tax_score(text: str, client_rules: str) -> int:
@@ -118,11 +133,17 @@ async def vision_review(
 
     combined_text = '\n'.join(texts).lower()
     advisor_confirmed = advisor_report_present(texts, image_files)
-    advisor_hint = "\n\nCONFIRMED: CCC Advisor Report is included based on OCR or filename." if advisor_confirmed else ""
+    clean_value_confirmed = clean_retail_present(texts, image_files)
+
+    confirm_hints = []
+    if advisor_confirmed:
+        confirm_hints.append("✅ CCC Advisor Report CONFIRMED via OCR or text.")
+    if clean_value_confirmed:
+        confirm_hints.append("✅ Clean Retail Value CONFIRMED via OCR or text.")
 
     vision_message = {"role": "user", "content": []}
     if texts:
-        vision_message["content"].append({"type": "text", "text": '\n\n'.join(texts) + advisor_hint})
+        vision_message["content"].append({"type": "text", "text": '\n\n'.join(texts) + ('\n\n' + '\n'.join(confirm_hints) if confirm_hints else '')})
     if images:
         vision_message["content"].extend(images)
 
@@ -133,13 +154,10 @@ async def vision_review(
     - If labor hours are present but the labor rate is $0 or missing, the Compliance Score must be set to 0%.
     - If tax is required by client rules but no tax rate is found in the estimate, reduce the Compliance Score by 75%.
     - Never assume compliance if required elements (like labor rate or taxes) are missing.
-    - Treat mentions or OCR detection of "Clean Retail Value", or "NADA Value", or "Fair Market Range", or "Estimated Trade-In Value", as CONFIRMATION that the value was included.
-    - Treat mentions or OCR detection of "CCC Advisor Report" as CONFIRMATION that the Advisor Report was included.
+    - Treat mentions or OCR detection of \"Clean Retail Value\", \"NADA Value\", \"Fair Market Range\", or \"Estimated Trade-In Value\" as CONFIRMATION that the value was included.
+    - Treat mentions or OCR detection of \"CCC Advisor Report\" as CONFIRMATION that the Advisor Report was included.
+    - Only evaluate Total Loss protocols if the estimate explicitly indicates a Total Loss status. If not, disregard.
     - Do NOT rely on assumptions. Only acknowledge presence of documents or data when clearly present in text or visible in photos.
-    - Only evaluate Total Loss protocols if the estimate or documentation explicitly indicates the vehicle was a total loss.
-    - Do not assume a total loss condition based on estimate formatting or value alone.
-    - If no mention of Total Loss or salvage is found, do not apply deductions for missing Total Loss evaluation details.
-
 
     PHOTO EVIDENCE RULES (override label dependency):
     [...continue prompt as before...]
@@ -245,3 +263,4 @@ async def get_client_rules(client_name: str):
             return JSONResponse(status_code=500, content={"error": str(e)})
     else:
         return JSONResponse(status_code=404, content={"error": "Rules not found for this client."})
+
