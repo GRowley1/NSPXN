@@ -65,7 +65,8 @@ def extract_text_from_pdf(file) -> str:
                 logger.warning(f"Page {i} OCR output skipped (garbled): {ocr_text[:100]}...")
                 continue
             text_output += f"\n[Page {i}]\n{ocr_text}"
-            logger.debug(f"OCR output for page {i}: {ocr_text[:500]}...")
+            if i == 5:  # Log Page 5 for labor/tax
+                logger.debug(f"Page 5 OCR (labor/tax): {ocr_text[:500]}...")
         if not text_output.strip():
             logger.error("No valid text extracted from PDF")
         return text_output
@@ -171,15 +172,18 @@ def check_labor_and_tax_score(text: str, client_rules: str) -> int:
     required_sections = ["body labor", "paint labor", "mechanical labor", "structural labor"]
     found_sections = []
     for section in required_sections:
-        if re.search(rf"{section}[:\s]*\$?\d+\.?\d*", text, re.IGNORECASE):
+        # Flexible regex for labor rates (e.g., "$68.00", "68.00/hr", "68.00")
+        if re.search(rf"{section}[:\s]*(?:\$?\d+\.?\d*\s*(?:/hr|hour)?)", text, re.IGNORECASE):
             found_sections.append(section)
+            logger.debug(f"Found labor rate for {section}")
     if not found_sections:  # Deduct only if ALL labor rates are missing
         score_adj -= 50
         logger.debug("All labor rates missing")
     else:
         logger.debug(f"Found labor rates in sections: {found_sections}")
     if re.search(r"utilize applicable tax rate", client_rules, re.IGNORECASE):
-        if not re.search(r"tax[:\s]*\$?\d+|\d+%", text, re.IGNORECASE):
+        # Flexible regex for tax (e.g., "8.7%", "$867.08", "tax: 8.7")
+        if not re.search(r"tax[:\s]*(?:\$?\d+\.?\d*|\d+\.?\d*%?)", text, re.IGNORECASE):
             score_adj -= 25
             logger.debug("Tax rate missing")
         else:
@@ -239,8 +243,8 @@ async def vision_review(
     You are an AI auto damage auditor. You have access to both text and images (or scans).
 
     IMPORTANT RULES:
-    - If labor rates are missing for ALL sections (body, paint, mechanical, structural), reduce Compliance Score by 50%.
-    - If tax is required by client rules but no tax rate is found, reduce Compliance Score by 25%.
+    - If labor rates are missing for ALL sections (body, paint, mechanical, structural), reduce Compliance Score by 50%. If any labor rate is present (e.g., body or paint), no deduction applies.
+    - If tax is required by client rules but no tax rate or amount (e.g., percentage or dollar value) is found, reduce Compliance Score by 25%.
     - Never assume compliance if required elements (like labor rates, taxes, or photos) are missing.
     - Treat mentions or OCR detection of "Clean Retail Value", "NADA Value", "Fair Market Range", "Estimated Trade-In Value", "market value", "J.D. Power", "JD Power", or "Average Price Paid" as CONFIRMATION that the retail/market value requirement is met.
     - Treat mentions or OCR detection of "CCC Advisor Report" or "Advisor Report" as CONFIRMATION that the Advisor Report was included.
@@ -248,13 +252,13 @@ async def vision_review(
     - Only evaluate Total Loss protocols if the estimate or documentation explicitly indicates the vehicle was a total loss (e.g., mentions "total loss" or "salvage").
     - Do not assume a total loss condition based on estimate formatting or value alone.
     - If no mention of Total Loss or salvage is found, do not apply deductions for missing Total Loss evaluation details.
-    - For parts usage, flag non-compliance if alternative parts (e.g., LKQ, aftermarket) are used for vehicles of the current model year (2025) or previous year (2024), as per client rules.
+    - For parts usage, flag non-compliance if alternative parts (e.g., LKQ, aftermarket) are used for vehicles of the current model year (2025) or previous year (2024), as per client rules. Deduct 25% for this violation.
     - Deduct 25% from Compliance Score for each missing required photo type (four corners, odometer, VIN, license plate).
     - For four corners photos, consider the requirement met if at least two corner views (e.g., front left, front right, rear left, rear right) are present in text or images.
 
     PHOTO EVIDENCE RULES:
     - Required photos: four corners, odometer, VIN, license plate.
-    - Four corners is satisfied if at least two views (e.g., front left, front right, rear left, rear right) are detected.
+    - Four corners is satisfied if at least two views (e.g., front left, front right, rear left, rear right) are detected in text or images.
     - If photo types are missing (indicated in input as "MISSING PHOTOS"), deduct 25% per missing type from Compliance Score.
 
     At the top of your response, ALWAYS include:
