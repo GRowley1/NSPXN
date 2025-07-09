@@ -252,7 +252,7 @@ async def vision_review(
     - Deduct 25% from Compliance Score for each missing required photo type (four corners, odometer, VIN, license plate).
     - For four corners photos, the requirement is met if at least two corner views (e.g., front left, front right, rear left, rear right, or synonyms like left front, right front, left rear, right rear) are present in text or images, as indicated in the MISSING PHOTOS hint.
     - Do NOT apply deductions for unmentioned elements or assumed violations. Deductions must be explicitly listed in the findings and supported by evidence in the input or client rules.
-    - The Compliance Score starts at 100% and is only reduced by explicit deductions for labor rates (50% if all missing), tax (25% if missing), photos (25% per missing type), or parts (25% for non-OEM in 2024/2025 models).
+    - The Compliance Score starts at 100% and is only reduced by explicit deductions for labor rates (50% if all missing), tax (25% if missing), photos (25% per missing type), or parts (25% for violations).
     - Respect the MISSING PHOTOS hint provided in the input to determine photo compliance.
 
     PHOTO EVIDENCE RULES:
