@@ -255,7 +255,7 @@ async def vision_review(
 
     PHOTO EVIDENCE RULES:
     - Required photos: four corners, odometer, VIN, license plate.
-    - Four corners is satisfied if at least two views (e.g., front left, front right, rear left, rear right, or synonyms like left front, right front) are detected in text or images, as indicated in the MISSING PHOTOS hint.
+    - Four corners is satisfied if at least two views (e.g., front left, front right, rear left, rear right, or synonyms like left front, right front, left rear, right rear) are detected in text or images, as indicated in the MISSING PHOTOS hint.
     - If photo types are missing (indicated in input as "MISSING PHOTOS"), deduct 25% per missing type from Compliance Score.
     - Respect the MISSING PHOTOS hint provided in the input to determine photo compliance.
 
@@ -288,9 +288,7 @@ async def vision_review(
 
         score_adj = check_labor_and_tax_score(combined_text, client_rules)
         score_adj -= 25 * len(missing_photos)
-        # Placeholder: Apply a 25% deduction to match expected 75% score, pending clarification
-        score_adj -= 25  # Temporary adjustment for unspecified violation
-        logger.debug(f"Score calculation: AI score={score}, labor_tax_adj={check_labor_and_tax_score(combined_text, client_rules)}, photo_adj={-25 * len(missing_photos)}, placeholder_adj=-25, final_score={max(0, score + score_adj)}")
+        logger.debug(f"Score calculation: AI score={score}, labor_tax_adj={check_labor_and_tax_score(combined_text, client_rules)}, photo_adj={-25 * len(missing_photos)}, final_score={max(0, score + score_adj)}")
         score = max(0, score + score_adj)
 
         pdf = FPDF()
@@ -366,4 +364,3 @@ async def get_client_rules(client_name: str):
     else:
         logger.error(f"Rules not found for client: {client_name}")
         return JSONResponse(status_code=404, content={"error": "Rules not found for this client."})
-
