@@ -52,16 +52,18 @@ def preprocess_image(img: Image.Image) -> Image.Image:
 def extract_text_from_pdf(file) -> str:
     try:
         file.seek(0)
-        images = convert_from_bytes(file.read(), dpi=200)
+        images = convert_from_bytes(file.read(), dpi=400)  # Increased DPI
         text_output = ""
         for i, img in enumerate(images, 1):
             processed = preprocess_image(img)
-            ocr_text = pytesseract.image_to_string(processed, lang="eng", config='--psm 6')
+            ocr_text = pytesseract.image_to_string(processed, lang="eng", config='--psm 3')  # Try PSM 3
             if len(ocr_text.strip()) < 50 or re.search(r"[\:/\d\s]{50,}", ocr_text):
                 logger.warning(f"Page {i} OCR output skipped (garbled): {ocr_text[:100]}...")
                 continue
             text_output += f"\n[Page {i}]\n{ocr_text}"
             logger.debug(f"OCR output for page {i}: {ocr_text[:500]}...")
+        if not text_output.strip():
+            logger.error("No valid text extracted from PDF")
         return text_output
     except Exception as e:
         logger.error(f"OCR error: {str(e)}")
@@ -109,18 +111,40 @@ def check_required_photos(image_files: List[UploadFile], ocr_text: str) -> List[
     required_photos = ["four corners", "odometer", "vin", "license plate"]
     found_photos = []
     ocr_lower = ocr_text.lower()
+    # Keyword-based detection from OCR text
     if any(term in ocr_lower for term in ["license plate", "plate photo", "registration plate"]):
         found_photos.append("license plate")
-        logger.debug("Found license plate photo")
+        logger.debug("Found license plate photo via OCR keywords")
     if any(term in ocr_lower for term in ["odometer", "mileage photo", "dashboard mileage"]):
         found_photos.append("odometer")
-        logger.debug("Found odometer photo")
+        logger.debug("Found odometer photo via OCR keywords")
     if any(term in ocr_lower for term in ["vin", "vehicle identification number", "vin photo"]):
         found_photos.append("vin")
-        logger.debug("Found VIN photo")
-    if any(term in ocr_lower for term in ["four corners", "four corner photo", "vehicle corners"]):
+        logger.debug("Found VIN photo via OCR keywords")
+    if any(term in ocr_lower for term in ["four corners", "four corner photo", "vehicle corners", "front left", "front right", "rear left", "rear right"]):
         found_photos.append("four corners")
-        logger.debug("Found four corners photo")
+        logger.debug("Found four corners photo via OCR keywords")
+    # Image-based recognition for uploaded images
+    for img in image_files:
+        try:
+            img.file.seek(0)
+            image = Image.open(io.BytesIO(img.file.read()))
+            processed = preprocess_image(image)
+            ocr = pytesseract.image_to_string(processed, lang="eng")
+            if re.search(r"\b[A-HJ-NPR-Z0-9]{17}\b", ocr, re.IGNORECASE):  # VIN: 17 alphanumeric chars
+                found_photos.append("vin")
+                logger.debug("Found VIN photo via image OCR")
+            if re.search(r"\d{1,3}(,\d{3})*\s*(miles|km)", ocr, re.IGNORECASE):  # Odometer: mileage format
+                found_photos.append("odometer")
+                logger.debug("Found odometer photo via image OCR")
+            if re.search(r"(license|registration)\s*plate|\b[A-Z0-9]{5,8}\b", ocr, re.IGNORECASE):  # License plate
+                found_photos.append("license plate")
+                logger.debug("Found license plate photo via image OCR")
+            if any(term in ocr.lower() for term in ["front left", "front right", "rear left", "rear right", "vehicle corner"]):
+                found_photos.append("four corners")
+                logger.debug("Found four corners photo via image OCR")
+        except Exception as e:
+            logger.error(f"Image processing error: {str(e)}")
     found_photos = list(set(found_photos))
     missing = [p for p in required_photos if p not in found_photos]
     logger.debug(f"Found photos: {found_photos}, Missing photos: {missing}")
