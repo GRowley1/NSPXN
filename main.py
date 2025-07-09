@@ -53,7 +53,7 @@ def preprocess_image(img: Image.Image) -> Image.Image:
 def extract_text_from_pdf(file) -> str:
     try:
         file.seek(0)
-        images = convert_from_bytes(file.read(), dpi=300)  # Increased DPI for better clarity
+        images = convert_from_bytes(file.read(), dpi=200)  # Increased DPI for better clarity
         text_output = ""
         for i, img in enumerate(images, 1):
             processed = preprocess_image(img)
