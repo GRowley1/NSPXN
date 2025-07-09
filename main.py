@@ -52,11 +52,15 @@ def preprocess_image(img: Image.Image) -> Image.Image:
 def extract_text_from_pdf(file) -> str:
     try:
         file.seek(0)
-        images = convert_from_bytes(file.read(), dpi=400)  # Increased DPI
+        images = convert_from_bytes(file.read(), dpi=200)  # Reverted to 200 DPI
         text_output = ""
         for i, img in enumerate(images, 1):
             processed = preprocess_image(img)
-            ocr_text = pytesseract.image_to_string(processed, lang="eng", config='--psm 3')  # Try PSM 3
+            try:
+                ocr_text = pytesseract.image_to_string(processed, lang="eng", config='--psm 3')
+            except Exception as e:
+                logger.warning(f"PSM 3 failed for page {i}: {str(e)}, retrying with PSM 6")
+                ocr_text = pytesseract.image_to_string(processed, lang="eng", config='--psm 6')
             if len(ocr_text.strip()) < 50 or re.search(r"[\:/\d\s]{50,}", ocr_text):
                 logger.warning(f"Page {i} OCR output skipped (garbled): {ocr_text[:100]}...")
                 continue
@@ -66,7 +70,7 @@ def extract_text_from_pdf(file) -> str:
             logger.error("No valid text extracted from PDF")
         return text_output
     except Exception as e:
-        logger.error(f"OCR error: {str(e)}")
+        logger.error(f"OCR error (possible network failure): {str(e)}")
         return f"\n\u274c OCR error during combined extraction: {str(e)}"
 
 def extract_text_from_docx(file) -> str:
