@@ -250,8 +250,10 @@ async def vision_review(
     - If no mention of Total Loss or salvage is found, do not apply deductions for missing Total Loss evaluation details.
     - For parts usage, flag non-compliance if alternative parts (e.g., LKQ, aftermarket) are used for vehicles of the current model year (2025) or previous year (2024), as per client rules. Deduct 25% for this violation. For older models (e.g., 2012), LKQ/aftermarket parts are compliant.
     - Deduct 25% from Compliance Score for each missing required photo type (four corners, odometer, VIN, license plate).
-    - For four corners photos, the requirement is met if at least two corner views (e.g., front left, front right, rear left, rear right, or synonyms like left front, right front, left rear, right rear) are present in text or images.
-    - Only apply deductions explicitly listed in the findings. Do not assume additional violations unless evidence is provided in the input or client rules.
+    - For four corners photos, the requirement is met if at least two corner views (e.g., front left, front right, rear left, rear right, or synonyms like left front, right front, left rear, right rear) are present in text or images, as indicated in the MISSING PHOTOS hint.
+    - Do NOT apply deductions for unmentioned elements or assumed violations. Deductions must be explicitly listed in the findings and supported by evidence in the input or client rules.
+    - The Compliance Score starts at 100% and is only reduced by explicit deductions for labor rates (50% if all missing), tax (25% if missing), photos (25% per missing type), or parts (25% for non-OEM in 2024/2025 models).
+    - Respect the MISSING PHOTOS hint provided in the input to determine photo compliance.
 
     PHOTO EVIDENCE RULES:
     - Required photos: four corners, odometer, VIN, license plate.
@@ -290,6 +292,9 @@ async def vision_review(
         score_adj -= 25 * len(missing_photos)
         logger.debug(f"Score calculation: AI score={score}, labor_tax_adj={check_labor_and_tax_score(combined_text, client_rules)}, photo_adj={-25 * len(missing_photos)}, final_score={max(0, score + score_adj)}")
         score = max(0, score + score_adj)
+        if score < 100 and score_adj == 0:
+            logger.warning(f"AI score ({score}) inconsistent with no deductions (labor_tax_adj=0, photo_adj=0). Overriding to 100.")
+            score = 100
 
         pdf = FPDF()
         pdf.add_page()
