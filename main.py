@@ -17,7 +17,7 @@ from PIL import Image
 from openai import OpenAI
 
 if "OPENAI_API_KEY" not in os.environ:
-    raise RuntimeError("\u274c OPENAI_API_KEY environment variable is NOT set.")
+    raise RuntimeError("❌ OPENAI_API_KEY environment variable is NOT set.")
 client = OpenAI(api_key=os.environ["OPENAI_API_KEY"])
 
 app = FastAPI()
@@ -47,7 +47,7 @@ def extract_text_from_pdf(file) -> str:
             text_output += f"\n[Page {i}]\n" + ocr_text
         return text_output
     except Exception as e:
-        return f"\n\u274c OCR error during combined extraction: {str(e)}"
+        return f"\n❌ OCR error during combined extraction: {str(e)}"
 
 def extract_text_from_docx(file) -> str:
     doc = Document(file)
@@ -65,26 +65,41 @@ def advisor_report_present(texts: List[str], image_files: List[UploadFile]) -> b
     for img in image_files:
         if "advisor" in img.filename.lower():
             return True
-        ocr = pytesseract.image_to_string(Image.open(io.BytesIO(img.file.read())), lang="eng")
-        if "advisor report" in ocr.lower():
-            return True
+        try:
+            ocr = pytesseract.image_to_string(Image.open(io.BytesIO(img.file.read())), lang="eng")
+            if "advisor report" in ocr.lower():
+                return True
+        except:
+            continue
     return False
 
-def check_labor_and_tax_score(text: str, client_rules: str) -> int:
-    labor_hours = re.search(r"(body|paint) labor\s+\d+\.?\d*\s+hrs", text, re.IGNORECASE)
-    zero_rate = re.search(r"\$\s*0+(\.00)?\s*/hr", text, re.IGNORECASE)
-    if labor_hours and zero_rate:
-        return -100
+def check_visual_photo_evidence(image_files: List[UploadFile]) -> List[str]:
+    missing = []
+    ocr_text = ""
+    for img in image_files:
+        try:
+            ocr = pytesseract.image_to_string(Image.open(io.BytesIO(img.file.read())), lang="eng")
+            ocr_text += ocr.lower() + "\n"
+        except:
+            continue
+    if not re.search(r"vin[:\s-]*[a-hj-npr-z\d]{11,17}", ocr_text):
+        missing.append("VIN Plate")
+    if not re.search(r"(odo|mileage|mi)[:\s-]*\d{4,6}", ocr_text):
+        missing.append("Odometer")
+    if not re.search(r"plate[:\s-]*\w{2,8}", ocr_text):
+        missing.append("License Plate")
+    if not re.search(r"(dent|scratch|damage|bumper|door|fender|quarter)", ocr_text):
+        missing.append("Damage Area Photos")
+    return missing
 
+def check_labor_and_tax_score(text: str, client_rules: str) -> int:
+    if re.search(r"labor hours[:\s]*\d+", text, re.IGNORECASE):
+        if re.search(r"labor rate[:\s]*\$?0+(\.00)?", text, re.IGNORECASE):
+            return -100
     if re.search(r"utilize applicable tax rate", client_rules, re.IGNORECASE):
         if not re.search(r"tax[:\s]*\$?\d+|\d+%", text, re.IGNORECASE):
             return -75
-
     return 0
-
-@app.get("/")
-async def root():
-    return {"status": "ok"}
 
 @app.post("/vision-review")
 async def vision_review(
@@ -119,11 +134,14 @@ async def vision_review(
 
     combined_text = '\n'.join(texts).lower()
     advisor_confirmed = advisor_report_present(texts, image_files)
+    photo_issues = check_visual_photo_evidence(image_files)
+
     advisor_hint = "\n\nCONFIRMED: CCC Advisor Report is included based on OCR or filename." if advisor_confirmed else ""
+    photo_hint = f"\n\nMissing required photo elements: {', '.join(photo_issues)}" if photo_issues else ""
 
     vision_message = {"role": "user", "content": []}
     if texts:
-        vision_message["content"].append({"type": "text", "text": '\n\n'.join(texts) + advisor_hint})
+        vision_message["content"].append({"type": "text", "text": '\n\n'.join(texts) + advisor_hint + photo_hint})
     if images:
         vision_message["content"].extend(images)
 
@@ -136,13 +154,11 @@ async def vision_review(
     - Never assume compliance if required elements (like labor rate or taxes) are missing.
     - Treat mentions or OCR detection of \"Clean Retail Value\", or \"NADA Value\", or \"Fair Market Range\", or \"Estimated Trade-In Value\", as CONFIRMATION that the value was included.
     - Treat mentions or OCR detection of \"CCC Advisor Report\" as CONFIRMATION that the Advisor Report was included.
-    - Do NOT rely on assumptions. Only acknowledge presence of documents or data when clearly present in text or visible in photos.
     - Only evaluate Total Loss protocols if the estimate or documentation explicitly indicates the vehicle was a total loss.
     - Do not assume a total loss condition based on estimate formatting or value alone.
     - If no mention of Total Loss or salvage is found, do not apply deductions for missing Total Loss evaluation details.
-
-    PHOTO EVIDENCE RULES (override label dependency):
-    [...continue prompt as before...]
+    - PHOTO EVIDENCE RULES (override label dependency):
+      - Confirm VIN, Odometer, License Plate, Damage Area photos based on OCR findings only — not filenames or descriptions.
 
     At the top of your response, ALWAYS include:
     Claim #: (from estimate)
@@ -245,4 +261,3 @@ async def get_client_rules(client_name: str):
             return JSONResponse(status_code=500, content={"error": str(e)})
     else:
         return JSONResponse(status_code=404, content={"error": "Rules not found for this client."})
-
