@@ -10,7 +10,6 @@ import smtplib
 from email.message import EmailMessage
 from fpdf import FPDF
 from docx import Document
-from PyPDF2 import PdfReader
 from pdf2image import convert_from_bytes
 import pytesseract
 from PIL import Image, ImageEnhance, ImageOps, ImageFilter
@@ -75,6 +74,11 @@ def extract_text_from_docx(file) -> str:
     return text
 
 def extract_field(label, text) -> str:
+    pattern = re.compile(rf"{label}\s*[:\-#=]?\s*(AU025\d+-[a-zA-Z0-9]+)", re.IGNORECASE)
+    matches = pattern.findall(text)
+    if matches:
+        from collections import Counter
+        return Counter(matches).most_common(1)[0][0].strip()
     pattern = re.compile(rf"{label}\s*[:\-#=]?\s*([^\n\r;]+)", re.IGNORECASE)
     matches = pattern.findall(text)
     if matches:
@@ -105,14 +109,18 @@ def check_required_photos(image_files: List[UploadFile], ocr_text: str) -> List[
     required_photos = ["four corners", "odometer", "vin", "license plate"]
     found_photos = []
     ocr_lower = ocr_text.lower()
-    if "license plate" in ocr_lower or "page 20" in ocr_lower:
+    if any(term in ocr_lower for term in ["license plate", "plate photo", "registration plate"]):
         found_photos.append("license plate")
-    if "odometer" in ocr_lower or "page 31" in ocr_lower:
+        logger.debug("Found license plate photo")
+    if any(term in ocr_lower for term in ["odometer", "mileage photo", "dashboard mileage"]):
         found_photos.append("odometer")
-    if "vin" in ocr_lower or "page 19" in ocr_lower or "page 25" in ocr_lower:
+        logger.debug("Found odometer photo")
+    if any(term in ocr_lower for term in ["vin", "vehicle identification number", "vin photo"]):
         found_photos.append("vin")
-    if any(term in ocr_lower for term in ["front", "rear", "corner", "side view"]):
+        logger.debug("Found VIN photo")
+    if any(term in ocr_lower for term in ["four corners", "four corner photo", "vehicle corners"]):
         found_photos.append("four corners")
+        logger.debug("Found four corners photo")
     found_photos = list(set(found_photos))
     missing = [p for p in required_photos if p not in found_photos]
     logger.debug(f"Found photos: {found_photos}, Missing photos: {missing}")
@@ -134,6 +142,8 @@ def check_labor_and_tax_score(text: str, client_rules: str) -> int:
         if not re.search(r"tax[:\s]*\$?\d+|\d+%", text, re.IGNORECASE):
             score_adj -= 25
             logger.debug("Tax rate missing")
+        else:
+            logger.debug("Tax rate found")
     return score_adj
 
 @app.get("/")
@@ -192,14 +202,14 @@ async def vision_review(
     - If labor rates are missing for ALL sections (body, paint, mechanical, structural), reduce Compliance Score by 50%.
     - If tax is required by client rules but no tax rate is found, reduce Compliance Score by 25%.
     - Never assume compliance if required elements (like labor rates, taxes, or photos) are missing.
-    - Treat mentions or OCR detection of "Clean Retail Value", "NADA Value", "Fair Market Range", "Estimated Trade-In Value", or synonyms like "retail value" or "market value" as CONFIRMATION that the value was included.
+    - Treat mentions or OCR detection of "Clean Retail Value", "NADA Value", "Fair Market Range", "Estimated Trade-In Value", "market value", "J.D. Power", "JD Power", or "Average Price Paid" as CONFIRMATION that the retail/market value requirement is met.
     - Treat mentions or OCR detection of "CCC Advisor Report" or "Advisor Report" as CONFIRMATION that the Advisor Report was included.
     - Do NOT rely on assumptions. Only acknowledge presence of documents or data when clearly present in text or visible in photos.
     - Only evaluate Total Loss protocols if the estimate or documentation explicitly indicates the vehicle was a total loss (e.g., mentions "total loss" or "salvage").
     - Do not assume a total loss condition based on estimate formatting or value alone.
     - If no mention of Total Loss or salvage is found, do not apply deductions for missing Total Loss evaluation details.
-    - For parts usage, flag non-compliance if alternative parts are used for vehicles of the current model year (2025) or previous year (2024), as per client rules.
-    - Deduct 25% from Compliance Score if required photos (four corners, odometer, VIN, license plate) are missing, per photo type.
+    - For parts usage, flag non-compliance if alternative parts (e.g., LKQ, aftermarket) are used for vehicles of the current model year (2025) or previous year (2024), as per client rules.
+    - Deduct 25% from Compliance Score for each missing required photo type (four corners, odometer, VIN, license plate).
 
     PHOTO EVIDENCE RULES:
     - Required photos: four corners, odometer, VIN, license plate.
