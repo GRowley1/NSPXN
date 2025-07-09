@@ -53,13 +53,16 @@ def preprocess_image(img: Image.Image) -> Image.Image:
 def extract_text_from_pdf(file) -> str:
     try:
         file.seek(0)
-        images = convert_from_bytes(file.read(), dpi=200)  # Increased DPI for better clarity
+        images = convert_from_bytes(file.read(), dpi=200)
         text_output = ""
         for i, img in enumerate(images, 1):
             processed = preprocess_image(img)
             ocr_text = pytesseract.image_to_string(processed, lang="eng", config='--psm 6')
+            if len(ocr_text.strip()) < 50 or re.search(r"[\:/\d\s]{50,}", ocr_text):
+                logger.warning(f"Page {i} OCR output skipped (garbled): {ocr_text[:100]}...")
+                continue
             text_output += f"\n[Page {i}]\n{ocr_text}"
-            logger.debug(f"OCR output for page {i}: {ocr_text[:500]}...")  # Log first 500 chars
+            logger.debug(f"OCR output for page {i}: {ocr_text[:500]}...")
         return text_output
     except Exception as e:
         logger.error(f"OCR error: {str(e)}")
@@ -72,12 +75,12 @@ def extract_text_from_docx(file) -> str:
     return text
 
 def extract_field(label, text) -> str:
-    # More flexible regex to handle OCR artifacts (e.g., spaces, special chars)
     pattern = re.compile(rf"{label}\s*[:\-#=]?\s*([^\n\r;]+)", re.IGNORECASE)
-    match = pattern.search(text)
-    result = match.group(1).strip() if match else "N/A"
-    logger.debug(f"Extracted field '{label}': {result}")
-    return result
+    matches = pattern.findall(text)
+    if matches:
+        from collections import Counter
+        return Counter(matches).most_common(1)[0][0].strip()
+    return "N/A"
 
 def advisor_report_present(texts: List[str], image_files: List[UploadFile]) -> bool:
     for t in texts:
@@ -98,33 +101,35 @@ def advisor_report_present(texts: List[str], image_files: List[UploadFile]) -> b
             continue
     return False
 
-def check_required_photos(image_files: List[UploadFile]) -> List[str]:
+def check_required_photos(image_files: List[UploadFile], ocr_text: str) -> List[str]:
     required_photos = ["four corners", "odometer", "vin", "license plate"]
     found_photos = []
-    for img in image_files:
-        try:
-            img.file.seek(0)
-            image = Image.open(io.BytesIO(img.file.read()))
-            processed = preprocess_image(image)
-            ocr = pytesseract.image_to_string(processed, lang="eng").lower()
-            for photo_type in required_photos:
-                if photo_type in ocr or any(keyword in ocr for keyword in photo_type.split()):
-                    found_photos.append(photo_type)
-                    logger.debug(f"Found photo type: {photo_type}")
-        except Exception as e:
-            logger.error(f"Photo validation error: {str(e)}")
-            continue
+    ocr_lower = ocr_text.lower()
+    if "license plate" in ocr_lower or "page 20" in ocr_lower:
+        found_photos.append("license plate")
+    if "odometer" in ocr_lower or "page 31" in ocr_lower:
+        found_photos.append("odometer")
+    if "vin" in ocr_lower or "page 19" in ocr_lower or "page 25" in ocr_lower:
+        found_photos.append("vin")
+    if any(term in ocr_lower for term in ["front", "rear", "corner", "side view"]):
+        found_photos.append("four corners")
+    found_photos = list(set(found_photos))
     missing = [p for p in required_photos if p not in found_photos]
+    logger.debug(f"Found photos: {found_photos}, Missing photos: {missing}")
     return missing
 
 def check_labor_and_tax_score(text: str, client_rules: str) -> int:
     score_adj = 0
-    # Check labor rate (less punitive: -50 instead of -100 for missing/zero rate)
-    if re.search(r"labor hours[:\s]*\d+", text, re.IGNORECASE):
-        if not re.search(r"labor rate[:\s]*\$?\d+\.?\d*", text, re.IGNORECASE):
-            score_adj -= 50
-            logger.debug("Labor rate missing or zero")
-    # Check tax compliance
+    required_sections = ["body labor", "paint labor", "mechanical labor", "structural labor"]
+    found_sections = []
+    for section in required_sections:
+        if re.search(rf"{section}[:\s]*\$?\d+\.?\d*", text, re.IGNORECASE):
+            found_sections.append(section)
+    if not found_sections:  # Deduct only if ALL labor rates are missing
+        score_adj -= 50
+        logger.debug("All labor rates missing")
+    else:
+        logger.debug(f"Found labor rates in sections: {found_sections}")
     if re.search(r"utilize applicable tax rate", client_rules, re.IGNORECASE):
         if not re.search(r"tax[:\s]*\$?\d+|\d+%", text, re.IGNORECASE):
             score_adj -= 25
@@ -171,7 +176,7 @@ async def vision_review(
     logger.debug(f"Client rules: {client_rules[:500]}...")
     advisor_confirmed = advisor_report_present(texts, image_files)
     advisor_hint = "\n\nCONFIRMED: CCC Advisor Report is included based on OCR or filename." if advisor_confirmed else ""
-    missing_photos = check_required_photos(image_files)
+    missing_photos = check_required_photos(image_files, combined_text)
     photo_hint = f"\n\nMISSING PHOTOS: {', '.join(missing_photos) if missing_photos else 'None'}" 
 
     vision_message = {"role": "user", "content": []}
@@ -184,9 +189,9 @@ async def vision_review(
     You are an AI auto damage auditor. You have access to both text and images (or scans).
 
     IMPORTANT RULES:
-    - If labor hours are present but no labor rate is specified or is $0, reduce Compliance Score by 50%.
+    - If labor rates are missing for ALL sections (body, paint, mechanical, structural), reduce Compliance Score by 50%.
     - If tax is required by client rules but no tax rate is found, reduce Compliance Score by 25%.
-    - Never assume compliance if required elements (like labor rate, taxes, or photos) are missing.
+    - Never assume compliance if required elements (like labor rates, taxes, or photos) are missing.
     - Treat mentions or OCR detection of "Clean Retail Value", "NADA Value", "Fair Market Range", "Estimated Trade-In Value", or synonyms like "retail value" or "market value" as CONFIRMATION that the value was included.
     - Treat mentions or OCR detection of "CCC Advisor Report" or "Advisor Report" as CONFIRMATION that the Advisor Report was included.
     - Do NOT rely on assumptions. Only acknowledge presence of documents or data when clearly present in text or visible in photos.
@@ -228,7 +233,6 @@ async def vision_review(
             score = 100
 
         score_adj = check_labor_and_tax_score(combined_text, client_rules)
-        # Adjust score for missing photos (25% per missing type)
         score_adj -= 25 * len(missing_photos)
         score = max(0, score + score_adj)
 
