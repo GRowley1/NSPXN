@@ -52,7 +52,7 @@ def preprocess_image(img: Image.Image) -> Image.Image:
 def extract_text_from_pdf(file) -> str:
     try:
         file.seek(0)
-        images = convert_from_bytes(file.read(), dpi=200)  # Reverted to 200 DPI
+        images = convert_from_bytes(file.read(), dpi=200)  # Stable DPI
         text_output = ""
         for i, img in enumerate(images, 1):
             processed = preprocess_image(img)
@@ -115,6 +115,10 @@ def check_required_photos(image_files: List[UploadFile], ocr_text: str) -> List[
     required_photos = ["four corners", "odometer", "vin", "license plate"]
     found_photos = []
     ocr_lower = ocr_text.lower()
+    corner_keywords = ["four corners", "four corner photo", "vehicle corners", 
+                      "front left", "front right", "rear left", "rear right"]
+    corner_matches = []
+    
     # Keyword-based detection from OCR text
     if any(term in ocr_lower for term in ["license plate", "plate photo", "registration plate"]):
         found_photos.append("license plate")
@@ -125,9 +129,13 @@ def check_required_photos(image_files: List[UploadFile], ocr_text: str) -> List[
     if any(term in ocr_lower for term in ["vin", "vehicle identification number", "vin photo"]):
         found_photos.append("vin")
         logger.debug("Found VIN photo via OCR keywords")
-    if any(term in ocr_lower for term in ["four corners", "four corner photo", "vehicle corners", "front left", "front right", "rear left", "rear right"]):
+    for term in corner_keywords:
+        if term in ocr_lower:
+            corner_matches.append(term)
+    if len(corner_matches) >= 2:  # At least two corner views for four corners
         found_photos.append("four corners")
-        logger.debug("Found four corners photo via OCR keywords")
+        logger.debug(f"Found four corners photo via OCR keywords: {corner_matches}")
+    
     # Image-based recognition for uploaded images
     for img in image_files:
         try:
@@ -144,14 +152,18 @@ def check_required_photos(image_files: List[UploadFile], ocr_text: str) -> List[
             if re.search(r"(license|registration)\s*plate|\b[A-Z0-9]{5,8}\b", ocr, re.IGNORECASE):  # License plate
                 found_photos.append("license plate")
                 logger.debug("Found license plate photo via image OCR")
-            if any(term in ocr.lower() for term in ["front left", "front right", "rear left", "rear right", "vehicle corner"]):
+            corner_matches_img = [term for term in corner_keywords if term in ocr.lower()]
+            if len(corner_matches_img) >= 2:
                 found_photos.append("four corners")
-                logger.debug("Found four corners photo via image OCR")
+                logger.debug(f"Found four corners photo via image OCR: {corner_matches_img}")
+            if corner_matches_img:
+                corner_matches.extend(corner_matches_img)
         except Exception as e:
             logger.error(f"Image processing error: {str(e)}")
+    
     found_photos = list(set(found_photos))
     missing = [p for p in required_photos if p not in found_photos]
-    logger.debug(f"Found photos: {found_photos}, Missing photos: {missing}")
+    logger.debug(f"Found photos: {found_photos}, Missing photos: {missing}, Corner matches: {corner_matches}")
     return missing
 
 def check_labor_and_tax_score(text: str, client_rules: str) -> int:
@@ -238,9 +250,11 @@ async def vision_review(
     - If no mention of Total Loss or salvage is found, do not apply deductions for missing Total Loss evaluation details.
     - For parts usage, flag non-compliance if alternative parts (e.g., LKQ, aftermarket) are used for vehicles of the current model year (2025) or previous year (2024), as per client rules.
     - Deduct 25% from Compliance Score for each missing required photo type (four corners, odometer, VIN, license plate).
+    - For four corners photos, consider the requirement met if at least two corner views (e.g., front left, front right, rear left, rear right) are present in text or images.
 
     PHOTO EVIDENCE RULES:
     - Required photos: four corners, odometer, VIN, license plate.
+    - Four corners is satisfied if at least two views (e.g., front left, front right, rear left, rear right) are detected.
     - If photo types are missing (indicated in input as "MISSING PHOTOS"), deduct 25% per missing type from Compliance Score.
 
     At the top of your response, ALWAYS include:
