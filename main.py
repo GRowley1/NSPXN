@@ -301,7 +301,7 @@ async def vision_review(
         pdf.multi_cell(0, 10, f"File Number: {file_number}")
         pdf.multi_cell(0, 10, f"IA Company: {ia_company}")
         pdf.multi_cell(0, 10, f"Appraiser ID #: {appraiser_id}")
-        pdf.multi_cell(0, 10, f"AI-4-IA Final Compliance Score: {score}%")
+        pdf.multi_cell(0, 10, f"Compliance Score: {score}%")
         pdf.ln(5)
         pdf.multi_cell(0, 10, "AI-4-IA Review Summary:", align='L')
         pdf.set_font("DejaVu", size=9)
