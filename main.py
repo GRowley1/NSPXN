@@ -77,7 +77,7 @@ def check_labor_and_tax_score(text: str, client_rules: str) -> int:
 
     if re.search(r"utilize applicable tax rate", client_rules, re.IGNORECASE):
         if not re.search(r"tax[:\s]*\$?\d+|\d+%", text, re.IGNORECASE):
-            return -50
+            return -75
 
     return 0
 
