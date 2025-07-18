@@ -112,9 +112,10 @@ def advisor_report_present(texts: List[str], image_files: List[UploadFile]) -> b
         "sca claim services", "motor crash estimating guide"
     ]
     for t in texts:
-        if any(term in t.lower() for term in advisor_terms):
-            logger.debug(f"Advisor report found in text with term: {term}")
-            return True
+        for term in advisor_terms:
+            if term in t.lower():
+                logger.debug(f"Advisor report found in text with term: {term}")
+                return True
     for img in image_files:
         try:
             img.file.seek(0)
@@ -125,9 +126,10 @@ def advisor_report_present(texts: List[str], image_files: List[UploadFile]) -> b
             image = Image.open(io.BytesIO(content))
             processed = preprocess_image(image)
             ocr = pytesseract.image_to_string(processed, lang="eng")
-            if any(term in ocr.lower() for term in advisor_terms):
-                logger.debug(f"Advisor report found in image OCR with term: {term}")
-                return True
+            for term in advisor_terms:
+                if term in ocr.lower():
+                    logger.debug(f"Advisor report found in image OCR with term: {term}")
+                    return True
         except Exception as e:
             logger.error(f"Image processing error for {img.filename}: {str(e)}")
             continue
@@ -303,7 +305,7 @@ async def vision_review(
 
         PHOTO EVIDENCE RULES:
         - Required photos: four corners, odometer, VIN, license plate.
-        - Four corners is satisfied if at least two views (e.g., front left, front right, rear left, right rear, or synonyms like left front, right front, left rear, right rear) are detected in text or images, as indicated in the MISSING PHOTOS hint.
+        - Four corners is satisfied if at least two views (e.g., front left, front right, rear left, rear right, or synonyms like left front, right front, left rear, right rear) are detected in text or images, as indicated in the MISSING PHOTOS hint.
         - If photo types are missing (indicated in input as "MISSING PHOTOS"), deduct 25% per missing type from Compliance Score.
         - Respect the MISSING PHOTOS hint provided in the input to determine photo compliance.
 
@@ -335,6 +337,10 @@ async def vision_review(
                 score = int(score.strip("%"))
             except:
                 score = 100
+
+            vehicle_year_match = re.search(r"\b(20\d{2})\b", combined_text)
+            vehicle_year = int(vehicle_year_match.group(1)) if vehicle_year_match else 0
+            logger.debug(f"Extracted vehicle year: {vehicle_year}")
 
             score_adj = check_labor_and_tax_score(combined_text, client_rules)
             score_adj += check_parts_compliance(combined_text, vehicle_year)
@@ -420,4 +426,4 @@ async def get_client_rules(client_name: str):
             raise HTTPException(status_code=500, detail=f"Client rules error: {str(e)}")
     else:
         logger.error(f"Rules not found for client: {client_name}")
-        raise HTTPException(status_code=404, detail="Rules not found for this client."})
+        raise HTTPException(status_code=404, detail="Rules not found for this client.")
