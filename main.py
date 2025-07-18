@@ -81,7 +81,7 @@ def extract_text_from_docx(file) -> str:
     return text
 
 def extract_field(label, text) -> str:
-    pattern = re.compile(rf"{label}\s*[:\-#=]?\s*(R226\d+.*|[A-HJ-NPR-Z0-9]{17}|[^\n\r;]+)", re.IGNORECASE)
+    pattern = re.compile(rf"{label}\s*[:\-#=]?\s*(R226\d+.*|[A-HJ-NPR-Z0-9]{{17}}|[^\n\r;]+)", re.IGNORECASE)
     matches = pattern.findall(text)
     if matches:
         from collections import Counter
@@ -89,9 +89,13 @@ def extract_field(label, text) -> str:
     return "N/A"
 
 def advisor_report_present(texts: List[str], image_files: List[UploadFile]) -> bool:
+    advisor_terms = [
+        "ccc advisor report", "advisor report", "estimate of record", "supplement of record",
+        "sca claim services", "motor crash estimating guide"
+    ]
     for t in texts:
-        if any(term in t.lower() for term in ["ccc advisor report", "advisor report"]):
-            logger.debug("Advisor report found in text")
+        if any(term in t.lower() for term in advisor_terms):
+            logger.debug(f"Advisor report found in text with term: {term}")
             return True
     for img in image_files:
         try:
@@ -99,8 +103,8 @@ def advisor_report_present(texts: List[str], image_files: List[UploadFile]) -> b
             image = Image.open(io.BytesIO(img.file.read()))
             processed = preprocess_image(image)
             ocr = pytesseract.image_to_string(processed, lang="eng")
-            if "advisor report" in ocr.lower():
-                logger.debug("Advisor report found in image OCR")
+            if any(term in ocr.lower() for term in advisor_terms):
+                logger.debug(f"Advisor report found in image OCR with term: {term}")
                 return True
         except Exception as e:
             logger.error(f"Image processing error: {str(e)}")
@@ -111,9 +115,11 @@ def check_required_photos(image_files: List[UploadFile], ocr_text: str) -> List[
     required_photos = ["four corners", "odometer", "vin", "license plate"]
     found_photos = []
     ocr_lower = ocr_text.lower()
-    corner_keywords = ["four corners", "four corner photo", "vehicle corners", 
-                      "front left", "front right", "rear left", "rear right",
-                      "left front", "right front", "left rear", "right rear"]
+    corner_keywords = [
+        "four corners", "four corner photo", "vehicle corners",
+        "front left", "front right", "rear left", "rear right",
+        "left front", "right front", "left rear", "right rear"
+    ]
     corner_matches = []
     
     # Keyword-based detection from OCR text
@@ -169,7 +175,7 @@ def check_labor_and_tax_score(text: str, client_rules: str) -> int:
     found_sections = []
     for section in required_sections:
         # Flexible regex for labor rates (e.g., "$50.00", "50.00/hr", "50.00")
-        if re.search(rf"{section}[:\s]*(?:\$?\d+\.?\d*\s*(?:/hr|hour)?)", text, re.IGNORECASE):
+        if re.search(rf"{section}\s*[:\s]*\$?\d+\.?\d*\s*(?:/hr|hour)?", text, re.IGNORECASE):
             found_sections.append(section)
             logger.debug(f"Found labor rate for {section}")
     if not found_sections:  # Deduct only if ALL labor rates are missing
@@ -184,6 +190,16 @@ def check_labor_and_tax_score(text: str, client_rules: str) -> int:
             logger.debug("Tax rate missing")
         else:
             logger.debug("Tax rate found")
+    return score_adj
+
+def check_parts_compliance(text: str, vehicle_year: int) -> int:
+    score_adj = 0
+    if vehicle_year in [2024, 2025]:
+        if re.search(r"\b(?:LKQ|aftermarket|A/M)\b", text, re.IGNORECASE):
+            score_adj -= 25
+            logger.debug(f"Non-compliant parts (LKQ/aftermarket) detected for vehicle year {vehicle_year}")
+    else:
+        logger.debug(f"Vehicle year {vehicle_year} allows LKQ/aftermarket parts")
     return score_adj
 
 @app.get("/")
@@ -225,9 +241,14 @@ async def vision_review(
     logger.debug(f"Combined text: {combined_text[:1000]}...")
     logger.debug(f"Client rules: {client_rules[:500]}...")
     advisor_confirmed = advisor_report_present(texts, image_files)
-    advisor_hint = "\n\nCONFIRMED: CCC Advisor Report is included based on OCR or filename." if advisor_confirmed else ""
+    advisor_hint = "\n\nCONFIRMED: CCC Advisor Report or equivalent (Estimate/Supplement of Record) is included based on OCR or filename." if advisor_confirmed else "\n\nWARNING: No CCC Advisor Report or equivalent detected."
     missing_photos = check_required_photos(image_files, combined_text)
-    photo_hint = f"\n\nMISSING PHOTOS: {', '.join(missing_photos) if missing_photos else 'None'}" 
+    photo_hint = f"\n\nMISSING PHOTOS: {', '.join(missing_photos) if missing_photos else 'None'}"
+
+    # Extract vehicle year for parts compliance check
+    vehicle_year_match = re.search(r"\b(20\d{2})\b", combined_text)
+    vehicle_year = int(vehicle_year_match.group(1)) if vehicle_year_match else 0
+    logger.debug(f"Extracted vehicle year: {vehicle_year}")
 
     vision_message = {"role": "user", "content": []}
     if texts:
@@ -243,12 +264,12 @@ async def vision_review(
     - If tax is required by client rules but no tax rate or amount (e.g., percentage or dollar value) is found, reduce Compliance Score by 25%.
     - Never assume compliance if required elements (like labor rates, taxes, or photos) are missing.
     - Treat mentions or OCR detection of "Clean Retail Value", "NADA Value", "Fair Market Range", "Estimated Trade-In Value", "market value", "J.D. Power", "JD Power", or "Average Price Paid" as CONFIRMATION that the retail/market value requirement is met.
-    - Treat mentions or OCR detection of "CCC Advisor Report" or "Advisor Report" as CONFIRMATION that the Advisor Report was included.
+    - Treat mentions or OCR detection of "CCC Advisor Report", "Advisor Report", "Estimate of Record", "Supplement of Record", "SCA Claim Services", or "MOTOR CRASH ESTIMATING GUIDE" as CONFIRMATION that the Advisor Report was included.
     - Do NOT rely on assumptions. Only acknowledge presence of documents or data when clearly present in text or visible in photos.
     - Only evaluate Total Loss protocols if the estimate or documentation explicitly indicates the vehicle was a total loss (e.g., mentions "total loss" or "salvage"). If declared a total loss, no forms or bids are required.
     - Do not assume a total loss condition based on estimate formatting or value alone.
     - If no mention of Total Loss or salvage is found, do not apply deductions for missing Total Loss evaluation details.
-    - For parts usage, flag non-compliance if alternative parts (e.g., LKQ, aftermarket) are used for vehicles of the current model year (2025) or previous year (2024), as per client rules. Deduct 25% for this violation. For older models (e.g., 2012), LKQ/aftermarket parts are compliant.
+    - For parts usage, flag non-compliance if alternative parts (e.g., LKQ, aftermarket) are used for vehicles of the current model year (2025) or previous year (2024), as per client rules. Deduct 25% for this violation. For older models (e.g., 2019), LKQ/aftermarket parts are compliant.
     - Deduct 25% from Compliance Score for each missing required photo type (four corners, odometer, VIN, license plate).
     - For four corners photos, the requirement is met if at least two corner views (e.g., front left, front right, rear left, rear right, or synonyms like left front, right front, left rear, right rear) are present in text or images, as indicated in the MISSING PHOTOS hint.
     - Do NOT apply deductions for unmentioned elements or assumed violations. Deductions must be explicitly listed in the findings and supported by evidence in the input or client rules.
@@ -289,11 +310,12 @@ async def vision_review(
             score = 100
 
         score_adj = check_labor_and_tax_score(combined_text, client_rules)
+        score_adj += check_parts_compliance(combined_text, vehicle_year)
         score_adj -= 25 * len(missing_photos)
-        logger.debug(f"Score calculation: AI score={score}, labor_tax_adj={check_labor_and_tax_score(combined_text, client_rules)}, photo_adj={-25 * len(missing_photos)}, final_score={max(0, score + score_adj)}")
+        logger.debug(f"Score calculation: AI score={score}, labor_tax_adj={check_labor_and_tax_score(combined_text, client_rules)}, parts_adj={check_parts_compliance(combined_text, vehicle_year)}, photo_adj={-25 * len(missing_photos)}, final_score={max(0, score + score_adj)}")
         score = max(0, score + score_adj)
         if score < 100 and score_adj == 0:
-            logger.warning(f"AI score ({score}) inconsistent with no deductions (labor_tax_adj=0, photo_adj=0). Overriding to 100.")
+            logger.warning(f"AI score ({score}) inconsistent with no deductions (labor_tax_adj=0, parts_adj=0, photo_adj=0). Overriding to 100.")
             score = 100
 
         pdf = FPDF()
