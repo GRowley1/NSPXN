@@ -214,6 +214,18 @@ def is_total_loss(text: str, gpt_output: str) -> bool:
     combined_text = text.lower()
     return any(term in combined_text or term in gpt_output.lower() for term in ["total loss", "totaled", "write-off"])
 
+def get_fraud_risk_explanation(fraud_flags: List[str]) -> str:
+    explanations = {
+        "🚩 Repeated Claim Number": "Multiple instances of the claim number were detected, which may indicate data duplication or potential fraud.",
+        "🚩 Multiple Total Loss Mentions": "The term 'total loss' appears excessively, suggesting possible manipulation or inconsistency.",
+        "🚩 Edited or manipulated content terms found": "Terms like 'copy', 'edited', 'photoshop', or 'manipulated' were found, indicating potential image or document alteration.",
+        "🚩 Future Date of Loss": "The date of loss is set in the future relative to the current date, which may suggest a data entry error or intentional misrepresentation.",
+        "🚩 Claim Number Mismatch": "Different claim numbers were identified across the documents, which could indicate a mismatch or fraudulent activity.",
+        "🚩 GPT flagged suspicious content": "The AI model flagged the content as suspicious, potentially due to unusual patterns or language.",
+        "🚩 Possible duplicate photos or content": "The AI detected possible duplicate photos or content, which may suggest tampering or resubmission."
+    }
+    return "\n".join([explanations.get(flag, "Unknown fraud indicator.") for flag in fraud_flags]) or "No fraud indicators detected."
+
 def fraud_risk_score(combined_text: str, gpt_output: str, claim_numbers: List[str]) -> dict:
     fraud_flags = []
     current_date = datetime.now().date()
@@ -323,6 +335,7 @@ async def vision_review(
     - Don’t assume total loss unless explicitly mentioned
     - Use MISSING PHOTOS hint and advisor confirmation for repair estimates
     - Use total loss status to switch evaluation mode
+    - Do not include disclaimers about processing personal data (e.g., names); focus solely on vehicle assessment data.
 
     {client_rules}
     """
@@ -357,6 +370,7 @@ async def vision_review(
 
         # Fraud detection
         fraud_result = fraud_risk_score(combined_text, gpt_output, claim_numbers)
+        fraud_explanation = get_fraud_risk_explanation(fraud_result["flags"])
 
         # Generate PDF
         pdf = FPDF()
@@ -377,6 +391,9 @@ async def vision_review(
             pdf.multi_cell(0, 10, "Fraud Indicators:")
             for flag in fraud_result['flags']:
                 pdf.multi_cell(0, 10, f"- {flag}")
+            pdf.ln(5)
+            pdf.multi_cell(0, 10, "Fraud Risk Explanation:")
+            pdf.multi_cell(0, 10, fraud_explanation)
         pdf.set_text_color(0, 0, 0)
         pdf.ln(5)
         pdf.multi_cell(0, 10, "Total Loss Status: Yes" if total_loss_status else "Total Loss Status: No")
@@ -407,6 +424,9 @@ AI Review Summary:
 
 Fraud Indicators:
 {chr(10).join(fraud_result['flags']) if fraud_result['flags'] else "None Detected"}
+
+Fraud Risk Explanation:
+{fraud_explanation}
 """
         msg.set_content(email_body)
 
@@ -422,6 +442,7 @@ Fraud Indicators:
             "score": f"{final_score}%",
             "fraud_risk_score": f"{fraud_result['score']}%",
             "fraud_indicators": fraud_result['flags'],
+            "fraud_explanation": fraud_explanation,
             "total_loss": total_loss_status
         }
 
@@ -454,5 +475,4 @@ async def get_client_rules(client_name: str):
     else:
         logger.warning(f"Client rules not found for: {client_name}")
         return JSONResponse(status_code=404, content={"error": f"Rules not found for client: {client_name}"})
-
 
