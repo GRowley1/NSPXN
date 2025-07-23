@@ -228,7 +228,7 @@ async def vision_review(
         vision_message["content"].append({"type": "text", "text": '\n\n'.join(texts) + advisor_hint + photo_hint})
     if images:
         vision_message["content"].extend(images)
-prompt = f"""
+    prompt = f"""
     You are an AI auto damage auditor. You have access to both text and images (or scans).
 
     IMPORTANT RULES:
@@ -288,7 +288,7 @@ prompt = f"""
         if score < 100 and score_adj == 0:
             logger.warning(f"AI score ({score}) inconsistent with no deductions (labor_tax_adj=0, photo_adj=0). Overriding to 100.")
             score = 100
-pdf = FPDF()
+    pdf = FPDF()
         pdf.add_page()
         pdf.add_font("DejaVu", "", "DejaVuSans.ttf", uni=True)
         pdf.set_font("DejaVu", size=11)
