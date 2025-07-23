@@ -15,7 +15,6 @@ import pytesseract
 from PIL import Image, ImageEnhance, ImageOps, ImageFilter
 from openai import OpenAI
 import logging
-from collections import Counter
 
 # Configure logging
 logging.basicConfig(level=logging.DEBUG, filename='app.log', filemode='a',
@@ -42,8 +41,59 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
+# Fraud detection module
+def run_fraud_checks(texts: List[str], image_files: List[UploadFile]) -> dict:
+    indicators = {
+        "manipulated_photos": False,
+        "repeated_damage_claims": False,
+        "timestamp_conflict": False,
+        "salvage_resubmission": False,
+        "suspicious_terms": [],
+    }
+
+    combined_text = '\n'.join(texts).lower()
+
+    suspicious_keywords = ["prior damage", "again", "second time", "wasn't paid", "already repaired", "previous total loss"]
+    found_keywords = [term for term in suspicious_keywords if term in combined_text]
+    if found_keywords:
+        indicators["repeated_damage_claims"] = True
+        indicators["suspicious_terms"] = found_keywords
+
+    if "salvage" in combined_text or "total loss" in combined_text:
+        indicators["salvage_resubmission"] = True
+
+    try:
+        for file in image_files:
+            file.file.seek(0)
+            image = Image.open(io.BytesIO(file.file.read()))
+            exif_data = image.getexif()
+            if exif_data:
+                date = exif_data.get(36867)
+                if date and not re.search(r"202[3-5]", date):
+                    indicators["timestamp_conflict"] = True
+                    break
+    except Exception as e:
+        logger.warning(f"EXIF check failed: {str(e)}")
+
+    manipulated = any("photoshop" in t.lower() or "edited" in t.lower() for t in texts)
+    if manipulated:
+        indicators["manipulated_photos"] = True
+
+    score = 0
+    if indicators["manipulated_photos"]:
+        score += 40
+    if indicators["repeated_damage_claims"]:
+        score += 30
+    if indicators["timestamp_conflict"]:
+        score += 20
+    if indicators["salvage_resubmission"]:
+        score += 25
+
+    score = min(100, score)
+    return {"risk_score": score, "flags": indicators}
+
 def preprocess_image(img: Image.Image) -> Image.Image:
-    img = img.convert("L")  # Grayscale
+    img = img.convert("L")
     img = ImageEnhance.Contrast(img).enhance(2.0)
     img = img.filter(ImageFilter.MedianFilter(size=3))
     img = ImageOps.autocontrast(img)
@@ -59,14 +109,18 @@ def extract_text_from_pdf(file) -> str:
             processed = preprocess_image(img)
             try:
                 ocr_text = pytesseract.image_to_string(processed, lang="eng", config='--psm 3')
-            except Exception:
+            except Exception as e:
+                logger.warning(f"PSM 3 failed on page {i}: {str(e)}")
                 ocr_text = pytesseract.image_to_string(processed, lang="eng", config='--psm 6')
-            if len(ocr_text.strip()) < 50:
+            if len(ocr_text.strip()) < 50 or re.search(r"[\:/\d\s]{50,}", ocr_text):
                 continue
             text_output += f"\n[Page {i}]\n{ocr_text}"
-        return text_output or "❌ No valid text extracted."
+        if not text_output.strip():
+            logger.error("No valid text extracted from PDF")
+        return text_output
     except Exception as e:
-        return f"❌ OCR Error: {e}"
+        logger.error(f"OCR error: {str(e)}")
+        return f"\n❌ OCR error: {str(e)}"
 
 def extract_text_from_docx(file) -> str:
     doc = Document(file)
@@ -75,11 +129,14 @@ def extract_text_from_docx(file) -> str:
 def extract_field(label, text) -> str:
     pattern = re.compile(rf"{label}\s*[:\-#=]?\s*(R226\d+.*|[A-HJ-NPR-Z0-9]{{17}}|[^\n\r;]+)", re.IGNORECASE)
     matches = pattern.findall(text)
-    return Counter(matches).most_common(1)[0][0].strip() if matches else "N/A"
+    if matches:
+        from collections import Counter
+        return Counter(matches).most_common(1)[0][0].strip()
+    return "N/A"
 
 def advisor_report_present(texts: List[str], image_files: List[UploadFile]) -> bool:
     for t in texts:
-        if "advisor report" in t.lower():
+        if any(term in t.lower() for term in ["ccc advisor report", "advisor report"]):
             return True
     for img in image_files:
         try:
@@ -89,77 +146,95 @@ def advisor_report_present(texts: List[str], image_files: List[UploadFile]) -> b
             ocr = pytesseract.image_to_string(processed, lang="eng")
             if "advisor report" in ocr.lower():
                 return True
-        except:
-            continue
+        except Exception as e:
+            logger.error(f"Image OCR error: {str(e)}")
     return False
+
 def check_required_photos(image_files: List[UploadFile], ocr_text: str) -> List[str]:
     required_photos = ["four corners", "odometer", "vin", "license plate"]
     found_photos = []
     ocr_lower = ocr_text.lower()
-    corner_keywords = ["front left", "front right", "rear left", "rear right", 
-                       "left front", "right front", "left rear", "right rear"]
-    if any(k in ocr_lower for k in ["license plate", "registration plate"]):
+    corner_keywords = [
+        "four corners", "four corner photo", "vehicle corners",
+        "front left", "front right", "rear left", "rear right",
+        "left front", "right front", "left rear", "right rear"
+    ]
+    corner_matches = []
+
+    if any(term in ocr_lower for term in ["license plate", "plate photo", "registration plate"]):
         found_photos.append("license plate")
-    if any(k in ocr_lower for k in ["odometer", "mileage"]):
+    if any(term in ocr_lower for term in ["odometer", "mileage photo", "dashboard mileage"]):
         found_photos.append("odometer")
-    if "vin" in ocr_lower:
+    if any(term in ocr_lower for term in ["vin", "vehicle identification number", "vin photo"]):
         found_photos.append("vin")
-    if sum(1 for term in corner_keywords if term in ocr_lower) >= 2:
+    for term in corner_keywords:
+        if term in ocr_lower:
+            corner_matches.append(term)
+    if len(corner_matches) >= 2:
         found_photos.append("four corners")
 
     for img in image_files:
         try:
             img.file.seek(0)
             image = Image.open(io.BytesIO(img.file.read()))
-            ocr = pytesseract.image_to_string(preprocess_image(image))
+            processed = preprocess_image(image)
+            ocr = pytesseract.image_to_string(processed, lang="eng")
             if re.search(r"\b[A-HJ-NPR-Z0-9]{17}\b", ocr):
                 found_photos.append("vin")
             if re.search(r"\d{1,3}(,\d{3})*\s*(miles|km)", ocr, re.IGNORECASE):
                 found_photos.append("odometer")
-            if re.search(r"(license|registration)\s*plate|\b[A-Z0-9]{5,8}\b", ocr):
+            if re.search(r"(license|registration)\s*plate|\b[A-Z0-9]{5,8}\b", ocr, re.IGNORECASE):
                 found_photos.append("license plate")
-            if sum(1 for term in corner_keywords if term in ocr.lower()) >= 2:
+            corner_matches_img = [term for term in corner_keywords if term in ocr.lower()]
+            if len(corner_matches_img) >= 2:
                 found_photos.append("four corners")
-        except:
-            continue
-    return [p for p in required_photos if p not in set(found_photos)]
+        except Exception as e:
+            logger.error(f"OCR image read error: {str(e)}")
+
+    found_photos = list(set(found_photos))
+    missing = [p for p in required_photos if p not in found_photos]
+    return missing
 
 def check_labor_and_tax_score(text: str, client_rules: str) -> int:
-    score = 0
-    required_labor = ["body labor", "paint labor", "mechanical labor", "structural labor"]
-    if not any(re.search(rf"{lab}[:\s]*\$?\d+", text, re.IGNORECASE) for lab in required_labor):
-        score -= 50
-    if "utilize applicable tax rate" in client_rules.lower():
-        if not re.search(r"tax[:\s]*\$?\d+|\d+\%", text, re.IGNORECASE):
-            score -= 25
-    return score
+    score_adj = 0
+    required_sections = ["body labor", "paint labor", "mechanical labor", "structural labor"]
+    found_sections = []
+    for section in required_sections:
+        if re.search(rf"{section}[:\s]*(?:\$?\d+\.?\d*\s*(?:/hr|hour)?)", text, re.IGNORECASE):
+            found_sections.append(section)
+    if not found_sections:
+        score_adj -= 50
+    if re.search(r"utilize applicable tax rate", client_rules, re.IGNORECASE):
+        if not re.search(r"tax[:\s]*(?:\$?\d+\.?\d*|\d+\.?\d*%?)", text, re.IGNORECASE):
+            score_adj -= 25
+    return score_adj
 
-def detect_fraud_signals(text: str, score: int, missing_photos: List[str], has_advisor: bool) -> List[str]:
-    red_flags = []
-    if score <= 50:
-        red_flags.append("🚩 Low compliance score (< 50%)")
-    if len(missing_photos) >= 2:
-        red_flags.append(f"🚩 Missing multiple required photos: {', '.join(missing_photos)}")
-    if not has_advisor and "advisor" not in text.lower():
-        red_flags.append("🚩 Advisor report not found")
-    if "same damage repeated" in text.lower():
-        red_flags.append("🚩 Duplicate or recycled damage description")
-    if re.search(r"(edited|photoshopped|tampered)", text.lower()):
-        red_flags.append("🚩 Possible image manipulation reference")
-    if re.search(r"repaired.*before photos", text.lower()):
-        red_flags.append("🚩 Repaired prior to inspection")
-    return red_flags
+def fraud_risk_score(combined_text: str, gpt_output: str) -> dict:
+    fraud_flags = []
 
-def compute_fraud_risk_score(red_flags: List[str]) -> str:
-    level = len(red_flags)
-    if level == 0:
-        return "Low"
-    elif level <= 2:
-        return "Moderate"
-    elif level <= 4:
-        return "High"
-    else:
-        return "Critical"
+    if "claim number" in combined_text and combined_text.count("claim number") > 3:
+        fraud_flags.append("🚩 Repeated Claim Number")
+    if "total loss" in combined_text and combined_text.count("total loss") > 2:
+        fraud_flags.append("🚩 Multiple Total Loss Mentions")
+    if any(term in combined_text for term in ["copy", "edited", "photoshop", "manipulated"]):
+        fraud_flags.append("🚩 Edited or manipulated content terms found")
+
+    fraud_risk_score = 0
+    if "fraud" in gpt_output.lower() or "suspicious" in gpt_output.lower():
+        fraud_risk_score += 30
+        fraud_flags.append("🚩 GPT flagged suspicious content")
+    if "duplicate" in gpt_output.lower():
+        fraud_risk_score += 20
+        fraud_flags.append("🚩 Possible duplicate photos or content")
+    fraud_risk_score += 10 * len(fraud_flags)
+    fraud_risk_score = min(fraud_risk_score, 100)
+
+    logger.debug(f"Fraud risk score: {fraud_risk_score}, flags: {fraud_flags}")
+    return {
+        "score": fraud_risk_score,
+        "flags": fraud_flags or ["No fraud indicators detected."]
+    }
+
 @app.get("/")
 async def root():
     return {"status": "ok"}
@@ -175,7 +250,9 @@ async def vision_review(
     if not appraiser_id.strip():
         return JSONResponse(status_code=400, content={"error": "Appraiser ID is required."})
 
-    images, texts, image_files = [], [], []
+    images = []
+    texts = []
+    image_files = []
 
     for file in files:
         content = await file.read()
@@ -194,20 +271,41 @@ async def vision_review(
             texts.append(f"⚠️ Skipped unsupported file: {file.filename}")
 
     combined_text = '\n'.join(texts).lower()
-    advisor_confirmed = advisor_report_present(texts, image_files)
+    advisor_confirmed = advisorස
+
+ystem: advisor_report_present(texts, image_files)
     advisor_hint = "\n\nCONFIRMED: CCC Advisor Report is included." if advisor_confirmed else ""
     missing_photos = check_required_photos(image_files, combined_text)
     photo_hint = f"\n\nMISSING PHOTOS: {', '.join(missing_photos) if missing_photos else 'None'}"
 
     vision_message = {"role": "user", "content": []}
     if texts:
-        vision_message["content"].append({"type": "text", "text": '\n\n'.join(texts) + advisor_hint + photo_hint})
+        vision_message["content"].append({
+            "type": "text",
+            "text": '\n\n'.join(texts) + advisor_hint + photo_hint
+        })
     if images:
         vision_message["content"].extend(images)
 
-    prompt = f"""You are an AI auto damage auditor. Review based on the following rules:
-{client_rules}
-"""
+    prompt = f"""
+    You are an AI auto damage auditor. Always output:
+
+    Claim #: (from estimate)
+    VIN: (from estimate or photos)
+    Vehicle: (make, model, mileage)
+    Compliance Score: (0–100%)
+
+    Then summarize findings based on these rules:
+    - Deduct 50% if ALL labor rates missing
+    - Deduct 25% if tax missing and client requires it
+    - Deduct 25% per missing photo type: four corners, odometer, VIN, license plate
+    - Treat mentions of “advisor report” as confirmation of inclusion
+    - Don’t assume total loss unless explicitly mentioned
+    - Start from 100% and only deduct per explicit violation
+    - Use MISSING PHOTOS hint and advisor confirmation to determine penalties
+
+    {client_rules}
+    """
 
     try:
         response = client.chat.completions.create(
@@ -227,14 +325,12 @@ async def vision_review(
 
         score_adj = check_labor_and_tax_score(combined_text, client_rules)
         score_adj -= 25 * len(missing_photos)
-        score = max(0, score + score_adj)
-        if score < 100 and score_adj == 0:
-            score = 100
+        final_score = max(0, score + score_adj)
 
-        fraud_flags = detect_fraud_signals(gpt_output, score, missing_photos, advisor_confirmed)
-        fraud_level = compute_fraud_risk_score(fraud_flags)
+        # Fraud detection
+        fraud_result = fraud_risk_score(combined_text, gpt_output)
 
-        # continue in next part...
+        # Generate PDF
         pdf = FPDF()
         pdf.add_page()
         pdf.add_font("DejaVu", "", "DejaVuSans.ttf", uni=True)
@@ -244,19 +340,28 @@ async def vision_review(
         pdf.multi_cell(0, 10, f"File Number: {file_number}")
         pdf.multi_cell(0, 10, f"IA Company: {ia_company}")
         pdf.multi_cell(0, 10, f"Appraiser ID #: {appraiser_id}")
-        pdf.multi_cell(0, 10, f"Compliance Score: {score}%")
-        pdf.multi_cell(0, 10, f"Fraud Risk Score: {fraud_level}/10")
-        pdf.multi_cell(0, 10, "Fraud Red Flags: " + (", ".join(fraud_flags) if fraud_flags else "None"))
+        # Removed: pdf.multi_cell(0, 10, f"Adjusted Compliance Score: {final_score}%")
+        pdf.set_font("DejaVu", size=10)
         pdf.ln(5)
-        pdf.multi_cell(0, 10, "AI-4-IA Review Summary:", align='L')
+        pdf.set_text_color(200, 0, 0)
+        pdf.multi_cell(0, 10, f"Fraud Risk Score: {fraud_result['score']}%")
+        if fraud_result['flags']:
+            pdf.set_text_color(0, 0, 0)
+            pdf.multi_cell(0, 10, "Fraud Indicators:")
+            for flag in fraud_result['flags']:
+                pdf.multi_cell(0, 10, f"- {flag}")
+        pdf.set_text_color(0, 0, 0)
+        pdf.ln(5)
+        pdf.multi_cell(0, 10, "AI-4-IA Review Summary:")
         pdf.set_font("DejaVu", size=9)
         pdf.multi_cell(0, 10, gpt_output)
 
         pdf_path = f"{file_number}.pdf"
         pdf.output(pdf_path)
 
+        # Send Email
         msg = EmailMessage()
-        msg["Subject"] = f"AI-4-IA Review: {claim_number} (Risk: {fraud_level}/10)"
+        msg["Subject"] = f"AI-4-IA Review: {claim_number}"
         msg["From"] = "noreply@nspxn.com"
         msg["To"] = "info@nspxn.com"
         email_body = f"""NSPXN.com AI4IA Review Report
@@ -264,15 +369,16 @@ async def vision_review(
 File Number: {file_number}
 IA Company: {ia_company}
 Appraiser ID #: {appraiser_id}
-
-Adjusted Compliance Score: {score}%
-Fraud Risk Score: {fraud_level}/10
-Fraud Red Flags: {', '.join(fraud_flags) if fraud_flags else "None"}
+Adjusted Compliance Score: {final_score}%
+Fraud Risk Score: {fraud_result['score']}%
 
 AI Review Summary:
 {gpt_output}
+
+Fraud Indicators:
+{chr(10).join(fraud_result['flags']) if fraud_result['flags'] else "None Detected"}
 """
-        msg.set_content(email_body.encode("utf-8", errors="ignore").decode("utf-8"))
+        msg.set_content(email_body)
 
         with smtplib.SMTP_SSL("mail.tierra.net", 465) as smtp:
             smtp.login("info@nspxn.com", "grr2025GRR")
@@ -283,13 +389,39 @@ AI Review Summary:
             "file_number": file_number,
             "claim_number": claim_number,
             "vehicle": vehicle,
-            "score": f"{score}%",
-            "fraud_risk_score": fraud_level,
-            "fraud_flags": fraud_flags
+            "score": f"{final_score}%",
+            "fraud_risk_score": f"{fraud_result['score']}%",
+            "fraud_indicators": fraud_result['flags']
         }
 
     except Exception as e:
-        logger.error(f"API error: {str(e)}")
-        return JSONResponse(status_code=500, content={"error": str(e), "gpt_output": "⚠️ AI review failed."})
+        logger.error(f"Review processing failed: {str(e)}")
+        return JSONResponse(status_code=500, content={"error": str(e)})
+
+@app.get("/download-pdf")
+async def download_pdf(file_number: str):
+    pdf_path = f"{file_number}.pdf"
+    if os.path.exists(pdf_path):
+        return FileResponse(path=pdf_path, media_type="application/pdf", filename=os.path.basename(pdf_path))
+    return JSONResponse(status_code=404, content={"detail": "PDF not found."})
+
+@app.get("/client-rules/{client_name}")
+async def get_client_rules(client_name: str):
+    rules_dir = "client_rules"
+    file_name = f"{client_name}.docx"
+    file_path = os.path.join(rules_dir, file_name)
+
+    if os.path.exists(file_path):
+        try:
+            doc = Document(file_path)
+            text = '\n'.join([p.text for p in doc.paragraphs if p.text.strip()])
+            logger.debug(f"Retrieved client rules for {client_name}: {text[:500]}...")
+            return {"text": text}
+        except Exception as e:
+            logger.error(f"Error reading client rules for {client_name}: {str(e)}")
+            return JSONResponse(status_code=500, content={"error": f"Failed to read client rules: {str(e)}"})
+    else:
+        logger.warning(f"Client rules not found for: {client_name}")
+        return JSONResponse(status_code=404, content={"error": f"Rules not found for client: {client_name}"})
 
 
