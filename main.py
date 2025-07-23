@@ -15,6 +15,7 @@ import pytesseract
 from PIL import Image, ImageEnhance, ImageOps, ImageFilter
 from openai import OpenAI
 import logging
+from datetime import datetime
 
 # Configure logging
 logging.basicConfig(level=logging.DEBUG, filename='app.log', filemode='a',
@@ -209,8 +210,13 @@ def check_labor_and_tax_score(text: str, client_rules: str) -> int:
             score_adj -= 25
     return score_adj
 
-def fraud_risk_score(combined_text: str, gpt_output: str) -> dict:
+def is_total_loss(text: str, gpt_output: str) -> bool:
+    combined_text = text.lower()
+    return any(term in combined_text or term in gpt_output.lower() for term in ["total loss", "totaled", "write-off"])
+
+def fraud_risk_score(combined_text: str, gpt_output: str, claim_numbers: List[str]) -> dict:
     fraud_flags = []
+    current_date = datetime.now().date()
 
     if "claim number" in combined_text and combined_text.count("claim number") > 3:
         fraud_flags.append("🚩 Repeated Claim Number")
@@ -219,6 +225,15 @@ def fraud_risk_score(combined_text: str, gpt_output: str) -> dict:
     if any(term in combined_text for term in ["copy", "edited", "photoshop", "manipulated"]):
         fraud_flags.append("🚩 Edited or manipulated content terms found")
 
+    date_match = re.search(r"date of loss\s*[:\-]?\s*(\d{1,2}/\d{1,2}/\d{4})", combined_text, re.IGNORECASE)
+    if date_match:
+        loss_date = datetime.strptime(date_match.group(1), "%m/%d/%Y").date()
+        if loss_date > current_date:
+            fraud_flags.append("🚩 Future Date of Loss")
+
+    if len(set(claim_numbers)) > 1:
+        fraud_flags.append("🚩 Claim Number Mismatch")
+
     fraud_risk_score = 0
     if "fraud" in gpt_output.lower() or "suspicious" in gpt_output.lower():
         fraud_risk_score += 30
@@ -226,6 +241,8 @@ def fraud_risk_score(combined_text: str, gpt_output: str) -> dict:
     if "duplicate" in gpt_output.lower():
         fraud_risk_score += 20
         fraud_flags.append("🚩 Possible duplicate photos or content")
+    if is_total_loss(combined_text, gpt_output) and "date of loss" in combined_text:
+        fraud_risk_score += 15  # Additional risk for total loss with date
     fraud_risk_score += 10 * len(fraud_flags)
     fraud_risk_score = min(fraud_risk_score, 100)
 
@@ -253,6 +270,7 @@ async def vision_review(
     images = []
     texts = []
     image_files = []
+    claim_numbers = []
 
     for file in files:
         content = await file.read()
@@ -276,6 +294,10 @@ async def vision_review(
     missing_photos = check_required_photos(image_files, combined_text)
     photo_hint = f"\n\nMISSING PHOTOS: {', '.join(missing_photos) if missing_photos else 'None'}"
 
+    # Extract claim numbers
+    claim_pattern = re.compile(r"claim\s*#?\s*[:\-]?\s*(CAs-\d+|\d+)", re.IGNORECASE)
+    claim_numbers = claim_pattern.findall(combined_text)
+
     vision_message = {"role": "user", "content": []}
     if texts:
         vision_message["content"].append({
@@ -292,15 +314,15 @@ async def vision_review(
     VIN: (from estimate or photos)
     Vehicle: (make, model, mileage)
     Compliance Score: (0–100%)
+    Total Loss Status: (Yes/No)
 
     Then summarize findings based on these rules:
-    - Deduct 50% if ALL labor rates missing
-    - Deduct 25% if tax missing and client requires it
-    - Deduct 25% per missing photo type: four corners, odometer, VIN, license plate
-    - Treat mentions of “advisor report” as confirmation of inclusion
+    - For repair estimates: Deduct 50% if ALL labor rates missing, 25% if tax missing and client requires it, 25% per missing photo type (four corners, odometer, VIN, license plate)
+    - For total loss: Start at 100%, deduct 25% per missing field (insured, policy #, claim #, date of loss)
+    - Treat mentions of “advisor report” as confirmation of inclusion for repair estimates
     - Don’t assume total loss unless explicitly mentioned
-    - Start from 100% and only deduct per explicit violation
-    - Use MISSING PHOTOS hint and advisor confirmation to determine penalties
+    - Use MISSING PHOTOS hint and advisor confirmation for repair estimates
+    - Use total loss status to switch evaluation mode
 
     {client_rules}
     """
@@ -315,18 +337,26 @@ async def vision_review(
         claim_number = extract_field("Claim", gpt_output)
         vehicle = extract_field("Vehicle", gpt_output)
         score = extract_field("Compliance Score", gpt_output)
+        total_loss_status = extract_field("Total Loss Status", gpt_output).lower() == "yes"
 
         try:
             score = int(score.strip("%"))
         except:
             score = 100
 
-        score_adj = check_labor_and_tax_score(combined_text, client_rules)
-        score_adj -= 25 * len(missing_photos)
+        score_adj = 0
+        if not total_loss_status:
+            score_adj = check_labor_and_tax_score(combined_text, client_rules)
+            score_adj -= 25 * len(missing_photos)
+        else:
+            required_fields = ["insured", "policy #", "claim #", "date of loss"]
+            found_fields = [f for f in required_fields if f in combined_text]
+            score_adj -= 25 * (len(required_fields) - len(found_fields))
+
         final_score = max(0, score + score_adj)
 
         # Fraud detection
-        fraud_result = fraud_risk_score(combined_text, gpt_output)
+        fraud_result = fraud_risk_score(combined_text, gpt_output, claim_numbers)
 
         # Generate PDF
         pdf = FPDF()
@@ -338,7 +368,6 @@ async def vision_review(
         pdf.multi_cell(0, 10, f"File Number: {file_number}")
         pdf.multi_cell(0, 10, f"IA Company: {ia_company}")
         pdf.multi_cell(0, 10, f"Appraiser ID #: {appraiser_id}")
-        # Removed: pdf.multi_cell(0, 10, f"Adjusted Compliance Score: {final_score}%")
         pdf.set_font("DejaVu", size=10)
         pdf.ln(5)
         pdf.set_text_color(200, 0, 0)
@@ -349,6 +378,8 @@ async def vision_review(
             for flag in fraud_result['flags']:
                 pdf.multi_cell(0, 10, f"- {flag}")
         pdf.set_text_color(0, 0, 0)
+        pdf.ln(5)
+        pdf.multi_cell(0, 10, "Total Loss Status: Yes" if total_loss_status else "Total Loss Status: No")
         pdf.ln(5)
         pdf.multi_cell(0, 10, "AI-4-IA Review Summary:")
         pdf.set_font("DejaVu", size=9)
@@ -369,6 +400,7 @@ IA Company: {ia_company}
 Appraiser ID #: {appraiser_id}
 Adjusted Compliance Score: {final_score}%
 Fraud Risk Score: {fraud_result['score']}%
+Total Loss Status: {'Yes' if total_loss_status else 'No'}
 
 AI Review Summary:
 {gpt_output}
@@ -389,7 +421,8 @@ Fraud Indicators:
             "vehicle": vehicle,
             "score": f"{final_score}%",
             "fraud_risk_score": f"{fraud_result['score']}%",
-            "fraud_indicators": fraud_result['flags']
+            "fraud_indicators": fraud_result['flags'],
+            "total_loss": total_loss_status
         }
 
     except Exception as e:
