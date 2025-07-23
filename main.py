@@ -214,7 +214,7 @@ def is_total_loss(text: str, gpt_output: str) -> bool:
     combined_text = text.lower()
     return any(term in combined_text or term in gpt_output.lower() for term in ["total loss", "totaled", "write-off"])
 
-def get_fraud_risk_explanation(fraud_flags: List[str]) -> str:
+def get_fraud_risk_explanation(fraud_flags: List[str], score: int) -> str:
     explanations = {
         "🚩 Repeated Claim Number": "Multiple instances of the claim number were detected, which may indicate data duplication or potential fraud.",
         "🚩 Multiple Total Loss Mentions": "The term 'total loss' appears excessively, suggesting possible manipulation or inconsistency.",
@@ -224,7 +224,11 @@ def get_fraud_risk_explanation(fraud_flags: List[str]) -> str:
         "🚩 GPT flagged suspicious content": "The AI model flagged the content as suspicious, potentially due to unusual patterns or language.",
         "🚩 Possible duplicate photos or content": "The AI detected possible duplicate photos or content, which may suggest tampering or resubmission."
     }
-    return "\n".join([explanations.get(flag, "Unknown fraud indicator.") for flag in fraud_flags]) or "No fraud indicators detected."
+    if not fraud_flags or fraud_flags == ["No fraud indicators detected."]:
+        if score > 0:
+            return "A baseline risk is present due to the identification of a total loss with a specified date of loss, which may warrant further review."
+        return "No fraud indicators detected."
+    return "\n".join([explanations.get(flag, "Unknown fraud indicator.") for flag in fraud_flags])
 
 def fraud_risk_score(combined_text: str, gpt_output: str, claim_numbers: List[str]) -> dict:
     fraud_flags = []
@@ -375,7 +379,7 @@ async def vision_review(
 
         # Fraud detection
         fraud_result = fraud_risk_score(combined_text, gpt_output, claim_numbers)
-        fraud_explanation = get_fraud_risk_explanation(fraud_result["flags"])
+        fraud_explanation = get_fraud_risk_explanation(fraud_result["flags"], fraud_result["score"])
 
         # Generate PDF
         pdf = FPDF()
