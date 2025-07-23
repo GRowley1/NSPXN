@@ -65,7 +65,7 @@ def extract_text_from_pdf(file) -> str:
                 logger.warning(f"Page {i} OCR output skipped (garbled): {ocr_text[:100]}...")
                 continue
             text_output += f"\n[Page {i}]\n{ocr_text}"
-            if i == 5:  # Log Page 5 for labor/tax
+            if i == 5:
                 logger.debug(f"Page 5 OCR (labor/tax): {ocr_text[:500]}...")
         if not text_output.strip():
             logger.error("No valid text extracted from PDF")
@@ -73,7 +73,6 @@ def extract_text_from_pdf(file) -> str:
     except Exception as e:
         logger.error(f"OCR error (possible network failure): {str(e)}")
         return f"\n\u274c OCR error during combined extraction: {str(e)}"
-
 def extract_text_from_docx(file) -> str:
     doc = Document(file)
     text = '\n'.join(p.text for p in doc.paragraphs if p.text.strip())
@@ -116,7 +115,6 @@ def check_required_photos(image_files: List[UploadFile], ocr_text: str) -> List[
                       "left front", "right front", "left rear", "right rear"]
     corner_matches = []
     
-    # Keyword-based detection from OCR text
     if any(term in ocr_lower for term in ["license plate", "plate photo", "registration plate"]):
         found_photos.append("license plate")
         logger.debug("Found license plate photo via OCR keywords")
@@ -129,24 +127,23 @@ def check_required_photos(image_files: List[UploadFile], ocr_text: str) -> List[
     for term in corner_keywords:
         if term in ocr_lower:
             corner_matches.append(term)
-    if len(corner_matches) >= 2:  # At least two corner views for four corners
+    if len(corner_matches) >= 2:
         found_photos.append("four corners")
         logger.debug(f"Found four corners photo via OCR keywords: {corner_matches}")
-    
-    # Image-based recognition for uploaded images
+
     for img in image_files:
         try:
             img.file.seek(0)
             image = Image.open(io.BytesIO(img.file.read()))
             processed = preprocess_image(image)
             ocr = pytesseract.image_to_string(processed, lang="eng")
-            if re.search(r"\b[A-HJ-NPR-Z0-9]{17}\b", ocr, re.IGNORECASE):  # VIN: 17 alphanumeric chars
+            if re.search(r"\b[A-HJ-NPR-Z0-9]{17}\b", ocr, re.IGNORECASE):
                 found_photos.append("vin")
                 logger.debug("Found VIN photo via image OCR")
-            if re.search(r"\d{1,3}(,\d{3})*\s*(miles|km)", ocr, re.IGNORECASE):  # Odometer: mileage format
+            if re.search(r"\d{1,3}(,\d{3})*\s*(miles|km)", ocr, re.IGNORECASE):
                 found_photos.append("odometer")
                 logger.debug("Found odometer photo via image OCR")
-            if re.search(r"(license|registration)\s*plate|\b[A-Z0-9]{5,8}\b", ocr, re.IGNORECASE):  # License plate
+            if re.search(r"(license|registration)\s*plate|\b[A-Z0-9]{5,8}\b", ocr, re.IGNORECASE):
                 found_photos.append("license plate")
                 logger.debug("Found license plate photo via image OCR")
             corner_matches_img = [term for term in corner_keywords if term in ocr.lower()]
@@ -157,28 +154,25 @@ def check_required_photos(image_files: List[UploadFile], ocr_text: str) -> List[
                 corner_matches.extend(corner_matches_img)
         except Exception as e:
             logger.error(f"Image processing error: {str(e)}")
-    
+
     found_photos = list(set(found_photos))
     missing = [p for p in required_photos if p not in found_photos]
     logger.debug(f"Found photos: {found_photos}, Missing photos: {missing}, Corner matches: {corner_matches}")
     return missing
-
 def check_labor_and_tax_score(text: str, client_rules: str) -> int:
     score_adj = 0
     required_sections = ["body labor", "paint labor", "mechanical labor", "structural labor"]
     found_sections = []
     for section in required_sections:
-        # Flexible regex for labor rates (e.g., "$50.00", "50.00/hr", "50.00")
         if re.search(rf"{section}[:\s]*(?:\$?\d+\.?\d*\s*(?:/hr|hour)?)", text, re.IGNORECASE):
             found_sections.append(section)
             logger.debug(f"Found labor rate for {section}")
-    if not found_sections:  # Deduct only if ALL labor rates are missing
+    if not found_sections:
         score_adj -= 50
         logger.debug("All labor rates missing")
     else:
         logger.debug(f"Found labor rates in sections: {found_sections}")
     if re.search(r"utilize applicable tax rate", client_rules, re.IGNORECASE):
-        # Flexible regex for tax (e.g., "8.25%", "$352.60", "tax: 8.25")
         if not re.search(r"tax[:\s]*(?:\$?\d+\.?\d*|\d+\.?\d*%?)", text, re.IGNORECASE):
             score_adj -= 25
             logger.debug("Tax rate missing")
@@ -227,15 +221,14 @@ async def vision_review(
     advisor_confirmed = advisor_report_present(texts, image_files)
     advisor_hint = "\n\nCONFIRMED: CCC Advisor Report is included based on OCR or filename." if advisor_confirmed else ""
     missing_photos = check_required_photos(image_files, combined_text)
-    photo_hint = f"\n\nMISSING PHOTOS: {', '.join(missing_photos) if missing_photos else 'None'}" 
+    photo_hint = f"\n\nMISSING PHOTOS: {', '.join(missing_photos) if missing_photos else 'None'}"
 
     vision_message = {"role": "user", "content": []}
     if texts:
         vision_message["content"].append({"type": "text", "text": '\n\n'.join(texts) + advisor_hint + photo_hint})
     if images:
         vision_message["content"].extend(images)
-
-    prompt = f"""
+prompt = f"""
     You are an AI auto damage auditor. You have access to both text and images (or scans).
 
     IMPORTANT RULES:
@@ -295,8 +288,7 @@ async def vision_review(
         if score < 100 and score_adj == 0:
             logger.warning(f"AI score ({score}) inconsistent with no deductions (labor_tax_adj=0, photo_adj=0). Overriding to 100.")
             score = 100
-
-        pdf = FPDF()
+pdf = FPDF()
         pdf.add_page()
         pdf.add_font("DejaVu", "", "DejaVuSans.ttf", uni=True)
         pdf.set_font("DejaVu", size=11)
@@ -305,6 +297,7 @@ async def vision_review(
         pdf.multi_cell(0, 10, f"File Number: {file_number}")
         pdf.multi_cell(0, 10, f"IA Company: {ia_company}")
         pdf.multi_cell(0, 10, f"Appraiser ID #: {appraiser_id}")
+        pdf.multi_cell(0, 10, f"AI-4-IA Final Compliance Score: {score}%")
         pdf.ln(5)
         pdf.multi_cell(0, 10, "AI-4-IA Review Summary:", align='L')
         pdf.set_font("DejaVu", size=9)
@@ -368,3 +361,4 @@ async def get_client_rules(client_name: str):
     else:
         logger.error(f"Rules not found for client: {client_name}")
         return JSONResponse(status_code=404, content={"error": "Rules not found for this client."})
+
