@@ -230,6 +230,10 @@ def fraud_risk_score(combined_text: str, gpt_output: str, claim_numbers: List[st
     fraud_flags = []
     current_date = datetime.now().date()
 
+    # Extract estimate date if available
+    estimate_date_match = re.search(r"(\d{1,2}/\d{1,2}/\d{4})\s*(?:AM|PM)?", combined_text, re.IGNORECASE)
+    estimate_date = datetime.strptime(estimate_date_match.group(1), "%m/%d/%Y").date() if estimate_date_match else current_date
+
     if "claim number" in combined_text and combined_text.count("claim number") > 3:
         fraud_flags.append("🚩 Repeated Claim Number")
     if "total loss" in combined_text and combined_text.count("total loss") > 2:
@@ -240,7 +244,8 @@ def fraud_risk_score(combined_text: str, gpt_output: str, claim_numbers: List[st
     date_match = re.search(r"date of loss\s*[:\-]?\s*(\d{1,2}/\d{1,2}/\d{4})", combined_text, re.IGNORECASE)
     if date_match:
         loss_date = datetime.strptime(date_match.group(1), "%m/%d/%Y").date()
-        if loss_date > current_date:
+        # Flag only if loss date is after both current date and estimate date
+        if loss_date > current_date or (estimate_date_match and loss_date > estimate_date):
             fraud_flags.append("🚩 Future Date of Loss")
 
     if len(set(claim_numbers)) > 1:
@@ -475,4 +480,3 @@ async def get_client_rules(client_name: str):
     else:
         logger.warning(f"Client rules not found for: {client_name}")
         return JSONResponse(status_code=404, content={"error": f"Rules not found for client: {client_name}"})
-
