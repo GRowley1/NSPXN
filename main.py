@@ -407,7 +407,7 @@ async def vision_review(
 
         pdf.output(pdf_path)
 
-        # Send Email
+        # Send Email within try block
         msg = EmailMessage()
         msg["Subject"] = f"AI-4-IA Review: {claim_number}"
         msg["From"] = "noreply@nspxn.com"
@@ -431,7 +431,6 @@ Fraud Risk Explanation:
 {fraud_explanation}
 """
         msg.set_content(email_body)
-
         try:
             with smtplib.SMTP_SSL("mail.tierra.net", 465) as smtp:
                 smtp.login("info@nspxn.com", "grr2025GRR")
@@ -454,32 +453,3 @@ Fraud Risk Explanation:
     except Exception as e:
         logger.error(f"Review processing failed: {str(e)}", exc_info=True)
         return JSONResponse(status_code=500, content={"error": f"Internal server error: {str(e)}"})
-
-@app.get("/download-pdf")
-async def download_pdf(file_number: str):
-    pdf_path = next((f for f in os.listdir('.') if f.startswith(f"{file_number}_") and f.endswith(".pdf")), None)
-    if pdf_path and os.path.exists(pdf_path):
-        return FileResponse(path=pdf_path, media_type="application/pdf", filename=os.path.basename(pdf_path))
-    return JSONResponse(status_code=404, content={"detail": "PDF not found."})
-
-@app.get("/client-rules/{client_name}")
-async def get_client_rules(client_name: str):
-    rules_dir = "client_rules"
-    file_name = f"{client_name}.docx"
-    file_path = os.path.join(rules_dir, file_name)
-
-    if os.path.exists(file_path):
-        try:
-            doc = Document(file_path)
-            text = '\n'.join([p.text for p in doc.paragraphs if p.text.strip()])
-            logger.debug(f"Retrieved client rules for {client_name}: {text[:500]}...")
-            return {"text": text}
-        except Exception as e:
-            logger.error(f"Error reading client rules for {client_name}: {str(e)}")
-            return JSONResponse(status_code=500, content={"error": f"Failed to read client rules: {str(e)}"})
-    else:
-        logger.warning(f"Client rules not found for: {client_name}")
-        return JSONResponse(status_code=404, content={"error": f"Rules not found for client: {client_name}"})
-    else:
-        logger.warning(f"Client rules not found for: {client_name}")
-        return JSONResponse(status_code=404, content={"error": f"Rules not found for client: {client_name}"})
