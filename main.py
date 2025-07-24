@@ -248,12 +248,13 @@ def fraud_risk_score(combined_text: str, gpt_output: str, claim_numbers: List[st
     date_match = re.search(r"date of loss\s*[:\-]?\s*(\d{1,2}/\d{1,2}/\d{4})", combined_text, re.IGNORECASE)
     if date_match:
         loss_date = datetime.strptime(date_match.group(1), "%m/%d/%Y").date()
-        # Flag only if loss date is after both current date and estimate date
         if loss_date > current_date or (estimate_date_match and loss_date > estimate_date):
             fraud_flags.append("🚩 Future Date of Loss")
 
-    if len(set(claim_numbers)) > 1:
-        fraud_flags.append("🚩 Claim Number Mismatch")
+    # Handle claim numbers safely
+    if claim_numbers:  # Only proceed if claim_numbers is not empty
+        if len(set(claim_numbers)) > 1:
+            fraud_flags.append("🚩 Claim Number Mismatch")
 
     fraud_risk_score = 0
     if "fraud" in gpt_output.lower() or "suspicious" in gpt_output.lower():
@@ -262,8 +263,8 @@ def fraud_risk_score(combined_text: str, gpt_output: str, claim_numbers: List[st
     if "duplicate" in gpt_output.lower():
         fraud_risk_score += 20
         fraud_flags.append("🚩 Possible duplicate photos or content")
-    if is_total_loss(combined_text, gpt_output) and "date of loss" in combined_text:
-        fraud_risk_score += 15  # Additional risk for total loss with date
+    if is_total_loss(combined_text, gpt_output) and "date of loss" in combined_text.lower():
+        fraud_risk_score += 15
     fraud_risk_score += 10 * len(fraud_flags)
     fraud_risk_score = min(fraud_risk_score, 100)
 
