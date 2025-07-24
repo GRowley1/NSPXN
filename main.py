@@ -456,13 +456,21 @@ Fraud Risk Explanation:
             "total_loss": total_loss_status
         }
 
-   except Exception as e:
-        logger.error(f"Review processing failed: {str(e)}")
-        return JSONResponse(status_code=500, content={"error": str(e)})
+    except MemoryError as me:
+        logger.error(f"Memory error during processing: {str(me)}", exc_info=True)
+        return JSONResponse(status_code=500, content={"error": f"Memory error: {str(me)}"})
+    except Exception as e:
+        logger.error(f"Review processing failed: {str(e)}", exc_info=True)
+        return JSONResponse(status_code=500, content={"error": f"Internal server error: {str(e)}"})
 
 @app.get("/download-pdf")
 async def download_pdf(file_number: str):
-    pdf_path = f"{file_number}.pdf"
+    pdf_files = [f for f in os.listdir('.') if f.startswith(f"{file_number}_") and f.endswith(".pdf")]
+    if not pdf_files:
+        return JSONResponse(status_code=404, content={"detail": "PDF not found."})
+    # Sort by creation time to get the latest
+    latest_pdf = max(pdf_files, key=lambda x: os.path.getctime(x))
+    pdf_path = latest_pdf
     if os.path.exists(pdf_path):
         return FileResponse(path=pdf_path, media_type="application/pdf", filename=os.path.basename(pdf_path))
     return JSONResponse(status_code=404, content={"detail": "PDF not found."})
