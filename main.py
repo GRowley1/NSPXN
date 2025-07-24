@@ -106,19 +106,25 @@ def extract_text_from_pdf(file) -> str:
         file.seek(0)
         images = convert_from_bytes(file.read(), dpi=150)
         text_output = ""
-        for i, img in enumerate(images, 1):
+        for i, img in enumerate(images[:10]):  # Limit to 10 pages to reduce memory
             processed = preprocess_image(img)
             try:
                 ocr_text = pytesseract.image_to_string(processed, lang="eng", config='--psm 3')
             except Exception as e:
-                logger.warning(f"PSM 3 failed on page {i}: {str(e)}")
+                logger.warning(f"PSM 3 failed on page {i+1}: {str(e)}")
                 ocr_text = pytesseract.image_to_string(processed, lang="eng", config='--psm 6')
             if ocr_text.strip() and not re.search(r"[\:/\d\s]{50,}", ocr_text):
-                text_output += f"\n[Page {i}]\n{ocr_text.strip()}"
+                text_output += f"\n[Page {i+1}]\n{ocr_text.strip()}"
+            if i + 1 == 10:  # Warn if truncated
+                logger.warning(f"PDF processing limited to 10 pages; additional pages ignored")
+                break
         if not text_output.strip():
             logger.error("No valid text extracted from PDF")
             return "\n❌ No valid text extracted from PDF"
         return text_output
+    except MemoryError as me:
+        logger.error(f"Memory error during PDF processing: {str(me)}")
+        return f"\n❌ Memory error: {str(me)}"
     except Exception as e:
         logger.error(f"OCR error: {str(e)}")
         return f"\n❌ OCR error: {str(e)}"
@@ -407,7 +413,7 @@ async def vision_review(
 
         pdf.output(pdf_path)
 
-        # Send Email within try block
+        # Send Email
         msg = EmailMessage()
         msg["Subject"] = f"AI-4-IA Review: {claim_number}"
         msg["From"] = "noreply@nspxn.com"
@@ -450,6 +456,10 @@ Fraud Risk Explanation:
             "total_loss": total_loss_status
         }
 
+    except MemoryError as me:
+        logger.error(f"Memory error during processing: {str(me)}", exc_info=True)
+        return JSONResponse(status_code=500, content={"error": f"Memory error: {str(me)}"})
     except Exception as e:
         logger.error(f"Review processing failed: {str(e)}", exc_info=True)
         return JSONResponse(status_code=500, content={"error": f"Internal server error: {str(e)}"})
+
