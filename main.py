@@ -106,14 +106,17 @@ def extract_text_from_pdf(file) -> str:
     try:
         file.seek(0)
         pdf_data = file.read()
-        images = convert_from_bytes(pdf_data, dpi=100)  # Reduced DPI to 100
+        images = convert_from_bytes(pdf_data, dpi=100)
         text_output = ""
-        max_pages = 15
-        for i, img in enumerate(images[:max_pages]):
+        max_pages = 25  # Soft limit to prevent excessive memory use
+        for i, img in enumerate(images):
+            if i >= max_pages:
+                logger.warning(f"Reached soft page limit of {max_pages}, stopping processing")
+                break
             start_time = time.time()
             processed = preprocess_image(img)
             try:
-                ocr_text = pytesseract.image_to_string(processed, lang="eng", config='--psm 3', timeout=30)  # 30-second timeout
+                ocr_text = pytesseract.image_to_string(processed, lang="eng", config='--psm 3', timeout=30)
             except Exception as e:
                 logger.warning(f"PSM 3 failed on page {i+1}: {str(e)}")
                 ocr_text = pytesseract.image_to_string(processed, lang="eng", config='--psm 6', timeout=30)
@@ -172,9 +175,14 @@ def check_required_photos(image_files: List[UploadFile], ocr_text: str) -> List[
         "front left", "front right", "rear left", "rear right",
         "left front", "right front", "left rear", "right rear"
     ]
+    license_plate_keywords = [
+        "license plate", "plate photo", "registration plate",
+        "license", "reg plate", r"\b[A-Z0-9]{5,8}\b"
+    ]
 
     # Check OCR text
-    if any(term in ocr_lower for term in ["license plate", "plate photo", "registration plate"]):
+    if any(re.search(rf"{re.escape(term)}", ocr_lower) for term in license_plate_keywords) or \
+       re.search(r"\b[A-Z0-9]{5,8}\b", ocr_lower):
         found_photos.append("license plate")
     if any(term in ocr_lower for term in ["odometer", "mileage photo", "dashboard mileage"]):
         found_photos.append("odometer")
@@ -194,9 +202,9 @@ def check_required_photos(image_files: List[UploadFile], ocr_text: str) -> List[
                 found_photos.append("vin")
             if re.search(r"\d{1,3}(,\d{3})*\s*(miles|km)", ocr, re.IGNORECASE):
                 found_photos.append("odometer")
-            if re.search(r"(license|registration)\s*plate|\b[A-Z0-9]{5,8}\b", ocr, re.IGNORECASE):
+            if any(re.search(rf"{re.escape(term)}", ocr.lower()) for term in license_plate_keywords) or \
+               re.search(r"\b[A-Z0-9]{5,8}\b", ocr):
                 found_photos.append("license plate")
-            # Improved corner detection with page context
             if any(term in ocr.lower() for term in corner_keywords) or \
                any(re.search(rf"\b{re.escape(term)}\b", ocr.lower()) for term in corner_keywords):
                 found_photos.append("four corners")
