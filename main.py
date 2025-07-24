@@ -106,7 +106,7 @@ def extract_text_from_pdf(file) -> str:
         file.seek(0)
         images = convert_from_bytes(file.read(), dpi=150)
         text_output = ""
-        for i, img in enumerate(images):  # Remove 10-page limit
+        for i, img in enumerate(images):
             processed = preprocess_image(img)
             try:
                 ocr_text = pytesseract.image_to_string(processed, lang="eng", config='--psm 3')
@@ -115,21 +115,18 @@ def extract_text_from_pdf(file) -> str:
                 ocr_text = pytesseract.image_to_string(processed, lang="eng", config='--psm 6')
             if ocr_text.strip() and not re.search(r"[\:/\d\s]{50,}", ocr_text):
                 text_output += f"\n[Page {i+1}]\n{ocr_text.strip()}"
-            if i % 10 == 9:  # Memory check every 10 pages
-                logger.debug(f"Processed {i+1} pages, checking memory...")
-                if memory_usage() > 1.5e9:  # Approx 1.5GB (requires psutil or similar)
-                    logger.warning(f"Memory usage high at {i+1} pages; stopping")
-                    break
+            if i > 0 and i % 10 == 0:  # Log progress every 10 pages
+                logger.debug(f"Processed {i+1} pages successfully")
         if not text_output.strip():
             logger.error("No valid text extracted from PDF")
             return "\n❌ No valid text extracted from PDF"
         return text_output
     except MemoryError as me:
-        logger.error(f"Memory error during PDF processing: {str(me)}")
-        return f"\n❌ Memory error: {str(me)}"
+        logger.error(f"Memory error during PDF processing after {i+1} pages: {str(me)}", exc_info=True)
+        return text_output if text_output else f"\n❌ Memory error after {i+1} pages: {str(me)}"
     except Exception as e:
-        logger.error(f"OCR error: {str(e)}")
-        return f"\n❌ OCR error: {str(e)}"
+        logger.error(f"OCR error on page {i+1}: {str(e)}", exc_info=True)
+        return text_output if text_output else f"\n❌ OCR error on page {i+1}: {str(e)}"
 
 def extract_text_from_docx(file) -> str:
     doc = Document(file)
@@ -311,6 +308,7 @@ async def vision_review(
         elif name.endswith(".pdf"):
             text = extract_text_from_pdf(io.BytesIO(content))
             texts.append(text)
+            logger.debug(f"Extracted text from PDF: {text[:200]}...")  # Debug log
         elif name.endswith(".docx"):
             texts.append(extract_text_from_docx(io.BytesIO(content)))
         elif name.endswith(".txt"):
@@ -330,8 +328,10 @@ async def vision_review(
             "type": "text",
             "text": '\n\n'.join(texts) + advisor_hint + photo_hint
         })
+        logger.debug(f"Vision message text: {vision_message['content'][0]['text'][:200]}...")  # Debug log
     if images:
         vision_message["content"].extend(images)
+        logger.debug(f"Vision message includes {len(images)} images")  # Debug log
 
     prompt = f"""
     You are an AI auto damage auditor. Always output:
@@ -361,6 +361,7 @@ async def vision_review(
             max_tokens=3500
         )
         gpt_output = response.choices[0].message.content or "⚠️ GPT returned no output."
+        logger.debug(f"GPT output: {gpt_output[:200]}...")  # Debug log
         claim_number = extract_field("Claim", gpt_output)
         vehicle = extract_field("Vehicle", gpt_output)
         score = extract_field("Compliance Score", gpt_output)
