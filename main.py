@@ -106,7 +106,7 @@ def extract_text_from_pdf(file) -> str:
         file.seek(0)
         images = convert_from_bytes(file.read(), dpi=150)
         text_output = ""
-        for i, img in enumerate(images[:10]):  # Limit to 10 pages to reduce memory
+        for i, img in enumerate(images):  # Remove 10-page limit
             processed = preprocess_image(img)
             try:
                 ocr_text = pytesseract.image_to_string(processed, lang="eng", config='--psm 3')
@@ -115,9 +115,11 @@ def extract_text_from_pdf(file) -> str:
                 ocr_text = pytesseract.image_to_string(processed, lang="eng", config='--psm 6')
             if ocr_text.strip() and not re.search(r"[\:/\d\s]{50,}", ocr_text):
                 text_output += f"\n[Page {i+1}]\n{ocr_text.strip()}"
-            if i + 1 == 10:  # Warn if truncated
-                logger.warning(f"PDF processing limited to 10 pages; additional pages ignored")
-                break
+            if i % 10 == 9:  # Memory check every 10 pages
+                logger.debug(f"Processed {i+1} pages, checking memory...")
+                if memory_usage() > 1.5e9:  # Approx 1.5GB (requires psutil or similar)
+                    logger.warning(f"Memory usage high at {i+1} pages; stopping")
+                    break
         if not text_output.strip():
             logger.error("No valid text extracted from PDF")
             return "\n❌ No valid text extracted from PDF"
@@ -167,6 +169,7 @@ def check_required_photos(image_files: List[UploadFile], ocr_text: str) -> List[
         "left front", "right front", "left rear", "right rear"
     ]
 
+    # Check OCR text
     if any(term in ocr_lower for term in ["license plate", "plate photo", "registration plate"]):
         found_photos.append("license plate")
     if any(term in ocr_lower for term in ["odometer", "mileage photo", "dashboard mileage"]):
@@ -176,6 +179,7 @@ def check_required_photos(image_files: List[UploadFile], ocr_text: str) -> List[
     if any(term in ocr_lower for term in corner_keywords):
         found_photos.append("four corners")
 
+    # Enhanced image analysis
     for img in image_files:
         try:
             img.file.seek(0)
@@ -188,7 +192,9 @@ def check_required_photos(image_files: List[UploadFile], ocr_text: str) -> List[
                 found_photos.append("odometer")
             if re.search(r"(license|registration)\s*plate|\b[A-Z0-9]{5,8}\b", ocr, re.IGNORECASE):
                 found_photos.append("license plate")
-            if any(term in ocr.lower() for term in corner_keywords):
+            # Improved corner detection with page context
+            if any(term in ocr.lower() for term in corner_keywords) or \
+               any(re.search(rf"\b{re.escape(term)}\b", ocr.lower()) for term in corner_keywords):
                 found_photos.append("four corners")
         except Exception as e:
             logger.error(f"OCR image read error: {str(e)}")
@@ -380,8 +386,13 @@ async def vision_review(
         fraud_result = fraud_risk_score(combined_text, gpt_output)
         fraud_explanation = get_fraud_risk_explanation(fraud_result["flags"], fraud_result["score"])
 
-        # Generate PDF
-        pdf_path = f"{file_number}_{datetime.now().strftime('%Y%m%d_%H%M%S')}.pdf"
+        # Generate PDF with only file number, appending suffix if exists
+        base_pdf_path = f"{file_number}.pdf"
+        pdf_path = base_pdf_path
+        counter = 1
+        while os.path.exists(pdf_path):
+            pdf_path = f"{file_number}_{counter}.pdf"
+            counter += 1
         pdf = FPDF()
         pdf.add_page()
         pdf.add_font("DejaVu", "", "DejaVuSans.ttf", uni=True)
@@ -465,7 +476,7 @@ Fraud Risk Explanation:
 
 @app.get("/download-pdf")
 async def download_pdf(file_number: str):
-    pdf_files = [f for f in os.listdir('.') if f.startswith(f"{file_number}_") and f.endswith(".pdf")]
+    pdf_files = [f for f in os.listdir('.') if f.startswith(f"{file_number}") and f.endswith(".pdf")]
     if not pdf_files:
         return JSONResponse(status_code=404, content={"detail": "PDF not found."})
     # Sort by creation time to get the latest
