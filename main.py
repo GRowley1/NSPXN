@@ -16,6 +16,7 @@ from PIL import Image, ImageEnhance, ImageOps, ImageFilter
 from openai import OpenAI
 import logging
 from datetime import datetime
+import time
 
 # Configure logging
 logging.basicConfig(level=logging.DEBUG, filename='app.log', filemode='a',
@@ -104,15 +105,21 @@ def preprocess_image(img: Image.Image) -> Image.Image:
 def extract_text_from_pdf(file) -> str:
     try:
         file.seek(0)
-        images = convert_from_bytes(file.read(), dpi=150)
+        pdf_data = file.read()
+        images = convert_from_bytes(pdf_data, dpi=100)  # Reduced DPI to 100
         text_output = ""
-        for i, img in enumerate(images[:15]):  # Limit to 15 pages
+        max_pages = 15
+        for i, img in enumerate(images[:max_pages]):
+            start_time = time.time()
             processed = preprocess_image(img)
             try:
-                ocr_text = pytesseract.image_to_string(processed, lang="eng", config='--psm 3')
+                ocr_text = pytesseract.image_to_string(processed, lang="eng", config='--psm 3', timeout=30)  # 30-second timeout
             except Exception as e:
                 logger.warning(f"PSM 3 failed on page {i+1}: {str(e)}")
-                ocr_text = pytesseract.image_to_string(processed, lang="eng", config='--psm 6')
+                ocr_text = pytesseract.image_to_string(processed, lang="eng", config='--psm 6', timeout=30)
+            if time.time() - start_time > 30:
+                logger.warning(f"OCR timeout on page {i+1}")
+                break
             if ocr_text.strip() and not re.search(r"[\:/\d\s]{50,}", ocr_text):
                 text_output += f"\n[Page {i+1}]\n{ocr_text.strip()}"
             if i > 0 and i % 10 == 0:
@@ -307,6 +314,9 @@ async def vision_review(
             images.append({"type": "image_url", "image_url": {"url": f"data:image/jpeg;base64,{b64}"}})
         elif name.endswith(".pdf"):
             text = extract_text_from_pdf(io.BytesIO(content))
+            if "❌" in text:
+                logger.error(f"PDF processing failed: {text}")
+                return JSONResponse(status_code=500, content={"error": f"PDF processing failed: {text}"})
             texts.append(text)
             logger.debug(f"Extracted text from PDF: {text[:200]}...")  # Debug log
         elif name.endswith(".docx"):
@@ -509,5 +519,4 @@ async def get_client_rules(client_name: str):
     else:
         logger.warning(f"Client rules not found for: {client_name}")
         return JSONResponse(status_code=404, content={"error": f"Rules not found for client: {client_name}"})
-
 
