@@ -106,7 +106,7 @@ def extract_text_from_pdf(file) -> str:
         file.seek(0)
         images = convert_from_bytes(file.read(), dpi=150)
         text_output = ""
-        for i, img in enumerate(images):
+        for i, img in enumerate(images[:15]):  # Limit to 15 pages
             processed = preprocess_image(img)
             try:
                 ocr_text = pytesseract.image_to_string(processed, lang="eng", config='--psm 3')
@@ -115,7 +115,7 @@ def extract_text_from_pdf(file) -> str:
                 ocr_text = pytesseract.image_to_string(processed, lang="eng", config='--psm 6')
             if ocr_text.strip() and not re.search(r"[\:/\d\s]{50,}", ocr_text):
                 text_output += f"\n[Page {i+1}]\n{ocr_text.strip()}"
-            if i > 0 and i % 10 == 0:  # Log progress every 10 pages
+            if i > 0 and i % 10 == 0:
                 logger.debug(f"Processed {i+1} pages successfully")
         if not text_output.strip():
             logger.error("No valid text extracted from PDF")
@@ -332,6 +332,10 @@ async def vision_review(
     if images:
         vision_message["content"].extend(images)
         logger.debug(f"Vision message includes {len(images)} images")  # Debug log
+
+    if not vision_message["content"]:
+        logger.error("No content available for GPT processing")
+        return JSONResponse(status_code=400, content={"error": "No valid data extracted for processing"})
 
     prompt = f"""
     You are an AI auto damage auditor. Always output:
