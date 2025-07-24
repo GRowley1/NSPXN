@@ -113,11 +113,11 @@ def extract_text_from_pdf(file) -> str:
             except Exception as e:
                 logger.warning(f"PSM 3 failed on page {i}: {str(e)}")
                 ocr_text = pytesseract.image_to_string(processed, lang="eng", config='--psm 6')
-            if len(ocr_text.strip()) < 50 or re.search(r"[\:/\d\s]{50,}", ocr_text):
-                continue
-            text_output += f"\n[Page {i}]\n{ocr_text}"
+            if ocr_text.strip() and not re.search(r"[\:/\d\s]{50,}", ocr_text):
+                text_output += f"\n[Page {i}]\n{ocr_text.strip()}"
         if not text_output.strip():
             logger.error("No valid text extracted from PDF")
+            return "\n❌ No valid text extracted from PDF"
         return text_output
     except Exception as e:
         logger.error(f"OCR error: {str(e)}")
@@ -125,10 +125,10 @@ def extract_text_from_pdf(file) -> str:
 
 def extract_text_from_docx(file) -> str:
     doc = Document(file)
-    return '\n'.join(p.text for p in doc.paragraphs if p.text.strip())
+    return '\n'.join(p.text.strip() for p in doc.paragraphs if p.text.strip())
 
-def extract_field(label, text) -> str:
-    pattern = re.compile(rf"{label}\s*[:\-#=]?\s*(R226\d+.*|[A-HJ-NPR-Z0-9]{{17}}|[^\n\r;]+)", re.IGNORECASE)
+def extract_field(label: str, text: str) -> str:
+    pattern = re.compile(rf"{re.escape(label)}\s*[:\-#=]?\s*(R226\d+.*|[A-HJ-NPR-Z0-9]{{17}}|[^\n\r;]+)", re.IGNORECASE)
     matches = pattern.findall(text)
     if matches:
         from collections import Counter
@@ -160,7 +160,6 @@ def check_required_photos(image_files: List[UploadFile], ocr_text: str) -> List[
         "front left", "front right", "rear left", "rear right",
         "left front", "right front", "left rear", "right rear"
     ]
-    corner_matches = []
 
     if any(term in ocr_lower for term in ["license plate", "plate photo", "registration plate"]):
         found_photos.append("license plate")
@@ -168,10 +167,7 @@ def check_required_photos(image_files: List[UploadFile], ocr_text: str) -> List[
         found_photos.append("odometer")
     if any(term in ocr_lower for term in ["vin", "vehicle identification number", "vin photo"]):
         found_photos.append("vin")
-    for term in corner_keywords:
-        if term in ocr_lower:
-            corner_matches.append(term)
-    if len(corner_matches) >= 2:
+    if any(term in ocr_lower for term in corner_keywords):
         found_photos.append("four corners")
 
     for img in image_files:
@@ -186,8 +182,7 @@ def check_required_photos(image_files: List[UploadFile], ocr_text: str) -> List[
                 found_photos.append("odometer")
             if re.search(r"(license|registration)\s*plate|\b[A-Z0-9]{5,8}\b", ocr, re.IGNORECASE):
                 found_photos.append("license plate")
-            corner_matches_img = [term for term in corner_keywords if term in ocr.lower()]
-            if len(corner_matches_img) >= 2:
+            if any(term in ocr.lower() for term in corner_keywords):
                 found_photos.append("four corners")
         except Exception as e:
             logger.error(f"OCR image read error: {str(e)}")
@@ -230,7 +225,7 @@ def get_fraud_risk_explanation(fraud_flags: List[str], score: int) -> str:
         return "No fraud indicators detected."
     return "\n".join([explanations.get(flag, "Unknown fraud indicator.") for flag in fraud_flags])
 
-def fraud_risk_score(combined_text: str, gpt_output: str, claim_numbers: List[str]) -> dict:
+def fraud_risk_score(combined_text: str, gpt_output: str) -> dict:
     fraud_flags = []
     current_date = datetime.now().date()
 
@@ -238,8 +233,14 @@ def fraud_risk_score(combined_text: str, gpt_output: str, claim_numbers: List[st
     estimate_date_match = re.search(r"(\d{1,2}/\d{1,2}/\d{4})\s*(?:AM|PM)?", combined_text, re.IGNORECASE)
     estimate_date = datetime.strptime(estimate_date_match.group(1), "%m/%d/%Y").date() if estimate_date_match else current_date
 
-    if "claim number" in combined_text and combined_text.count("claim number") > 3:
+    # Extract claim numbers within function
+    claim_pattern = re.compile(r"claim\s*#?\s*[:\-]?\s*(C[A-Z]\d+[A-Z]?\d*|225\d{6}V\d|\d{5,6})", re.IGNORECASE)
+    claim_numbers = claim_pattern.findall(combined_text)
+
+    if len(claim_numbers) > 3:  # Check for repetition
         fraud_flags.append("🚩 Repeated Claim Number")
+    if claim_numbers and len(set(claim_numbers)) > 1:  # Safe mismatch check
+        fraud_flags.append("🚩 Claim Number Mismatch")
     if "total loss" in combined_text and combined_text.count("total loss") > 2:
         fraud_flags.append("🚩 Multiple Total Loss Mentions")
     if any(term in combined_text for term in ["copy", "edited", "photoshop", "manipulated"]):
@@ -250,11 +251,6 @@ def fraud_risk_score(combined_text: str, gpt_output: str, claim_numbers: List[st
         loss_date = datetime.strptime(date_match.group(1), "%m/%d/%Y").date()
         if loss_date > current_date or (estimate_date_match and loss_date > estimate_date):
             fraud_flags.append("🚩 Future Date of Loss")
-
-    # Handle claim numbers safely
-    if claim_numbers:  # Only proceed if claim_numbers is not empty
-        if len(set(claim_numbers)) > 1:
-            fraud_flags.append("🚩 Claim Number Mismatch")
 
     fraud_risk_score = 0
     if "fraud" in gpt_output.lower() or "suspicious" in gpt_output.lower():
@@ -292,7 +288,6 @@ async def vision_review(
     images = []
     texts = []
     image_files = []
-    claim_numbers = []
 
     for file in files:
         content = await file.read()
@@ -302,7 +297,8 @@ async def vision_review(
             b64 = base64.b64encode(content).decode("utf-8")
             images.append({"type": "image_url", "image_url": {"url": f"data:image/jpeg;base64,{b64}"}})
         elif name.endswith(".pdf"):
-            texts.append(extract_text_from_pdf(io.BytesIO(content)))
+            text = extract_text_from_pdf(io.BytesIO(content))
+            texts.append(text)
         elif name.endswith(".docx"):
             texts.append(extract_text_from_docx(io.BytesIO(content)))
         elif name.endswith(".txt"):
@@ -315,10 +311,6 @@ async def vision_review(
     advisor_hint = "\n\nCONFIRMED: CCC Advisor Report is included." if advisor_confirmed else ""
     missing_photos = check_required_photos(image_files, combined_text)
     photo_hint = f"\n\nMISSING PHOTOS: {', '.join(missing_photos) if missing_photos else 'None'}"
-
-    # Extract claim numbers
-    claim_pattern = re.compile(r"claim\s*#?\s*[:\-]?\s*(CAs-\d+|\d+)", re.IGNORECASE)
-    claim_numbers = claim_pattern.findall(combined_text)
 
     vision_message = {"role": "user", "content": []}
     if texts:
@@ -364,7 +356,7 @@ async def vision_review(
 
         try:
             score = int(score.strip("%"))
-        except:
+        except ValueError:
             score = 100
 
         score_adj = 0
@@ -376,13 +368,14 @@ async def vision_review(
             found_fields = [f for f in required_fields if f in combined_text]
             score_adj -= 25 * (len(required_fields) - len(found_fields))
 
-        final_score = max(0, score + score_adj)
+        final_score = max(0, min(100, score + score_adj))
 
         # Fraud detection
-        fraud_result = fraud_risk_score(combined_text, gpt_output, claim_numbers)
+        fraud_result = fraud_risk_score(combined_text, gpt_output)
         fraud_explanation = get_fraud_risk_explanation(fraud_result["flags"], fraud_result["score"])
 
         # Generate PDF
+        pdf_path = f"{file_number}_{datetime.now().strftime('%Y%m%d_%H%M%S')}.pdf"
         pdf = FPDF()
         pdf.add_page()
         pdf.add_font("DejaVu", "", "DejaVuSans.ttf", uni=True)
@@ -406,13 +399,12 @@ async def vision_review(
             pdf.multi_cell(0, 10, fraud_explanation)
         pdf.set_text_color(0, 0, 0)
         pdf.ln(5)
-        pdf.multi_cell(0, 10, "Total Loss Status: Yes" if total_loss_status else "Total Loss Status: No")
+        pdf.multi_cell(0, 10, f"Total Loss Status: {'Yes' if total_loss_status else 'No'}")
         pdf.ln(5)
         pdf.multi_cell(0, 10, "AI-4-IA Review Summary:")
         pdf.set_font("DejaVu", size=9)
         pdf.multi_cell(0, 10, gpt_output)
 
-        pdf_path = f"{file_number}.pdf"
         pdf.output(pdf_path)
 
         # Send Email
@@ -440,9 +432,12 @@ Fraud Risk Explanation:
 """
         msg.set_content(email_body)
 
-        with smtplib.SMTP_SSL("mail.tierra.net", 465) as smtp:
-            smtp.login("info@nspxn.com", "grr2025GRR")
-            smtp.send_message(msg)
+        try:
+            with smtplib.SMTP_SSL("mail.tierra.net", 465) as smtp:
+                smtp.login("info@nspxn.com", "grr2025GRR")
+                smtp.send_message(msg)
+        except Exception as e:
+            logger.error(f"Email sending failed: {str(e)}")
 
         return {
             "gpt_output": gpt_output,
@@ -457,13 +452,13 @@ Fraud Risk Explanation:
         }
 
     except Exception as e:
-        logger.error(f"Review processing failed: {str(e)}")
-        return JSONResponse(status_code=500, content={"error": str(e)})
+        logger.error(f"Review processing failed: {str(e)}", exc_info=True)
+        return JSONResponse(status_code=500, content={"error": f"Internal server error: {str(e)}"})
 
 @app.get("/download-pdf")
 async def download_pdf(file_number: str):
-    pdf_path = f"{file_number}.pdf"
-    if os.path.exists(pdf_path):
+    pdf_path = next((f for f in os.listdir('.') if f.startswith(f"{file_number}_") and f.endswith(".pdf")), None)
+    if pdf_path and os.path.exists(pdf_path):
         return FileResponse(path=pdf_path, media_type="application/pdf", filename=os.path.basename(pdf_path))
     return JSONResponse(status_code=404, content={"detail": "PDF not found."})
 
@@ -482,6 +477,9 @@ async def get_client_rules(client_name: str):
         except Exception as e:
             logger.error(f"Error reading client rules for {client_name}: {str(e)}")
             return JSONResponse(status_code=500, content={"error": f"Failed to read client rules: {str(e)}"})
+    else:
+        logger.warning(f"Client rules not found for: {client_name}")
+        return JSONResponse(status_code=404, content={"error": f"Rules not found for client: {client_name}"})
     else:
         logger.warning(f"Client rules not found for: {client_name}")
         return JSONResponse(status_code=404, content={"error": f"Rules not found for client: {client_name}"})
