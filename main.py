@@ -106,7 +106,10 @@ def extract_text_from_pdf(file) -> str:
     try:
         file.seek(0)
         pdf_data = file.read()
-        images = convert_from_bytes(pdf_data, dpi=200)
+        images = convert_from_bytes(pdf_data, dpi=150)  # Reverted to 150 for memory safety
+        if not images:
+            logger.error("No images generated from PDF")
+            return "\n❌ No images generated from PDF"
         text_output = ""
         for i, img in enumerate(images):
             start_time = time.time()
@@ -128,11 +131,11 @@ def extract_text_from_pdf(file) -> str:
             return "\n❌ No valid text extracted from PDF"
         return text_output
     except MemoryError as me:
-        logger.error(f"Memory error during PDF processing after {i+1} pages: {str(me)}", exc_info=True)
-        return text_output if text_output else f"\n❌ Memory error after {i+1} pages: {str(me)}"
+        logger.error(f"Memory error during PDF processing after {i+1 if 'i' in locals() else 0} pages: {str(me)}", exc_info=True)
+        return text_output if text_output else f"\n❌ Memory error after {i+1 if 'i' in locals() else 0} pages: {str(me)}"
     except Exception as e:
-        logger.error(f"OCR error on page {i+1}: {str(e)}", exc_info=True)
-        return text_output if text_output else f"\n❌ OCR error on page {i+1}: {str(e)}"
+        logger.error(f"OCR error on page {i+1 if 'i' in locals() else 0}: {str(e)}", exc_info=True)
+        return text_output if text_output else f"\n❌ OCR error on page {i+1 if 'i' in locals() else 0}: {str(e)}"
 
 def extract_text_from_docx(file) -> str:
     doc = Document(file)
