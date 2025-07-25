@@ -12,11 +12,9 @@ from fpdf import FPDF
 from docx import Document
 from pdf2image import convert_from_bytes
 import pytesseract
-from PIL import Image, ImageEnhance, ImageFilter
+from PIL import Image, ImageEnhance, ImageOps, ImageFilter
 from openai import OpenAI
 import logging
-from datetime import datetime
-import time
 
 # Configure logging
 logging.basicConfig(level=logging.DEBUG, filename='app.log', filemode='a',
@@ -24,7 +22,7 @@ logging.basicConfig(level=logging.DEBUG, filename='app.log', filemode='a',
 logger = logging.getLogger(__name__)
 
 if "OPENAI_API_KEY" not in os.environ:
-    raise RuntimeError("❌ OPENAI_API_KEY environment variable is NOT set.")
+    raise RuntimeError("\u274c OPENAI_API_KEY environment variable is NOT set.")
 client = OpenAI(api_key=os.environ["OPENAI_API_KEY"])
 
 app = FastAPI()
@@ -43,118 +41,56 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-# Fraud detection module
-def run_fraud_checks(texts: List[str], image_files: List[UploadFile]) -> dict:
-    indicators = {
-        "manipulated_photos": False,
-        "repeated_damage_claims": False,
-        "timestamp_conflict": False,
-        "salvage_resubmission": False,
-        "suspicious_terms": [],
-    }
-
-    combined_text = '\n'.join(texts).lower()
-
-    suspicious_keywords = ["prior damage", "again", "second time", "wasn't paid", "already repaired", "previous total loss"]
-    found_keywords = [term for term in suspicious_keywords if term in combined_text]
-    if found_keywords:
-        indicators["repeated_damage_claims"] = True
-        indicators["suspicious_terms"] = found_keywords
-
-    if "salvage" in combined_text or "total loss" in combined_text:
-        indicators["salvage_resubmission"] = True
-
-    try:
-        for file in image_files:
-            file.file.seek(0)
-            image = Image.open(io.BytesIO(file.file.read()))
-            exif_data = image.getexif()
-            if exif_data:
-                date = exif_data.get(36867)
-                if date and not re.search(r"202[3-5]", date):
-                    indicators["timestamp_conflict"] = True
-                    break
-    except Exception as e:
-        logger.warning(f"EXIF check failed: {str(e)}")
-
-    manipulated = any("photoshop" in t.lower() or "edited" in t.lower() for t in texts)
-    if manipulated:
-        indicators["manipulated_photos"] = True
-
-    score = 0
-    if indicators["manipulated_photos"]:
-        score += 40
-    if indicators["repeated_damage_claims"]:
-        score += 30
-    if indicators["timestamp_conflict"]:
-        score += 20
-    if indicators["salvage_resubmission"]:
-        score += 25
-
-    score = min(100, score)
-    return {"risk_score": score, "flags": indicators}
-
 def preprocess_image(img: Image.Image) -> Image.Image:
-    img = img.convert("L")
-    img = ImageEnhance.Contrast(img).enhance(1.3)  # Slightly increased contrast
-    img = img.filter(ImageFilter.SHARPEN)  # Retained sharpening
+    img = img.convert("L")  # Convert to grayscale
+    img = ImageEnhance.Contrast(img).enhance(2.0)  # Enhance contrast
     img = img.filter(ImageFilter.MedianFilter(size=3))  # Noise reduction
+    img = ImageOps.autocontrast(img)  # Adaptive thresholding
+    img = ImageOps.invert(img)  # Invert for better OCR
     return img
 
 def extract_text_from_pdf(file) -> str:
     try:
         file.seek(0)
-        pdf_data = file.read()
-        images = convert_from_bytes(pdf_data, dpi=200)  # Retained dpi=200
-        if not images:
-            logger.error("No images generated from PDF")
-            return "\n❌ No images generated from PDF"
+        images = convert_from_bytes(file.read(), dpi=300)  # Stable DPI
         text_output = ""
-        for i, img in enumerate(images):
-            start_time = time.time()
+        for i, img in enumerate(images, 1):
             processed = preprocess_image(img)
             try:
-                ocr_text = pytesseract.image_to_string(processed, lang="eng", config='--psm 3', timeout=30)
+                ocr_text = pytesseract.image_to_string(processed, lang="eng", config='--psm 3')
             except Exception as e:
-                logger.warning(f"PSM 3 failed on page {i+1}: {str(e)}")
-                ocr_text = pytesseract.image_to_string(processed, lang="eng", config='--psm 6', timeout=30)
-            if time.time() - start_time > 30:
-                logger.warning(f"OCR timeout on page {i+1}")
-                break
-            if ocr_text.strip() and not re.search(r"[\:/\d\s]{50,}", ocr_text):
-                text_output += f"\n[Page {i+1}]\n{ocr_text.strip()}"
-                logger.debug(f"Page {i+1} OCR text: {ocr_text[:200]}...")
-            if i > 0 and i % 10 == 0:
-                logger.debug(f"Processed {i+1} pages successfully")
+                logger.warning(f"PSM 3 failed for page {i}: {str(e)}, retrying with PSM 6")
+                ocr_text = pytesseract.image_to_string(processed, lang="eng", config='--psm 6')
+            if len(ocr_text.strip()) < 50 or re.search(r"[\:/\d\s]{50,}", ocr_text):
+                logger.warning(f"Page {i} OCR output skipped (garbled): {ocr_text[:100]}...")
+                continue
+            text_output += f"\n[Page {i}]\n{ocr_text}"
+            if i == 5:
+                logger.debug(f"Page 5 OCR (labor/tax): {ocr_text[:500]}...")
         if not text_output.strip():
             logger.error("No valid text extracted from PDF")
-            return "\n❌ No valid text extracted from PDF"
         return text_output
-    except MemoryError as me:
-        logger.error(f"Memory error during PDF processing after {i+1 if 'i' in locals() else 0} pages: {str(me)}", exc_info=True)
-        return text_output if text_output else f"\n❌ Memory error after {i+1 if 'i' in locals() else 0} pages: {str(me)}"
     except Exception as e:
-        logger.error(f"OCR error on page {i+1 if 'i' in locals() else 0}: {str(e)}", exc_info=True)
-        return text_output if text_output else f"\n❌ OCR error on page {i+1 if 'i' in locals() else 0}: {str(e)}"
-
+        logger.error(f"OCR error (possible network failure): {str(e)}")
+        return f"\n\u274c OCR error during combined extraction: {str(e)}"
 def extract_text_from_docx(file) -> str:
     doc = Document(file)
-    return '\n'.join(p.text.strip() for p in doc.paragraphs if p.text.strip())
+    text = '\n'.join(p.text for p in doc.paragraphs if p.text.strip())
+    logger.debug(f"Extracted DOCX text: {text[:500]}...")
+    return text
 
-def extract_field(label: str, text: str) -> str:
-    pattern = re.compile(rf"{re.escape(label)}\s*[:\-#=]?\s*(R226\d+.*|[A-HJ-NPR-Z0-9]{{10,17}}|[^\n\r;]+)", re.IGNORECASE)
+def extract_field(label, text) -> str:
+    pattern = re.compile(rf"{label}\s*[:\-#=]?\s*(R226\d+.*|[A-HJ-NPR-Z0-9]{17}|[^\n\r;]+)", re.IGNORECASE)
     matches = pattern.findall(text)
     if matches:
         from collections import Counter
         return Counter(matches).most_common(1)[0][0].strip()
-    if label.lower() == "vin":
-        vin_match = re.search(r"\b[A-HJ-NPR-Z0-9]{10,17}\b", text, re.IGNORECASE)
-        return vin_match.group(0) if vin_match else "N/A"
     return "N/A"
 
 def advisor_report_present(texts: List[str], image_files: List[UploadFile]) -> bool:
     for t in texts:
         if any(term in t.lower() for term in ["ccc advisor report", "advisor report"]):
+            logger.debug("Advisor report found in text")
             return True
     for img in image_files:
         try:
@@ -163,39 +99,37 @@ def advisor_report_present(texts: List[str], image_files: List[UploadFile]) -> b
             processed = preprocess_image(image)
             ocr = pytesseract.image_to_string(processed, lang="eng")
             if "advisor report" in ocr.lower():
+                logger.debug("Advisor report found in image OCR")
                 return True
         except Exception as e:
-            logger.error(f"Image OCR error: {str(e)}")
+            logger.error(f"Image processing error: {str(e)}")
+            continue
     return False
 
 def check_required_photos(image_files: List[UploadFile], ocr_text: str) -> List[str]:
     required_photos = ["four corners", "odometer", "vin", "license plate"]
     found_photos = []
     ocr_lower = ocr_text.lower()
-    corner_keywords = [
-        "four corners", "four corner photo", "vehicle corners",
-        "front left", "front right", "rear left", "rear right",
-        "left front", "right front", "left rear", "right rear",
-        "corner view", "all corners", "vehicle angles"
-    ]
-    license_plate_keywords = [
-        "license plate", "plate photo", "registration plate",
-        "license", "reg plate", "license #", r"\b[A-Z0-9]{5,8}\b"
-    ]
-
-    if any(re.search(rf"{re.escape(term)}", ocr_lower) for term in license_plate_keywords) or \
-       re.search(r"\b[A-Z0-9]{5,8}\b", ocr_lower):
+    corner_keywords = ["four corners", "four corner photo", "vehicle corners", 
+                      "front left", "front right", "rear left", "rear right",
+                      "left front", "right front", "left rear", "right rear"]
+    corner_matches = []
+    
+    if any(term in ocr_lower for term in ["license plate", "plate photo", "registration plate"]):
         found_photos.append("license plate")
-        logger.debug("Detected license plate in OCR text")
-    if any(re.search(rf"{re.escape(term)}", ocr_lower) for term in ["odometer", "mileage photo", "dashboard mileage", "mileage reading", r"\d{1,6}(?:,\d{3})*(?:\s*miles|\s*km)?", r"\d{5,6}"]):  # Added 5-6 digit mileage
+        logger.debug("Found license plate photo via OCR keywords")
+    if any(term in ocr_lower for term in ["odometer", "mileage photo", "dashboard mileage"]):
         found_photos.append("odometer")
-        logger.debug("Detected odometer in OCR text")
+        logger.debug("Found odometer photo via OCR keywords")
     if any(term in ocr_lower for term in ["vin", "vehicle identification number", "vin photo"]):
         found_photos.append("vin")
-        logger.debug("Detected VIN in OCR text")
-    if any(re.search(rf"{re.escape(term)}", ocr_lower) for term in corner_keywords):
+        logger.debug("Found VIN photo via OCR keywords")
+    for term in corner_keywords:
+        if term in ocr_lower:
+            corner_matches.append(term)
+    if len(corner_matches) >= 2:
         found_photos.append("four corners")
-        logger.debug("Detected four corners in OCR text")
+        logger.debug(f"Found four corners photo via OCR keywords: {corner_matches}")
 
     for img in image_files:
         try:
@@ -203,104 +137,48 @@ def check_required_photos(image_files: List[UploadFile], ocr_text: str) -> List[
             image = Image.open(io.BytesIO(img.file.read()))
             processed = preprocess_image(image)
             ocr = pytesseract.image_to_string(processed, lang="eng")
-            logger.debug(f"Raw image OCR text: {ocr[:500]}...")
-            if re.search(r"\b[A-HJ-NPR-Z0-9]{10,17}\b", ocr):
+            if re.search(r"\b[A-HJ-NPR-Z0-9]{17}\b", ocr, re.IGNORECASE):
                 found_photos.append("vin")
-                logger.debug("Detected VIN in image")
-            if re.search(r"\d{1,6}(?:,\d{3})*(?:\s*miles|\s*km)?|\d{5,6}", ocr, re.IGNORECASE):  # Added 5-6 digit mileage
+                logger.debug("Found VIN photo via image OCR")
+            if re.search(r"\d{1,3}(,\d{3})*\s*(miles|km)", ocr, re.IGNORECASE):
                 found_photos.append("odometer")
-                logger.debug("Detected odometer in image")
-            if any(re.search(rf"{re.escape(term)}", ocr.lower()) for term in license_plate_keywords) or \
-               re.search(r"\b[A-Z0-9]{5,8}\b", ocr):
+                logger.debug("Found odometer photo via image OCR")
+            if re.search(r"(license|registration)\s*plate|\b[A-Z0-9]{5,8}\b", ocr, re.IGNORECASE):
                 found_photos.append("license plate")
-                logger.debug("Detected license plate in image")
-            if any(re.search(rf"{re.escape(term)}", ocr.lower()) for term in corner_keywords):
+                logger.debug("Found license plate photo via image OCR")
+            corner_matches_img = [term for term in corner_keywords if term in ocr.lower()]
+            if len(corner_matches_img) >= 2:
                 found_photos.append("four corners")
-                logger.debug("Detected four corners in image")
+                logger.debug(f"Found four corners photo via image OCR: {corner_matches_img}")
+            if corner_matches_img:
+                corner_matches.extend(corner_matches_img)
         except Exception as e:
-            logger.error(f"OCR image read error: {str(e)}")
+            logger.error(f"Image processing error: {str(e)}")
 
     found_photos = list(set(found_photos))
     missing = [p for p in required_photos if p not in found_photos]
-    logger.debug(f"Found photos: {found_photos}, Missing photos: {missing}")
+    logger.debug(f"Found photos: {found_photos}, Missing photos: {missing}, Corner matches: {corner_matches}")
     return missing
-
 def check_labor_and_tax_score(text: str, client_rules: str) -> int:
     score_adj = 0
-    required_sections = ["body labor", "paint labor", "mechanical labor", "structural labor", "D=", "E=", "F=", "G=", "M=", "S="]  # Added abbreviations
+    required_sections = ["body labor", "paint labor", "mechanical labor", "structural labor"]
     found_sections = []
     for section in required_sections:
-        if re.search(rf"{section}[:\s]*(?:\$?\d+\.?\d*\s*(?:/hr|hour)?|\d+\.?\d*\s*hours?)", text, re.IGNORECASE):  # Added hours pattern
+        if re.search(rf"{section}[:\s]*(?:\$?\d+\.?\d*\s*(?:/hr|hour)?)", text, re.IGNORECASE):
             found_sections.append(section)
+            logger.debug(f"Found labor rate for {section}")
     if not found_sections:
         score_adj -= 50
+        logger.debug("All labor rates missing")
+    else:
+        logger.debug(f"Found labor rates in sections: {found_sections}")
     if re.search(r"utilize applicable tax rate", client_rules, re.IGNORECASE):
         if not re.search(r"tax[:\s]*(?:\$?\d+\.?\d*|\d+\.?\d*%?)", text, re.IGNORECASE):
             score_adj -= 25
+            logger.debug("Tax rate missing")
+        else:
+            logger.debug("Tax rate found")
     return score_adj
-
-def is_total_loss(text: str, gpt_output: str) -> bool:
-    combined_text = text.lower()
-    return any(term in combined_text or term in gpt_output.lower() for term in ["total loss", "totaled", "write-off"])
-
-def get_fraud_risk_explanation(fraud_flags: List[str], score: int) -> str:
-    explanations = {
-        "🚩 Repeated Claim Number": "Multiple instances of the claim number were detected, which may indicate data duplication or potential fraud.",
-        "🚩 Multiple Total Loss Mentions": "The term 'total loss' appears excessively, suggesting possible manipulation or inconsistency.",
-        "🚩 Edited or manipulated content terms found": "Terms like 'copy', 'edited', 'photoshop', or 'manipulated' were found, indicating potential image or document alteration.",
-        "🚩 Future Date of Loss": "The date of loss is set in the future relative to the current date, which may suggest a data entry error or intentional misrepresentation.",
-        "🚩 Claim Number Mismatch": "Different claim numbers were identified across the documents, which could indicate a mismatch or fraudulent activity.",
-        "🚩 GPT flagged suspicious content": "The AI model flagged the content as suspicious, potentially due to unusual patterns or language.",
-        "🚩 Possible duplicate photos or content": "The AI detected possible duplicate photos or content, which may suggest tampering or resubmission."
-    }
-    if not fraud_flags or fraud_flags == ["No fraud indicators detected."]:
-        if score > 0:
-            return "A baseline risk is present due to the identification of a total loss with a specified date of loss, which may warrant further review."
-        return "No fraud indicators detected."
-    return "\n".join([explanations.get(flag, "Unknown fraud indicator.") for flag in fraud_flags])
-
-def fraud_risk_score(combined_text: str, gpt_output: str) -> dict:
-    fraud_flags = []
-    current_date = datetime.now().date()
-
-    estimate_date_match = re.search(r"(\d{1,2}/\d{1,2}/\d{4})\s*(?:AM|PM)?", combined_text, re.IGNORECASE)
-    estimate_date = datetime.strptime(estimate_date_match.group(1), "%m/%d/%Y").date() if estimate_date_match else current_date
-
-    claim_pattern = re.compile(r"claim\s*#?\s*[:\-]?\s*(C[A-Z]\d+[A-Z]?\d*|225\d{6}V\d|\d{5,6})", re.IGNORECASE)
-    claim_numbers = claim_pattern.findall(combined_text)
-
-    if len(claim_numbers) > 3:
-        fraud_flags.append("🚩 Repeated Claim Number")
-    if claim_numbers and len(set(claim_numbers)) > 1:
-        fraud_flags.append("🚩 Claim Number Mismatch")
-    if "total loss" in combined_text and combined_text.count("total loss") > 2:
-        fraud_flags.append("🚩 Multiple Total Loss Mentions")
-    if any(term in combined_text for term in ["copy", "edited", "photoshop", "manipulated"]):
-        fraud_flags.append("🚩 Edited or manipulated content terms found")
-
-    date_match = re.search(r"date of loss\s*[:\-]?\s*(\d{1,2}/\d{1,2}/\d{4})", combined_text, re.IGNORECASE)
-    if date_match:
-        loss_date = datetime.strptime(date_match.group(1), "%m/%d/%Y").date()
-        if loss_date > current_date or (estimate_date_match and loss_date > estimate_date):
-            fraud_flags.append("🚩 Future Date of Loss")
-
-    fraud_risk_score = 0
-    if "fraud" in gpt_output.lower() or "suspicious" in gpt_output.lower():
-        fraud_risk_score += 30
-        fraud_flags.append("🚩 GPT flagged suspicious content")
-    if "duplicate" in gpt_output.lower():
-        fraud_risk_score += 20
-        fraud_flags.append("🚩 Possible duplicate photos or content")
-    if is_total_loss(combined_text, gpt_output) and "date of loss" in combined_text.lower():
-        fraud_risk_score += 15
-    fraud_risk_score += 10 * len(fraud_flags)
-    fraud_risk_score = min(fraud_risk_score, 100)
-
-    logger.debug(f"Fraud risk score: {fraud_risk_score}, flags: {fraud_flags}")
-    return {
-        "score": fraud_risk_score,
-        "flags": fraud_flags or ["No fraud indicators detected."]
-    }
 
 @app.get("/")
 async def root():
@@ -329,12 +207,7 @@ async def vision_review(
             b64 = base64.b64encode(content).decode("utf-8")
             images.append({"type": "image_url", "image_url": {"url": f"data:image/jpeg;base64,{b64}"}})
         elif name.endswith(".pdf"):
-            text = extract_text_from_pdf(io.BytesIO(content))
-            if "❌" in text:
-                logger.error(f"PDF processing failed: {text}")
-                return JSONResponse(status_code=500, content={"error": f"PDF processing failed: {text}"})
-            texts.append(text)
-            logger.debug(f"Extracted text from PDF: {text[:200]}...")
+            texts.append(extract_text_from_pdf(io.BytesIO(content)))
         elif name.endswith(".docx"):
             texts.append(extract_text_from_docx(io.BytesIO(content)))
         elif name.endswith(".txt"):
@@ -343,44 +216,51 @@ async def vision_review(
             texts.append(f"⚠️ Skipped unsupported file: {file.filename}")
 
     combined_text = '\n'.join(texts).lower()
+    logger.debug(f"Combined text: {combined_text[:1000]}...")
+    logger.debug(f"Client rules: {client_rules[:500]}...")
     advisor_confirmed = advisor_report_present(texts, image_files)
-    advisor_hint = "\n\nCONFIRMED: CCC Advisor Report is included." if advisor_confirmed else ""
+    advisor_hint = "\n\nCONFIRMED: CCC Advisor Report is included based on OCR or filename." if advisor_confirmed else ""
     missing_photos = check_required_photos(image_files, combined_text)
     photo_hint = f"\n\nMISSING PHOTOS: {', '.join(missing_photos) if missing_photos else 'None'}"
 
     vision_message = {"role": "user", "content": []}
     if texts:
-        vision_message["content"].append({
-            "type": "text",
-            "text": '\n'.join(texts) + advisor_hint + photo_hint
-        })
-        logger.debug(f"Vision message text: {vision_message['content'][0]['text'][:200]}...")
+        vision_message["content"].append({"type": "text", "text": '\n\n'.join(texts) + advisor_hint + photo_hint})
     if images:
         vision_message["content"].extend(images)
-        logger.debug(f"Vision message includes {len(images)} images")
-
-    if not vision_message["content"]:
-        logger.error("No content available for GPT processing")
-        return JSONResponse(status_code=400, content={"error": "No valid data extracted for processing"})
-
     prompt = f"""
-    You are an AI auto damage auditor. Always output:
+    You are an AI auto damage auditor. You have access to both text and images (or scans).
 
+    IMPORTANT RULES:
+    - If labor rates are missing for ALL sections (body, paint, mechanical, structural), reduce Compliance Score by 50%. If any labor rate is present (e.g., body or paint), no deduction applies.
+    - If tax is required by client rules but no tax rate or amount (e.g., percentage or dollar value) is found, reduce Compliance Score by 25%.
+    - Never assume compliance if required elements (like labor rates, taxes, or photos) are missing.
+    - Treat mentions or OCR detection of "Clean Retail Value", "NADA Value", "Fair Market Range", "Estimated Trade-In Value", "market value", "J.D. Power", "JD Power", or "Average Price Paid" as CONFIRMATION that the retail/market value requirement is met.
+    - Treat mentions or OCR detection of "CCC Advisor Report" or "Advisor Report" as CONFIRMATION that the Advisor Report was included.
+    - Do NOT rely on assumptions. Only acknowledge presence of documents or data when clearly present in text or visible in photos.
+    - Only evaluate Total Loss protocols if the estimate or documentation explicitly indicates the vehicle was a total loss (e.g., mentions "total loss" or "salvage"). If declared a total loss, no forms or bids are required.
+    - Do not assume a total loss condition based on estimate formatting or value alone.
+    - If no mention of Total Loss or salvage is found, do not apply deductions for missing Total Loss evaluation details.
+    - For parts usage, flag non-compliance if alternative parts (e.g., LKQ, aftermarket) are used for vehicles of the current model year (2025) or previous year (2024), as per client rules. Deduct 25% for this violation. For older models (e.g., 2012), LKQ/aftermarket parts are compliant.
+    - Deduct 25% from Compliance Score for each missing required photo type (four corners, odometer, VIN, license plate).
+    - For four corners photos, the requirement is met if at least two corner views (e.g., front left, front right, rear left, rear right, or synonyms like left front, right front, left rear, right rear) are present in text or images, as indicated in the MISSING PHOTOS hint.
+    - Do NOT apply deductions for unmentioned elements or assumed violations. Deductions must be explicitly listed in the findings and supported by evidence in the input or client rules.
+    - The Compliance Score starts at 100% and is only reduced by explicit deductions for labor rates (50% if all missing), tax (25% if missing), photos (25% per missing type), or parts (25% for violations).
+    - Respect the MISSING PHOTOS hint provided in the input to determine photo compliance.
+
+    PHOTO EVIDENCE RULES:
+    - Required photos: four corners, odometer, VIN, license plate.
+    - Four corners is satisfied if at least two views (e.g., front left, front right, rear left, rear right, or synonyms like left front, right front, left rear, right rear) are detected in text or images, as indicated in the MISSING PHOTOS hint.
+    - If photo types are missing (indicated in input as "MISSING PHOTOS"), deduct 25% per missing type from Compliance Score.
+    - Respect the MISSING PHOTOS hint provided in the input to determine photo compliance.
+
+    At the top of your response, ALWAYS include:
     Claim #: (from estimate)
     VIN: (from estimate or photos)
-    Vehicle: (make, model, mileage)
+    Vehicle: (make, model, mileage from estimate)
     Compliance Score: (0–100%)
-    Total Loss Status: (Yes/No)
 
-    Then summarize findings based on these rules:
-    - For repair estimates: Deduct 50% if ALL labor rates missing, 25% if tax missing and client requires it, 25% per missing photo type (four corners, odometer, VIN, license plate)
-    - For total loss: Start at 100%, deduct 25% per missing field (insured, policy #, claim #, date of loss)
-    - Treat mentions of “advisor report” as confirmation of inclusion for repair estimates
-    - Don’t assume total loss unless explicitly mentioned
-    - Use MISSING PHOTOS hint and advisor confirmation for repair estimates
-    - Use total loss status to switch evaluation mode
-    - Do not include disclaimers about processing personal data (e.g., names); focus solely on vehicle assessment data.
-
+    Then summarize findings and rule violations based STRICTLY on the following rules:
     {client_rules}
     """
 
@@ -391,40 +271,24 @@ async def vision_review(
             max_tokens=3500
         )
         gpt_output = response.choices[0].message.content or "⚠️ GPT returned no output."
-        logger.debug(f"GPT output: {gpt_output[:200]}...")
+        logger.debug(f"GPT output: {gpt_output[:1000]}...")
         claim_number = extract_field("Claim", gpt_output)
         vehicle = extract_field("Vehicle", gpt_output)
-        mileage_match = re.search(r"mileage:\s*(\d{1,6}(?:,\d{3})*(?:\s*miles|\s*km)?)", vehicle.lower())
-        if mileage_match:
-            vehicle = re.sub(r"mileage:\s*\d{1,6}(?:,\d{3})*(?:\s*miles|\s*km)?", "", vehicle).strip()
         score = extract_field("Compliance Score", gpt_output)
-        total_loss_status = extract_field("Total Loss Status", gpt_output).lower() == "yes"
 
         try:
             score = int(score.strip("%"))
-        except ValueError:
+        except:
             score = 100
 
-        score_adj = 0
-        if not total_loss_status:
-            score_adj = check_labor_and_tax_score(combined_text, client_rules)
-            score_adj -= 25 * len(missing_photos)
-        else:
-            required_fields = ["insured", "policy #", "claim #", "date of loss"]
-            found_fields = [f for f in required_fields if f in combined_text]
-            score_adj -= 25 * (len(required_fields) - len(found_fields))
-
-        final_score = max(0, min(100, score + score_adj))
-
-        fraud_result = fraud_risk_score(combined_text, gpt_output)
-        fraud_explanation = get_fraud_risk_explanation(fraud_result["flags"], fraud_result["score"])
-
-        base_pdf_path = f"{file_number}.pdf"
-        pdf_path = base_pdf_path
-        counter = 1
-        while os.path.exists(pdf_path):
-            pdf_path = f"{file_number}_{counter}.pdf"
-            counter += 1
+        score_adj = check_labor_and_tax_score(combined_text, client_rules)
+        score_adj -= 25 * len(missing_photos)
+        logger.debug(f"Score calculation: AI score={score}, labor_tax_adj={check_labor_and_tax_score(combined_text, client_rules)}, photo_adj={-25 * len(missing_photos)}, final_score={max(0, score + score_adj)}")
+        score = max(0, score + score_adj)
+        if score < 100 and score_adj == 0:
+            logger.warning(f"AI score ({score}) inconsistent with no deductions (labor_tax_adj=0, photo_adj=0). Overriding to 100.")
+            score = 100
+          
         pdf = FPDF()
         pdf.add_page()
         pdf.add_font("DejaVu", "", "DejaVuSans.ttf", uni=True)
@@ -434,26 +298,12 @@ async def vision_review(
         pdf.multi_cell(0, 10, f"File Number: {file_number}")
         pdf.multi_cell(0, 10, f"IA Company: {ia_company}")
         pdf.multi_cell(0, 10, f"Appraiser ID #: {appraiser_id}")
-        pdf.set_font("DejaVu", size=10)
         pdf.ln(5)
-        pdf.set_text_color(200, 0, 0)
-        pdf.multi_cell(0, 10, f"Fraud Risk Score: {fraud_result['score']}%")
-        if fraud_result['flags']:
-            pdf.set_text_color(0, 0, 0)
-            pdf.multi_cell(0, 10, "Fraud Indicators:")
-            for flag in fraud_result['flags']:
-                pdf.multi_cell(0, 10, f"- {flag}")
-            pdf.ln(5)
-            pdf.multi_cell(0, 10, "Fraud Risk Explanation:")
-            pdf.multi_cell(0, 10, fraud_explanation)
-        pdf.set_text_color(0, 0, 0)
-        pdf.ln(5)
-        pdf.multi_cell(0, 10, f"Total Loss Status: {'Yes' if total_loss_status else 'No'}")
-        pdf.ln(5)
-        pdf.multi_cell(0, 10, "AI-4-IA Review Summary:")
+        pdf.multi_cell(0, 10, "AI-4-IA Review Summary:", align='L')
         pdf.set_font("DejaVu", size=9)
         pdf.multi_cell(0, 10, gpt_output)
 
+        pdf_path = f"{file_number}.pdf"
         pdf.output(pdf_path)
 
         msg = EmailMessage()
@@ -465,72 +315,50 @@ async def vision_review(
 File Number: {file_number}
 IA Company: {ia_company}
 Appraiser ID #: {appraiser_id}
-Adjusted Compliance Score: {final_score}%
-Fraud Risk Score: {fraud_result['score']}%
-Total Loss Status: {'Yes' if total_loss_status else 'No'}
+Adjusted Compliance Score: {score}%
 
 AI Review Summary:
 {gpt_output}
-
-Fraud Indicators:
-{chr(10).join(fraud_result['flags']) if fraud_result['flags'] else "None Detected"}
-
-Fraud Risk Explanation:
-{fraud_explanation}
 """
-        msg.set_content(email_body)
-        try:
-            with smtplib.SMTP_SSL("mail.tierra.net", 465) as smtp:
-                smtp.login("info@nspxn.com", "grr2025GRR")
-                smtp.send_message(msg)
-        except Exception as e:
-            logger.error(f"Email sending failed: {str(e)}")
+        msg.set_content(email_body.encode("utf-8", errors="ignore").decode("utf-8"))
+        with smtplib.SMTP_SSL("mail.tierra.net", 465) as smtp:
+            smtp.login("info@nspxn.com", "grr2025GRR")
+            smtp.send_message(msg)
 
         return {
             "gpt_output": gpt_output,
             "file_number": file_number,
             "claim_number": claim_number,
             "vehicle": vehicle,
-            "score": f"{final_score}%",
-            "fraud_risk_score": f"{fraud_result['score']}%",
-            "fraud_indicators": fraud_result['flags'],
-            "fraud_explanation": fraud_explanation,
-            "total_loss": total_loss_status
+            "score": f"{score}%"
         }
 
-    except MemoryError as me:
-        logger.error(f"Memory error during processing: {str(me)}", exc_info=True)
-        return JSONResponse(status_code=500, content={"error": f"Memory error: {str(me)}"})
     except Exception as e:
-        logger.error(f"Review processing failed: {str(e)}", exc_info=True)
-        return JSONResponse(status_code=500, content={"error": f"Internal server error: {str(e)}"})
+        logger.error(f"API error: {str(e)}")
+        return JSONResponse(status_code=500, content={"error": str(e), "gpt_output": "⚠️ AI review failed."})
 
 @app.get("/download-pdf")
 async def download_pdf(file_number: str):
-    pdf_files = [f for f in os.listdir('.') if f.startswith(f"{file_number}") and f.endswith(".pdf")]
-    if not pdf_files:
-        return JSONResponse(status_code=404, content={"detail": "PDF not found."})
-    latest_pdf = max(pdf_files, key=lambda x: os.path.getctime(x))
-    pdf_path = latest_pdf
+    pdf_path = f"{file_number}.pdf"
     if os.path.exists(pdf_path):
-        return FileResponse(path=pdf_path, media_type="application/pdf", filename=os.path.basename(pdf_path))
-    return JSONResponse(status_code=404, content={"detail": "PDF not found."})
+        return FileResponse(path=pdf_path, media_type="application/pdf", filename=pdf_path)
+    return JSONResponse(status_code=404, content={"detail": "Not Found"})
 
 @app.get("/client-rules/{client_name}")
 async def get_client_rules(client_name: str):
     rules_dir = "client_rules"
     file_name = f"{client_name}.docx"
     file_path = os.path.join(rules_dir, file_name)
-
     if os.path.exists(file_path):
         try:
             doc = Document(file_path)
             text = '\n'.join([p.text for p in doc.paragraphs if p.text.strip()])
-            logger.debug(f"Retrieved client rules for {client_name}: {text[:500]}...")
+            logger.debug(f"Client rules for {client_name}: {text[:500]}...")
             return {"text": text}
         except Exception as e:
-            logger.error(f"Error reading client rules for {client_name}: {str(e)}")
-            return JSONResponse(status_code=500, content={"error": f"Failed to read client rules: {str(e)}"})
+            logger.error(f"Client rules error: {str(e)}")
+            return JSONResponse(status_code=500, content={"error": str(e)})
     else:
-        logger.warning(f"Client rules not found for: {client_name}")
-        return JSONResponse(status_code=404, content={"error": f"Rules not found for client: {client_name}"})
+        logger.error(f"Rules not found for client: {client_name}")
+        return JSONResponse(status_code=404, content={"error": "Rules not found for this client."})
+
