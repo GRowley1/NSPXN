@@ -96,16 +96,16 @@ def run_fraud_checks(texts: List[str], image_files: List[UploadFile]) -> dict:
 
 def preprocess_image(img: Image.Image) -> Image.Image:
     img = img.convert("L")
-    img = ImageEnhance.Contrast(img).enhance(1.2)  # Further reduced contrast
-    img = img.filter(ImageFilter.SHARPEN)  # Added sharpening
-    img = img.filter(ImageFilter.MedianFilter(size=3))
+    img = ImageEnhance.Contrast(img).enhance(1.3)  # Slightly increased contrast
+    img = img.filter(ImageFilter.SHARPEN)  # Retained sharpening
+    img = img.filter(ImageFilter.MedianFilter(size=3))  # Noise reduction
     return img
 
 def extract_text_from_pdf(file) -> str:
     try:
         file.seek(0)
         pdf_data = file.read()
-        images = convert_from_bytes(pdf_data, dpi=200)  # Increased to 200 for clarity
+        images = convert_from_bytes(pdf_data, dpi=200)  # Retained dpi=200
         if not images:
             logger.error("No images generated from PDF")
             return "\n❌ No images generated from PDF"
@@ -142,12 +142,11 @@ def extract_text_from_docx(file) -> str:
     return '\n'.join(p.text.strip() for p in doc.paragraphs if p.text.strip())
 
 def extract_field(label: str, text: str) -> str:
-    pattern = re.compile(rf"{re.escape(label)}\s*[:\-#=]?\s*(R226\d+.*|[A-HJ-NPR-Z0-9]{{10,17}}|[^\n\r;]+)", re.IGNORECASE)  # Expanded VIN range
+    pattern = re.compile(rf"{re.escape(label)}\s*[:\-#=]?\s*(R226\d+.*|[A-HJ-NPR-Z0-9]{{10,17}}|[^\n\r;]+)", re.IGNORECASE)
     matches = pattern.findall(text)
     if matches:
         from collections import Counter
         return Counter(matches).most_common(1)[0][0].strip()
-    # Fallback for VIN with partial matches
     if label.lower() == "vin":
         vin_match = re.search(r"\b[A-HJ-NPR-Z0-9]{10,17}\b", text, re.IGNORECASE)
         return vin_match.group(0) if vin_match else "N/A"
@@ -184,12 +183,11 @@ def check_required_photos(image_files: List[UploadFile], ocr_text: str) -> List[
         "license", "reg plate", "license #", r"\b[A-Z0-9]{5,8}\b"
     ]
 
-    # Check OCR text
     if any(re.search(rf"{re.escape(term)}", ocr_lower) for term in license_plate_keywords) or \
        re.search(r"\b[A-Z0-9]{5,8}\b", ocr_lower):
         found_photos.append("license plate")
         logger.debug("Detected license plate in OCR text")
-    if any(re.search(rf"{re.escape(term)}", ocr_lower) for term in ["odometer", "mileage photo", "dashboard mileage", "mileage reading", r"\d{1,6}(?:,\d{3})*(?:\s*miles|\s*km)?"]):  # Expanded mileage range
+    if any(re.search(rf"{re.escape(term)}", ocr_lower) for term in ["odometer", "mileage photo", "dashboard mileage", "mileage reading", r"\d{1,6}(?:,\d{3})*(?:\s*miles|\s*km)?", r"\d{5,6}"]):  # Added 5-6 digit mileage
         found_photos.append("odometer")
         logger.debug("Detected odometer in OCR text")
     if any(term in ocr_lower for term in ["vin", "vehicle identification number", "vin photo"]):
@@ -199,18 +197,17 @@ def check_required_photos(image_files: List[UploadFile], ocr_text: str) -> List[
         found_photos.append("four corners")
         logger.debug("Detected four corners in OCR text")
 
-    # Enhanced image analysis with detailed logging
     for img in image_files:
         try:
             img.file.seek(0)
             image = Image.open(io.BytesIO(img.file.read()))
             processed = preprocess_image(image)
             ocr = pytesseract.image_to_string(processed, lang="eng")
-            logger.debug(f"Raw image OCR text: {ocr[:500]}...")  # Increased log length
-            if re.search(r"\b[A-HJ-NPR-Z0-9]{10,17}\b", ocr):  # Relaxed VIN
+            logger.debug(f"Raw image OCR text: {ocr[:500]}...")
+            if re.search(r"\b[A-HJ-NPR-Z0-9]{10,17}\b", ocr):
                 found_photos.append("vin")
                 logger.debug("Detected VIN in image")
-            if re.search(r"\d{1,6}(?:,\d{3})*(?:\s*miles|\s*km)?", ocr, re.IGNORECASE):  # Expanded mileage
+            if re.search(r"\d{1,6}(?:,\d{3})*(?:\s*miles|\s*km)?|\d{5,6}", ocr, re.IGNORECASE):  # Added 5-6 digit mileage
                 found_photos.append("odometer")
                 logger.debug("Detected odometer in image")
             if any(re.search(rf"{re.escape(term)}", ocr.lower()) for term in license_plate_keywords) or \
@@ -230,10 +227,10 @@ def check_required_photos(image_files: List[UploadFile], ocr_text: str) -> List[
 
 def check_labor_and_tax_score(text: str, client_rules: str) -> int:
     score_adj = 0
-    required_sections = ["body labor", "paint labor", "mechanical labor", "structural labor"]
+    required_sections = ["body labor", "paint labor", "mechanical labor", "structural labor", "D=", "E=", "F=", "G=", "M=", "S="]  # Added abbreviations
     found_sections = []
     for section in required_sections:
-        if re.search(rf"{section}[:\s]*(?:\$?\d+\.?\d*\s*(?:/hr|hour)?)", text, re.IGNORECASE):
+        if re.search(rf"{section}[:\s]*(?:\$?\d+\.?\d*\s*(?:/hr|hour)?|\d+\.?\d*\s*hours?)", text, re.IGNORECASE):  # Added hours pattern
             found_sections.append(section)
     if not found_sections:
         score_adj -= 50
@@ -266,17 +263,15 @@ def fraud_risk_score(combined_text: str, gpt_output: str) -> dict:
     fraud_flags = []
     current_date = datetime.now().date()
 
-    # Extract estimate date if available
     estimate_date_match = re.search(r"(\d{1,2}/\d{1,2}/\d{4})\s*(?:AM|PM)?", combined_text, re.IGNORECASE)
     estimate_date = datetime.strptime(estimate_date_match.group(1), "%m/%d/%Y").date() if estimate_date_match else current_date
 
-    # Extract claim numbers within function
     claim_pattern = re.compile(r"claim\s*#?\s*[:\-]?\s*(C[A-Z]\d+[A-Z]?\d*|225\d{6}V\d|\d{5,6})", re.IGNORECASE)
     claim_numbers = claim_pattern.findall(combined_text)
 
-    if len(claim_numbers) > 3:  # Check for repetition
+    if len(claim_numbers) > 3:
         fraud_flags.append("🚩 Repeated Claim Number")
-    if claim_numbers and len(set(claim_numbers)) > 1:  # Safe mismatch check
+    if claim_numbers and len(set(claim_numbers)) > 1:
         fraud_flags.append("🚩 Claim Number Mismatch")
     if "total loss" in combined_text and combined_text.count("total loss") > 2:
         fraud_flags.append("🚩 Multiple Total Loss Mentions")
@@ -339,7 +334,7 @@ async def vision_review(
                 logger.error(f"PDF processing failed: {text}")
                 return JSONResponse(status_code=500, content={"error": f"PDF processing failed: {text}"})
             texts.append(text)
-            logger.debug(f"Extracted text from PDF: {text[:200]}...")  # Debug log
+            logger.debug(f"Extracted text from PDF: {text[:200]}...")
         elif name.endswith(".docx"):
             texts.append(extract_text_from_docx(io.BytesIO(content)))
         elif name.endswith(".txt"):
@@ -359,10 +354,10 @@ async def vision_review(
             "type": "text",
             "text": '\n'.join(texts) + advisor_hint + photo_hint
         })
-        logger.debug(f"Vision message text: {vision_message['content'][0]['text'][:200]}...")  # Debug log
+        logger.debug(f"Vision message text: {vision_message['content'][0]['text'][:200]}...")
     if images:
         vision_message["content"].extend(images)
-        logger.debug(f"Vision message includes {len(images)} images")  # Debug log
+        logger.debug(f"Vision message includes {len(images)} images")
 
     if not vision_message["content"]:
         logger.error("No content available for GPT processing")
@@ -396,7 +391,7 @@ async def vision_review(
             max_tokens=3500
         )
         gpt_output = response.choices[0].message.content or "⚠️ GPT returned no output."
-        logger.debug(f"GPT output: {gpt_output[:200]}...")  # Debug log
+        logger.debug(f"GPT output: {gpt_output[:200]}...")
         claim_number = extract_field("Claim", gpt_output)
         vehicle = extract_field("Vehicle", gpt_output)
         mileage_match = re.search(r"mileage:\s*(\d{1,6}(?:,\d{3})*(?:\s*miles|\s*km)?)", vehicle.lower())
@@ -421,11 +416,9 @@ async def vision_review(
 
         final_score = max(0, min(100, score + score_adj))
 
-        # Fraud detection
         fraud_result = fraud_risk_score(combined_text, gpt_output)
         fraud_explanation = get_fraud_risk_explanation(fraud_result["flags"], fraud_result["score"])
 
-        # Generate PDF with only file number, appending suffix if exists
         base_pdf_path = f"{file_number}.pdf"
         pdf_path = base_pdf_path
         counter = 1
@@ -463,7 +456,6 @@ async def vision_review(
 
         pdf.output(pdf_path)
 
-        # Send Email
         msg = EmailMessage()
         msg["Subject"] = f"AI-4-IA Review: {claim_number}"
         msg["From"] = "noreply@nspxn.com"
@@ -518,7 +510,6 @@ async def download_pdf(file_number: str):
     pdf_files = [f for f in os.listdir('.') if f.startswith(f"{file_number}") and f.endswith(".pdf")]
     if not pdf_files:
         return JSONResponse(status_code=404, content={"detail": "PDF not found."})
-    # Sort by creation time to get the latest
     latest_pdf = max(pdf_files, key=lambda x: os.path.getctime(x))
     pdf_path = latest_pdf
     if os.path.exists(pdf_path):
