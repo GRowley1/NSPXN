@@ -106,7 +106,7 @@ def extract_text_from_pdf(file) -> str:
     try:
         file.seek(0)
         pdf_data = file.read()
-        images = convert_from_bytes(pdf_data, dpi=300)
+        images = convert_from_bytes(pdf_data, dpi=200)
         text_output = ""
         max_pages = 25  # Soft limit to prevent excessive memory use
         for i, img in enumerate(images):
