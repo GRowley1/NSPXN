@@ -96,17 +96,16 @@ def run_fraud_checks(texts: List[str], image_files: List[UploadFile]) -> dict:
 
 def preprocess_image(img: Image.Image) -> Image.Image:
     img = img.convert("L")
-    img = ImageEnhance.Contrast(img).enhance(2.0)
+    img = ImageEnhance.Contrast(img).enhance(1.5)  # Reduced contrast
     img = img.filter(ImageFilter.MedianFilter(size=3))
-    img = ImageOps.autocontrast(img)
-    img = ImageOps.invert(img)
+    # Removed inversion to preserve text
     return img
 
 def extract_text_from_pdf(file) -> str:
     try:
         file.seek(0)
         pdf_data = file.read()
-        images = convert_from_bytes(pdf_data, dpi=150)
+        images = convert_from_bytes(pdf_data, dpi=100)  # Reduced to 100 for stability
         if not images:
             logger.error("No images generated from PDF")
             return "\n❌ No images generated from PDF"
@@ -148,6 +147,10 @@ def extract_field(label: str, text: str) -> str:
     if matches:
         from collections import Counter
         return Counter(matches).most_common(1)[0][0].strip()
+    # Fallback for VIN with garbled input
+    if label.lower() == "vin":
+        vin_match = re.search(r"\b[A-HJ-NPR-Z0-9]{10,17}\b", text, re.IGNORECASE)
+        return vin_match.group(0) if vin_match else "N/A"
     return "N/A"
 
 def advisor_report_present(texts: List[str], image_files: List[UploadFile]) -> bool:
@@ -186,7 +189,7 @@ def check_required_photos(image_files: List[UploadFile], ocr_text: str) -> List[
        re.search(r"\b[A-Z0-9]{5,8}\b", ocr_lower):
         found_photos.append("license plate")
         logger.debug("Detected license plate in OCR text")
-    if any(term in ocr_lower for term in ["odometer", "mileage photo", "dashboard mileage", "mileage reading"]):
+    if any(term in ocr_lower for term in ["odometer", "mileage photo", "dashboard mileage", "mileage reading", r"\d{1,3}(,\d{3})*(?:\s*miles|\s*km)?"]):
         found_photos.append("odometer")
         logger.debug("Detected odometer in OCR text")
     if any(term in ocr_lower for term in ["vin", "vehicle identification number", "vin photo"]):
@@ -204,10 +207,10 @@ def check_required_photos(image_files: List[UploadFile], ocr_text: str) -> List[
             processed = preprocess_image(image)
             ocr = pytesseract.image_to_string(processed, lang="eng")
             logger.debug(f"Image OCR text: {ocr[:200]}...")
-            if re.search(r"\b[A-HJ-NPR-Z0-9]{17}\b", ocr):
+            if re.search(r"\b[A-HJ-NPR-Z0-9]{17}\b", ocr) or re.search(r"\b[A-HJ-NPR-Z0-9]{10,17}\b", ocr):  # Relaxed VIN
                 found_photos.append("vin")
                 logger.debug("Detected VIN in image")
-            if re.search(r"\d{1,3}(,\d{3})*\s*(miles|km)", ocr, re.IGNORECASE):
+            if re.search(r"\d{1,3}(,\d{3})*(?:\s*miles|\s*km)?", ocr, re.IGNORECASE):
                 found_photos.append("odometer")
                 logger.debug("Detected odometer in image")
             if any(re.search(rf"{re.escape(term)}", ocr.lower()) for term in license_plate_keywords) or \
@@ -355,7 +358,7 @@ async def vision_review(
     if texts:
         vision_message["content"].append({
             "type": "text",
-            "text": '\n\n'.join(texts) + advisor_hint + photo_hint
+            "text": '\n'.join(texts) + advisor_hint + photo_hint  # Simplified to avoid duplicate newlines
         })
         logger.debug(f"Vision message text: {vision_message['content'][0]['text'][:200]}...")  # Debug log
     if images:
@@ -397,6 +400,10 @@ async def vision_review(
         logger.debug(f"GPT output: {gpt_output[:200]}...")  # Debug log
         claim_number = extract_field("Claim", gpt_output)
         vehicle = extract_field("Vehicle", gpt_output)
+        # Extract mileage from vehicle field if present
+        mileage_match = re.search(r"mileage:\s*(\d{1,3}(?:,\d{3})*(?:\s*miles|\s*km)?)", vehicle.lower())
+        if mileage_match:
+            vehicle = re.sub(r"mileage:\s*\d{1,3}(?:,\d{3})*(?:\s*miles|\s*km)?", "", vehicle).strip()
         score = extract_field("Compliance Score", gpt_output)
         total_loss_status = extract_field("Total Loss Status", gpt_output).lower() == "yes"
 
