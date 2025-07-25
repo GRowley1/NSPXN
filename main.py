@@ -12,7 +12,7 @@ from fpdf import FPDF
 from docx import Document
 from pdf2image import convert_from_bytes
 import pytesseract
-from PIL import Image, ImageEnhance, ImageOps, ImageFilter
+from PIL import Image, ImageEnhance, ImageFilter
 from openai import OpenAI
 import logging
 from datetime import datetime
@@ -96,16 +96,16 @@ def run_fraud_checks(texts: List[str], image_files: List[UploadFile]) -> dict:
 
 def preprocess_image(img: Image.Image) -> Image.Image:
     img = img.convert("L")
-    img = ImageEnhance.Contrast(img).enhance(1.5)  # Reduced contrast
+    img = ImageEnhance.Contrast(img).enhance(1.2)  # Further reduced contrast
+    img = img.filter(ImageFilter.SHARPEN)  # Added sharpening
     img = img.filter(ImageFilter.MedianFilter(size=3))
-    # Removed inversion to preserve text
     return img
 
 def extract_text_from_pdf(file) -> str:
     try:
         file.seek(0)
         pdf_data = file.read()
-        images = convert_from_bytes(pdf_data, dpi=100)  # Reduced to 100 for stability
+        images = convert_from_bytes(pdf_data, dpi=200)  # Increased to 200 for clarity
         if not images:
             logger.error("No images generated from PDF")
             return "\n❌ No images generated from PDF"
@@ -142,12 +142,12 @@ def extract_text_from_docx(file) -> str:
     return '\n'.join(p.text.strip() for p in doc.paragraphs if p.text.strip())
 
 def extract_field(label: str, text: str) -> str:
-    pattern = re.compile(rf"{re.escape(label)}\s*[:\-#=]?\s*(R226\d+.*|[A-HJ-NPR-Z0-9]{{17}}|[^\n\r;]+)", re.IGNORECASE)
+    pattern = re.compile(rf"{re.escape(label)}\s*[:\-#=]?\s*(R226\d+.*|[A-HJ-NPR-Z0-9]{{10,17}}|[^\n\r;]+)", re.IGNORECASE)  # Expanded VIN range
     matches = pattern.findall(text)
     if matches:
         from collections import Counter
         return Counter(matches).most_common(1)[0][0].strip()
-    # Fallback for VIN with garbled input
+    # Fallback for VIN with partial matches
     if label.lower() == "vin":
         vin_match = re.search(r"\b[A-HJ-NPR-Z0-9]{10,17}\b", text, re.IGNORECASE)
         return vin_match.group(0) if vin_match else "N/A"
@@ -189,7 +189,7 @@ def check_required_photos(image_files: List[UploadFile], ocr_text: str) -> List[
        re.search(r"\b[A-Z0-9]{5,8}\b", ocr_lower):
         found_photos.append("license plate")
         logger.debug("Detected license plate in OCR text")
-    if any(term in ocr_lower for term in ["odometer", "mileage photo", "dashboard mileage", "mileage reading", r"\d{1,3}(,\d{3})*(?:\s*miles|\s*km)?"]):
+    if any(re.search(rf"{re.escape(term)}", ocr_lower) for term in ["odometer", "mileage photo", "dashboard mileage", "mileage reading", r"\d{1,6}(?:,\d{3})*(?:\s*miles|\s*km)?"]):  # Expanded mileage range
         found_photos.append("odometer")
         logger.debug("Detected odometer in OCR text")
     if any(term in ocr_lower for term in ["vin", "vehicle identification number", "vin photo"]):
@@ -199,26 +199,25 @@ def check_required_photos(image_files: List[UploadFile], ocr_text: str) -> List[
         found_photos.append("four corners")
         logger.debug("Detected four corners in OCR text")
 
-    # Enhanced image analysis
+    # Enhanced image analysis with detailed logging
     for img in image_files:
         try:
             img.file.seek(0)
             image = Image.open(io.BytesIO(img.file.read()))
             processed = preprocess_image(image)
             ocr = pytesseract.image_to_string(processed, lang="eng")
-            logger.debug(f"Image OCR text: {ocr[:200]}...")
-            if re.search(r"\b[A-HJ-NPR-Z0-9]{17}\b", ocr) or re.search(r"\b[A-HJ-NPR-Z0-9]{10,17}\b", ocr):  # Relaxed VIN
+            logger.debug(f"Raw image OCR text: {ocr[:500]}...")  # Increased log length
+            if re.search(r"\b[A-HJ-NPR-Z0-9]{10,17}\b", ocr):  # Relaxed VIN
                 found_photos.append("vin")
                 logger.debug("Detected VIN in image")
-            if re.search(r"\d{1,3}(,\d{3})*(?:\s*miles|\s*km)?", ocr, re.IGNORECASE):
+            if re.search(r"\d{1,6}(?:,\d{3})*(?:\s*miles|\s*km)?", ocr, re.IGNORECASE):  # Expanded mileage
                 found_photos.append("odometer")
                 logger.debug("Detected odometer in image")
             if any(re.search(rf"{re.escape(term)}", ocr.lower()) for term in license_plate_keywords) or \
                re.search(r"\b[A-Z0-9]{5,8}\b", ocr):
                 found_photos.append("license plate")
                 logger.debug("Detected license plate in image")
-            if any(re.search(rf"{re.escape(term)}", ocr.lower()) for term in corner_keywords) or \
-               any(re.search(rf"\b{re.escape(term)}\b", ocr.lower()) for term in corner_keywords):
+            if any(re.search(rf"{re.escape(term)}", ocr.lower()) for term in corner_keywords):
                 found_photos.append("four corners")
                 logger.debug("Detected four corners in image")
         except Exception as e:
@@ -358,7 +357,7 @@ async def vision_review(
     if texts:
         vision_message["content"].append({
             "type": "text",
-            "text": '\n'.join(texts) + advisor_hint + photo_hint  # Simplified to avoid duplicate newlines
+            "text": '\n'.join(texts) + advisor_hint + photo_hint
         })
         logger.debug(f"Vision message text: {vision_message['content'][0]['text'][:200]}...")  # Debug log
     if images:
@@ -400,10 +399,9 @@ async def vision_review(
         logger.debug(f"GPT output: {gpt_output[:200]}...")  # Debug log
         claim_number = extract_field("Claim", gpt_output)
         vehicle = extract_field("Vehicle", gpt_output)
-        # Extract mileage from vehicle field if present
-        mileage_match = re.search(r"mileage:\s*(\d{1,3}(?:,\d{3})*(?:\s*miles|\s*km)?)", vehicle.lower())
+        mileage_match = re.search(r"mileage:\s*(\d{1,6}(?:,\d{3})*(?:\s*miles|\s*km)?)", vehicle.lower())
         if mileage_match:
-            vehicle = re.sub(r"mileage:\s*\d{1,3}(?:,\d{3})*(?:\s*miles|\s*km)?", "", vehicle).strip()
+            vehicle = re.sub(r"mileage:\s*\d{1,6}(?:,\d{3})*(?:\s*miles|\s*km)?", "", vehicle).strip()
         score = extract_field("Compliance Score", gpt_output)
         total_loss_status = extract_field("Total Loss Status", gpt_output).lower() == "yes"
 
@@ -545,4 +543,3 @@ async def get_client_rules(client_name: str):
     else:
         logger.warning(f"Client rules not found for: {client_name}")
         return JSONResponse(status_code=404, content={"error": f"Rules not found for client: {client_name}"})
-
