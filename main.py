@@ -106,7 +106,7 @@ def extract_text_from_pdf(file) -> str:
     try:
         file.seek(0)
         pdf_data = file.read()
-        images = convert_from_bytes(pdf_data, dpi=150)  # Reverted to 150 for memory safety
+        images = convert_from_bytes(pdf_data, dpi=150)
         if not images:
             logger.error("No images generated from PDF")
             return "\n❌ No images generated from PDF"
@@ -124,6 +124,7 @@ def extract_text_from_pdf(file) -> str:
                 break
             if ocr_text.strip() and not re.search(r"[\:/\d\s]{50,}", ocr_text):
                 text_output += f"\n[Page {i+1}]\n{ocr_text.strip()}"
+                logger.debug(f"Page {i+1} OCR text: {ocr_text[:200]}...")
             if i > 0 and i % 10 == 0:
                 logger.debug(f"Processed {i+1} pages successfully")
         if not text_output.strip():
@@ -172,23 +173,28 @@ def check_required_photos(image_files: List[UploadFile], ocr_text: str) -> List[
     corner_keywords = [
         "four corners", "four corner photo", "vehicle corners",
         "front left", "front right", "rear left", "rear right",
-        "left front", "right front", "left rear", "right rear"
+        "left front", "right front", "left rear", "right rear",
+        "corner view", "all corners", "vehicle angles"
     ]
     license_plate_keywords = [
         "license plate", "plate photo", "registration plate",
-        "license", "reg plate", r"\b[A-Z0-9]{5,8}\b"
+        "license", "reg plate", "license #", r"\b[A-Z0-9]{5,8}\b"
     ]
 
     # Check OCR text
     if any(re.search(rf"{re.escape(term)}", ocr_lower) for term in license_plate_keywords) or \
        re.search(r"\b[A-Z0-9]{5,8}\b", ocr_lower):
         found_photos.append("license plate")
-    if any(term in ocr_lower for term in ["odometer", "mileage photo", "dashboard mileage"]):
+        logger.debug("Detected license plate in OCR text")
+    if any(term in ocr_lower for term in ["odometer", "mileage photo", "dashboard mileage", "mileage reading"]):
         found_photos.append("odometer")
+        logger.debug("Detected odometer in OCR text")
     if any(term in ocr_lower for term in ["vin", "vehicle identification number", "vin photo"]):
         found_photos.append("vin")
-    if any(term in ocr_lower for term in corner_keywords):
+        logger.debug("Detected VIN in OCR text")
+    if any(re.search(rf"{re.escape(term)}", ocr_lower) for term in corner_keywords):
         found_photos.append("four corners")
+        logger.debug("Detected four corners in OCR text")
 
     # Enhanced image analysis
     for img in image_files:
@@ -197,21 +203,27 @@ def check_required_photos(image_files: List[UploadFile], ocr_text: str) -> List[
             image = Image.open(io.BytesIO(img.file.read()))
             processed = preprocess_image(image)
             ocr = pytesseract.image_to_string(processed, lang="eng")
+            logger.debug(f"Image OCR text: {ocr[:200]}...")
             if re.search(r"\b[A-HJ-NPR-Z0-9]{17}\b", ocr):
                 found_photos.append("vin")
+                logger.debug("Detected VIN in image")
             if re.search(r"\d{1,3}(,\d{3})*\s*(miles|km)", ocr, re.IGNORECASE):
                 found_photos.append("odometer")
+                logger.debug("Detected odometer in image")
             if any(re.search(rf"{re.escape(term)}", ocr.lower()) for term in license_plate_keywords) or \
                re.search(r"\b[A-Z0-9]{5,8}\b", ocr):
                 found_photos.append("license plate")
-            if any(term in ocr.lower() for term in corner_keywords) or \
+                logger.debug("Detected license plate in image")
+            if any(re.search(rf"{re.escape(term)}", ocr.lower()) for term in corner_keywords) or \
                any(re.search(rf"\b{re.escape(term)}\b", ocr.lower()) for term in corner_keywords):
                 found_photos.append("four corners")
+                logger.debug("Detected four corners in image")
         except Exception as e:
             logger.error(f"OCR image read error: {str(e)}")
 
     found_photos = list(set(found_photos))
     missing = [p for p in required_photos if p not in found_photos]
+    logger.debug(f"Found photos: {found_photos}, Missing photos: {missing}")
     return missing
 
 def check_labor_and_tax_score(text: str, client_rules: str) -> int:
