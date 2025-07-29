@@ -283,11 +283,7 @@ async def vision_review(
     
     damage_summary = extract_damage_descriptions(combined_text)
     if damage_summary:
-        prompt += "
-
-Estimated Damage Descriptions:
-" + "
-".join(damage_summary)
+        prompt += "\n\nEstimated Damage Descriptions:\n" + "\n".join(damage_summary)
 
 
     try:
