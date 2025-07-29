@@ -283,7 +283,7 @@ async def vision_review(
     
     damage_summary = extract_damage_descriptions(combined_text)
     if damage_summary:
-        prompt += f"
+        prompt += "
 
 Estimated Damage Descriptions:
 " + "
