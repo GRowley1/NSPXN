@@ -213,7 +213,7 @@ async def vision_review(
         content = await file.read()
         name = file.filename.lower()
         
-        elif name.endswith((".jpg", ".jpeg", ".png")):
+        if name.endswith((".jpg", ".jpeg", ".png")):
             image_files.append(file)
             b64 = base64.b64encode(content).decode("utf-8")
             images.append({"type": "image_url", "image_url": {"url": f"data:image/jpeg;base64,{b64}"}})
