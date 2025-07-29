@@ -1,10 +1,11 @@
 fastapi
 uvicorn
-openai>=1.0.0
-python-multipart
-PyPDF2
-python-docx
-fpdf
+openai
+imagehash
 Pillow
+piexif
+fpdf
+python-docx
 pdf2image
 pytesseract
+
