@@ -388,3 +388,4 @@ async def get_client_rules(client_name: str):
         logger.error(f"Rules not found for client: {client_name}")
         return JSONResponse(status_code=404, content={"error": "Rules not found for this client."})
 
+
