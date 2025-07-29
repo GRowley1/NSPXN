@@ -212,7 +212,21 @@ async def vision_review(
     for file in files:
         content = await file.read()
         name = file.filename.lower()
-        if name.endswith((".jpg", ".jpeg", ".png")):
+        
+        elif name.endswith((".jpg", ".jpeg", ".png")):
+            image_files.append(file)
+            b64 = base64.b64encode(content).decode("utf-8")
+            images.append({"type": "image_url", "image_url": {"url": f"data:image/jpeg;base64,{b64}"}})
+            try:
+                img = Image.open(io.BytesIO(content))
+                processed = preprocess_image(img)
+                ocr_text = pytesseract.image_to_string(processed, lang="eng")
+                texts.append(f"[OCR from {file.filename}]:\n" + ocr_text)
+                logger.debug(f"Processed OCR for {file.filename}: {ocr_text[:200]}...")
+            except Exception as e:
+                logger.error(f"OCR failed on image {file.filename}: {str(e)}")
+                texts.append(f"[OCR failed on {file.filename}]")
+    
             image_files.append(file)
             b64 = base64.b64encode(content).decode("utf-8")
             images.append({"type": "image_url", "image_url": {"url": f"data:image/jpeg;base64,{b64}"}})
