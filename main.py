@@ -280,7 +280,7 @@ async def vision_review(
     - Cross-check damage descriptions (e.g., "front bumper dent", "rear door scratch") from the estimate against the provided photos.
     - If the damage described is not visible in any photo, flag as "Photo Evidence MISSING for described damage: [description]".
     - If damage is clearly shown in photos but not mentioned in estimate, flag as "Unlisted Damage Found in Photo: [description]".
-    - For each confirmed match, briefly list the description and confirm it's shown (e.g., “Front bumper dent – visible in photo”).
+    - For each confirmed match, briefly list the description and confirm it's shown (e.g., Front bumper dent  visible in photo).
     - For each photo provided, identify visible damages and list them.
 
     PHOTO EVIDENCE RULES:
@@ -293,7 +293,7 @@ async def vision_review(
     Claim #: (from estimate)
     VIN: (from estimate or photos)
     Vehicle: (make, model, mileage from estimate)
-    Compliance Score: (0100%)
+    Compliance Score: (0?100%)
 
     Then summarize findings and rule violations based STRICTLY on the following rules:
     {client_rules}
@@ -402,5 +402,4 @@ async def get_client_rules(client_name: str):
     else:
         logger.error(f"Rules not found for client: {client_name}")
         return JSONResponse(status_code=404, content={"error": "Rules not found for this client."})
-
 
