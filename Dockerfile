@@ -1,28 +1,26 @@
 FROM python:3.11-slim
 
-WORKDIR /app
-
-COPY . .
-
+# System dependencies
 RUN apt-get update && apt-get install -y \
     tesseract-ocr \
-    libgl1 \
     poppler-utils \
+    libglib2.0-0 \
+    libsm6 \
+    libxext6 \
+    libxrender-dev \
     && rm -rf /var/lib/apt/lists/*
 
-RUN pip install --no-cache-dir \
-    fastapi \
-    uvicorn \
-    openai \
-    python-docx \
-    fpdf \
-    pytesseract \
-    pdf2image \
-    pillow \
-    smtplib \
-    imagehash \
-    ultralytics
+# Create app directory
+WORKDIR /app
 
-ENV OPENAI_API_KEY=your-openai-api-key-here
+# Install Python dependencies
+COPY requirements.txt .
+RUN pip install --no-cache-dir -r requirements.txt
 
+# Copy app files
+COPY . .
+
+# Expose port and run app
+EXPOSE 8000
 CMD ["uvicorn", "main:app", "--host", "0.0.0.0", "--port", "8000"]
+
