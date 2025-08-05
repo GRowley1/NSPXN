@@ -9,3 +9,4 @@ python-docx
 pdf2image
 pytesseract
 python-multipart
+ultralytics
