@@ -17,6 +17,7 @@ from openai import OpenAI
 import logging
 from ultralytics import YOLO
 import torch
+from fraud_check import calculate_fraud_risk
 
 # Configure logging
 logging.basicConfig(level=logging.DEBUG, filename='app.log', filemode='a',
@@ -310,14 +311,9 @@ async def vision_review(
 
         final_score = max(0, min(100, score + score_adj))
 
-        # Fallback if calculate_fraud_risk is not defined
-        try:
-            from fraud_check import calculate_fraud_risk
-            fraud_result = calculate_fraud_risk(combined_text)
-        except ImportError:
-            logger.warning("fraud_check module not found, using default fraud result")
-            fraud_result = {"score": 0, "flags": []}
-        fraud_explanation = "No fraud indicators detected." if not fraud_result["flags"] else "\n".join(fraud_result["flags"])
+        # Calculate fraud risk
+        fraud_result = calculate_fraud_risk(combined_text, image_files)
+        fraud_explanation = fraud_result["explanation"]
 
         base_pdf_path = f"{file_number}.pdf"
         pdf_path = base_pdf_path
@@ -409,6 +405,7 @@ async def get_client_rules(client_name: str):
     else:
         logger.error(f"Rules not found for client: {client_name}")
         return JSONResponse(status_code=404, content={"error": "Rules not found for this client."})
+
 
 
 
