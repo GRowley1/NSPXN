@@ -1,12 +1,12 @@
 fastapi
 uvicorn
-openai
-imagehash
-Pillow
-piexif
+python-multipart
 fpdf
 python-docx
 pdf2image
 pytesseract
-python-multipart
+Pillow
+openai
+torch
 ultralytics
+opencv-python-headless  # Use headless version to avoid GUI dependencies
