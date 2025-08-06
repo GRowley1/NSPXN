@@ -15,9 +15,8 @@ import pytesseract
 from PIL import Image, ImageEnhance, ImageOps, ImageFilter
 from openai import OpenAI
 import logging
-from ultralytics import YOLO  # Updated for YOLOv8
+from ultralytics import YOLO
 import torch
-from fraud_check import calculate_fraud_risk
 
 # Configure logging
 logging.basicConfig(level=logging.DEBUG, filename='app.log', filemode='a',
@@ -98,9 +97,10 @@ def detect_corners_with_yolo(image: Image.Image) -> int:
             logger.error(f"YOLO model file not found at {model_path}")
             return 0
         model = YOLO(model_path)
-        # Convert PIL image to format compatible with YOLO (RGB)
+        # Convert PIL image to RGB and ensure numpy compatibility
         image_rgb = image.convert("RGB")
-        # Perform inference
+        # Perform inference in headless mode
+        os.environ["OPENCV_VIDEOIO_PRIORITY_MSMF"] = "0"  # Force headless mode
         results = model(image_rgb)
         # Count detected corners (assuming class 0 is corner)
         corner_count = len([box for box in results[0].boxes if box.cls[0] == 0]) if results[0].boxes else 0
@@ -403,5 +403,6 @@ async def get_client_rules(client_name: str):
     else:
         logger.error(f"Rules not found for client: {client_name}")
         return JSONResponse(status_code=404, content={"error": "Rules not found for this client."})
+
 
 
