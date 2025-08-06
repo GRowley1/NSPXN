@@ -1,3 +1,4 @@
+# Use an official Python runtime as a parent image
 FROM python:3.11-slim
 
 # System dependencies
@@ -8,6 +9,7 @@ RUN apt-get update && apt-get install -y \
     libsm6 \
     libxext6 \
     libxrender-dev \
+    libgl1-mesa-glx \  # Added to provide libGL.so.1
     && rm -rf /var/lib/apt/lists/*
 
 # Create app directory
@@ -20,7 +22,13 @@ RUN pip install --no-cache-dir -r requirements.txt
 # Copy app files
 COPY . .
 
-# Expose port and run app
-EXPOSE 8000
-CMD ["uvicorn", "main:app", "--host", "0.0.0.0", "--port", "8000"]
+# Set environment variables for headless OpenCV
+ENV OPENCV_VIDEOIO_PRIORITY_MSMF=0
+ENV QT_QPA_PLATFORM=offscreen  # Optional: Forces Qt to run without GUI
+
+# Expose port (use $PORT for Render compatibility)
+EXPOSE $PORT
+
+# Run the application
+CMD ["uvicorn", "main:app", "--host", "0.0.0.0", "--port", "$PORT"]
 
