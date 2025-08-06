@@ -2,6 +2,7 @@
 FROM python:3.11-slim
 
 # System dependencies
+# Install required packages including libgl1-mesa-glx for OpenGL support
 RUN apt-get update \
     && apt-get install -y \
     tesseract-ocr \
@@ -10,7 +11,7 @@ RUN apt-get update \
     libsm6 \
     libxext6 \
     libxrender-dev \
-    libgl1-mesa-glx \  # Added to provide libGL.so.1
+    libgl1-mesa-glx \
     && rm -rf /var/lib/apt/lists/*
 
 # Create app directory
@@ -33,4 +34,3 @@ EXPOSE $PORT
 
 # Run the application
 CMD ["uvicorn", "main:app", "--host", "0.0.0.0", "--port", "$PORT"]
-
