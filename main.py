@@ -280,7 +280,7 @@ async def vision_review(
     - Cross-check damage descriptions (e.g., "front bumper dent", "rear door scratch") from the estimate against the provided photos.
     - If the damage described is not visible in any photo, flag as "Photo Evidence MISSING for described damage: [description]".
     - If damage is clearly shown in photos but not mentioned in estimate, flag as "Unlisted Damage Found in Photo: [description]".
-    - For each confirmed match, briefly list the description and confirm it's shown (e.g., “Front bumper dent – visible in photo”).
+    - For each confirmed match, briefly list the description and confirm it's shown (e.g., Â“Front bumper dent Â– visible in photoÂ”).
     - For each photo provided, identify visible damages and list them.
 
     PHOTO EVIDENCE RULES:
