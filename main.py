@@ -285,7 +285,7 @@ async def vision_review(
             messages=[{"role": "system", "content": prompt}, vision_message],
             max_tokens=3500
         )
-        gpt_output = response.choices[0].message.content or "\u26a0\ufe0f GPT returned no output."
+        gpt_output = response.choices[0].message.content or "\u274c GPT returned no output."
         logger.debug(f"GPT output: {gpt_output[:200]}...")
         claim_number = extract_field("Claim", gpt_output)
         vehicle = extract_field("Vehicle", gpt_output)
@@ -311,9 +311,9 @@ async def vision_review(
 
         final_score = max(0, min(100, score + score_adj))
 
-        # Calculate fraud risk
+        # Calculate fraud risk with safe access to explanation
         fraud_result = calculate_fraud_risk(combined_text, image_files)
-        fraud_explanation = fraud_result["explanation"]
+        fraud_explanation = fraud_result.get("explanation", "No fraud indicators detected.")
 
         base_pdf_path = f"{file_number}.pdf"
         pdf_path = base_pdf_path
@@ -360,6 +360,7 @@ File Number: {file_number}
 IA Company: {ia_company}
 Appraiser ID #: {appraiser_id}
 Adjusted Compliance Score: {final_score}%
+Fraud Risk Score: {fraud_result['score']}%
 
 AI Review Summary:
 {gpt_output}
@@ -374,12 +375,13 @@ AI Review Summary:
             "file_number": file_number,
             "claim_number": claim_number,
             "vehicle": vehicle,
-            "score": f"{final_score}%"
+            "score": f"{final_score}%",
+            "fraud_score": f"{fraud_result['score']}%"
         }
 
     except Exception as e:
         logger.error(f"API error: {str(e)}")
-        return JSONResponse(status_code=500, content={"error": str(e), "gpt_output": "\u26a0\ufe0f AI review failed."})
+        return JSONResponse(status_code=500, content={"error": str(e), "gpt_output": "\u274c AI review failed."})
 
 @app.get("/download-pdf")
 async def download_pdf(file_number: str):
@@ -405,6 +407,7 @@ async def get_client_rules(client_name: str):
     else:
         logger.error(f"Rules not found for client: {client_name}")
         return JSONResponse(status_code=404, content={"error": "Rules not found for this client."})
+
 
 
 
