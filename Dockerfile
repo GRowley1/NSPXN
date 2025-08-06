@@ -23,8 +23,9 @@ RUN pip install --no-cache-dir -r requirements.txt
 COPY . .
 
 # Set environment variables for headless OpenCV
+# Optional: Forces Qt to run without GUI
 ENV OPENCV_VIDEOIO_PRIORITY_MSMF=0
-ENV QT_QPA_PLATFORM=offscreen  # Optional: Forces Qt to run without GUI
+ENV QT_QPA_PLATFORM=offscreen
 
 # Expose port (use $PORT for Render compatibility)
 EXPOSE $PORT
