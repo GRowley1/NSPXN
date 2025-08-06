@@ -9,4 +9,4 @@ Pillow
 openai
 torch
 ultralytics
-opencv-python-headless  # Use headless version to avoid GUI dependencies
+opencv-python-headless
