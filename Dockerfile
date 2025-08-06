@@ -32,5 +32,5 @@ ENV QT_QPA_PLATFORM=offscreen
 # Expose port (use $PORT for Render compatibility)
 EXPOSE $PORT
 
-# Run the application
-CMD ["uvicorn", "main:app", "--host", "0.0.0.0", "--port", "$PORT"]
+# Run the application with shell form to expand $PORT
+CMD ["sh", "-c", "uvicorn main:app --host 0.0.0.0 --port $PORT"]
