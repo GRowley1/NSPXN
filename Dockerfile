@@ -2,7 +2,8 @@
 FROM python:3.11-slim
 
 # System dependencies
-RUN apt-get update && apt-get install -y \
+RUN apt-get update \
+    && apt-get install -y \
     tesseract-ocr \
     poppler-utils \
     libglib2.0-0 \
