@@ -153,6 +153,7 @@ def check_required_photos(image_files: List[UploadFile]) -> tuple[List[str], flo
 
         except Exception as e:
             logger.error(f"Image processing error: {str(e)}")
+            corner_deduction = 25  # Default to full deduction if image processing fails
 
     found_photos = list(set(found_photos))
     missing = [p for p in required_photos if p not in found_photos]
@@ -204,7 +205,8 @@ async def vision_review(
     client_rules: str = Form(...),
     file_number: str = Form(...),
     ia_company: str = Form(...),
-    appraiser_id: str = Form(...)
+    appraiser_id: str = Form(...),
+    claim_number: str = Form("010683-162546-AD-01")  # Default to provided claim number
 ):
     if not appraiser_id.strip():
         return JSONResponse(status_code=400, content={"error": "Appraiser ID is required."})
@@ -287,7 +289,7 @@ async def vision_review(
         )
         gpt_output = response.choices[0].message.content or "\u274c GPT returned no output."
         logger.debug(f"GPT output: {gpt_output[:200]}...")
-        claim_number = extract_field("Claim", gpt_output)
+        claim_number_from_gpt = extract_field("Claim", gpt_output)
         vehicle = extract_field("Vehicle", gpt_output)
         mileage_match = re.search(r"mileage:\s*(\d{1,6}(?:,\d{3})*(?:\s*miles|\s*km)?)", vehicle.lower())
         if mileage_match:
@@ -311,8 +313,8 @@ async def vision_review(
 
         final_score = max(0, min(100, score + score_adj))
 
-        # Calculate fraud risk with safe access to explanation
-        fraud_result = calculate_fraud_risk(combined_text, image_files)
+        # Calculate fraud risk with the provided claim number
+        fraud_result = calculate_fraud_risk(combined_text, image_files, claim_number)
         fraud_explanation = fraud_result.get("explanation", "No fraud indicators detected.")
 
         base_pdf_path = f"{file_number}.pdf"
@@ -373,7 +375,7 @@ AI Review Summary:
         return {
             "gpt_output": gpt_output,
             "file_number": file_number,
-            "claim_number": claim_number,
+            "claim_number": claim_number_from_gpt or claim_number,
             "vehicle": vehicle,
             "score": f"{final_score}%",
             "fraud_score": f"{fraud_result['score']}%"
