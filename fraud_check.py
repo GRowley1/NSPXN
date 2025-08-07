@@ -3,10 +3,11 @@ import re
 from datetime import datetime
 import io
 
-def calculate_fraud_risk(combined_text, image_files=None):
+def calculate_fraud_risk(combined_text, image_files=None, reference_claim=None):
     score = 0
     flags = []
     current_year = datetime.now().year  # 2025
+    reference_claim = reference_claim or "010683-162546-AD-01"  # Default to provided claim number
 
     # 1. Check for suspicious terms
     suspicious_terms = ["fraud", "fake", "altered", "manipulated", "forged"]
@@ -17,12 +18,11 @@ def calculate_fraud_risk(combined_text, image_files=None):
     # 2. Claim number consistency
     claim_numbers = re.findall(r"Claim\s*#?\s*([A-Z0-9-]+)", combined_text, re.IGNORECASE)
     if claim_numbers:
-        claim_number = claim_numbers[0]
-        if not all(cn == claim_number for cn in claim_numbers):
-            flags.append("Inconsistent claim numbers detected")
+        if reference_claim not in claim_numbers:
+            flags.append(f"Inconsistent claim number; expected {reference_claim}, found {', '.join(claim_numbers)}")
             score += 25
     else:
-        flags.append("No claim number found")
+        flags.append(f"No claim number found; expected {reference_claim}")
         score += 10
 
     # 3. Edited/Manipulated Image Indicators
@@ -62,6 +62,9 @@ def calculate_fraud_risk(combined_text, image_files=None):
     score = min(100, score)
 
     # Ensure explanation is always provided
+    explanation = "No fraud indicators detected." if not flags else "\n".join(flags)
+
+    return {"score": score, "flags": flags, "explanation": explanation}
     explanation = "No fraud indicators detected." if not flags else "\n".join(flags)
 
     return {"score": score, "flags": flags, "explanation": explanation}
