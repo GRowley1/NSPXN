@@ -3,11 +3,10 @@ import re
 from datetime import datetime
 import io
 
-def calculate_fraud_risk(combined_text, image_files=None, reference_claim=None):
+def calculate_fraud_risk(combined_text, image_files=None):
     score = 0
     flags = []
     current_year = datetime.now().year  # 2025
-    reference_claim = reference_claim or "010683-162546-AD-01"  # Default to provided claim number
 
     # 1. Check for suspicious terms
     suspicious_terms = ["fraud", "fake", "altered", "manipulated", "forged"]
@@ -20,11 +19,14 @@ def calculate_fraud_risk(combined_text, image_files=None, reference_claim=None):
     claim_numbers = re.findall(claim_pattern, combined_text, re.IGNORECASE)
     if claim_numbers:
         valid_claims = [c for c in claim_numbers if re.match(r"^[0-9]{6}-[0-9]{6}-[A-Z]{2}-[0-9]{2}$", c)]
-        if not valid_claims or reference_claim.lower() not in [c.lower() for c in valid_claims]:
-            flags.append(f"Inconsistent claim number; expected {reference_claim}, found {', '.join(valid_claims)}")
-            score += 20  # Reduced from 25 to calibrate severity
+        if len(valid_claims) > 1 and len(set(valid_claims)) > 1:
+            flags.append(f"Multiple inconsistent claim numbers detected: {', '.join(valid_claims)}")
+            score += 20  # Penalty for multiple different claims
+        elif not valid_claims:
+            flags.append("No valid claim number format detected")
+            score += 10
     else:
-        flags.append(f"No valid claim number found; expected {reference_claim}")
+        flags.append("No claim number found")
         score += 10
 
     # 3. Edited/Manipulated Image Indicators
