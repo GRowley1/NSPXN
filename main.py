@@ -148,17 +148,19 @@ def check_required_photos(image_files: List[UploadFile]) -> tuple[List[str], flo
                 corner_deduction = 12.5  # Partial deduction
                 logger.debug("Detected 1 corner view with YOLO")
             else:
-                corner_deduction = 25  # Full deduction
-                logger.debug("Detected 0 corner views with YOLO")
+                corner_deduction = 25  # Default deduction for 0 corners
 
         except Exception as e:
             logger.error(f"Image processing error: {str(e)}")
-            corner_deduction = 25  # Default to full deduction if image processing fails
+            corner_deduction = 25  # Default to 25% if processing fails
 
     found_photos = list(set(found_photos))
     missing = [p for p in required_photos if p not in found_photos]
     if "four corners" not in found_photos:
         missing.append("four corners")  # Ensure four corners is marked missing if not compliant
+    # Apply 50% deduction if all required photos are missing
+    if all(p in missing for p in required_photos):
+        corner_deduction = 50
     logger.debug(f"Found photos: {found_photos}, Missing photos: {missing}, Corner deduction: {corner_deduction}%")
     return missing, corner_deduction
 
@@ -409,6 +411,7 @@ async def get_client_rules(client_name: str):
     else:
         logger.error(f"Rules not found for client: {client_name}")
         return JSONResponse(status_code=404, content={"error": "Rules not found for this client."})
+
 
 
 
