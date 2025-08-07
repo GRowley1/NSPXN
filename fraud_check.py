@@ -13,16 +13,18 @@ def calculate_fraud_risk(combined_text, image_files=None, reference_claim=None):
     suspicious_terms = ["fraud", "fake", "altered", "manipulated", "forged"]
     if any(term in combined_text.lower() for term in suspicious_terms):
         flags.append("Suspicious terms detected")
-        score += 25
+        score += 15  # Reduced from 25 to calibrate severity
 
     # 2. Claim number consistency
-    claim_numbers = re.findall(r"Claim\s*#?\s*([A-Z0-9-]+)", combined_text, re.IGNORECASE)
+    claim_pattern = r"Claim\s*#?\s*([0-9]{6}-[0-9]{6}-[A-Z]{2}-[0-9]{2})"
+    claim_numbers = re.findall(claim_pattern, combined_text, re.IGNORECASE)
     if claim_numbers:
-        if reference_claim not in claim_numbers:
-            flags.append(f"Inconsistent claim number; expected {reference_claim}, found {', '.join(claim_numbers)}")
-            score += 25
+        valid_claims = [c for c in claim_numbers if re.match(r"^[0-9]{6}-[0-9]{6}-[A-Z]{2}-[0-9]{2}$", c)]
+        if not valid_claims or reference_claim.lower() not in [c.lower() for c in valid_claims]:
+            flags.append(f"Inconsistent claim number; expected {reference_claim}, found {', '.join(valid_claims)}")
+            score += 20  # Reduced from 25 to calibrate severity
     else:
-        flags.append(f"No claim number found; expected {reference_claim}")
+        flags.append(f"No valid claim number found; expected {reference_claim}")
         score += 10
 
     # 3. Edited/Manipulated Image Indicators
@@ -62,9 +64,6 @@ def calculate_fraud_risk(combined_text, image_files=None, reference_claim=None):
     score = min(100, score)
 
     # Ensure explanation is always provided
-    explanation = "No fraud indicators detected." if not flags else "\n".join(flags)
-
-    return {"score": score, "flags": flags, "explanation": explanation}
     explanation = "No fraud indicators detected." if not flags else "\n".join(flags)
 
     return {"score": score, "flags": flags, "explanation": explanation}
