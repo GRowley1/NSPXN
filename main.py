@@ -114,7 +114,7 @@ def detect_corners_with_yolo(image: Image.Image) -> int:
 def check_required_photos(image_files: List[UploadFile]) -> tuple[List[str], float]:
     required_photos = ["four corners", "odometer", "vin", "license plate"]
     found_photos = []
-    corner_deduction = 0
+    total_deduction = 0
 
     for img in image_files:
         try:
@@ -145,14 +145,14 @@ def check_required_photos(image_files: List[UploadFile]) -> tuple[List[str], flo
                 found_photos.append("four corners")
                 logger.debug("Detected 2+ corner views with YOLO")
             elif corner_count == 1:
-                corner_deduction = 12.5  # Partial deduction
+                total_deduction += 12.5  # Partial deduction
                 logger.debug("Detected 1 corner view with YOLO")
             else:
-                corner_deduction = 25  # Default deduction for 0 corners
+                total_deduction += 25  # Default deduction for 0 corners
 
         except Exception as e:
             logger.error(f"Image processing error: {str(e)}")
-            corner_deduction = 25  # Default to 25% if processing fails
+            total_deduction += 25  # Default to 25% if processing fails
 
     found_photos = list(set(found_photos))
     missing = [p for p in required_photos if p not in found_photos]
@@ -160,9 +160,9 @@ def check_required_photos(image_files: List[UploadFile]) -> tuple[List[str], flo
         missing.append("four corners")  # Ensure four corners is marked missing if not compliant
     # Apply 50% deduction if all required photos are missing
     if all(p in missing for p in required_photos):
-        corner_deduction = 50
-    logger.debug(f"Found photos: {found_photos}, Missing photos: {missing}, Corner deduction: {corner_deduction}%")
-    return missing, corner_deduction
+        total_deduction = max(total_deduction, 50)
+    logger.debug(f"Found photos: {found_photos}, Missing photos: {missing}, Total deduction: {total_deduction}%")
+    return missing, total_deduction
 
 def check_labor_and_tax_score(text: str, client_rules: str, skip_labor_tax_checks: bool) -> int:
     if skip_labor_tax_checks:
@@ -210,8 +210,7 @@ async def vision_review(
     client_rules: str = Form(...),
     file_number: str = Form(...),
     ia_company: str = Form(...),
-    appraiser_id: str = Form(...),
-    claim_number: str = Form("010683-162546-AD-01")  # Default to provided claim number
+    appraiser_id: str = Form(...)
 ):
     if not appraiser_id.strip():
         return JSONResponse(status_code=400, content={"error": "Appraiser ID is required."})
@@ -318,8 +317,8 @@ async def vision_review(
 
         final_score = max(0, min(100, score + score_adj))
 
-        # Calculate fraud risk with the provided claim number
-        fraud_result = calculate_fraud_risk(combined_text, image_files, claim_number)
+        # Calculate fraud risk without reference claim
+        fraud_result = calculate_fraud_risk(combined_text, image_files)
         fraud_explanation = fraud_result.get("explanation", "No fraud indicators detected.")
 
         base_pdf_path = f"{file_number}.pdf"
@@ -358,7 +357,7 @@ async def vision_review(
         pdf.output(pdf_path)
 
         msg = EmailMessage()
-        msg["Subject"] = f"AI-4-IA Review: {claim_number}"
+        msg["Subject"] = f"AI-4-IA Review: {claim_number_from_gpt or 'N/A'}"
         msg["From"] = "noreply@nspxn.com"
         msg["To"] = "info@nspxn.com"
         email_body = f"""NSPXN.com AI4IA Review Report
@@ -380,7 +379,7 @@ AI Review Summary:
         return {
             "gpt_output": gpt_output,
             "file_number": file_number,
-            "claim_number": claim_number_from_gpt or claim_number,
+            "claim_number": claim_number_from_gpt or "N/A",
             "vehicle": vehicle,
             "score": f"{final_score}%",
             "fraud_score": f"{fraud_result['score']}%"
