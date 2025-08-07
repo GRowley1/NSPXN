@@ -177,7 +177,7 @@ def check_labor_and_tax_score(text: str, client_rules: str, skip_labor_tax_check
     if not found_sections:
         score_adj -= 50
     if re.search(r"utilize applicable tax rate", client_rules, re.IGNORECASE):
-        tax_pattern = r"sales\s+tax\s+tier\s+\d+\s+\$\s*\d+\.?\d*\s+@\s*\d+\.?\d*%\s+\$\s*\d+\.?\d*"
+        tax_pattern = r"(?:sales\s+)?tax(?:\s+tier\s+\d+)?\s*[:\s]*\$?\s*\d+\.?\d*\s*(?:@|\s+at\s+)\s*\d+\.?\d*%\s*\$?\s*\d+\.?\d*"
         if re.search(tax_pattern, text.lower()):
             logger.debug("Tax information detected, no deduction applied")
         else:
@@ -413,6 +413,7 @@ async def get_client_rules(client_name: str):
     else:
         logger.error(f"Rules not found for client: {client_name}")
         return JSONResponse(status_code=404, content={"error": "Rules not found for this client."})
+
 
 
 
