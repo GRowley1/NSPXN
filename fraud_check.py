@@ -21,14 +21,15 @@ def calculate_fraud_risk(combined_text, image_files=None):
         score += 15
 
     # 2. Claim number consistency
-    claim_pattern = r"claim\s*(?:#?:\s*)?([0-9]{6}-[0-9]{6}-[A-Z]{2}-[0-9]{2})"
+    claim_pattern = r"claim\s*#\s*(.+?)(?=\s|$)"
     claim_numbers = re.findall(claim_pattern, combined_text, re.IGNORECASE)
     if claim_numbers:
-        valid_claims = [c for c in claim_numbers if re.match(r"^[0-9]{6}-[0-9]{6}-[A-Z]{2}-[0-9]{2}$", c)]
+        valid_claims = [c.strip() for c in claim_numbers if c.strip()]
         if valid_claims:
             if len(valid_claims) > 1 and len(set(valid_claims)) > 1:
                 flags.append(f"Multiple inconsistent claim numbers detected: {', '.join(valid_claims)}")
                 score += 20
+            # No flag if a single valid claim is found
         else:
             flags.append("No valid claim number format detected")
             score += 10
