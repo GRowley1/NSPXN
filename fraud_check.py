@@ -4,6 +4,10 @@ from datetime import datetime
 import io
 from ultralytics import YOLO
 import os
+import logging
+
+# Configure logging
+logger = logging.getLogger(__name__)
 
 def calculate_fraud_risk(combined_text, image_files=None):
     score = 0
@@ -82,7 +86,7 @@ def calculate_fraud_risk(combined_text, image_files=None):
                     if extra_damages:
                         discrepancy.append(f"Damages in photos not in estimate: {', '.join(extra_damages)}")
                     flags.append("Discrepancy between estimate and photo damage: " + "; ".join(discrepancy))
-                    score += 20  # Penalty for significant mismatch
+                    score += 20
 
         except Exception as e:
             logger.error(f"Damage comparison error: {str(e)}")
@@ -127,7 +131,5 @@ def calculate_fraud_risk(combined_text, image_files=None):
 
     # Ensure explanation is always provided
     explanation = "No fraud indicators detected." if not flags else "\n".join(flags)
-
-    return {"score": score, "flags": flags, "explanation": explanation}d." if not flags else "\n".join(flags)
 
     return {"score": score, "flags": flags, "explanation": explanation}
