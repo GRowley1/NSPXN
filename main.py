@@ -293,6 +293,8 @@ async def vision_review(
         )
         gpt_output = response.choices[0].message.content or "\u274c GPT returned no output."
         logger.debug(f"GPT output: {gpt_output[:200]}...")
+        # Include GPT output in combined_text for fraud check
+        combined_text += "\n" + gpt_output.lower()
         claim_number_from_gpt = extract_field("Claim", gpt_output)
         vehicle = extract_field("Vehicle", gpt_output)
         mileage_match = re.search(r"mileage:\s*(\d{1,6}(?:,\d{3})*(?:\s*miles|\s*km)?)", vehicle.lower())
@@ -317,7 +319,7 @@ async def vision_review(
 
         final_score = max(0, min(100, score + score_adj))
 
-        # Calculate fraud risk without reference claim
+        # Calculate fraud risk
         fraud_result = calculate_fraud_risk(combined_text, image_files)
         fraud_explanation = fraud_result.get("explanation", "No fraud indicators detected.")
 
