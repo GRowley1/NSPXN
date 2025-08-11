@@ -77,12 +77,8 @@ def extract_text_from_pdf(file_content: bytes) -> tuple[str, List[Image.Image]]:
         return "\n\u274c PDF processing error: {str(e)}", []
 
 def extract_text_from_docx(file) -> str:
-    try:
-        doc = Document(file)
-        return '\n'.join(p.text.strip() for p in doc.paragraphs if p.text.strip())
-    except Exception as e:
-        logger.error(f"DOCX processing error: {str(e)}")
-        return f"\u274c DOCX processing error: {str(e)}"
+    doc = Document(file)
+    return '\n'.join(p.text.strip() for p in doc.paragraphs if p.text.strip())
 
 def extract_field(label: str, text: str) -> str:
     pattern = re.compile(rf"{re.escape(label)}\s*[:\-#=]?\s*(R226\d+.*|[A-HJ-NPR-Z0-9]{{17}}|[^\n\r;]+)", re.IGNORECASE)
@@ -103,36 +99,35 @@ def detect_corners_with_yolo(image: Image.Image) -> dict:
             logger.error(f"YOLO model file not found at {model_path}")
             return {"total_corners": 0, "corner_types": {}}
         model = YOLO(model_path)
-        # Convert PIL image to RGB
+        # Convert PIL image to RGB and ensure numpy compatibility
         image_rgb = image.convert("RGB")
         # Perform inference in headless mode
-        os.environ["OPENCV_VIDEOIO_PRIORITY_MSMF"] = "0"
-        results = model(image_rgb, verbose=True)
-        # Count detected corners by class
+        os.environ["OPENCV_VIDEOIO_PRIORITY_MSMF"] = "0"  # Force headless mode
+        results = model(image_rgb)
+        # Count detected corners by class (assuming classes 0-3 for different corners)
         corner_types = ["front_left_corner", "front_right_corner", "rear_left_corner", "rear_right_corner"]
         corner_counts = {ctype: 0 for ctype in corner_types}
-        total_corners = 0
         if results[0].boxes:
             for box in results[0].boxes:
                 class_id = int(box.cls[0])
-                if class_id < len(corner_types):  # Ensure class_id is valid
-                    corner_name = corner_types[class_id]
-                    corner_counts[corner_name] += 1
-                    total_corners += 1
-        logger.debug(f"YOLO detected {total_corners} corners: {corner_counts}")
+                if class_id < len(corner_types):
+                    corner_counts[corner_types[class_id]] += 1
+        total_corners = sum(corner_counts.values())
+        logger.debug(f"YOLO detected {total_corners} corner views: {corner_counts}")
         return {"total_corners": total_corners, "corner_types": corner_counts}
     except Exception as e:
         logger.error(f"YOLO detection error: {str(e)}")
-        return {"total_corners": 0, "corner_types": {ctype: 0 for ctype in corner_types}}
+        return {"total_corners": 0, "corner_types": {}}
 
-def process_single_image_for_photos(image: Image.Image, found_photos: list, corner_counts: dict) -> None:
+def process_single_image_for_photos(image: Image.Image, found_photos: list, corner_counts: dict) -> float:
+    corner_deduction = 0.0
     try:
         processed = preprocess_image(image)
         ocr_text = pytesseract.image_to_string(processed, lang="eng")
         logger.debug(f"Image OCR text: {ocr_text[:200]}...")
 
         # VIN detection
-        if re.search(r"\b[A-HJ-NPR-Z0-9]{17}\b", ocr_text, re.IGNORECASE):
+        if re.search(r"\b[A-HJ-NPR-Z0-9]{17}\b", ocr_text):
             found_photos.append("vin")
             logger.debug("Detected VIN in image")
 
@@ -142,17 +137,20 @@ def process_single_image_for_photos(image: Image.Image, found_photos: list, corn
             logger.debug("Detected odometer in image")
 
         # License plate detection
-        if re.search(r"\b[A-Z0-9]{5,8}\b", ocr_text, re.IGNORECASE):
+        if re.search(r"\b[A-Z0-9]{5,8}\b", ocr_text):
             found_photos.append("license plate")
             logger.debug("Detected license plate in image")
 
-        # Corner detection
+        # Four corners detection using YOLO
         corner_result = detect_corners_with_yolo(image)
-        for corner_type, count in corner_result["corner_types"].items():
-            corner_counts[corner_type] = corner_counts.get(corner_type, 0) + count
+        for ctype, count in corner_result["corner_types"].items():
+            corner_counts[ctype] = corner_counts.get(ctype, 0) + count
 
     except Exception as e:
         logger.error(f"Image processing error: {str(e)}")
+        corner_deduction = 25  # Default to 25% if processing fails
+
+    return corner_deduction
 
 def check_required_photos(upload_image_files: List[UploadFile], pdf_images: List[Image.Image]) -> tuple[List[str], float]:
     required_photos = ["four corners", "odometer", "vin", "license plate"]
@@ -165,21 +163,18 @@ def check_required_photos(upload_image_files: List[UploadFile], pdf_images: List
         try:
             img_file.file.seek(0)
             image = Image.open(io.BytesIO(img_file.file.read()))
-            process_single_image_for_photos(image, found_photos, corner_counts)
+            corner_deduction = max(corner_deduction, process_single_image_for_photos(image, found_photos, corner_counts))
         except Exception as e:
             logger.error(f"Uploaded image processing error: {str(e)}")
             corner_deduction = max(corner_deduction, 25)
 
     # Process PDF images
     for pdf_img in pdf_images:
-        process_single_image_for_photos(pdf_img, found_photos, corner_counts)
+        corner_deduction = max(corner_deduction, process_single_image_for_photos(pdf_img, found_photos, corner_counts))
 
-    # Check if all four corners are represented
-    unique_corners = sum(1 for count in corner_counts.values() if count > 0)
-    total_corners = sum(corner_counts.values())
-    logger.debug(f"Corner counts: {corner_counts}, Unique corners: {unique_corners}, Total corners: {total_corners}")
-
-    if unique_corners >= 4 and total_corners >= 4:
+    # Adjust corner deduction based on unique corners detected across all images
+    unique_corners = sum(1 for v in corner_counts.values() if v > 0)
+    if unique_corners >= 4:
         found_photos.append("four corners")
         corner_deduction = 0
     elif unique_corners >= 2:
@@ -253,41 +248,38 @@ async def vision_review(
     if not appraiser_id.strip():
         return JSONResponse(status_code=400, content={"error": "Appraiser ID is required."})
 
-    vision_images = []
+    vision_images = []  # for GPT-4o content
     texts = []
-    upload_image_files = []
-    all_pdf_images = []
+    upload_image_files = []  # Uploaded image files
+    all_pdf_images = []  # Collected from all PDFs
 
     for file in files:
         content = await file.read()
         name = file.filename.lower()
-        try:
-            if name.endswith((".jpg", ".jpeg", ".png")):
-                upload_image_files.append(file)
-                b64 = base64.b64encode(content).decode("utf-8")
+        if name.endswith((".jpg", ".jpeg", ".png")):
+            upload_image_files.append(file)
+            b64 = base64.b64encode(content).decode("utf-8")
+            vision_images.append({"type": "image_url", "image_url": {"url": f"data:image/jpeg;base64,{b64}"}})
+        elif name.endswith(".pdf"):
+            text, pdf_images = extract_text_from_pdf(content)
+            if "\u274c" in text:
+                logger.error(f"PDF processing failed: {text}")
+                return JSONResponse(status_code=500, content={"error": f"PDF processing failed: {text}"})
+            texts.append(text)
+            all_pdf_images.extend(pdf_images)
+            # Add PDF images to vision_images
+            for img in pdf_images:
+                img_byte_arr = io.BytesIO()
+                img.save(img_byte_arr, format='JPEG')
+                b64 = base64.b64encode(img_byte_arr.getvalue()).decode("utf-8")
                 vision_images.append({"type": "image_url", "image_url": {"url": f"data:image/jpeg;base64,{b64}"}})
-            elif name.endswith(".pdf"):
-                text, pdf_images = extract_text_from_pdf(content)
-                if "\u274c" in text:
-                    logger.error(f"PDF processing failed: {text}")
-                    return JSONResponse(status_code=500, content={"error": f"PDF processing failed: {text}"})
-                texts.append(text)
-                all_pdf_images.extend(pdf_images)
-                for img in pdf_images:
-                    img_byte_arr = io.BytesIO()
-                    img.save(img_byte_arr, format='JPEG')
-                    b64 = base64.b64encode(img_byte_arr.getvalue()).decode("utf-8")
-                    vision_images.append({"type": "image_url", "image_url": {"url": f"data:image/jpeg;base64,{b64}"}})
-                logger.debug(f"Extracted text from PDF: {text[:200]}...")
-            elif name.endswith(".docx"):
-                texts.append(extract_text_from_docx(io.BytesIO(content)))
-            elif name.endswith(".txt"):
-                texts.append(content.decode("utf-8", errors="ignore"))
-            else:
-                texts.append(f"\u26a0\ufe0f Skipped unsupported file: {file.filename}")
-        except Exception as e:
-            logger.error(f"File processing error for {name}: {str(e)}")
-            return JSONResponse(status_code=500, content={"error": f"File processing failed: {str(e)}"})
+            logger.debug(f"Extracted text from PDF: {text[:200]}...")
+        elif name.endswith(".docx"):
+            texts.append(extract_text_from_docx(io.BytesIO(content)))
+        elif name.endswith(".txt"):
+            texts.append(content.decode("utf-8", errors="ignore"))
+        else:
+            texts.append(f"\u26a0\ufe0f Skipped unsupported file: {file.filename}")
 
     combined_text = '\n'.join(texts).lower()
     advisor_confirmed = advisor_report_present(texts, upload_image_files, all_pdf_images)
@@ -295,6 +287,7 @@ async def vision_review(
     missing_photos, corner_deduction = check_required_photos(upload_image_files, all_pdf_images)
     photo_hint = f"\n\nMISSING PHOTOS: {', '.join(missing_photos) if missing_photos else 'None'}"
 
+    # Check for no damage phrases
     skip_labor_tax_checks = any(phrase in combined_text for phrase in ["no damage found", "no damage identified"])
 
     vision_message = {"role": "user", "content": []}
@@ -322,7 +315,7 @@ async def vision_review(
     Total Loss Status: (Yes/No)
 
     Then summarize findings based on these rules:
-    - For repair estimates: Deduct {corner_deduction}% for four corners photo compliance based on detection, 25% if tax missing and client requires it, 50% if ALL labor rates missing (only if damage is indicated)
+    - For repair estimates: Deduct {corner_deduction}% for four corners photo compliance based on YOLO detection, 25% if tax missing and client requires it, 50% if ALL labor rates missing (only if damage is indicated)
     - For total loss: Start at 100%, deduct 25% per missing field (insured, policy #, claim #, date of loss)
     - Treat mentions of “advisor report” as confirmation of inclusion for repair estimates
     - Don’t assume total loss unless explicitly mentioned
@@ -347,6 +340,7 @@ async def vision_review(
         )
         gpt_output = response.choices[0].message.content or "\u274c GPT returned no output."
         logger.debug(f"GPT output: {gpt_output[:200]}...")
+        # Include GPT output in combined_text for fraud check
         combined_text += "\n" + gpt_output.lower()
         claim_number_from_gpt = extract_field("Claim", gpt_output)
         vehicle = extract_field("Vehicle", gpt_output)
@@ -364,7 +358,7 @@ async def vision_review(
         score_adj = 0
         if not total_loss_status:
             score_adj = check_labor_and_tax_score(combined_text, client_rules, skip_labor_tax_checks)
-            score_adj -= corner_deduction
+            score_adj -= corner_deduction  # Apply YOLO-based corner deduction
         else:
             required_fields = ["insured", "policy #", "claim #", "date of loss"]
             found_fields = [f for f in required_fields if f in combined_text]
@@ -373,431 +367,6 @@ async def vision_review(
         final_score = max(0, min(100, score + score_adj))
 
         # Calculate fraud risk
-        fraud_result = calculate_fraud_risk(combined_text, upload_image_files)
-        fraud_explanation = fraud_result.get("explanation", "No fraud indicators detected.")
-
-        base_pdf_path = f"{file_number}.pdf"
-        pdf_path = base_pdf_path
-        counter = 1
-        while os.path.exists(pdf_path):
-            pdf_path = f"{file_number}_{counter}.pdf"
-            counter += 1
-        pdf = FPDF()
-        pdf.add_page()
-        pdf.add_font("DejaVu", "", "DejaVuSans.ttf", uni=True)
-        pdf.set_font("DejaVu", size=11)
-        pdf.cell(200, 10, txt="NSPXN.com AI Review Report", ln=True, align='C')
-        pdf.ln(5)
-        pdf.multi_cell(0, 10, f"File Number: {file_number}")
-        pdf.multi_cell(0, 10, f"IA Company: {ia_company}")
-        pdf.multi_cell(0, 10, f"Appraiser ID #: {appraiser_id}")
-        pdf.ln(5)
-        pdf.set_text_color(200, 0, 0)
-        pdf.multi_cell(0, 10, f"Fraud Risk Score: {fraud_result['score']}%")
-        if fraud_result["flags"]:
-            pdf.set_text_color(ம
-
-System: I'm sorry, it looks like your message was cut off. The provided logs and the context suggest you're asking about integrating the YOLO detection improvements into `main.py` to reflect the corrected output, and possibly addressing the server error. Below, I'll explain the changes made to `main.py` to align with the corrected output (100% compliance score, all required photos detected, including four corners) and address the issues identified in the logs.
-
-### Key Changes to `main.py`
-
-1. **Improved YOLO Corner Detection**:
-   - Modified `detect_corners_with_yolo` to return a dictionary with counts for each corner type (`front_left_corner`, `front_right_corner`, `rear_left_corner`, `rear_right_corner`) instead of a single count.
-   - Updated `check_required_photos` to aggregate corner counts across all images (uploaded and PDF-extracted) and check for all four corner types. The function now requires at least one detection of each corner type (total of 4 unique corners) to mark "four corners" as present, setting `corner_deduction` to 0. If only 2 or 3 unique corners are detected, a 12.5% deduction is applied; otherwise, a 25% deduction is applied.
-
-2. **Optimized PDF Processing**:
-   - Added `thread_count=4` to `convert_from_bytes` in `extract_text_from_pdf` to use multi-threading, improving performance for large PDFs like `8141038 Merge.pdf` (59 pages).
-   - Ensured PDF images are stored and processed for both OCR and YOLO detection, capturing corners in pages like 48, 49, 53, 55, and 56.
-
-3. **Enhanced Error Handling**:
-   - Added try-except blocks around file processing in the `/vision-review` endpoint to catch and log specific exceptions, preventing HTTP 500 errors.
-   - Improved logging to provide detailed error messages for debugging (e.g., file processing errors, YOLO failures).
-
-4. **Robust Image Processing**:
-   - Separated image processing logic into `process_single_image_for_photos` to handle both uploaded images and PDF-extracted images consistently.
-   - Ensured all images are checked for VIN, odometer, license plate, and corners, avoiding false negatives for required photos.
-
-5. **Compliance Logic**:
-   - Updated `check_required_photos` to consider unique corner types, ensuring that detecting all four corners (as in the corrected output) results in no deduction (`corner_deduction = 0`).
-   - Maintained the logic to apply a 50% deduction if all required photos are missing.
-
-### Addressing the Logs and Error
-
-- **YOLO Detection Issue**: The logs only show `front_left_corners`, indicating the YOLO model (`corner-detector.pt`) may be trained only for this class or misconfigured. The updated `detect_corners_with_yolo` function assumes the model is trained for all four corner types (with class IDs 0–3 corresponding to front-left, front-right, rear-left, rear-right). If the model is indeed limited to `front_left_corner`, it needs retraining or replacement with a model that detects all four corners. The script now checks for unique corner types, which should align with the corrected output showing all four corners detected.
-
-- **Server Error**: The HTTP 500 error with a 411-second response time suggests resource exhaustion or a timeout, likely due to processing a large number of images from the 59-page PDF. The addition of multi-threading in `extract_text_from_pdf` and error handling in `/vision-review` should mitigate this. If the error persists, consider:
-  - Increasing server timeout limits (e.g., adjust FastAPI/Render configuration).
-  - Limiting the number of PDF pages processed (e.g., only process pages likely to contain images, like 48–56).
-  - Offloading image processing to a queue-based system for asynchronous handling.
-
-### Updated `main.py`
-
-Below is the updated `main.py` incorporating these changes. Note that the `calculate_fraud_risk` function is assumed to work correctly with `combined_text` and `upload_image_files`. If it relies on image data, you may need to modify it to include `all_pdf_images` as well.
-
-```python
-from fastapi import FastAPI, File, UploadFile, Form
-from fastapi.responses import JSONResponse, FileResponse
-from fastapi.middleware.cors import CORSMiddleware
-from typing import List
-import os
-import re
-import base64
-import io
-import smtplib
-from email.message import EmailMessage
-from fpdf import FPDF
-from docx import Document
-from pdf2image import convert_from_bytes
-import pytesseract
-from PIL import Image, ImageEnhance, ImageOps, ImageFilter
-from openai import OpenAI
-import logging
-from ultralytics import YOLO
-import torch
-from fraud_check import calculate_fraud_risk
-
-# Configure logging
-logging.basicConfig(level=logging.DEBUG, filename='app.log', filemode='a',
-                    format='%(asctime)s - %(levelname)s - %(message)s')
-logger = logging.getLogger(__name__)
-
-if "OPENAI_API_KEY" not in os.environ:
-    raise RuntimeError("\u274c OPENAI_API_KEY environment variable is NOT set.")
-client = OpenAI(api_key=os.environ["OPENAI_API_KEY"])
-
-app = FastAPI()
-
-app.add_middleware(
-    CORSMiddleware,
-    allow_origins=[
-        "https://nspxn.com",
-        "https://www.nspxn.com",
-        "http://nspxn.com",
-        "http://www.nspxn.com",
-        "https://nspxn.onrender.com"
-    ],
-    allow_credentials=True,
-    allow_methods=["*"],
-    allow_headers=["*"],
-)
-
-def preprocess_image(img: Image.Image) -> Image.Image:
-    img = img.convert("L")  # Convert to grayscale
-    img = ImageEnhance.Contrast(img).enhance(2.0)  # Enhance contrast
-    img = img.filter(ImageFilter.MedianFilter(size=3))  # Noise reduction
-    img = ImageOps.autocontrast(img)  # Adaptive thresholding
-    img = ImageOps.invert(img)  # Invert for better OCR
-    return img
-
-def extract_text_from_pdf(file_content: bytes) -> tuple[str, List[Image.Image]]:
-    try:
-        images = convert_from_bytes(file_content, dpi=150, thread_count=4)  # Optimize with threading
-        text_output = ""
-        pdf_images = []
-        for i, img in enumerate(images, 1):
-            processed = preprocess_image(img)
-            pdf_images.append(img)  # Store original img for YOLO
-            try:
-                ocr_text = pytesseract.image_to_string(processed, lang="eng", config='--psm 3', timeout=30)
-            except Exception as e:
-                logger.warning(f"PSM 3 failed on page {i}: {str(e)}")
-                ocr_text = pytesseract.image_to_string(processed, lang="eng", config='--psm 6', timeout=30)
-            if ocr_text.strip() and not re.search(r"[\:/\d\s]{50,}", ocr_text):
-                text_output += f"\n[Page {i}]\n{ocr_text.strip()}"
-                logger.debug(f"Page {i} OCR text: {ocr_text[:200]}...")
-        if not text_output.strip():
-            logger.error("No valid text extracted from PDF")
-            return "\n\u274c No valid text extracted from PDF", []
-        return text_output, pdf_images
-    except Exception as e:
-        logger.error(f"PDF processing error: {str(e)}")
-        return "\n\u274c PDF processing error: {str(e)}", []
-
-def extract_text_from_docx(file) -> str:
-    try:
-        doc = Document(file)
-        return '\n'.join(p.text.strip() for p in doc.paragraphs if p.text.strip())
-    except Exception as e:
-        logger.error(f"DOCX processing error: {str(e)}")
-        return f"\u274c DOCX processing error: {str(e)}"
-
-def extract_field(label: str, text: str) -> str:
-    pattern = re.compile(rf"{re.escape(label)}\s*[:\-#=]?\s*(R226\d+.*|[A-HJ-NPR-Z0-9]{{17}}|[^\n\r;]+)", re.IGNORECASE)
-    matches = pattern.findall(text)
-    if matches:
-        from collections import Counter
-        return Counter(matches).most_common(1)[0][0].strip()
-    if label.lower() == "vin":
-        vin_match = re.search(r"\b[A-HJ-NPR-Z0-9]{17}\b", text, re.IGNORECASE)
-        return vin_match.group(0) if vin_match else "N/A"
-    return "N/A"
-
-def detect_corners_with_yolo(image: Image.Image) -> dict:
-    try:
-        model_path = os.path.join(os.getcwd(), "corner-detector.pt")
-        if not os.path.exists(model_path):
-            logger.error(f"YOLO model file not found at {model_path}")
-            return {"total_corners": 0, "corner_types": {"front_left_corner": 0, "front_right_corner": 0, "rear_left_corner": 0, "rear_right_corner": 0}}
-        model = YOLO(model_path)
-        image_rgb = image.convert("RGB")
-        os.environ["OPENCV_VIDEOIO_PRIORITY_MSMF"] = "0"
-        results = model(image_rgb, verbose=True)
-        corner_types = ["front_left_corner", "front_right_corner", "rear_left_corner", "rear_right_corner"]
-        corner_counts = {ctype: 0 for ctype in corner_types}
-        total_corners = 0
-        if results[0].boxes:
-            for box in results[0].boxes:
-                class_id = int(box.cls[0])
-                if class_id < len(corner_types):
-                    corner_name = corner_types[class_id]
-                    corner_counts[corner_name] += 1
-                    total_corners += 1
-        logger.debug(f"YOLO detected {total_corners} corners: {corner_counts}")
-        return {"total_corners": total_corners, "corner_types": corner_counts}
-    except Exception as e:
-        logger.error(f"YOLO detection error: {str(e)}")
-        return {"total_corners": 0, "corner_types": {"front_left_corner": 0, "front_right_corner": 0, "rear_left_corner": 0, "rear_right_corner": 0}}
-
-def process_single_image_for_photos(image: Image.Image, found_photos: list, corner_counts: dict) -> None:
-    try:
-        processed = preprocess_image(image)
-        ocr_text = pytesseract.image_to_string(processed, lang="eng")
-        logger.debug(f"Image OCR text: {ocr_text[:200]}...")
-
-        if re.search(r"\b[A-HJ-NPR-Z0-9]{17}\b", ocr_text, re.IGNORECASE):
-            found_photos.append("vin")
-            logger.debug("Detected VIN in image")
-
-        if re.search(r"\d{1,6}(?:,\d{3})*(?:\s*miles|\s*km)?", ocr_text, re.IGNORECASE):
-            found_photos.append("odometer")
-            logger.debug("Detected odometer in image")
-
-        if re.search(r"\b[A-Z0-9]{5,8}\b", ocr_text, re.IGNORECASE):
-            found_photos.append("license plate")
-            logger.debug("Detected license plate in image")
-
-        corner_result = detect_corners_with_yolo(image)
-        for corner_type, count in corner_result["corner_types"].items():
-            corner_counts[corner_type] = corner_counts.get(corner_type, 0) + count
-
-    except Exception as e:
-        logger.error(f"Image processing error: {str(e)}")
-
-def check_required_photos(upload_image_files: List[UploadFile], pdf_images: List[Image.Image]) -> tuple[List[str], float]:
-    required_photos = ["four corners", "odometer", "vin", "license plate"]
-    found_photos = []
-    corner_counts = {"front_left_corner": 0, "front_right_corner": 0, "rear_left_corner": 0, "rear_right_corner": 0}
-    corner_deduction = 0.0
-
-    for img_file in upload_image_files:
-        try:
-            img_file.file.seek(0)
-            image = Image.open(io.BytesIO(img_file.file.read()))
-            process_single_image_for_photos(image, found_photos, corner_counts)
-        except Exception as e:
-            logger.error(f"Uploaded image processing error: {str(e)}")
-            corner_deduction = max(corner_deduction, 25)
-
-    for pdf_img in pdf_images:
-        process_single_image_for_photos(pdf_img, found_photos, corner_counts)
-
-    unique_corners = sum(1 for count in corner_counts.values() if count > 0)
-    total_corners = sum(corner_counts.values())
-    logger.debug(f"Corner counts: {corner_counts}, Unique corners: {unique_corners}, Total corners: {total_corners}")
-
-    if unique_corners >= 4 and total_corners >= 4:
-        found_photos.append("four corners")
-        corner_deduction = 0
-    elif unique_corners >= 2:
-        corner_deduction = 12.5
-    else:
-        corner_deduction = 25
-
-    found_photos = list(set(found_photos))
-    missing = [p for p in required_photos if p not in found_photos]
-    if len(missing) == len(required_photos):
-        corner_deduction = max(corner_deduction, 50)
-    logger.debug(f"Found photos: {found_photos}, Missing photos: {missing}, Corner deduction: {corner_deduction}%")
-    return missing, corner_deduction
-
-def check_labor_and_tax_score(text: str, client_rules: str, skip_labor_tax_checks: bool) -> int:
-    if skip_labor_tax_checks:
-        logger.debug("Skipping labor and tax checks due to no damage found")
-        return 0
-    score_adj = 0
-    required_sections = ["body labor", "paint labor", "mechanical labor", "structural labor"]
-    found_sections = []
-    for section in required_sections:
-        if re.search(rf"{section}[:\s]*(?:\$?\d+\.?\d*\s*(?:/hr|hour)?)", text, re.IGNORECASE):
-            found_sections.append(section)
-    if not found_sections:
-        score_adj -= 50
-    if re.search(r"utilize applicable tax rate", client_rules, re.IGNORECASE):
-        tax_pattern = r"(?:sales\s+)?tax(?:\s+tier\s+\d+)?\s*[:\s]*\$?\s*\d+\.?\d*\s*(?:@|\s+at\s+)\s*\d+\.?\d*%\s*\$?\s*\d+\.?\d*"
-        if re.search(tax_pattern, text.lower()):
-            logger.debug("Tax information detected, no deduction applied")
-        else:
-            score_adj -= 25
-    return score_adj
-
-def advisor_report_present(texts: List[str], upload_image_files: List[UploadFile], pdf_images: List[Image.Image]) -> bool:
-    for t in texts:
-        if any(term in t.lower() for term in ["ccc advisor report", "advisor report"]):
-            return True
-    for img in upload_image_files:
-        try:
-            img.file.seek(0)
-            image = Image.open(io.BytesIO(img.file.read()))
-            processed = preprocess_image(image)
-            ocr = pytesseract.image_to_string(processed, lang="eng")
-            if "advisor report" in ocr.lower():
-                return True
-        except Exception as e:
-            logger.error(f"Image OCR error: {str(e)}")
-    for pdf_img in pdf_images:
-        try:
-            processed = preprocess_image(pdf_img)
-            ocr = pytesseract.image_to_string(processed, lang="eng")
-            if "advisor report" in ocr.lower():
-                return True
-        except Exception as e:
-            logger.error(f"PDF Image OCR error: {str(e)}")
-    return False
-
-@app.get("/")
-async def root():
-    return {"status": "ok"}
-
-@app.post("/vision-review")
-async def vision_review(
-    files: List[UploadFile] = File(...),
-    client_rules: str = Form(...),
-    file_number: str = Form(...),
-    ia_company: str = Form(...),
-    appraiser_id: str = Form(...)
-):
-    if not appraiser_id.strip():
-        return JSONResponse(status_code=400, content={"error": "Appraiser ID is required."})
-
-    vision_images = []
-    texts = []
-    upload_image_files = []
-    all_pdf_images = []
-
-    for file in files:
-        content = await file.read()
-        name = file.filename.lower()
-        try:
-            if name.endswith((".jpg", ".jpeg", ".png")):
-                upload_image_files.append(file)
-                b64 = base64.b64encode(content).decode("utf-8")
-                vision_images.append({"type": "image_url", "image_url": {"url": f"data:image/jpeg;base64,{b64}"}})
-            elif name.endswith(".pdf"):
-                text, pdf_images = extract_text_from_pdf(content)
-                if "\u274c" in text:
-                    logger.error(f"PDF processing failed: {text}")
-                    return JSONResponse(status_code=500, content={"error": f"PDF processing failed: {text}"})
-                texts.append(text)
-                all_pdf_images.extend(pdf_images)
-                for img in pdf_images:
-                    img_byte_arr = io.BytesIO()
-                    img.save(img_byte_arr, format='JPEG')
-                    b64 = base64.b64encode(img_byte_arr.getvalue()).decode("utf-8")
-                    vision_images.append({"type": "image_url", "image_url": {"url": f"data:image/jpeg;base64,{b64}"}})
-                logger.debug(f"Extracted text from PDF: {text[:200]}...")
-            elif name.endswith(".docx"):
-                texts.append(extract_text_from_docx(io.BytesIO(content)))
-            elif name.endswith(".txt"):
-                texts.append(content.decode("utf-8", errors="ignore"))
-            else:
-                texts.append(f"\u26a0\ufe0f Skipped unsupported file: {file.filename}")
-        except Exception as e:
-            logger.error(f"File processing error for {name}: {str(e)}")
-            return JSONResponse(status_code=500, content={"error": f"File processing failed: {str(e)}"})
-
-    combined_text = '\n'.join(texts).lower()
-    advisor_confirmed = advisor_report_present(texts, upload_image_files, all_pdf_images)
-    advisor_hint = "\n\nCONFIRMED: CCC Advisor Report is included." if advisor_confirmed else ""
-    missing_photos, corner_deduction = check_required_photos(upload_image_files, all_pdf_images)
-    photo_hint = f"\n\nMISSING PHOTOS: {', '.join(missing_photos) if missing_photos else 'None'}"
-
-    skip_labor_tax_checks = any(phrase in combined_text for phrase in ["no damage found", "no damage identified"])
-
-    vision_message = {"role": "user", "content": []}
-    if texts:
-        vision_message["content"].append({
-            "type": "text",
-            "text": '\n'.join(texts) + advisor_hint + photo_hint
-        })
-        logger.debug(f"Vision message text: {vision_message['content'][0]['text'][:200]}...")
-    if vision_images:
-        vision_message["content"].extend(vision_images)
-        logger.debug(f"Vision message includes {len(vision_images)} images")
-
-    if not vision_message["content"]:
-        logger.error("No content available for GPT processing")
-        return JSONResponse(status_code=400, content={"error": "No valid data extracted for processing"})
-
-    prompt = f"""
-    You are an AI auto damage auditor. Always output:
-
-    Claim #: (from estimate)
-    VIN: (from estimate or photos)
-    Vehicle: (make, model, mileage)
-    Compliance Score: (0–100%)
-    Total Loss Status: (Yes/No)
-
-    Then summarize findings based on these rules:
-    - For repair estimates: Deduct {corner_deduction}% for four corners photo compliance based on detection, 25% if tax missing and client requires it, 50% if ALL labor rates missing (only if damage is indicated)
-    - For total loss: Start at 100%, deduct 25% per missing field (insured, policy #, claim #, date of loss)
-    - Treat mentions of “advisor report” as confirmation of inclusion for repair estimates
-    - Don’t assume total loss unless explicitly mentioned
-    - Use MISSING PHOTOS hint and advisor confirmation for repair estimates
-    - Use total loss status to switch evaluation mode
-    - Do not include disclaimers about processing personal data (e.g., names); focus solely on vehicle assessment data.
-
-    {client_rules}
-
-    After the summary, provide a separate section titled "Damage Comparison Results" with a robust comparison of the damages described in the estimate text to the damages visible in the provided photos. 
-    - First, list key damages from the estimate (e.g., dents, scratches, broken parts).
-    - Then, describe visible damages in the photos, noting any matches, mismatches, or missing evidence.
-    - Highlight consistencies and discrepancies (e.g., "Estimate mentions front bumper damage, confirmed by photo showing dent; however, no photo evidence for claimed rear damage").
-    - If no damages in estimate or no photos, note accordingly.
-    """
-
-    try:
-        response = client.chat.completions.create(
-            model="gpt-4o",
-            messages=[{"role": "system", "content": prompt}, vision_message],
-            max_tokens=3500
-        )
-        gpt_output = response.choices[0].message.content or "\u274c GPT returned no output."
-        logger.debug(f"GPT output: {gpt_output[:200]}...")
-        combined_text += "\n" + gpt_output.lower()
-        claim_number_from_gpt = extract_field("Claim", gpt_output)
-        vehicle = extract_field("Vehicle", gpt_output)
-        mileage_match = re.search(r"mileage:\s*(\d{1,6}(?:,\d{3})*(?:\s*miles|\s*km)?)", vehicle.lower())
-        if mileage_match:
-            vehicle = re.sub(r"mileage:\s*\d{1,6}(?:,\d{3})*(?:\s*miles|\s*km)?", "", vehicle).strip()
-        score = extract_field("Compliance Score", gpt_output)
-        total_loss_status = extract_field("Total Loss Status", gpt_output).lower() == "yes"
-
-        try:
-            score = int(score.strip("%"))
-        except ValueError:
-            score = 100
-
-        score_adj = 0
-        if not total_loss_status:
-            score_adj = check_labor_and_tax_score(combined_text, client_rules, skip_labor_tax_checks)
-            score_adj -= corner_deduction
-        else:
-            required_fields = ["insured", "policy #", "claim #", "date of loss"]
-            found_fields = [f for f in required_fields if f in combined_text]
-            score_adj -= 25 * (len(required_fields) - len(found_fields))
-
-        final_score = max(0, min(100, score + score_adj))
-
         fraud_result = calculate_fraud_risk(combined_text, upload_image_files)
         fraud_explanation = fraud_result.get("explanation", "No fraud indicators detected.")
 
@@ -893,8 +462,6 @@ async def get_client_rules(client_name: str):
     else:
         logger.error(f"Rules not found for client: {client_name}")
         return JSONResponse(status_code=404, content={"error": "Rules not found for this client."})
-
-
 
 
 
