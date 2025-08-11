@@ -120,7 +120,7 @@ def check_required_photos(image_files: List[UploadFile]) -> tuple[List[str], flo
         try:
             img.file.seek(0)
             image = Image.open(io.BytesIO(img.file.read()))
-            processed = preprocess_image(image)
+            processed = preprocess_image(image)  # Fixed: pass image instead of img
             ocr_text = pytesseract.image_to_string(processed, lang="eng")
             logger.debug(f"Image OCR text: {ocr_text[:200]}...")
 
@@ -140,7 +140,7 @@ def check_required_photos(image_files: List[UploadFile]) -> tuple[List[str], flo
                 logger.debug("Detected license plate in image")
 
             # Four corners detection using YOLO only
-            corner_count = detect_corners_with_yolo(processed)
+            corner_count = detect_corners_with_yolo(image)  # Fixed: pass image
             if corner_count >= 2:
                 found_photos.append("four corners")
                 logger.debug("Detected 2+ corner views with YOLO")
@@ -159,6 +159,9 @@ def check_required_photos(image_files: List[UploadFile]) -> tuple[List[str], flo
     missing = [p for p in required_photos if p not in found_photos]
     if "four corners" not in found_photos:
         missing.append("four corners")  # Ensure four corners is marked missing if not compliant
+    # Apply 50% deduction if all required photos are missing
+    if all(p in missing for p in required_photos):
+        corner_deduction = max(corner_deduction, 50)
     logger.debug(f"Found photos: {found_photos}, Missing photos: {missing}, Corner deduction: {corner_deduction}%")
     return missing, corner_deduction
 
@@ -281,6 +284,12 @@ async def vision_review(
     - Do not include disclaimers about processing personal data (e.g., names); focus solely on vehicle assessment data.
 
     {client_rules}
+
+    After the summary, provide a separate section titled "Damage Comparison Results" with a robust comparison of the damages described in the estimate text to the damages visible in the provided photos. 
+    - First, list key damages from the estimate (e.g., dents, scratches, broken parts).
+    - Then, describe visible damages in the photos, noting any matches, mismatches, or missing evidence.
+    - Highlight consistencies and discrepancies (e.g., "Estimate mentions front bumper damage, confirmed by photo showing dent; however, no photo evidence for claimed rear damage").
+    - If no damages in estimate or no photos, note accordingly.
     """
 
     try:
@@ -292,7 +301,7 @@ async def vision_review(
         gpt_output = response.choices[0].message.content or "\u274c GPT returned no output."
         logger.debug(f"GPT output: {gpt_output[:200]}...")
         # Include GPT output in combined_text for fraud check
-        combined_text += '\n' + gpt_output.lower()
+        combined_text += "\n" + gpt_output.lower()
         claim_number_from_gpt = extract_field("Claim", gpt_output)
         vehicle = extract_field("Vehicle", gpt_output)
         mileage_match = re.search(r"mileage:\s*(\d{1,6}(?:,\d{3})*(?:\s*miles|\s*km)?)", vehicle.lower())
