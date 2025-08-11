@@ -114,7 +114,7 @@ def detect_corners_with_yolo(image: Image.Image) -> int:
 def check_required_photos(image_files: List[UploadFile]) -> tuple[List[str], float]:
     required_photos = ["four corners", "odometer", "vin", "license plate"]
     found_photos = []
-    total_deduction = 0
+    corner_deduction = 0
 
     for img in image_files:
         try:
@@ -145,24 +145,22 @@ def check_required_photos(image_files: List[UploadFile]) -> tuple[List[str], flo
                 found_photos.append("four corners")
                 logger.debug("Detected 2+ corner views with YOLO")
             elif corner_count == 1:
-                total_deduction += 12.5  # Partial deduction
+                corner_deduction = 12.5  # Partial deduction
                 logger.debug("Detected 1 corner view with YOLO")
             else:
-                total_deduction += 25  # Default deduction for 0 corners
+                corner_deduction = 25  # Full deduction
+                logger.debug("Detected 0 corner views with YOLO")
 
         except Exception as e:
             logger.error(f"Image processing error: {str(e)}")
-            total_deduction += 25  # Default to 25% if processing fails
+            corner_deduction = 25  # Default to 25% if processing fails
 
     found_photos = list(set(found_photos))
     missing = [p for p in required_photos if p not in found_photos]
     if "four corners" not in found_photos:
         missing.append("four corners")  # Ensure four corners is marked missing if not compliant
-    # Apply 50% deduction if all required photos are missing
-    if all(p in missing for p in required_photos):
-        total_deduction = max(total_deduction, 50)
-    logger.debug(f"Found photos: {found_photos}, Missing photos: {missing}, Total deduction: {total_deduction}%")
-    return missing, total_deduction
+    logger.debug(f"Found photos: {found_photos}, Missing photos: {missing}, Corner deduction: {corner_deduction}%")
+    return missing, corner_deduction
 
 def check_labor_and_tax_score(text: str, client_rules: str, skip_labor_tax_checks: bool) -> int:
     if skip_labor_tax_checks:
@@ -294,7 +292,7 @@ async def vision_review(
         gpt_output = response.choices[0].message.content or "\u274c GPT returned no output."
         logger.debug(f"GPT output: {gpt_output[:200]}...")
         # Include GPT output in combined_text for fraud check
-        combined_text += "\n" + gpt_output.lower()
+        combined_text += '\n' + gpt_output.lower()
         claim_number_from_gpt = extract_field("Claim", gpt_output)
         vehicle = extract_field("Vehicle", gpt_output)
         mileage_match = re.search(r"mileage:\s*(\d{1,6}(?:,\d{3})*(?:\s*miles|\s*km)?)", vehicle.lower())
