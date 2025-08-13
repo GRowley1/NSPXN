@@ -1,16 +1,15 @@
-# Use an official Python runtime as a parent image
 FROM python:3.11-slim
 
 # System dependencies
 RUN apt-get update \
     && apt-get install -y \
-    tesseract-ocr \
-    poppler-utils \
-    libglib2.0-0 \
-    libsm6 \
-    libxext6 \
-    libxrender-dev \
-    libgl1 \  # Replaced libgl1-mesa-glx with libgl1
+        tesseract-ocr \
+        poppler-utils \
+        libglib2.0-0 \
+        libsm6 \
+        libxext6 \
+        libxrender-dev \
+        libgl1 \  # Replaced libgl1-mesa-glx with libgl1
     && rm -rf /var/lib/apt/lists/*
 
 # Create app directory
