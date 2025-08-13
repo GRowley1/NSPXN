@@ -1,3 +1,4 @@
+```dockerfile
 # Use an official Python runtime as a parent image
 FROM python:3.11-slim
 
@@ -10,7 +11,7 @@ RUN apt-get update \
     libsm6 \
     libxext6 \
     libxrender-dev \
-    libgl1-mesa-glx \
+    libgl1 \  # Replaced libgl1-mesa-glx with libgl1
     && rm -rf /var/lib/apt/lists/*
 
 # Create app directory
@@ -24,14 +25,4 @@ RUN pip install --no-cache-dir -r requirements.txt
 COPY . .
 
 # Set environment variables for headless OpenCV
-ENV OPENCV_VIDEOIO_PRIORITY_MSMF=0
-ENV QT_QPA_PLATFORM=offscreen
-
-# Expose port (use $PORT for Render compatibility)
-EXPOSE $PORT
-
-# Run the application with shell form to expand $PORT
-CMD ["sh", "-c", "uvicorn main:app --host 0.0.0.0 --port $PORT"]
-
-# Run the application with shell form to expand $PORT
-CMD ["sh", "-c", "uvicorn main:app --host 0.0.0.0 --port $PORT"]
+ENV OPENCV_VIDEOIO_PRIORITY_M
