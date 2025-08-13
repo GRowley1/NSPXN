@@ -1,4 +1,3 @@
-```dockerfile
 # Use an official Python runtime as a parent image
 FROM python:3.11-slim
 
@@ -33,4 +32,4 @@ EXPOSE $PORT
 
 # Run the application with shell form to expand $PORT
 CMD ["sh", "-c", "uvicorn main:app --host 0.0.0.0 --port $PORT"]
-```
+
