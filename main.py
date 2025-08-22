@@ -110,11 +110,8 @@ def check_required_photos(image_files: List[UploadFile], ocr_text: str) -> List[
     required_photos = ["four corners", "odometer", "vin", "license plate"]
     found_photos = []
     ocr_lower = ocr_text.lower()
-    corner_keywords = ["four corners", "four corner photo", "vehicle corners", 
-                      "front left", "front right", "rear left", "rear right",
-                      "left front", "right front", "left rear", "right rear"]
-    corner_matches = []
     
+    # Existing checks for license, odometer, vin via text/OCR keywords...
     if any(term in ocr_lower for term in ["license plate", "plate photo", "registration plate"]):
         found_photos.append("license plate")
         logger.debug("Found license plate photo via OCR keywords")
@@ -124,13 +121,10 @@ def check_required_photos(image_files: List[UploadFile], ocr_text: str) -> List[
     if any(term in ocr_lower for term in ["vin", "vehicle identification number", "vin photo"]):
         found_photos.append("vin")
         logger.debug("Found VIN photo via OCR keywords")
-    for term in corner_keywords:
-        if term in ocr_lower:
-            corner_matches.append(term)
-    if len(corner_matches) >= 2:
-        found_photos.append("four corners")
-        logger.debug(f"Found four corners photo via OCR keywords: {corner_matches}")
-
+    
+    # Remove corner keyword check here—it's unreliable for unlabeled images. Let GPT handle via vision.
+    # (Comment out or remove the corner_keywords and matches logic)
+    
     for img in image_files:
         try:
             img.file.seek(0)
@@ -146,18 +140,13 @@ def check_required_photos(image_files: List[UploadFile], ocr_text: str) -> List[
             if re.search(r"(license|registration)\s*plate|\b[A-Z0-9]{5,8}\b", ocr, re.IGNORECASE):
                 found_photos.append("license plate")
                 logger.debug("Found license plate photo via image OCR")
-            corner_matches_img = [term for term in corner_keywords if term in ocr.lower()]
-            if len(corner_matches_img) >= 2:
-                found_photos.append("four corners")
-                logger.debug(f"Found four corners photo via image OCR: {corner_matches_img}")
-            if corner_matches_img:
-                corner_matches.extend(corner_matches_img)
+            # Remove corner OCR check here too
         except Exception as e:
             logger.error(f"Image processing error: {str(e)}")
-
+    
     found_photos = list(set(found_photos))
     missing = [p for p in required_photos if p not in found_photos]
-    logger.debug(f"Found photos: {found_photos}, Missing photos: {missing}, Corner matches: {corner_matches}")
+    logger.debug(f"Found photos: {found_photos}, Missing photos: {missing}")
     return missing
 def check_labor_and_tax_score(text: str, client_rules: str) -> int:
     score_adj = 0
@@ -243,16 +232,19 @@ async def vision_review(
     - If no mention of Total Loss or salvage is found, do not apply deductions for missing Total Loss evaluation details.
     - For parts usage, flag non-compliance if alternative parts (e.g., LKQ, aftermarket) are used for vehicles of the current model year (2025) or previous year (2024), as per client rules. Deduct 25% for this violation. For older models (e.g., 2012), LKQ/aftermarket parts are compliant.
     - Deduct 25% from Compliance Score for each missing required photo type (four corners, odometer, VIN, license plate).
-    - For four corners photos, the requirement is met if at least two corner views (e.g., front left, front right, rear left, rear right, or synonyms like left front, right front, left rear, right rear) are present in text or images, as indicated in the MISSING PHOTOS hint.
+    - For four corners photos, the requirement is met if all four unique views are present across the images: front-left (front and driver side), front-right (front and passenger side), rear-left (rear and driver side), rear-right (rear and passenger side). Three-quarter views or partial zooms count as long as the corner is clearly visible for damage assessment. Multiple images of the same view count as one.
     - Do NOT apply deductions for unmentioned elements or assumed violations. Deductions must be explicitly listed in the findings and supported by evidence in the input or client rules.
     - The Compliance Score starts at 100% and is only reduced by explicit deductions for labor rates (50% if all missing), tax (25% if missing), photos (25% per missing type), or parts (25% for violations).
-    - Respect the MISSING PHOTOS hint provided in the input to determine photo compliance.
+    - Respect the MISSING PHOTOS hint provided in the input to determine photo compliance, but override with your visual analysis of the images if the hint conflicts (e.g., if images clearly show a required photo but OCR missed it).
 
     PHOTO EVIDENCE RULES:
     - Required photos: four corners, odometer, VIN, license plate.
-    - Four corners is satisfied if at least two views (e.g., front left, front right, rear left, rear right, or synonyms like left front, right front, left rear, right rear) are detected in text or images, as indicated in the MISSING PHOTOS hint.
-    - If photo types are missing (indicated in input as "MISSING PHOTOS"), deduct 25% per missing type from Compliance Score.
-    - Respect the MISSING PHOTOS hint provided in the input to determine photo compliance.
+    - Examine each provided image and classify its primary view (e.g., 'Image 1: rear-left corner', 'Image 2: close-up rear-left corner'). List these classifications in your findings.
+    - Four corners is one type: satisfied only if all four unique corners are covered (deduct 25% if any are missing, and specify which one(s)).
+    - Odometer: deduct 25% if no image shows the dashboard mileage reading.
+    - VIN: deduct 25% if no image shows the VIN plate/sticker.
+    - License plate: satisfied if visible in any image (e.g., rear views).
+    - Respect the MISSING PHOTOS hint provided in the input, but use your visual analysis to confirm or override.
 
     At the top of your response, ALWAYS include:
     Claim #: (from estimate)
@@ -262,6 +254,9 @@ async def vision_review(
 
     Then summarize findings and rule violations based STRICTLY on the following rules:
     {client_rules}
+
+    In your findings, explicitly list:
+    - Which photo types are present/missing, with evidence from the images (e.g., 'Four corners: All present - rear-left in Images 1 and 2, rear-right in Image 3, front-right in Image 4, front-left in Image 5').
     """
 
     try:
@@ -361,6 +356,7 @@ async def get_client_rules(client_name: str):
     else:
         logger.error(f"Rules not found for client: {client_name}")
         return JSONResponse(status_code=404, content={"error": "Rules not found for this client."})
+
 
 
 
