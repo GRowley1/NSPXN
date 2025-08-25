@@ -194,6 +194,7 @@ async def vision_review(
     - Deduct 25% if any required photo is missing, unless virtual.
 
     DAMAGE REVIEW AND COMPARISON:
+    - Include a section titled 'Damage Review and Comparison:'.
     - Detect damage (dents, scratches) in photos with locations.
     - Extract damage from estimate text.
     - Compare: list matches, photo-only, estimate-only damage.
@@ -207,14 +208,14 @@ async def vision_review(
     Summarize findings based on rules, listing:
     - Virtual assignment status.
     - Photo presence/missing.
-    - Damage review comparison.
+    - 'Damage Review and Comparison:' section with comparison results.
     """
 
     try:
         response = client.chat.completions.create(
             model="gpt-4o",
             messages=[{"role": "system", "content": prompt}, vision_message],
-            max_tokens=3000  # Reduced to avoid token limit issues
+            max_tokens=3000
         )
         gpt_output = response.choices[0].message.content or "⚠️ GPT returned no output."
         logger.debug(f"GPT output: {gpt_output[:1000]}...")
@@ -250,7 +251,7 @@ async def vision_review(
         pdf.multi_cell(0, 10, gpt_output)
         pdf.ln(5)
         pdf.multi_cell(0, 10, "Damage Photo Review and Comparison:", align='L')
-        damage_section = gpt_output.split("Damage Review and Comparison:")[-1] if "Damage Review and Comparison:" in gpt_output else "No damage comparison data available."
+        damage_section = gpt_output.split("Damage Review and Comparison:")[-1].strip() if "Damage Review and Comparison:" in gpt_output else "No damage comparison data available."
         pdf.multi_cell(0, 10, damage_section)
 
         pdf_path = f"{file_number}.pdf"
@@ -311,6 +312,7 @@ async def get_client_rules(client_name: str):
     else:
         logger.error(f"Rules not found for client: {client_name}")
         return JSONResponse(status_code=404, content={"error": "Rules not found for this client."})
+
 
 
 
