@@ -159,11 +159,24 @@ async def vision_review(
     estimate: UploadFile = File(...),
     image_files: List[UploadFile] = File(...)
 ):
+    # Validate form fields
     if not all([file_number.strip(), ia_company.strip(), appraiser_id.strip()]):
         return JSONResponse(status_code=422, content={"error": "Missing or empty required form fields (file_number, ia_company, appraiser_id)"})
     if not estimate.filename.endswith(('.pdf', '.docx')):
         return JSONResponse(status_code=422, content={"error": "Estimate must be a PDF or DOCX file"})
     
+    # Check file sizes and readability
+    max_file_size = 10 * 1024 * 1024  # 10MB limit
+    estimate.file.seek(0, os.SEEK_END)
+    if estimate.file.tell() > max_file_size:
+        return JSONResponse(status_code=422, content={"error": "Estimate file exceeds 10MB limit"})
+    estimate.file.seek(0)
+    for img in image_files:
+        img.file.seek(0, os.SEEK_END)
+        if img.file.tell() > max_file_size:
+            return JSONResponse(status_code=422, content={"error": f"Image file {img.filename} exceeds 10MB limit"})
+        img.file.seek(0)
+
     combined_text = extract_text_from_pdf(estimate) if estimate.filename.endswith('.pdf') else extract_text_from_docx(estimate)
     if "OCR error" in combined_text:
         return JSONResponse(status_code=422, content={"error": "Failed to extract text from estimate due to OCR error"})
@@ -171,7 +184,7 @@ async def vision_review(
     missing_photos = check_required_photos(image_files, combined_text)
     vision_message = {"role": "user", "content": [
         {"type": "text", "text": combined_text},
-        *[{"type": "image_url", "image_url": {"url": f"data:image/jpeg;base64,{base64.b64encode(img.file.read()).decode('utf-8')}"}} for img in image_files]
+        *[{"type": "image_url", "image_url": {"url": f"data:image/jpeg;base64,{base64.b64encode(img.file.read()).decode('utf-8')}"}} for img in image_files if img.file.readable()]
     ]}
     client_rules = extract_text_from_docx(open(os.path.join("client_rules", "SCA.docx"), 'rb')) if os.path.exists(os.path.join("client_rules", "SCA.docx")) else ""
 
@@ -312,6 +325,7 @@ async def get_client_rules(client_name: str):
     else:
         logger.error(f"Rules not found for client: {client_name}")
         return JSONResponse(status_code=404, content={"error": "Rules not found for this client."})
+
 
 
 
