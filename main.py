@@ -159,7 +159,15 @@ async def vision_review(
     estimate: UploadFile = File(...),
     image_files: List[UploadFile] = File(...)
 ):
+    if not all([file_number.strip(), ia_company.strip(), appraiser_id.strip()]):
+        return JSONResponse(status_code=422, content={"error": "Missing or empty required form fields (file_number, ia_company, appraiser_id)"})
+    if not estimate.filename.endswith(('.pdf', '.docx')):
+        return JSONResponse(status_code=422, content={"error": "Estimate must be a PDF or DOCX file"})
+    
     combined_text = extract_text_from_pdf(estimate) if estimate.filename.endswith('.pdf') else extract_text_from_docx(estimate)
+    if "OCR error" in combined_text:
+        return JSONResponse(status_code=422, content={"error": "Failed to extract text from estimate due to OCR error"})
+    
     missing_photos = check_required_photos(image_files, combined_text)
     vision_message = {"role": "user", "content": [
         {"type": "text", "text": combined_text},
@@ -308,6 +316,7 @@ async def get_client_rules(client_name: str):
     else:
         logger.error(f"Rules not found for client: {client_name}")
         return JSONResponse(status_code=404, content={"error": "Rules not found for this client."})
+
 
 
 
