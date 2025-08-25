@@ -294,6 +294,7 @@ async def vision_review(
         pdf.multi_cell(0, 10, f"File Number: {file_number}")
         pdf.multi_cell(0, 10, f"IA Company: {ia_company}")
         pdf.multi_cell(0, 10, f"Appraiser ID #: {appraiser_id}")
+        pdf.multi_cell(0, 10, f"Adjusted Compliance Score: {score}%")
         pdf.ln(5)
         pdf.multi_cell(0, 10, "AI-4-IA Review Summary:", align='L')
         pdf.set_font("DejaVu", size=9)
@@ -357,6 +358,7 @@ async def get_client_rules(client_name: str):
     else:
         logger.error(f"Rules not found for client: {client_name}")
         return JSONResponse(status_code=404, content={"error": "Rules not found for this client."})
+
 
 
 
