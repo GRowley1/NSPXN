@@ -161,30 +161,28 @@ async def vision_review(
 ):
     # Validate form fields
     if not all([file_number.strip(), ia_company.strip(), appraiser_id.strip()]):
+        logger.error(f"Validation failed: Empty fields - file_number={file_number}, ia_company={ia_company}, appraiser_id={appraiser_id}")
         return JSONResponse(status_code=422, content={"error": "Missing or empty required form fields (file_number, ia_company, appraiser_id)"})
     if not estimate.filename.endswith(('.pdf', '.docx')):
+        logger.error(f"Validation failed: Invalid estimate file type - {estimate.filename}")
         return JSONResponse(status_code=422, content={"error": "Estimate must be a PDF or DOCX file"})
     
-    # Check file sizes and readability
-    max_file_size = 10 * 1024 * 1024  # 10MB limit
-    estimate.file.seek(0, os.SEEK_END)
-    if estimate.file.tell() > max_file_size:
-        return JSONResponse(status_code=422, content={"error": "Estimate file exceeds 10MB limit"})
-    estimate.file.seek(0)
-    for img in image_files:
-        img.file.seek(0, os.SEEK_END)
-        if img.file.tell() > max_file_size:
-            return JSONResponse(status_code=422, content={"error": f"Image file {img.filename} exceeds 10MB limit"})
-        img.file.seek(0)
+    # Log initial file details
+    logger.debug(f"Received files: estimate={estimate.filename}, image_files_count={len(image_files)}")
+    for i, img in enumerate(image_files):
+        logger.debug(f"Image {i+1}: filename={img.filename}, size={img.file.tell() if img.file else 'N/A'}")
 
+    # Process estimate
     combined_text = extract_text_from_pdf(estimate) if estimate.filename.endswith('.pdf') else extract_text_from_docx(estimate)
     if "OCR error" in combined_text:
+        logger.error(f"OCR error on estimate {estimate.filename}: {combined_text}")
         return JSONResponse(status_code=422, content={"error": "Failed to extract text from estimate due to OCR error"})
     
+    # Process images lazily
     missing_photos = check_required_photos(image_files, combined_text)
     vision_message = {"role": "user", "content": [
         {"type": "text", "text": combined_text},
-        *[{"type": "image_url", "image_url": {"url": f"data:image/jpeg;base64,{base64.b64encode(img.file.read()).decode('utf-8')}"}} for img in image_files if img.file.readable()]
+        *[{"type": "image_url", "image_url": {"url": f"data:image/jpeg;base64,{base64.b64encode(await img.read()).decode('utf-8')}"}} for img in image_files]
     ]}
     client_rules = extract_text_from_docx(open(os.path.join("client_rules", "SCA.docx"), 'rb')) if os.path.exists(os.path.join("client_rules", "SCA.docx")) else ""
 
@@ -298,7 +296,7 @@ AI Review Summary:
         }
 
     except Exception as e:
-        logger.error(f"API error: {str(e)}")
+        logger.error(f"API error during processing: {str(e)}")
         return JSONResponse(status_code=500, content={"error": str(e), "gpt_output": "⚠️ AI review failed."})
 
 @app.get("/download-pdf")
@@ -325,6 +323,7 @@ async def get_client_rules(client_name: str):
     else:
         logger.error(f"Rules not found for client: {client_name}")
         return JSONResponse(status_code=404, content={"error": "Rules not found for this client."})
+
 
 
 
