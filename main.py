@@ -246,6 +246,7 @@ async def vision_review(
     - VIN: deduct 25% if no image shows the VIN plate/sticker.
     - License plate: satisfied if visible in any image (e.g., rear views).
     - Respect the MISSING PHOTOS hint provided in the input, but use your visual analysis to confirm or override.
+    - If this is a VIRTUAL ASSIGNMENT and the registration photo is missing, do not apply a deduction for a missing registration photo.
 
     At the top of your response, ALWAYS include:
     Claim #: (from estimate)
@@ -294,7 +295,6 @@ async def vision_review(
         pdf.multi_cell(0, 10, f"File Number: {file_number}")
         pdf.multi_cell(0, 10, f"IA Company: {ia_company}")
         pdf.multi_cell(0, 10, f"Appraiser ID #: {appraiser_id}")
-        pdf.multi_cell(0, 10, f"Adjusted Compliance Score: {score}%")
         pdf.ln(5)
         pdf.multi_cell(0, 10, "AI-4-IA Review Summary:", align='L')
         pdf.set_font("DejaVu", size=9)
@@ -358,6 +358,7 @@ async def get_client_rules(client_name: str):
     else:
         logger.error(f"Rules not found for client: {client_name}")
         return JSONResponse(status_code=404, content={"error": "Rules not found for this client."})
+
 
 
 
