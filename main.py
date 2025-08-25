@@ -205,6 +205,15 @@ async def vision_review(
     - Registration: deduct 25% if no image shows the registration document/card, unless this is a VIRTUAL ASSIGNMENT.
     - Respect the MISSING PHOTOS hint provided in the input, but use your visual analysis to confirm or override.
 
+    DAMAGE REVIEW AND COMPARISON RULES:
+    - Analyze each image for visible damage (e.g., dents, scratches, cracks, broken parts) and specify the location (e.g., 'front-left door', 'rear-right bumper') and type.
+    - Extract damage details from the estimate text (e.g., descriptions like 'dent on hood', 'scratch on passenger door').
+    - Compare photo-detected damage with estimate-reported damage, listing:
+      - Matches: Damage present in both photos and estimate.
+      - Photo-only: Damage visible in photos but not in estimate.
+      - Estimate-only: Damage listed in estimate but not visible in photos.
+    - Provide a summary in the findings, e.g., 'All reported damage matched photos', or 'Discrepancy: Scratch on rear-right bumper in photos not in estimate'.
+
     At the top of your response, ALWAYS include:
     Claim #: (from estimate)
     VIN: (from estimate or photos)
@@ -217,6 +226,7 @@ async def vision_review(
     In your findings, explicitly list:
     - Whether this is a virtual assignment (with evidence from text like 'virtual', 'photo inspection', etc.).
     - Which photo types are present/missing, with evidence from the images (e.g., 'Four corners: All present - rear-left in Images 1 and 2, rear-right in Image 3, front-right in Image 4, front-left in Image 5'; 'Registration: Missing - no image of registration document').
+    - The damage review and comparison summary as per the DAMAGE REVIEW AND COMPARISON RULES.
     """
 
     try:
@@ -257,6 +267,9 @@ async def vision_review(
         pdf.multi_cell(0, 10, "AI-4-IA Review Summary:", align='L')
         pdf.set_font("DejaVu", size=9)
         pdf.multi_cell(0, 10, gpt_output)
+        pdf.ln(5)
+        pdf.multi_cell(0, 10, "Damage Photo Review and Comparison:", align='L')
+        pdf.multi_cell(0, 10, gpt_output.split("Damage Review and Comparison:")[1] if "Damage Review and Comparison:" in gpt_output else "No damage review data available.")
 
         pdf_path = f"{file_number}.pdf"
         pdf.output(pdf_path)
@@ -316,6 +329,7 @@ async def get_client_rules(client_name: str):
     else:
         logger.error(f"Rules not found for client: {client_name}")
         return JSONResponse(status_code=404, content={"error": "Rules not found for this client."})
+
 
 
 
