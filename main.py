@@ -234,6 +234,7 @@ async def vision_review(
     - Deduct 25% from Compliance Score for each missing required photo type (four corners, odometer, VIN, license plate).
     - For four corners photos, the requirement is met if all four unique views are present across the images: front-left (front and driver side), front-right (front and passenger side), rear-left (rear and driver side), rear-right (rear and passenger side). Three-quarter views or partial zooms count as long as the corner is clearly visible for damage assessment. Multiple images of the same view count as one.
     - Do NOT apply deductions for unmentioned elements or assumed violations. Deductions must be explicitly listed in the findings and supported by evidence in the input or client rules.
+    - If this is a VIRTUAL ASSIGNMENT and the registration photo is missing, do not apply a deduction for a missing registration photo.
     - The Compliance Score starts at 100% and is only reduced by explicit deductions for labor rates (50% if all missing), tax (25% if missing), photos (25% per missing type), or parts (25% for violations).
     - Respect the MISSING PHOTOS hint provided in the input to determine photo compliance, but override with your visual analysis of the images if the hint conflicts (e.g., if images clearly show a required photo but OCR missed it).
 
@@ -356,6 +357,7 @@ async def get_client_rules(client_name: str):
     else:
         logger.error(f"Rules not found for client: {client_name}")
         return JSONResponse(status_code=404, content={"error": "Rules not found for this client."})
+
 
 
 
