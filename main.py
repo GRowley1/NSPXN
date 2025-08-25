@@ -179,61 +179,42 @@ async def vision_review(
     You are an AI auto damage auditor. You have access to both text and images (or scans).
 
     IMPORTANT RULES:
-    - If labor rates are missing for ALL sections (body, paint, mechanical, structural), reduce Compliance Score by 50%. If any labor rate is present (e.g., body or paint), no deduction applies.
-    - If tax is required by client rules but no tax rate or amount (e.g., percentage or dollar value) is found, reduce Compliance Score by 25%.
-    - Never assume compliance if required elements (like labor rates, taxes, or photos) are missing.
-    - Treat mentions or OCR detection of "Clean Retail Value", "NADA Value", "Fair Market Range", "Estimated Trade-In Value", "market value", "J.D. Power", "JD Power", or "Average Price Paid" as CONFIRMATION that the retail/market value requirement is met.
-    - Treat mentions or OCR detection of "CCC Advisor Report" or "Advisor Report" as CONFIRMATION that the Advisor Report was included.
-    - Do NOT rely on assumptions. Only acknowledge presence of documents or data when clearly present in text or visible in photos.
-    - Only evaluate Total Loss protocols if the estimate or documentation explicitly indicates the vehicle was a total loss (e.g., mentions "total loss" or "salvage"). If declared a total loss, no forms or bids are required.
-    - Do not assume a total loss condition based on estimate formatting or value alone.
-    - If no mention of Total Loss or salvage is found, do not apply deductions for missing Total Loss evaluation details.
-    - For parts usage, flag non-compliance if alternative parts (e.g., LKQ, aftermarket) are used for vehicles of the current model year (2025) or previous year (2024), as per client rules. Deduct 25% for this violation. For older models (e.g., 2012), LKQ/aftermarket parts are compliant.
-    - Deduct 25% from Compliance Score for each missing required photo type (four corners, odometer, VIN, license plate, registration), unless the assignment is a VIRTUAL ASSIGNMENT (determined by text keywords like 'virtual', 'photo inspection', 'Streamline', 'customer photos', or absence of physical inspection date/notes), in which case no deduction applies for missing registration photo.
-    - For four corners photos, the requirement is met if all four unique views are present across the images: front-left (front and driver side), front-right (front and passenger side), rear-left (rear and driver side), rear-right (rear and passenger side). Three-quarter views or partial zooms count as long as the corner is clearly visible for damage assessment. Multiple images of the same view count as one.
-    - Do NOT apply deductions for unmentioned elements or assumed violations. Deductions must be explicitly listed in the findings and supported by evidence in the input or client rules.
-    - The Compliance Score starts at 100% and is only reduced by explicit deductions for labor rates (50% if all missing), tax (25% if missing), photos (25% per missing type), or parts (25% for violations).
-    - Respect the MISSING PHOTOS hint provided in the input to determine photo compliance, but override with your visual analysis of the images if the hint conflicts.
+    - If labor rates are missing for ALL sections (body, paint, mechanical, structural), reduce Compliance Score by 50%. If any labor rate is present, no deduction applies.
+    - If tax is required but missing, deduct 25%.
+    - Never assume compliance if required elements are missing.
+    - Treat mentions of 'J.D. Power' or similar as retail value confirmation.
+    - Treat 'Advisor Report' mentions as included.
+    - Deduct 25% per missing photo (four corners, odometer, VIN, license plate) unless virtual (keywords: 'virtual', 'photo inspection').
+    - Four corners require all unique views; multiple of same view count as one.
+    - Deductions only for explicit violations.
 
     PHOTO EVIDENCE RULES:
-    - Required photos: four corners, odometer, VIN, license plate, registration.
-    - Examine each provided image and classify its primary view (e.g., 'Image 1: rear-left corner', 'Image 2: close-up rear-left corner'). List these classifications in your findings.
-    - Four corners is one type: satisfied only if all four unique corners are covered (deduct 25% if any are missing, and specify which one(s)).
-    - Odometer: deduct 25% if no image shows the dashboard mileage reading.
-    - VIN: deduct 25% if no image shows the VIN plate/sticker.
-    - License plate: satisfied if visible in any image (e.g., rear views); deduct 25% if missing.
-    - Registration: deduct 25% if no image shows the registration document/card, unless this is a VIRTUAL ASSIGNMENT.
-    - Respect the MISSING PHOTOS hint provided in the input, but use your visual analysis to confirm or override.
+    - Required photos: four corners, odometer, VIN, license plate.
+    - Classify each image's view and list findings.
+    - Deduct 25% if any required photo is missing, unless virtual.
 
-    DAMAGE REVIEW AND COMPARISON RULES:
-    - Analyze each image for visible damage (e.g., dents, scratches, cracks, broken parts) and specify the location (e.g., 'front-left door', 'rear-right bumper') and type.
-    - Extract damage details from the estimate text (e.g., descriptions like 'dent on hood', 'scratch on passenger door').
-    - Compare photo-detected damage with estimate-reported damage, listing:
-      - Matches: Damage present in both photos and estimate.
-      - Photo-only: Damage visible in photos but not in estimate.
-      - Estimate-only: Damage listed in estimate but not visible in photos.
-    - Provide a summary in the findings, e.g., 'All reported damage matched photos', or 'Discrepancy: Scratch on rear-right bumper in photos not in estimate'.
+    DAMAGE REVIEW AND COMPARISON:
+    - Detect damage (dents, scratches) in photos with locations.
+    - Extract damage from estimate text.
+    - Compare: list matches, photo-only, estimate-only damage.
 
-    At the top of your response, ALWAYS include:
+    At the top, include:
     Claim #: (from estimate)
     VIN: (from estimate or photos)
-    Vehicle: (make, model, mileage from estimate)
+    Vehicle: (make, model, mileage)
     Compliance Score: (0–100%)
 
-    Then summarize findings and rule violations based STRICTLY on the following rules:
-    {client_rules}
-
-    In your findings, explicitly list:
-    - Whether this is a virtual assignment (with evidence from text like 'virtual', 'photo inspection', etc.).
-    - Which photo types are present/missing, with evidence from the images (e.g., 'Four corners: All present - rear-left in Images 1 and 2, rear-right in Image 3, front-right in Image 4, front-left in Image 5'; 'Registration: Missing - no image of registration document').
-    - The damage review and comparison summary as per the DAMAGE REVIEW AND COMPARISON RULES.
+    Summarize findings based on rules, listing:
+    - Virtual assignment status.
+    - Photo presence/missing.
+    - Damage review comparison.
     """
 
     try:
         response = client.chat.completions.create(
             model="gpt-4o",
             messages=[{"role": "system", "content": prompt}, vision_message],
-            max_tokens=3500
+            max_tokens=3000  # Reduced to avoid token limit issues
         )
         gpt_output = response.choices[0].message.content or "⚠️ GPT returned no output."
         logger.debug(f"GPT output: {gpt_output[:1000]}...")
@@ -251,7 +232,7 @@ async def vision_review(
         logger.debug(f"Score calculation: AI score={score}, labor_tax_adj={check_labor_and_tax_score(combined_text, client_rules)}, photo_adj={-25 * len(missing_photos)}, final_score={max(0, score + score_adj)}")
         score = max(0, score + score_adj)
         if score < 100 and score_adj == 0:
-            logger.warning(f"AI score ({score}) inconsistent with no deductions (labor_tax_adj=0, photo_adj=0). Overriding to 100.")
+            logger.warning(f"AI score ({score}) inconsistent with no deductions. Overriding to 100.")
             score = 100
           
         pdf = FPDF()
@@ -269,7 +250,8 @@ async def vision_review(
         pdf.multi_cell(0, 10, gpt_output)
         pdf.ln(5)
         pdf.multi_cell(0, 10, "Damage Photo Review and Comparison:", align='L')
-        pdf.multi_cell(0, 10, gpt_output.split("Damage Review and Comparison:")[1] if "Damage Review and Comparison:" in gpt_output else "No damage review data available.")
+        damage_section = gpt_output.split("Damage Review and Comparison:")[-1] if "Damage Review and Comparison:" in gpt_output else "No damage comparison data available."
+        pdf.multi_cell(0, 10, damage_section)
 
         pdf_path = f"{file_number}.pdf"
         pdf.output(pdf_path)
@@ -329,6 +311,7 @@ async def get_client_rules(client_name: str):
     else:
         logger.error(f"Rules not found for client: {client_name}")
         return JSONResponse(status_code=404, content={"error": "Rules not found for this client."})
+
 
 
 
