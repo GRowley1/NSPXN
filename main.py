@@ -169,31 +169,38 @@ async def vision_review(
     estimate: UploadFile = File(...),
     image_files: List[UploadFile] = File(...)
 ):
-    # Validate form fields
+    # Validate form fields with detailed logging
+    logger.debug(f"Received form data: file_number='{file_number}', ia_company='{ia_company}', appraiser_id='{appraiser_id}'")
     if not all([file_number.strip(), ia_company.strip(), appraiser_id.strip()]):
-        logger.error(f"Validation failed: Empty fields - file_number={file_number}, ia_company={ia_company}, appraiser_id={appraiser_id}")
+        logger.error(f"Validation failed: Empty fields - file_number='{file_number}', ia_company='{ia_company}', appraiser_id='{appraiser_id}'")
         return JSONResponse(status_code=422, content={"error": "Missing or empty required form fields (file_number, ia_company, appraiser_id)"})
-    if not estimate.filename.endswith(('.pdf', '.docx')):
+    
+    # Validate estimate file type
+    if not estimate.filename.lower().endswith(('.pdf', '.docx')):
         logger.error(f"Validation failed: Invalid estimate file type - {estimate.filename}")
-        return JSONResponse(status_code=422, content={"error": "Estimate must be a PDF or DOCX file"})
+        return JSONResponse(status_code=422, content={"error": f"Estimate must be a PDF or DOCX file, got {estimate.filename}"})
     
     # Log initial file details and size limits
     max_file_size = 5 * 1024 * 1024  # 5MB limit
     estimate.file.seek(0, os.SEEK_END)
-    if estimate.file.tell() > max_file_size:
-        logger.error(f"Estimate {estimate.filename} exceeds 5MB limit")
-        return JSONResponse(status_code=422, content={"error": "Estimate file exceeds 5MB limit"})
+    size = estimate.file.tell()
     estimate.file.seek(0)
+    logger.debug(f"Estimate file: {estimate.filename}, size={size} bytes")
+    if size > max_file_size:
+        logger.error(f"Estimate {estimate.filename} exceeds 5MB limit ({size} bytes)")
+        return JSONResponse(status_code=422, content={"error": "Estimate file exceeds 5MB limit"})
+    
     for i, img in enumerate(image_files):
         img.file.seek(0, os.SEEK_END)
-        if img.file.tell() > max_file_size:
-            logger.error(f"Image {img.filename} exceeds 5MB limit")
-            return JSONResponse(status_code=422, content={"error": f"Image file {img.filename} exceeds 5MB limit"})
+        size = img.file.tell()
         img.file.seek(0)
-    logger.debug(f"Received files: estimate={estimate.filename}, image_files_count={len(image_files)}")
-
+        logger.debug(f"Image {i+1}: filename={img.filename}, size={size} bytes")
+        if size > max_file_size:
+            logger.error(f"Image {img.filename} exceeds 5MB limit ({size} bytes)")
+            return JSONResponse(status_code=422, content={"error": f"Image file {img.filename} exceeds 5MB limit"})
+    
     # Process estimate
-    combined_text = extract_text_from_pdf(estimate) if estimate.filename.endswith('.pdf') else extract_text_from_docx(estimate)
+    combined_text = extract_text_from_pdf(estimate) if estimate.filename.lower().endswith('.pdf') else extract_text_from_docx(estimate)
     if "OCR error" in combined_text:
         logger.error(f"OCR error on estimate {estimate.filename}: {combined_text}")
         return JSONResponse(status_code=422, content={"error": "Failed to extract text from estimate due to OCR error"})
@@ -265,7 +272,7 @@ async def vision_review(
         response = client.chat.completions.create(
             model="gpt-4o",
             messages=[{"role": "system", "content": prompt}, vision_message],
-            max_tokens=4000  # Increased to handle larger inputs
+            max_tokens=4000
         )
         gpt_output = response.choices[0].message.content or "⚠️ GPT returned no output."
         logger.debug(f"GPT output: {gpt_output[:1000]}...")
@@ -370,6 +377,7 @@ async def get_client_rules(client_name: str):
     else:
         logger.error(f"Rules not found for client: {client_name}")
         return JSONResponse(status_code=404, content={"error": "Rules not found for this client."})
+
 
 
 
