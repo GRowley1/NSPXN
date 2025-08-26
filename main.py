@@ -177,13 +177,20 @@ async def vision_review(
         logger.error(f"Validation failed: Invalid estimate file type - {estimate.filename}")
         return JSONResponse(status_code=422, content={"error": "Estimate must be a PDF or DOCX file"})
     
-    # Log initial file details
-    logger.debug(f"Received files: estimate={estimate.filename}, image_files_count={len(image_files)}")
+    # Log initial file details and size limits
+    max_file_size = 5 * 1024 * 1024  # 5MB limit
+    estimate.file.seek(0, os.SEEK_END)
+    if estimate.file.tell() > max_file_size:
+        logger.error(f"Estimate {estimate.filename} exceeds 5MB limit")
+        return JSONResponse(status_code=422, content={"error": "Estimate file exceeds 5MB limit"})
+    estimate.file.seek(0)
     for i, img in enumerate(image_files):
         img.file.seek(0, os.SEEK_END)
-        size = img.file.tell()
+        if img.file.tell() > max_file_size:
+            logger.error(f"Image {img.filename} exceeds 5MB limit")
+            return JSONResponse(status_code=422, content={"error": f"Image file {img.filename} exceeds 5MB limit"})
         img.file.seek(0)
-        logger.debug(f"Image {i+1}: filename={img.filename}, size={size} bytes")
+    logger.debug(f"Received files: estimate={estimate.filename}, image_files_count={len(image_files)}")
 
     # Process estimate
     combined_text = extract_text_from_pdf(estimate) if estimate.filename.endswith('.pdf') else extract_text_from_docx(estimate)
@@ -258,7 +265,7 @@ async def vision_review(
         response = client.chat.completions.create(
             model="gpt-4o",
             messages=[{"role": "system", "content": prompt}, vision_message],
-            max_tokens=3500
+            max_tokens=4000  # Increased to handle larger inputs
         )
         gpt_output = response.choices[0].message.content or "⚠️ GPT returned no output."
         logger.debug(f"GPT output: {gpt_output[:1000]}...")
@@ -284,22 +291,26 @@ async def vision_review(
         pdf.add_page()
         pdf.add_font("DejaVu", "", "DejaVuSans.ttf", uni=True)
         pdf.set_font("DejaVu", size=11)
-        pdf.cell(200, 10, txt="NSPXN.com AI Review Report", ln=True, align='C')
-        pdf.ln(5)
-        pdf.multi_cell(0, 10, f"File Number: {file_number}")
-        pdf.multi_cell(0, 10, f"IA Company: {ia_company}")
-        pdf.multi_cell(0, 10, f"Appraiser ID #: {appraiser_id}")
-        pdf.ln(5)
-        pdf.multi_cell(0, 10, "AI-4-IA Review Summary:", align='L')
-        pdf.set_font("DejaVu", size=9)
-        pdf.multi_cell(0, 10, gpt_output)
-        pdf.ln(5)
-        pdf.multi_cell(0, 10, "Damage Photo Review and Comparison:", align='L')
-        damage_section = gpt_output.split("Damage Review and Comparison:")[-1].strip() if "Damage Review and Comparison:" in gpt_output else "No damage comparison data available."
-        pdf.multi_cell(0, 10, damage_section)
+        try:
+            pdf.cell(200, 10, txt="NSPXN.com AI Review Report", ln=True, align='C')
+            pdf.ln(5)
+            pdf.multi_cell(0, 10, f"File Number: {file_number}")
+            pdf.multi_cell(0, 10, f"IA Company: {ia_company}")
+            pdf.multi_cell(0, 10, f"Appraiser ID #: {appraiser_id}")
+            pdf.ln(5)
+            pdf.multi_cell(0, 10, "AI-4-IA Review Summary:", align='L')
+            pdf.set_font("DejaVu", size=9)
+            pdf.multi_cell(0, 10, gpt_output)
+            pdf.ln(5)
+            pdf.multi_cell(0, 10, "Damage Photo Review and Comparison:", align='L')
+            damage_section = gpt_output.split("Damage Review and Comparison:")[-1].strip() if "Damage Review and Comparison:" in gpt_output else "No damage comparison data available."
+            pdf.multi_cell(0, 10, damage_section)
 
-        pdf_path = f"{file_number}.pdf"
-        pdf.output(pdf_path)
+            pdf_path = f"{file_number}.pdf"
+            pdf.output(pdf_path)
+        except Exception as pdf_e:
+            logger.error(f"PDF generation error: {str(pdf_e)}")
+            return JSONResponse(status_code=500, content={"error": f"PDF generation failed: {str(pdf_e)}", "gpt_output": gpt_output})
 
         msg = EmailMessage()
         msg["Subject"] = f"AI-4-IA Review: {claim_number}"
@@ -317,8 +328,11 @@ AI Review Summary:
 """
         msg.set_content(email_body.encode("utf-8", errors="ignore").decode("utf-8"))
         with smtplib.SMTP_SSL("mail.tierra.net", 465) as smtp:
-            smtp.login("info@nspxn.com", "grr2025GRR")
-            smtp.send_message(msg)
+            try:
+                smtp.login("info@nspxn.com", "grr2025GRR")
+                smtp.send_message(msg)
+            except Exception as email_e:
+                logger.error(f"Email sending error: {str(email_e)}")
 
         return {
             "gpt_output": gpt_output,
@@ -356,6 +370,7 @@ async def get_client_rules(client_name: str):
     else:
         logger.error(f"Rules not found for client: {client_name}")
         return JSONResponse(status_code=404, content={"error": "Rules not found for this client."})
+
 
 
 
