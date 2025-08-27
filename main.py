@@ -1,7 +1,3 @@
-from fastapi import FastAPI, File, UploadFile, Form, Request, Response
-from fastapi.responses import JSONResponse, FileResponse
-from fastapi.middleware.cors import CORSMiddleware
-from typing import List
 import os
 import re
 import base64
@@ -15,6 +11,11 @@ import pytesseract
 from PIL import Image, ImageEnhance, ImageOps, ImageFilter
 from openai import OpenAI
 import logging
+from fastapi import FastAPI, File, UploadFile, Form, Request, Response
+from fastapi.responses import JSONResponse, FileResponse
+from fastapi.middleware.cors import CORSMiddleware
+from typing import List
+import uvicorn
 
 # Configure logging
 logging.basicConfig(level=logging.DEBUG, filename='app.log', filemode='a',
@@ -383,6 +384,12 @@ async def get_client_rules(client_name: str):
     else:
         logger.error(f"Rules not found for client: {client_name}")
         return JSONResponse(status_code=404, content={"error": "Rules not found for this client."})
+
+# Run the app with the Render-assigned port
+if __name__ == "__main__":
+    port = int(os.getenv("PORT", 8000))  # Default to 8000 if PORT not set
+    logger.debug(f"Starting server on port {port}")
+    uvicorn.run(app, host="0.0.0.0", port=port)
 
 
 
