@@ -169,13 +169,17 @@ async def vision_review(
     estimate: UploadFile = File(...),
     image_files: List[UploadFile] = File(...)
 ):
+    # Initial request received
+    logger.debug(f"Received POST /vision-review with requestID={request_id if 'request_id' in locals() else 'unknown'}")
+    
     # Validate form fields with detailed logging
-    logger.debug(f"Received form data: file_number='{file_number}', ia_company='{ia_company}', appraiser_id='{appraiser_id}'")
-    if not all([file_number.strip(), ia_company.strip(), appraiser_id.strip()]):
+    logger.debug(f"Raw form data: file_number='{file_number}', ia_company='{ia_company}', appraiser_id='{appraiser_id}'")
+    if not all([field.strip() for field in [file_number, ia_company, appraiser_id]]):
         logger.error(f"Validation failed: Empty fields - file_number='{file_number}', ia_company='{ia_company}', appraiser_id='{appraiser_id}'")
         return JSONResponse(status_code=422, content={"error": "Missing or empty required form fields (file_number, ia_company, appraiser_id)"})
     
     # Validate estimate file type
+    logger.debug(f"Estimate file: filename='{estimate.filename}', content_type='{estimate.content_type}'")
     if not estimate.filename.lower().endswith(('.pdf', '.docx')):
         logger.error(f"Validation failed: Invalid estimate file type - {estimate.filename}")
         return JSONResponse(status_code=422, content={"error": f"Estimate must be a PDF or DOCX file, got {estimate.filename}"})
@@ -185,7 +189,7 @@ async def vision_review(
     estimate.file.seek(0, os.SEEK_END)
     size = estimate.file.tell()
     estimate.file.seek(0)
-    logger.debug(f"Estimate file: {estimate.filename}, size={size} bytes")
+    logger.debug(f"Estimate file size: {size} bytes")
     if size > max_file_size:
         logger.error(f"Estimate {estimate.filename} exceeds 5MB limit ({size} bytes)")
         return JSONResponse(status_code=422, content={"error": "Estimate file exceeds 5MB limit"})
@@ -194,7 +198,7 @@ async def vision_review(
         img.file.seek(0, os.SEEK_END)
         size = img.file.tell()
         img.file.seek(0)
-        logger.debug(f"Image {i+1}: filename={img.filename}, size={size} bytes")
+        logger.debug(f"Image {i+1}: filename='{img.filename}', size={size} bytes")
         if size > max_file_size:
             logger.error(f"Image {img.filename} exceeds 5MB limit ({size} bytes)")
             return JSONResponse(status_code=422, content={"error": f"Image file {img.filename} exceeds 5MB limit"})
@@ -377,6 +381,7 @@ async def get_client_rules(client_name: str):
     else:
         logger.error(f"Rules not found for client: {client_name}")
         return JSONResponse(status_code=404, content={"error": "Rules not found for this client."})
+
 
 
 
