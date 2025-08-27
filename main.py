@@ -1,4 +1,4 @@
-from fastapi import FastAPI, File, UploadFile, Form, Request
+from fastapi import FastAPI, File, UploadFile, Form, Request, Response
 from fastapi.responses import JSONResponse, FileResponse
 from fastapi.middleware.cors import CORSMiddleware
 from typing import List
@@ -26,6 +26,17 @@ if "OPENAI_API_KEY" not in os.environ:
 client = OpenAI(api_key=os.environ["OPENAI_API_KEY"])
 
 app = FastAPI()
+
+# Global request logging middleware
+@app.middleware("http")
+async def log_requests(request: Request, call_next):
+    logger.debug(f"Received {request.method} {request.url.path} with requestID={request.headers.get('X-Request-ID', 'unknown')}")
+    form = await request.form() if request.method in ["POST", "PUT"] else None
+    if form:
+        logger.debug(f"Raw form data: {dict(form)}")
+    response = await call_next(request)
+    logger.debug(f"Response status: {response.status_code}")
+    return response
 
 app.add_middleware(
     CORSMiddleware,
@@ -163,11 +174,6 @@ def check_labor_and_tax_score(text: str, client_rules: str) -> int:
 
 @app.post("/vision-review")
 async def vision_review(request: Request, file_number: str = Form(...), ia_company: str = Form(...), appraiser_id: str = Form(...), estimate: UploadFile = File(...), image_files: List[UploadFile] = File(...)):
-    # Log raw request before validation
-    logger.debug(f"Received POST /vision-review with requestID={request.headers.get('X-Request-ID', 'unknown')}")
-    form_data = await request.form()
-    logger.debug(f"Raw form data: {dict(form_data)}")
-    
     # Validate form fields with detailed logging
     logger.debug(f"Processed form data: file_number='{file_number}', ia_company='{ia_company}', appraiser_id='{appraiser_id}'")
     if not all([field.strip() for field in [file_number, ia_company, appraiser_id]]):
