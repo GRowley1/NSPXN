@@ -1,4 +1,4 @@
-from fastapi import FastAPI, File, UploadFile, Form
+from fastapi import FastAPI, File, UploadFile, Form, Request
 from fastapi.responses import JSONResponse, FileResponse
 from fastapi.middleware.cors import CORSMiddleware
 from typing import List
@@ -162,18 +162,14 @@ def check_labor_and_tax_score(text: str, client_rules: str) -> int:
     return deduction
 
 @app.post("/vision-review")
-async def vision_review(
-    file_number: str = Form(...),
-    ia_company: str = Form(...),
-    appraiser_id: str = Form(...),
-    estimate: UploadFile = File(...),
-    image_files: List[UploadFile] = File(...)
-):
-    # Initial request received
-    logger.debug(f"Received POST /vision-review with requestID={request_id if 'request_id' in locals() else 'unknown'}")
+async def vision_review(request: Request, file_number: str = Form(...), ia_company: str = Form(...), appraiser_id: str = Form(...), estimate: UploadFile = File(...), image_files: List[UploadFile] = File(...)):
+    # Log raw request before validation
+    logger.debug(f"Received POST /vision-review with requestID={request.headers.get('X-Request-ID', 'unknown')}")
+    form_data = await request.form()
+    logger.debug(f"Raw form data: {dict(form_data)}")
     
     # Validate form fields with detailed logging
-    logger.debug(f"Raw form data: file_number='{file_number}', ia_company='{ia_company}', appraiser_id='{appraiser_id}'")
+    logger.debug(f"Processed form data: file_number='{file_number}', ia_company='{ia_company}', appraiser_id='{appraiser_id}'")
     if not all([field.strip() for field in [file_number, ia_company, appraiser_id]]):
         logger.error(f"Validation failed: Empty fields - file_number='{file_number}', ia_company='{ia_company}', appraiser_id='{appraiser_id}'")
         return JSONResponse(status_code=422, content={"error": "Missing or empty required form fields (file_number, ia_company, appraiser_id)"})
