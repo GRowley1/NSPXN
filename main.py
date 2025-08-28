@@ -247,7 +247,7 @@ async def vision_review(
     advisor_hint = "\n\nCONFIRMED: CCC Advisor Report is included based on OCR or filename." if advisor_confirmed else ""
     missing_photos = check_required_photos(image_files, combined_text)
 
-    fraud_result = calculate_fraud_risk(image_files, texts)
+    fraud_result = calculate_fraud_risk(image_files, " ".join(texts))
     fraud_hint = f"\n\nFRAUD RISK: {fraud_result['risk_level']}\nIssues: " + "; ".join(fraud_result['issues'])
 
     photo_hint = f"\n\nMISSING PHOTOS: {', '.join(missing_photos) if missing_photos else 'None'}"
@@ -402,5 +402,6 @@ async def get_client_rules(client_name: str):
     else:
         logger.error(f"Rules not found for client: {client_name}")
         return JSONResponse(status_code=404, content={"error": "Rules not found for this client."})
+
 
 
