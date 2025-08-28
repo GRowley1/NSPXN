@@ -247,7 +247,7 @@ async def vision_review(
     advisor_hint = "\n\nCONFIRMED: CCC Advisor Report is included based on OCR or filename." if advisor_confirmed else ""
     missing_photos = check_required_photos(image_files, combined_text)
 
-    fraud_result = calculate_fraud_risk(image_files, " ".join(texts))
+    fraud_result = calculate_fraud_risk(image_files, texts)
     fraud_hint = f"\n\nFRAUD RISK: {fraud_result['risk_level']}\nIssues: " + "; ".join(fraud_result['issues'])
 
     photo_hint = f"\n\nMISSING PHOTOS: {', '.join(missing_photos) if missing_photos else 'None'}"
@@ -280,7 +280,7 @@ async def vision_review(
     - Cross-check damage descriptions (e.g., "front bumper dent", "rear door scratch") from the estimate against the provided photos.
     - If the damage described is not visible in any photo, flag as "Photo Evidence MISSING for described damage: [description]".
     - If damage is clearly shown in photos but not mentioned in estimate, flag as "Unlisted Damage Found in Photo: [description]".
-    - For each confirmed match, briefly list the description and confirm it's shown (e.g., Â“Front bumper dent Â– visible in photoÂ”).
+    - For each confirmed match, briefly list the description and confirm it's shown (e.g., “Front bumper dent – visible in photo”).
     - For each photo provided, identify visible damages and list them.
 
     PHOTO EVIDENCE RULES:
@@ -402,6 +402,4 @@ async def get_client_rules(client_name: str):
     else:
         logger.error(f"Rules not found for client: {client_name}")
         return JSONResponse(status_code=404, content={"error": "Rules not found for this client."})
-
-
 
