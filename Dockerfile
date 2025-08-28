@@ -18,6 +18,7 @@ COPY . .
 
 # Set environment variables for headless OpenCV
 ENV OPENCV_VIDEOIO_PRIORITY_MSMF=0
+ENV PYTHONIOENCODING=UTF-8
 ENV QT_QPA_PLATFORM=offscreen
 
 # Expose port (use $PORT for Render compatibility)
