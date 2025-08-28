@@ -1,5 +1,6 @@
 # Use official slim Python image
-FROM python:3.11-slim
+FROM python:3.11-bullseye
+RUN pip install --upgrade pip
 
 # Install system dependencies
 RUN apt-get update && apt-get install -y \
@@ -17,7 +18,7 @@ WORKDIR /app
 
 # Copy requirements first and install
 COPY requirements.txt .
-RUN pip install --no-cache-dir -r requirements.txt
+RUN bash -c "for i in {1..5}; do pip install --no-cache-dir -r requirements.txt && break || sleep 5; done"
 
 # Copy all source files
 COPY . .
