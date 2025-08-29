@@ -32,7 +32,7 @@ app = FastAPI()
 @app.middleware("http")
 async def log_requests(request: Request, call_next):
     try:
-        logger.debug(f"Received {request.method} {request.url.path} with headers={dict(request.headers)}")  # Fixed: removed parentheses
+        logger.debug(f"Received {request.method} {request.url.path} with headers={dict(request.headers)}")
         body = await request.body()
         logger.debug(f"Raw request body: {body.decode('utf-8', errors='ignore')}")
         form = await request.form() if request.method in ["POST", "PUT"] else None
@@ -42,7 +42,7 @@ async def log_requests(request: Request, call_next):
         logger.debug(f"Response status: {response.status_code}")
         return response
     except Exception as e:
-        logger.error(f"Middleware error: {str(e)}")
+        logger.error(f"Middleware error: {str(e)} with body={body.decode('utf-8', errors='ignore') if 'body' in locals() else 'No body'}")
         return JSONResponse(status_code=400, content={"error": f"Invalid request: {str(e)}"})
 
 app.add_middleware(
@@ -60,17 +60,17 @@ app.add_middleware(
 )
 
 def preprocess_image(img: Image.Image) -> Image.Image:
-    img = img.convert("L")  # Convert to grayscale
-    img = ImageEnhance.Contrast(img).enhance(2.0)  # Enhance contrast
-    img = img.filter(ImageFilter.MedianFilter(size=3))  # Noise reduction
-    img = ImageOps.autocontrast(img)  # Adaptive thresholding
-    img = ImageOps.invert(img)  # Invert for better OCR
+    img = img.convert("L")
+    img = ImageEnhance.Contrast(img).enhance(2.0)
+    img = img.filter(ImageFilter.MedianFilter(size=3))
+    img = ImageOps.autocontrast(img)
+    img = ImageOps.invert(img)
     return img
 
 def extract_text_from_pdf(file) -> str:
     try:
         file.seek(0)
-        images = convert_from_bytes(file.read(), dpi=200)  # Stable DPI
+        images = convert_from_bytes(file.read(), dpi=200)
         text_output = ""
         for i, img in enumerate(images, 1):
             processed = preprocess_image(img)
@@ -171,16 +171,15 @@ def check_required_photos(image_files: List[UploadFile], ocr_text: str) -> List[
 
 def check_labor_and_tax_score(text: str, client_rules: str) -> int:
     deduction = 0
-    # Check for labor rates across all sections
     if not re.search(r'labor\s*rate\s*(body|paint|mechanical|structural)', text, re.IGNORECASE):
-        deduction -= 50  # All labor rates missing
-    # Check for tax
+        deduction -= 50
     if not re.search(r'(tax|sales tax)\s*[\d.]+%', text, re.IGNORECASE):
-        deduction -= 25  # Tax missing or no percentage
+        deduction -= 25
     return deduction
 
 @app.post("/vision-review")
 async def vision_review(file_number: str = Form(...), ia_company: str = Form(...), appraiser_id: str = Form(...), estimate: UploadFile = File(...), image_files: List[UploadFile] = File(...)):
+    logger.debug(f"Starting vision_review with request headers={dict(request.headers)}")
     # Validate form fields
     logger.debug(f"Processed form data: file_number='{file_number}', ia_company='{ia_company}', appraiser_id='{appraiser_id}'")
     if not all([field.strip() for field in [file_number, ia_company, appraiser_id]]):
@@ -393,7 +392,7 @@ async def get_client_rules(client_name: str):
         return JSONResponse(status_code=404, content={"error": "Rules not found for this client."})
 
 if __name__ == "__main__":
-    port = int(os.getenv("PORT", 8000))  # Use Render's PORT or default to 8000
+    port = int(os.getenv("PORT", 8000))
     logger.debug(f"Starting server on port {port}")
     uvicorn.run(app, host="0.0.0.0", port=port)
 
