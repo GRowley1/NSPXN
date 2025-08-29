@@ -15,7 +15,6 @@ import pytesseract
 from PIL import Image, ImageEnhance, ImageOps, ImageFilter
 from openai import OpenAI
 import logging
-from fraud_check import calculate_fraud_risk
 
 # Configure logging
 logging.basicConfig(level=logging.DEBUG, filename='app.log', filemode='a',
@@ -53,7 +52,7 @@ def preprocess_image(img: Image.Image) -> Image.Image:
 def extract_text_from_pdf(file) -> str:
     try:
         file.seek(0)
-        images = convert_from_bytes(file.read(), dpi=150)  # Stable DPI
+        images = convert_from_bytes(file.read(), dpi=200)  # Stable DPI
         text_output = ""
         for i, img in enumerate(images, 1):
             processed = preprocess_image(img)
@@ -160,16 +159,6 @@ def check_required_photos(image_files: List[UploadFile], ocr_text: str) -> List[
     missing = [p for p in required_photos if p not in found_photos]
     logger.debug(f"Found photos: {found_photos}, Missing photos: {missing}, Corner matches: {corner_matches}")
     return missing
-
-def extract_damage_descriptions(text: str) -> List[str]:
-    damage_terms = ["dent", "scratch", "crack", "scuff", "broken", "damaged", "replace", "repair"]
-    lines = text.splitlines()
-    matches = []
-    for line in lines:
-        if any(term in line.lower() for term in damage_terms):
-            matches.append(line.strip())
-    return matches
-
 def check_labor_and_tax_score(text: str, client_rules: str) -> int:
     score_adj = 0
     required_sections = ["body labor", "paint labor", "mechanical labor", "structural labor"]
@@ -213,21 +202,7 @@ async def vision_review(
     for file in files:
         content = await file.read()
         name = file.filename.lower()
-        
         if name.endswith((".jpg", ".jpeg", ".png")):
-            image_files.append(file)
-            b64 = base64.b64encode(content).decode("utf-8")
-            images.append({"type": "image_url", "image_url": {"url": f"data:image/jpeg;base64,{b64}"}})
-            try:
-                img = Image.open(io.BytesIO(content))
-                processed = preprocess_image(img)
-                ocr_text = pytesseract.image_to_string(processed, lang="eng")
-                texts.append(f"[OCR from {file.filename}]:\n" + ocr_text)
-                logger.debug(f"Processed OCR for {file.filename}: {ocr_text[:200]}...")
-            except Exception as e:
-                logger.error(f"OCR failed on image {file.filename}: {str(e)}")
-                texts.append(f"[OCR failed on {file.filename}]")
-    
             image_files.append(file)
             b64 = base64.b64encode(content).decode("utf-8")
             images.append({"type": "image_url", "image_url": {"url": f"data:image/jpeg;base64,{b64}"}})
@@ -238,7 +213,7 @@ async def vision_review(
         elif name.endswith(".txt"):
             texts.append(content.decode("utf-8", errors="ignore"))
         else:
-            texts.append(f"?? Skipped unsupported file: {file.filename}")
+            texts.append(f"⚠️ Skipped unsupported file: {file.filename}")
 
     combined_text = '\n'.join(texts).lower()
     logger.debug(f"Combined text: {combined_text[:1000]}...")
@@ -246,10 +221,6 @@ async def vision_review(
     advisor_confirmed = advisor_report_present(texts, image_files)
     advisor_hint = "\n\nCONFIRMED: CCC Advisor Report is included based on OCR or filename." if advisor_confirmed else ""
     missing_photos = check_required_photos(image_files, combined_text)
-
-    fraud_result = calculate_fraud_risk(image_files, texts)
-    fraud_hint = f"\n\nFRAUD RISK: {fraud_result['risk_level']}\nIssues: " + "; ".join(fraud_result['issues'])
-
     photo_hint = f"\n\nMISSING PHOTOS: {', '.join(missing_photos) if missing_photos else 'None'}"
 
     vision_message = {"role": "user", "content": []}
@@ -277,12 +248,6 @@ async def vision_review(
     - The Compliance Score starts at 100% and is only reduced by explicit deductions for labor rates (50% if all missing), tax (25% if missing), photos (25% per missing type), or parts (25% for violations).
     - Respect the MISSING PHOTOS hint provided in the input to determine photo compliance.
 
-    - Cross-check damage descriptions (e.g., "front bumper dent", "rear door scratch") from the estimate against the provided photos.
-    - If the damage described is not visible in any photo, flag as "Photo Evidence MISSING for described damage: [description]".
-    - If damage is clearly shown in photos but not mentioned in estimate, flag as "Unlisted Damage Found in Photo: [description]".
-    - For each confirmed match, briefly list the description and confirm it's shown (e.g., Front bumper dent  visible in photo).
-    - For each photo provided, identify visible damages and list them.
-
     PHOTO EVIDENCE RULES:
     - Required photos: four corners, odometer, VIN, license plate.
     - Four corners is satisfied if at least two views (e.g., front left, front right, rear left, rear right, or synonyms like left front, right front, left rear, right rear) are detected in text or images, as indicated in the MISSING PHOTOS hint.
@@ -293,17 +258,11 @@ async def vision_review(
     Claim #: (from estimate)
     VIN: (from estimate or photos)
     Vehicle: (make, model, mileage from estimate)
-    Compliance Score: (0?100%)
+    Compliance Score: (0–100%)
 
     Then summarize findings and rule violations based STRICTLY on the following rules:
     {client_rules}
     """
-
-    
-    damage_summary = extract_damage_descriptions(combined_text)
-    if damage_summary:
-        prompt += "\n\nEstimated Damage Descriptions:\n" + "\n".join(damage_summary)
-
 
     try:
         response = client.chat.completions.create(
@@ -311,7 +270,7 @@ async def vision_review(
             messages=[{"role": "system", "content": prompt}, vision_message],
             max_tokens=3500
         )
-        gpt_output = response.choices[0].message.content or "?? GPT returned no output."
+        gpt_output = response.choices[0].message.content or "⚠️ GPT returned no output."
         logger.debug(f"GPT output: {gpt_output[:1000]}...")
         claim_number = extract_field("Claim", gpt_output)
         vehicle = extract_field("Vehicle", gpt_output)
@@ -376,7 +335,7 @@ AI Review Summary:
 
     except Exception as e:
         logger.error(f"API error: {str(e)}")
-        return JSONResponse(status_code=500, content={"error": str(e), "gpt_output": "?? AI review failed."})
+        return JSONResponse(status_code=500, content={"error": str(e), "gpt_output": "⚠️ AI review failed."})
 
 @app.get("/download-pdf")
 async def download_pdf(file_number: str):
@@ -402,5 +361,7 @@ async def get_client_rules(client_name: str):
     else:
         logger.error(f"Rules not found for client: {client_name}")
         return JSONResponse(status_code=404, content={"error": "Rules not found for this client."})
+
+
 
 
