@@ -1,6 +1,7 @@
 from fastapi import FastAPI, File, UploadFile, Form, Request
 from fastapi.responses import JSONResponse
 from fastapi.middleware.cors import CORSMiddleware
+from typing import List  # Added missing import
 import os
 import re
 import base64
@@ -93,7 +94,7 @@ def extract_text_from_docx(file) -> str:
     logger.debug(f"Extracted DOCX text: {text[:500]}...")
     return text
 
-def extract_text_from_images(image_files: List[UploadFile]) -> str:
+def extract_text_from_images(image_files: List[UploadFile]) -> str:  # Now recognizes List
     text_output = ""
     for i, img in enumerate(image_files, 1):
         try:
@@ -201,6 +202,7 @@ if __name__ == "__main__":
     port = int(os.getenv("PORT", 8000))
     logger.debug(f"Starting server on port {port}")
     uvicorn.run(app, host="0.0.0.0", port=port)
+
 
 
 
