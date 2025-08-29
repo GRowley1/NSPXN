@@ -27,11 +27,10 @@ COPY . .
 ENV PYTHONIOENCODING=UTF-8
 ENV OPENCV_VIDEOIO_PRIORITY_MSMF=0
 ENV QT_QPA_PLATFORM=offscreen
-ENV PORT=10000
 
 # Expose dynamic Render port
-EXPOSE 10000
+EXPOSE $PORT
 
-# Start FastAPI via uvicorn
-CMD ["uvicorn", "main:app", "--host", "0.0.0.0", "--port", "8000"]
+# Start FastAPI via uvicorn (use $PORT)
+CMD ["sh", "-c", "uvicorn main:app --host 0.0.0.0 --port $PORT"]
 
