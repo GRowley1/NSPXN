@@ -1,4 +1,4 @@
-from fastapi import FastAPI, File, UploadFile, Form
+from fastapi import FastAPI, File, UploadFile, Form, Request
 from fastapi.responses import JSONResponse, FileResponse
 from fastapi.middleware.cors import CORSMiddleware
 from typing import List
@@ -15,6 +15,7 @@ import pytesseract
 from PIL import Image, ImageEnhance, ImageOps, ImageFilter
 from openai import OpenAI
 import logging
+import uvicorn
 
 # Configure logging
 logging.basicConfig(level=logging.DEBUG, filename='app.log', filemode='a',
@@ -26,6 +27,17 @@ if "OPENAI_API_KEY" not in os.environ:
 client = OpenAI(api_key=os.environ["OPENAI_API_KEY"])
 
 app = FastAPI()
+
+# Global request logging middleware
+@app.middleware("http")
+async def log_requests(request: Request, call_next):
+    logger.debug(f"Received {request.method} {request.url.path} with requestID={request.headers.get('X-Request-ID', 'unknown')}")
+    form = await request.form() if request.method in ["POST", "PUT"] else None
+    if form:
+        logger.debug(f"Raw form data: {dict(form)}")
+    response = await call_next(request)
+    logger.debug(f"Response status: {response.status_code}")
+    return response
 
 app.add_middleware(
     CORSMiddleware,
@@ -162,38 +174,52 @@ def check_labor_and_tax_score(text: str, client_rules: str) -> int:
     return deduction
 
 @app.post("/vision-review")
-async def vision_review(
-    file_number: str = Form(...),
-    ia_company: str = Form(...),
-    appraiser_id: str = Form(...),
-    estimate: UploadFile = File(...),
-    image_files: List[UploadFile] = File(...)
-):
+async def vision_review(request: Request, file_number: str = Form(...), ia_company: str = Form(...), appraiser_id: str = Form(...), estimate: UploadFile = File(...), image_files: List[UploadFile] = File(...)):
     # Validate form fields
-    if not all([file_number.strip(), ia_company.strip(), appraiser_id.strip()]):
+    logger.debug(f"Processed form data: file_number='{file_number}', ia_company='{ia_company}', appraiser_id='{appraiser_id}'")
+    if not all([field.strip() for field in [file_number, ia_company, appraiser_id]]):
+        logger.error(f"Validation failed: Empty fields - file_number='{file_number}', ia_company='{ia_company}', appraiser_id='{appraiser_id}'")
         return JSONResponse(status_code=422, content={"error": "Missing or empty required form fields (file_number, ia_company, appraiser_id)"})
-    if not estimate.filename.endswith(('.pdf', '.docx')):
-        return JSONResponse(status_code=422, content={"error": "Estimate must be a PDF or DOCX file"})
     
-    # Log initial file details
-    logger.debug(f"Received files: estimate={estimate.filename}, image_files_count={len(image_files)}")
+    # Validate estimate file type
+    logger.debug(f"Estimate file: filename='{estimate.filename}', content_type='{estimate.content_type}'")
+    if not estimate.filename.lower().endswith(('.pdf', '.docx')):
+        logger.error(f"Validation failed: Invalid estimate file type - {estimate.filename}")
+        return JSONResponse(status_code=422, content={"error": f"Estimate must be a PDF or DOCX file, got {estimate.filename}"})
+    
+    # Log initial file details and size limits
+    max_file_size = 5 * 1024 * 1024  # 5MB limit
+    estimate.file.seek(0, os.SEEK_END)
+    size = estimate.file.tell()
+    estimate.file.seek(0)
+    logger.debug(f"Estimate file size: {size} bytes")
+    if size > max_file_size:
+        logger.error(f"Estimate {estimate.filename} exceeds 5MB limit ({size} bytes)")
+        return JSONResponse(status_code=422, content={"error": "Estimate file exceeds 5MB limit"})
+    
     for i, img in enumerate(image_files):
         img.file.seek(0, os.SEEK_END)
         size = img.file.tell()
         img.file.seek(0)
-        logger.debug(f"Image {i+1}: filename={img.filename}, size={size} bytes")
+        logger.debug(f"Image {i+1}: filename='{img.filename}', size={size} bytes")
+        if size > max_file_size:
+            logger.error(f"Image {img.filename} exceeds 5MB limit ({size} bytes)")
+            return JSONResponse(status_code=422, content={"error": f"Image file {img.filename} exceeds 5MB limit"})
     
-    combined_text = extract_text_from_pdf(estimate) if estimate.filename.endswith('.pdf') else extract_text_from_docx(estimate)
+    # Process estimate
+    combined_text = extract_text_from_pdf(estimate) if estimate.filename.lower().endswith('.pdf') else extract_text_from_docx(estimate)
     if "OCR error" in combined_text:
+        logger.error(f"OCR error on estimate {estimate.filename}: {combined_text}")
         return JSONResponse(status_code=422, content={"error": "Failed to extract text from estimate due to OCR error"})
     
+    # Check required photos
     missing_photos = check_required_photos(image_files, combined_text)
     # Reset file pointers for images
     for img in image_files:
         img.file.seek(0)
     vision_message = {"role": "user", "content": [
         {"type": "text", "text": combined_text},
-        *[{"type": "image_url", "image_url": {"url": f"data:image/jpeg;base64,{base64.b64encode(img.file.read()).decode('utf-8')}"}} for img in image_files]
+        *[{"type": "image_url", "image_url": {"url": f"data:image/jpeg;base64,{base64.b64encode(await img.read()).decode('utf-8')}"}} for img in image_files]
     ]}
     client_rules = extract_text_from_docx(open(os.path.join("client_rules", "SCA.docx"), 'rb')) if os.path.exists(os.path.join("client_rules", "SCA.docx")) else ""
 
@@ -228,15 +254,11 @@ async def vision_review(
     - Registration: deduct 25% if no image shows the registration document/card (unless virtual assignment).
     - Respect the MISSING PHOTOS hint provided in the input, but use your visual analysis to confirm or override.
 
-    DAMAGE REVIEW AND COMPARISON RULES:
+    DAMAGE REVIEW AND COMPARISON:
     - Include a section titled 'Damage Review and Comparison:'.
-    - Analyze each image for visible damage (e.g., dents, scratches, cracks, broken parts) and specify the location (e.g., 'front-left door', 'rear-right bumper') and type.
-    - Extract damage details from the estimate text (e.g., descriptions like 'dent on hood', 'scratch on passenger door').
-    - Compare photo-detected damage with estimate-reported damage, listing:
-      - Matches: Damage present in both photos and estimate.
-      - Photo-only: Damage visible in photos but not in estimate.
-      - Estimate-only: Damage listed in estimate but not visible in photos.
-    - Provide a summary in the findings, e.g., 'All reported damage matched photos', or 'Discrepancy: Scratch on rear-right bumper in photos not in estimate'.
+    - Detect damage (e.g., dents, scratches) in photos with locations (e.g., 'front-left door', 'rear bumper').
+    - Extract damage descriptions from estimate text.
+    - Compare: list matches (damage in both photos and estimate), photo-only damage, and estimate-only damage.
 
     At the top of your response, ALWAYS include:
     Claim #: (from estimate)
@@ -257,7 +279,7 @@ async def vision_review(
         response = client.chat.completions.create(
             model="gpt-4o",
             messages=[{"role": "system", "content": prompt}, vision_message],
-            max_tokens=3500
+            max_tokens=4000
         )
         gpt_output = response.choices[0].message.content or "⚠️ GPT returned no output."
         logger.debug(f"GPT output: {gpt_output[:1000]}...")
@@ -271,8 +293,9 @@ async def vision_review(
             score = 100
 
         score_adj = check_labor_and_tax_score(combined_text, client_rules)
-        score_adj -= 25 * len(missing_photos)
-        logger.debug(f"Score calculation: AI score={score}, labor_tax_adj={check_labor_and_tax_score(combined_text, client_rules)}, photo_adj={-25 * len(missing_photos)}, final_score={max(0, score + score_adj)}")
+        photo_deduction = 25 * len(missing_photos)
+        score_adj -= photo_deduction
+        logger.debug(f"Score calculation: AI score={score}, labor_tax_adj={check_labor_and_tax_score(combined_text, client_rules)}, photo_adj={-photo_deduction}, final_score={max(0, score + score_adj)}")
         score = max(0, score + score_adj)
         if score < 100 and score_adj == 0:
             logger.warning(f"AI score ({score}) inconsistent with no deductions (labor_tax_adj=0, photo_adj=0). Overriding to 100.")
@@ -315,8 +338,11 @@ AI Review Summary:
 """
         msg.set_content(email_body.encode("utf-8", errors="ignore").decode("utf-8"))
         with smtplib.SMTP_SSL("mail.tierra.net", 465) as smtp:
-            smtp.login("info@nspxn.com", "grr2025GRR")
-            smtp.send_message(msg)
+            try:
+                smtp.login("info@nspxn.com", "grr2025GRR")
+                smtp.send_message(msg)
+            except Exception as email_e:
+                logger.error(f"Email sending error: {str(email_e)}")
 
         return {
             "gpt_output": gpt_output,
@@ -327,7 +353,7 @@ AI Review Summary:
         }
 
     except Exception as e:
-        logger.error(f"API error: {str(e)}")
+        logger.error(f"API error during processing: {str(e)}")
         return JSONResponse(status_code=500, content={"error": str(e), "gpt_output": "⚠️ AI review failed."})
 
 @app.get("/download-pdf")
@@ -354,6 +380,11 @@ async def get_client_rules(client_name: str):
     else:
         logger.error(f"Rules not found for client: {client_name}")
         return JSONResponse(status_code=404, content={"error": "Rules not found for this client."})
+
+if __name__ == "__main__":
+    port = int(os.getenv("PORT", 8000))  # Use Render's PORT or default to 8000
+    logger.debug(f"Starting server on port {port}")
+    uvicorn.run(app, host="0.0.0.0", port=port)
 
 
 
