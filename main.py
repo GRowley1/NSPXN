@@ -32,7 +32,7 @@ app = FastAPI()
 @app.middleware("http")
 async def log_requests(request: Request, call_next):
     try:
-        logger.debug(f"Received {request.method} {request.url.path} with headers={dict(request.headers())}")
+        logger.debug(f"Received {request.method} {request.url.path} with headers={dict(request.headers)}")  # Fixed: removed parentheses
         body = await request.body()
         logger.debug(f"Raw request body: {body.decode('utf-8', errors='ignore')}")
         form = await request.form() if request.method in ["POST", "PUT"] else None
@@ -396,6 +396,7 @@ if __name__ == "__main__":
     port = int(os.getenv("PORT", 8000))  # Use Render's PORT or default to 8000
     logger.debug(f"Starting server on port {port}")
     uvicorn.run(app, host="0.0.0.0", port=port)
+
 
 
 
