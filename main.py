@@ -174,36 +174,42 @@ def check_labor_and_tax_score(text: str, client_rules: str) -> int:
 
 @app.post("/vision-review")
 async def vision_review(file_number: str = Form(...), ia_company: str = Form(...), appraiser_id: str = Form(...), estimate: UploadFile = File(...), image_files: List[UploadFile] = File(...)):
+    # Log raw request for debugging
+    logger.debug(f"Received POST /vision-review with headers={dict(await request.headers())}")
+    form = await request.form()
+    logger.debug(f"Raw form data: {dict(form)}")
+
     # Validate form fields
     logger.debug(f"Processed form data: file_number='{file_number}', ia_company='{ia_company}', appraiser_id='{appraiser_id}'")
     if not all([field.strip() for field in [file_number, ia_company, appraiser_id]]):
         logger.error(f"Validation failed: Empty fields - file_number='{file_number}', ia_company='{ia_company}', appraiser_id='{appraiser_id}'")
         return JSONResponse(status_code=422, content={"error": "Missing or empty required form fields (file_number, ia_company, appraiser_id)"})
     
-    # Validate estimate file type
+    # Validate estimate file type (temporary relaxation for testing)
     logger.debug(f"Estimate file: filename='{estimate.filename}', content_type='{estimate.content_type}'")
     if not estimate.filename.lower().endswith(('.pdf', '.docx')):
         logger.error(f"Validation failed: Invalid estimate file type - {estimate.filename}")
         return JSONResponse(status_code=422, content={"error": f"Estimate must be a PDF or DOCX file, got {estimate.filename}"})
     
-    # Log initial file details and size limits
-    max_file_size = 5 * 1024 * 1024  # 5MB limit
+    # Log initial file details (temporary removal of size limit for testing)
     estimate.file.seek(0, os.SEEK_END)
     size = estimate.file.tell()
     estimate.file.seek(0)
     logger.debug(f"Estimate file size: {size} bytes")
-    if size > max_file_size:
-        logger.error(f"Estimate {estimate.filename} exceeds 5MB limit ({size} bytes)")
-        return JSONResponse(status_code=422, content={"error": "Estimate file exceeds 5MB limit"})
+    # Temporarily comment out size check
+    # if size > 5 * 1024 * 1024:
+    #     logger.error(f"Estimate {estimate.filename} exceeds 5MB limit ({size} bytes)")
+    #     return JSONResponse(status_code=422, content={"error": "Estimate file exceeds 5MB limit"})
     
     for i, img in enumerate(image_files):
         img.file.seek(0, os.SEEK_END)
         size = img.file.tell()
         img.file.seek(0)
         logger.debug(f"Image {i+1}: filename='{img.filename}', size={size} bytes")
-        if size > max_file_size:
-            logger.error(f"Image {img.filename} exceeds 5MB limit ({size} bytes)")
-            return JSONResponse(status_code=422, content={"error": f"Image file {img.filename} exceeds 5MB limit"})
+        # Temporarily comment out size check
+        # if size > 5 * 1024 * 1024:
+        #     logger.error(f"Image {img.filename} exceeds 5MB limit ({size} bytes)")
+        #     return JSONResponse(status_code=422, content={"error": f"Image file {img.filename} exceeds 5MB limit"})
     
     # Process estimate
     combined_text = extract_text_from_pdf(estimate) if estimate.filename.lower().endswith('.pdf') else extract_text_from_docx(estimate)
@@ -383,6 +389,7 @@ async def get_client_rules(client_name: str):
     else:
         logger.error(f"Rules not found for client: {client_name}")
         return JSONResponse(status_code=404, content={"error": "Rules not found for this client."})
+
 
 
 
