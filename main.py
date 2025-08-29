@@ -1,7 +1,7 @@
 from fastapi import FastAPI, File, UploadFile, Form, Request
 from fastapi.responses import JSONResponse
 from fastapi.middleware.cors import CORSMiddleware
-from typing import List  # Added missing import
+from typing import List
 import os
 import re
 import base64
@@ -32,7 +32,7 @@ async def log_requests(request: Request, call_next):
     try:
         logger.debug(f"Received {request.method} {request.url.path} with headers={dict(request.headers)}")
         body = await request.body()
-        logger.debug(f"Raw request body: {body.decode('utf-8', errors='ignore')}")
+        logger.debug(f"Raw request body (hex): {body.hex()}")
         form = await request.form() if request.method in ["POST", "PUT"] else None
         if form:
             logger.debug(f"Raw form data: {dict(form)}")
@@ -94,7 +94,7 @@ def extract_text_from_docx(file) -> str:
     logger.debug(f"Extracted DOCX text: {text[:500]}...")
     return text
 
-def extract_text_from_images(image_files: List[UploadFile]) -> str:  # Now recognizes List
+def extract_text_from_images(image_files: List[UploadFile]) -> str:
     text_output = ""
     for i, img in enumerate(image_files, 1):
         try:
@@ -110,13 +110,16 @@ def extract_text_from_images(image_files: List[UploadFile]) -> str:  # Now recog
 
 @app.post("/vision-review")
 async def vision_review(file_number: str = Form(...), ia_company: str = Form(...), appraiser_id: str = Form(...), estimate: UploadFile = File(...), image_files: List[UploadFile] = File(...)):
-    logger.debug(f"Starting vision_review with request headers={dict(request.headers)}")
-    # Validate form fields
+    logger.debug(f"Starting vision_review with headers={dict(request.headers)}")
+    # Validate form fields with detailed logging
+    logger.debug(f"Received form data: file_number='{file_number}', ia_company='{ia_company}', appraiser_id='{appraiser_id}'")
     if not all([field.strip() for field in [file_number, ia_company, appraiser_id]]):
-        logger.error(f"Validation failed: Empty fields - file_number='{file_number}', ia_company='{ia_company}', appraiser_id='{appraiser_id}'")
-        return JSONResponse(status_code=422, content={"error": "Missing or empty required form fields (file_number, ia_company, appraiser_id)"})
+        missing = [f for f in ['file_number', 'ia_company', 'appraiser_id'] if not f.strip()]
+        logger.error(f"Validation failed: Empty fields - {', '.join(missing)}")
+        return JSONResponse(status_code=422, content={"error": f"Missing or empty required fields: {', '.join(missing)}"})
     
     # Validate estimate file type
+    logger.debug(f"Estimate file: filename='{estimate.filename}', content_type='{estimate.content_type}'")
     if not estimate.filename.lower().endswith(('.pdf', '.docx')):
         logger.error(f"Validation failed: Invalid estimate file type - {estimate.filename}")
         return JSONResponse(status_code=422, content={"error": f"Estimate must be a PDF or DOCX file, got {estimate.filename}"})
@@ -202,6 +205,7 @@ if __name__ == "__main__":
     port = int(os.getenv("PORT", 8000))
     logger.debug(f"Starting server on port {port}")
     uvicorn.run(app, host="0.0.0.0", port=port)
+
 
 
 
