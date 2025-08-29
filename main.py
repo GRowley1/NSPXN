@@ -15,6 +15,7 @@ import pytesseract
 from PIL import Image, ImageEnhance, ImageOps, ImageFilter
 from openai import OpenAI
 import logging
+import uvicorn
 
 # Configure logging
 logging.basicConfig(level=logging.DEBUG, filename='app.log', filemode='a',
@@ -30,13 +31,19 @@ app = FastAPI()
 # Global request logging middleware
 @app.middleware("http")
 async def log_requests(request: Request, call_next):
-    logger.debug(f"Received {request.method} {request.url.path} with requestID={request.headers.get('X-Request-ID', 'unknown')}")
-    form = await request.form() if request.method in ["POST", "PUT"] else None
-    if form:
-        logger.debug(f"Raw form data: {dict(form)}")
-    response = await call_next(request)
-    logger.debug(f"Response status: {response.status_code}")
-    return response
+    try:
+        logger.debug(f"Received {request.method} {request.url.path} with headers={dict(request.headers())}")
+        body = await request.body()
+        logger.debug(f"Raw request body: {body.decode('utf-8', errors='ignore')}")
+        form = await request.form() if request.method in ["POST", "PUT"] else None
+        if form:
+            logger.debug(f"Raw form data: {dict(form)}")
+        response = await call_next(request)
+        logger.debug(f"Response status: {response.status_code}")
+        return response
+    except Exception as e:
+        logger.error(f"Middleware error: {str(e)}")
+        return JSONResponse(status_code=400, content={"error": f"Invalid request: {str(e)}"})
 
 app.add_middleware(
     CORSMiddleware,
@@ -174,29 +181,24 @@ def check_labor_and_tax_score(text: str, client_rules: str) -> int:
 
 @app.post("/vision-review")
 async def vision_review(file_number: str = Form(...), ia_company: str = Form(...), appraiser_id: str = Form(...), estimate: UploadFile = File(...), image_files: List[UploadFile] = File(...)):
-    # Log raw request for debugging
-    logger.debug(f"Received POST /vision-review with headers={dict(await request.headers())}")
-    form = await request.form()
-    logger.debug(f"Raw form data: {dict(form)}")
-
     # Validate form fields
     logger.debug(f"Processed form data: file_number='{file_number}', ia_company='{ia_company}', appraiser_id='{appraiser_id}'")
     if not all([field.strip() for field in [file_number, ia_company, appraiser_id]]):
         logger.error(f"Validation failed: Empty fields - file_number='{file_number}', ia_company='{ia_company}', appraiser_id='{appraiser_id}'")
         return JSONResponse(status_code=422, content={"error": "Missing or empty required form fields (file_number, ia_company, appraiser_id)"})
     
-    # Validate estimate file type (temporary relaxation for testing)
+    # Validate estimate file type
     logger.debug(f"Estimate file: filename='{estimate.filename}', content_type='{estimate.content_type}'")
     if not estimate.filename.lower().endswith(('.pdf', '.docx')):
         logger.error(f"Validation failed: Invalid estimate file type - {estimate.filename}")
         return JSONResponse(status_code=422, content={"error": f"Estimate must be a PDF or DOCX file, got {estimate.filename}"})
     
-    # Log initial file details (temporary removal of size limit for testing)
+    # Log initial file details
     estimate.file.seek(0, os.SEEK_END)
     size = estimate.file.tell()
     estimate.file.seek(0)
     logger.debug(f"Estimate file size: {size} bytes")
-    # Temporarily comment out size check
+    # Temporarily relaxed size check
     # if size > 5 * 1024 * 1024:
     #     logger.error(f"Estimate {estimate.filename} exceeds 5MB limit ({size} bytes)")
     #     return JSONResponse(status_code=422, content={"error": "Estimate file exceeds 5MB limit"})
@@ -206,7 +208,7 @@ async def vision_review(file_number: str = Form(...), ia_company: str = Form(...
         size = img.file.tell()
         img.file.seek(0)
         logger.debug(f"Image {i+1}: filename='{img.filename}', size={size} bytes")
-        # Temporarily comment out size check
+        # Temporarily relaxed size check
         # if size > 5 * 1024 * 1024:
         #     logger.error(f"Image {img.filename} exceeds 5MB limit ({size} bytes)")
         #     return JSONResponse(status_code=422, content={"error": f"Image file {img.filename} exceeds 5MB limit"})
@@ -389,6 +391,12 @@ async def get_client_rules(client_name: str):
     else:
         logger.error(f"Rules not found for client: {client_name}")
         return JSONResponse(status_code=404, content={"error": "Rules not found for this client."})
+
+if __name__ == "__main__":
+    port = int(os.getenv("PORT", 8000))  # Use Render's PORT or default to 8000
+    logger.debug(f"Starting server on port {port}")
+    uvicorn.run(app, host="0.0.0.0", port=port)
+
 
 
 
