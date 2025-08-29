@@ -173,7 +173,7 @@ def check_labor_and_tax_score(text: str, client_rules: str) -> int:
     return deduction
 
 @app.post("/vision-review")
-async def vision_review(request: Request, file_number: str = Form(...), ia_company: str = Form(...), appraiser_id: str = Form(...), estimate: UploadFile = File(...), image_files: List[UploadFile] = File(...)):
+async def vision_review(file_number: str = Form(...), ia_company: str = Form(...), appraiser_id: str = Form(...), estimate: UploadFile = File(...), image_files: List[UploadFile] = File(...)):
     # Validate form fields
     logger.debug(f"Processed form data: file_number='{file_number}', ia_company='{ia_company}', appraiser_id='{appraiser_id}'")
     if not all([field.strip() for field in [file_number, ia_company, appraiser_id]]):
@@ -383,6 +383,7 @@ async def get_client_rules(client_name: str):
     else:
         logger.error(f"Rules not found for client: {client_name}")
         return JSONResponse(status_code=404, content={"error": "Rules not found for this client."})
+
 
 
 
