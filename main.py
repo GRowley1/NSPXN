@@ -15,7 +15,6 @@ import pytesseract
 from PIL import Image, ImageEnhance, ImageOps, ImageFilter
 from openai import OpenAI
 import logging
-import uvicorn
 
 # Configure logging
 logging.basicConfig(level=logging.DEBUG, filename='app.log', filemode='a',
@@ -305,22 +304,26 @@ async def vision_review(request: Request, file_number: str = Form(...), ia_compa
         pdf.add_page()
         pdf.add_font("DejaVu", "", "DejaVuSans.ttf", uni=True)
         pdf.set_font("DejaVu", size=11)
-        pdf.cell(200, 10, txt="NSPXN.com AI Review Report", ln=True, align='C')
-        pdf.ln(5)
-        pdf.multi_cell(0, 10, f"File Number: {file_number}")
-        pdf.multi_cell(0, 10, f"IA Company: {ia_company}")
-        pdf.multi_cell(0, 10, f"Appraiser ID #: {appraiser_id}")
-        pdf.ln(5)
-        pdf.multi_cell(0, 10, "AI-4-IA Review Summary:", align='L')
-        pdf.set_font("DejaVu", size=9)
-        pdf.multi_cell(0, 10, gpt_output)
-        pdf.ln(5)
-        pdf.multi_cell(0, 10, "Damage Photo Review and Comparison:", align='L')
-        damage_section = gpt_output.split("Damage Review and Comparison:")[-1].strip() if "Damage Review and Comparison:" in gpt_output else "No damage comparison data available."
-        pdf.multi_cell(0, 10, damage_section)
+        try:
+            pdf.cell(200, 10, txt="NSPXN.com AI Review Report", ln=True, align='C')
+            pdf.ln(5)
+            pdf.multi_cell(0, 10, f"File Number: {file_number}")
+            pdf.multi_cell(0, 10, f"IA Company: {ia_company}")
+            pdf.multi_cell(0, 10, f"Appraiser ID #: {appraiser_id}")
+            pdf.ln(5)
+            pdf.multi_cell(0, 10, "AI-4-IA Review Summary:", align='L')
+            pdf.set_font("DejaVu", size=9)
+            pdf.multi_cell(0, 10, gpt_output)
+            pdf.ln(5)
+            pdf.multi_cell(0, 10, "Damage Photo Review and Comparison:", align='L')
+            damage_section = gpt_output.split("Damage Review and Comparison:")[-1].strip() if "Damage Review and Comparison:" in gpt_output else "No damage comparison data available."
+            pdf.multi_cell(0, 10, damage_section)
 
-        pdf_path = f"{file_number}.pdf"
-        pdf.output(pdf_path)
+            pdf_path = f"{file_number}.pdf"
+            pdf.output(pdf_path)
+        except Exception as pdf_e:
+            logger.error(f"PDF generation error: {str(pdf_e)}")
+            return JSONResponse(status_code=500, content={"error": f"PDF generation failed: {str(pdf_e)}", "gpt_output": gpt_output})
 
         msg = EmailMessage()
         msg["Subject"] = f"AI-4-IA Review: {claim_number}"
@@ -380,11 +383,6 @@ async def get_client_rules(client_name: str):
     else:
         logger.error(f"Rules not found for client: {client_name}")
         return JSONResponse(status_code=404, content={"error": "Rules not found for this client."})
-
-if __name__ == "__main__":
-    port = int(os.getenv("PORT", 8000))  # Use Render's PORT or default to 8000
-    logger.debug(f"Starting server on port {port}")
-    uvicorn.run(app, host="0.0.0.0", port=port)
 
 
 
