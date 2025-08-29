@@ -73,6 +73,7 @@ def extract_text_from_pdf(file) -> str:
     except Exception as e:
         logger.error(f"OCR error (possible network failure): {str(e)}")
         return f"\n\u274c OCR error during combined extraction: {str(e)}"
+
 def extract_text_from_docx(file) -> str:
     doc = Document(file)
     text = '\n'.join(p.text for p in doc.paragraphs if p.text.strip())
@@ -107,13 +108,9 @@ def advisor_report_present(texts: List[str], image_files: List[UploadFile]) -> b
     return False
 
 def check_required_photos(image_files: List[UploadFile], ocr_text: str) -> List[str]:
-    required_photos = ["four corners", "odometer", "vin", "license plate"]
+    required_photos = ["four corners", "odometer", "vin", "license plate", "registration"]
     found_photos = []
     ocr_lower = ocr_text.lower()
-    corner_keywords = ["four corners", "four corner photo", "vehicle corners", 
-                      "front left", "front right", "rear left", "rear right",
-                      "left front", "right front", "left rear", "right rear"]
-    corner_matches = []
     
     if any(term in ocr_lower for term in ["license plate", "plate photo", "registration plate"]):
         found_photos.append("license plate")
@@ -124,13 +121,10 @@ def check_required_photos(image_files: List[UploadFile], ocr_text: str) -> List[
     if any(term in ocr_lower for term in ["vin", "vehicle identification number", "vin photo"]):
         found_photos.append("vin")
         logger.debug("Found VIN photo via OCR keywords")
-    for term in corner_keywords:
-        if term in ocr_lower:
-            corner_matches.append(term)
-    if len(corner_matches) >= 2:
-        found_photos.append("four corners")
-        logger.debug(f"Found four corners photo via OCR keywords: {corner_matches}")
-
+    if any(term in ocr_lower for term in ["registration", "reg photo", "vehicle registration"]):
+        found_photos.append("registration")
+        logger.debug("Found registration photo via OCR keywords")
+    
     for img in image_files:
         try:
             img.file.seek(0)
@@ -146,88 +140,63 @@ def check_required_photos(image_files: List[UploadFile], ocr_text: str) -> List[
             if re.search(r"(license|registration)\s*plate|\b[A-Z0-9]{5,8}\b", ocr, re.IGNORECASE):
                 found_photos.append("license plate")
                 logger.debug("Found license plate photo via image OCR")
-            corner_matches_img = [term for term in corner_keywords if term in ocr.lower()]
-            if len(corner_matches_img) >= 2:
-                found_photos.append("four corners")
-                logger.debug(f"Found four corners photo via image OCR: {corner_matches_img}")
-            if corner_matches_img:
-                corner_matches.extend(corner_matches_img)
+            if re.search(r"registration\s*(document|card)", ocr, re.IGNORECASE):
+                found_photos.append("registration")
+                logger.debug("Found registration photo via image OCR")
         except Exception as e:
             logger.error(f"Image processing error: {str(e)}")
-
+    
     found_photos = list(set(found_photos))
     missing = [p for p in required_photos if p not in found_photos]
-    logger.debug(f"Found photos: {found_photos}, Missing photos: {missing}, Corner matches: {corner_matches}")
+    logger.debug(f"Found photos: {found_photos}, Missing photos: {missing}")
     return missing
-def check_labor_and_tax_score(text: str, client_rules: str) -> int:
-    score_adj = 0
-    required_sections = ["body labor", "paint labor", "mechanical labor", "structural labor"]
-    found_sections = []
-    for section in required_sections:
-        if re.search(rf"{section}[:\s]*(?:\$?\d+\.?\d*\s*(?:/hr|hour)?)", text, re.IGNORECASE):
-            found_sections.append(section)
-            logger.debug(f"Found labor rate for {section}")
-    if not found_sections:
-        score_adj -= 50
-        logger.debug("All labor rates missing")
-    else:
-        logger.debug(f"Found labor rates in sections: {found_sections}")
-    if re.search(r"utilize applicable tax rate", client_rules, re.IGNORECASE):
-        if not re.search(r"tax[:\s]*(?:\$?\d+\.?\d*|\d+\.?\d*%?)", text, re.IGNORECASE):
-            score_adj -= 25
-            logger.debug("Tax rate missing")
-        else:
-            logger.debug("Tax rate found")
-    return score_adj
 
-@app.get("/")
-async def root():
-    return {"status": "ok"}
+def check_labor_and_tax_score(text: str, client_rules: str) -> int:
+    deduction = 0
+    # Check for labor rates across all sections
+    if not re.search(r'labor\s*rate\s*(body|paint|mechanical|structural)', text, re.IGNORECASE):
+        deduction -= 50  # All labor rates missing
+    # Check for tax
+    if not re.search(r'(tax|sales tax)\s*[\d.]+%', text, re.IGNORECASE):
+        deduction -= 25  # Tax missing or no percentage
+    return deduction
 
 @app.post("/vision-review")
 async def vision_review(
-    files: List[UploadFile] = File(...),
-    client_rules: str = Form(...),
     file_number: str = Form(...),
     ia_company: str = Form(...),
-    appraiser_id: str = Form(...)
+    appraiser_id: str = Form(...),
+    estimate: UploadFile = File(...),
+    image_files: List[UploadFile] = File(...)
 ):
-    if not appraiser_id.strip():
-        return JSONResponse(status_code=400, content={"error": "Appraiser ID is required."})
-
-    images = []
-    texts = []
-    image_files = []
-
-    for file in files:
-        content = await file.read()
-        name = file.filename.lower()
-        if name.endswith((".jpg", ".jpeg", ".png")):
-            image_files.append(file)
-            b64 = base64.b64encode(content).decode("utf-8")
-            images.append({"type": "image_url", "image_url": {"url": f"data:image/jpeg;base64,{b64}"}})
-        elif name.endswith(".pdf"):
-            texts.append(extract_text_from_pdf(io.BytesIO(content)))
-        elif name.endswith(".docx"):
-            texts.append(extract_text_from_docx(io.BytesIO(content)))
-        elif name.endswith(".txt"):
-            texts.append(content.decode("utf-8", errors="ignore"))
-        else:
-            texts.append(f"⚠️ Skipped unsupported file: {file.filename}")
-
-    combined_text = '\n'.join(texts).lower()
-    logger.debug(f"Combined text: {combined_text[:1000]}...")
-    logger.debug(f"Client rules: {client_rules[:500]}...")
-    advisor_confirmed = advisor_report_present(texts, image_files)
-    advisor_hint = "\n\nCONFIRMED: CCC Advisor Report is included based on OCR or filename." if advisor_confirmed else ""
+    # Validate form fields
+    if not all([file_number.strip(), ia_company.strip(), appraiser_id.strip()]):
+        return JSONResponse(status_code=422, content={"error": "Missing or empty required form fields (file_number, ia_company, appraiser_id)"})
+    if not estimate.filename.endswith(('.pdf', '.docx')):
+        return JSONResponse(status_code=422, content={"error": "Estimate must be a PDF or DOCX file"})
+    
+    # Log initial file details
+    logger.debug(f"Received files: estimate={estimate.filename}, image_files_count={len(image_files)}")
+    for i, img in enumerate(image_files):
+        img.file.seek(0, os.SEEK_END)
+        size = img.file.tell()
+        img.file.seek(0)
+        logger.debug(f"Image {i+1}: filename={img.filename}, size={size} bytes")
+    
+    combined_text = extract_text_from_pdf(estimate) if estimate.filename.endswith('.pdf') else extract_text_from_docx(estimate)
+    if "OCR error" in combined_text:
+        return JSONResponse(status_code=422, content={"error": "Failed to extract text from estimate due to OCR error"})
+    
     missing_photos = check_required_photos(image_files, combined_text)
-    photo_hint = f"\n\nMISSING PHOTOS: {', '.join(missing_photos) if missing_photos else 'None'}"
+    # Reset file pointers for images
+    for img in image_files:
+        img.file.seek(0)
+    vision_message = {"role": "user", "content": [
+        {"type": "text", "text": combined_text},
+        *[{"type": "image_url", "image_url": {"url": f"data:image/jpeg;base64,{base64.b64encode(img.file.read()).decode('utf-8')}"}} for img in image_files]
+    ]}
+    client_rules = extract_text_from_docx(open(os.path.join("client_rules", "SCA.docx"), 'rb')) if os.path.exists(os.path.join("client_rules", "SCA.docx")) else ""
 
-    vision_message = {"role": "user", "content": []}
-    if texts:
-        vision_message["content"].append({"type": "text", "text": '\n\n'.join(texts) + advisor_hint + photo_hint})
-    if images:
-        vision_message["content"].extend(images)
     prompt = f"""
     You are an AI auto damage auditor. You have access to both text and images (or scans).
 
@@ -242,17 +211,32 @@ async def vision_review(
     - Do not assume a total loss condition based on estimate formatting or value alone.
     - If no mention of Total Loss or salvage is found, do not apply deductions for missing Total Loss evaluation details.
     - For parts usage, flag non-compliance if alternative parts (e.g., LKQ, aftermarket) are used for vehicles of the current model year (2025) or previous year (2024), as per client rules. Deduct 25% for this violation. For older models (e.g., 2012), LKQ/aftermarket parts are compliant.
-    - Deduct 25% from Compliance Score for each missing required photo type (four corners, odometer, VIN, license plate).
-    - For four corners photos, the requirement is met if at least two corner views (e.g., front left, front right, rear left, rear right, or synonyms like left front, right front, left rear, right rear) are present in text or images, as indicated in the MISSING PHOTOS hint.
+    - Deduct 25% from Compliance Score for each missing required photo type (four corners, odometer, VIN, license plate, registration).
+    - For four corners photos, the requirement is met if all four unique views are present across the images: front-left (front and driver side), front-right (front and passenger side), rear-left (rear and driver side), rear-right (rear and passenger side). Three-quarter views or partial zooms count as long as the corner is clearly visible for damage assessment. Multiple images of the same view count as one. Deduct 25% if any corner is missing.
+    - If this is a VIRTUAL ASSIGNMENT (determine from text: look for keywords like 'virtual inspection', 'photo estimate', 'Streamline', 'customer photos', 'remote appraisal', or absence of physical inspection date/notes), do not apply deduction for missing registration photo. Otherwise, deduct 25% if registration photo is missing.
     - Do NOT apply deductions for unmentioned elements or assumed violations. Deductions must be explicitly listed in the findings and supported by evidence in the input or client rules.
     - The Compliance Score starts at 100% and is only reduced by explicit deductions for labor rates (50% if all missing), tax (25% if missing), photos (25% per missing type), or parts (25% for violations).
-    - Respect the MISSING PHOTOS hint provided in the input to determine photo compliance.
+    - Respect the MISSING PHOTOS hint provided in the input to determine photo compliance, but override with your visual analysis of the images if the hint conflicts (e.g., if images clearly show a required photo but OCR missed it).
 
     PHOTO EVIDENCE RULES:
-    - Required photos: four corners, odometer, VIN, license plate.
-    - Four corners is satisfied if at least two views (e.g., front left, front right, rear left, rear right, or synonyms like left front, right front, left rear, right rear) are detected in text or images, as indicated in the MISSING PHOTOS hint.
-    - If photo types are missing (indicated in input as "MISSING PHOTOS"), deduct 25% per missing type from Compliance Score.
-    - Respect the MISSING PHOTOS hint provided in the input to determine photo compliance.
+    - Required photos: four corners, odometer, VIN, license plate, registration (photo of the vehicle registration document/card, separate from license plate).
+    - Examine each provided image and classify its primary view (e.g., 'Image 1: rear-left corner', 'Image 2: close-up rear-left corner'). List these classifications in your findings.
+    - Four corners is one type: satisfied only if all four unique corners are covered (deduct 25% if any are missing, and specify which one(s)).
+    - Odometer: deduct 25% if no image shows the dashboard mileage reading.
+    - VIN: deduct 25% if no image shows the VIN plate/sticker.
+    - License plate: satisfied if visible in any image (e.g., rear views); deduct 25% if missing.
+    - Registration: deduct 25% if no image shows the registration document/card (unless virtual assignment).
+    - Respect the MISSING PHOTOS hint provided in the input, but use your visual analysis to confirm or override.
+
+    DAMAGE REVIEW AND COMPARISON RULES:
+    - Include a section titled 'Damage Review and Comparison:'.
+    - Analyze each image for visible damage (e.g., dents, scratches, cracks, broken parts) and specify the location (e.g., 'front-left door', 'rear-right bumper') and type.
+    - Extract damage details from the estimate text (e.g., descriptions like 'dent on hood', 'scratch on passenger door').
+    - Compare photo-detected damage with estimate-reported damage, listing:
+      - Matches: Damage present in both photos and estimate.
+      - Photo-only: Damage visible in photos but not in estimate.
+      - Estimate-only: Damage listed in estimate but not visible in photos.
+    - Provide a summary in the findings, e.g., 'All reported damage matched photos', or 'Discrepancy: Scratch on rear-right bumper in photos not in estimate'.
 
     At the top of your response, ALWAYS include:
     Claim #: (from estimate)
@@ -262,6 +246,11 @@ async def vision_review(
 
     Then summarize findings and rule violations based STRICTLY on the following rules:
     {client_rules}
+
+    In your findings, explicitly list:
+    - Whether this is a virtual assignment (with evidence from text).
+    - Which photo types are present/missing, with evidence from the images (e.g., 'Four corners: All present - rear-left in Images 1 and 2, rear-right in Image 3, front-right in Image 4, front-left in Image 5'; 'Registration: Missing - no image of registration document').
+    - 'Damage Review and Comparison:' section with comparison results.
     """
 
     try:
@@ -302,6 +291,10 @@ async def vision_review(
         pdf.multi_cell(0, 10, "AI-4-IA Review Summary:", align='L')
         pdf.set_font("DejaVu", size=9)
         pdf.multi_cell(0, 10, gpt_output)
+        pdf.ln(5)
+        pdf.multi_cell(0, 10, "Damage Photo Review and Comparison:", align='L')
+        damage_section = gpt_output.split("Damage Review and Comparison:")[-1].strip() if "Damage Review and Comparison:" in gpt_output else "No damage comparison data available."
+        pdf.multi_cell(0, 10, damage_section)
 
         pdf_path = f"{file_number}.pdf"
         pdf.output(pdf_path)
@@ -361,6 +354,7 @@ async def get_client_rules(client_name: str):
     else:
         logger.error(f"Rules not found for client: {client_name}")
         return JSONResponse(status_code=404, content={"error": "Rules not found for this client."})
+
 
 
 
