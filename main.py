@@ -104,18 +104,22 @@ async def vision_review(
     ia_company: str = Form(...),
     appraiser_id: str = Form(...)
 ):
-    logger.debug(f"Starting vision_review with file_number={file_number}, ia_company={ia_company}, appraiser_id={appraiser_id}")
-    if not all([field.strip() for field in [file_number, ia_company, appraiser_id, client_rules]]):
-        missing = [f for f in ['file_number', 'ia_company', 'appraiser_id', 'client_rules'] if not f.strip()]
-        logger.error(f"Validation failed: Empty fields - {', '.join(missing)}")
-        return JSONResponse(status_code=422, content={"error": f"Missing or empty required fields: {', '.join(missing)}"})
+    logger.debug(f"Starting vision_review with raw form data: file_number={file_number}, ia_company={ia_company}, appraiser_id={appraiser_id}, client_rules={client_rules[:100]}...")
+    # Validate form fields with detailed logging
+    fields = [file_number, ia_company, appraiser_id, client_rules]
+    field_names = ['file_number', 'ia_company', 'appraiser_id', 'client_rules']
+    if not all(f.strip() for f in fields):
+        empty_fields = [name for name, f in zip(field_names, fields) if not f.strip()]
+        logger.error(f"Validation failed: Empty fields - {', '.join(empty_fields)}")
+        return JSONResponse(status_code=422, content={"error": f"Missing or empty required fields: {', '.join(empty_fields)}"})
 
+    # Process files
     estimate_text = ""
     image_files = []
     for file in files:
         content = await file.read()
         name = file.filename.lower()
-        if name.endswith((".pdf", ".docx")):
+        if name.endswith((".pdf", ".docx")) and not estimate_text:
             estimate_text = extract_text_from_pdf(io.BytesIO(content)) if name.endswith(".pdf") else extract_text_from_docx(io.BytesIO(content))
             if "OCR error" in estimate_text:
                 logger.error(f"OCR error on estimate {file.filename}: {estimate_text}")
@@ -123,10 +127,15 @@ async def vision_review(
         elif name.endswith((".jpg", ".jpeg", ".png")):
             image_files.append(file)
 
+    if not estimate_text:
+        logger.error("No valid estimate (PDF/DOCX) provided")
+        return JSONResponse(status_code=422, content={"error": "No valid estimate (PDF or DOCX) provided"})
+
     image_text = extract_text_from_images(image_files)
     if not image_text.strip():
         logger.warning("No valid text extracted from images")
 
+    # Prepare data for OpenAI
     vision_message = {"role": "user", "content": [
         {"type": "text", "text": f"Estimate Text:\n{estimate_text}\n\nImage Text:\n{image_text}\n\nClient Rules:\n{client_rules}"}
     ]}
@@ -160,6 +169,7 @@ async def vision_review(
         gpt_output = response.choices[0].message.content or "⚠️ GPT returned no output."
         logger.debug(f"GPT output: {gpt_output[:1000]}...")
 
+        # Generate PDF
         pdf = FPDF()
         pdf.add_page()
         pdf.add_font("DejaVu", "", "DejaVuSans.ttf", uni=True)
@@ -177,6 +187,7 @@ async def vision_review(
         pdf_path = f"{file_number}.pdf"
         pdf.output(pdf_path)
 
+        # Send email
         msg = EmailMessage()
         msg["Subject"] = f"Comparison Review Report: {file_number}"
         msg["From"] = "noreply@nspxn.com"
@@ -230,6 +241,7 @@ async def get_client_rules(client_name: str):
     else:
         logger.error(f"Rules not found for client: {client_name}")
         return JSONResponse(status_code=404, content={"error": "Rules not found for this client."})
+
 
 
 
