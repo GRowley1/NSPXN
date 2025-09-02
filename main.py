@@ -15,6 +15,7 @@ import pytesseract
 from PIL import Image, ImageEnhance, ImageOps, ImageFilter
 from openai import OpenAI
 import logging
+import json
 
 # Configure logging
 logging.basicConfig(level=logging.DEBUG, filename='app.log', filemode='a',
@@ -161,16 +162,17 @@ async def vision_review(
     """
 
     try:
-        logger.debug(f"OpenAI request: prompt={prompt[:500]}..., vision_message={vision_message}")
+        logger.debug(f"OpenAI request: prompt={prompt[:500]}..., vision_message={json.dumps(vision_message)}")
         response = client.chat.completions.create(
             model="gpt-4o",
             messages=[{"role": "system", "content": prompt}, vision_message],
             max_tokens=3500
         )
-        gpt_output = response.choices[0].message.content if response.choices and response.choices[0].message else "⚠️ No GPT output."
-        logger.debug(f"OpenAI response: {gpt_output[:1000]}...")
+        logger.debug(f"OpenAI raw response: {json.dumps(response.dict(), default=str)[:1000]}...")
+        gpt_output = response.choices[0].message.content if response.choices and response.choices[0].message and response.choices[0].message.content else "⚠️ No GPT output."
+        logger.debug(f"OpenAI extracted content: {gpt_output[:1000]}...")
         if gpt_output.startswith("⚠️"):
-            logger.error(f"OpenAI API returned no content: response={response}")
+            logger.error(f"OpenAI API returned no content: raw_response={json.dumps(response.dict(), default=str)}")
             return JSONResponse(status_code=500, content={"error": "OpenAI API returned no content", "review": gpt_output})
 
         # Generate PDF
@@ -245,6 +247,7 @@ async def get_client_rules(client_name: str):
     else:
         logger.error(f"Rules not found for client: {client_name}")
         return JSONResponse(status_code=404, content={"error": "Rules not found for this client."})
+
 
 
 
