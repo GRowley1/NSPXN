@@ -4,7 +4,6 @@ from fastapi.middleware.cors import CORSMiddleware
 from typing import List
 import os
 import re
-import base64
 import io
 import smtplib
 from email.message import EmailMessage
@@ -167,7 +166,7 @@ async def vision_review(
 
     PHOTO EVIDENCE RULES:
     - Required photos: four corners, odometer, VIN, license plate.
-    - Four corners is satisfied if at least two views (e.g., front left, front right, rear left, rear right, or synonyms like left front, right front, left rear, right rear) are detected in text or images, as indicated in the MISSING PHOTOS hint.
+    - Four corners is satisfied if at least two views (e.g., front left, right front, rear left, rear right, or synonyms like left front, right front, left rear, right rear) are detected in text or images, as indicated in the MISSING PHOTOS hint.
     - If photo types are missing (indicated in input as "MISSING PHOTOS"), deduct 25% per missing type from Compliance Score.
     - Respect the MISSING PHOTOS hint provided in the input to determine photo compliance.
 
@@ -188,7 +187,7 @@ async def vision_review(
             messages=[{"role": "system", "content": prompt}, vision_message],
             max_tokens=3500
         )
-        logger.debug(f"OpenAI raw response: {json.dumps(response.dict(), default=str)[:1000]}...")
+        logger.debug(f"OpenAI raw response: {json.dumps(response.dict(), default=str)}")
         gpt_output = response.choices[0].message.content or "⚠️ GPT returned no output."
         logger.debug(f"OpenAI extracted content: {gpt_output[:1000]}...")
 
@@ -210,7 +209,7 @@ async def vision_review(
         pdf.output(pdf_path)
 
         msg = EmailMessage()
-        msg["Subject"] = f"AI-4-IA Review: {file_number}"  # Using file_number as fallback
+        msg["Subject"] = f"AI-4-IA Review: {file_number}"
         msg["From"] = "noreply@nspxn.com"
         msg["To"] = "info@nspxn.com"
         email_body = f"""NSPXN.com AI4IA Review Report
