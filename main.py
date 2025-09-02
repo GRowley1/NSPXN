@@ -80,7 +80,7 @@ def extract_text_from_docx(file) -> str:
     return text
 
 def extract_field(label, text) -> str:
-    pattern = re.compile(rf"{label}\\s*[:\\-#=]?\\s*(R226\\d+.*|[A-HJ-NPR-Z0-9]{17}|[^\\n\\r;]+)", re.IGNORECASE)
+    pattern = re.compile(rf"{label}\s*[:#=\-]?\s*(R226\d+.*|[A-HJ-NPR-Z0-9]{{17}}|[^\n\r;]+)",re.IGNORECASE)
     matches = pattern.findall(text)
     if matches:
         from collections import Counter
@@ -379,6 +379,7 @@ async def get_client_rules(client_name: str):
     else:
         logger.error(f"Rules not found for client: {client_name}")
         return JSONResponse(status_code=404, content={"error": "Rules not found for this client."})
+
 
 
 
