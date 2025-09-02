@@ -266,7 +266,7 @@ async def vision_review(
 
     try:
         response = client.chat.completions.create(
-            model="gpt-4o",
+            model="gpt-5",
             messages=[{"role": "system", "content": prompt}, vision_message],
             max_tokens=3500
         )
@@ -361,6 +361,7 @@ async def get_client_rules(client_name: str):
     else:
         logger.error(f"Rules not found for client: {client_name}")
         return JSONResponse(status_code=404, content={"error": "Rules not found for this client."})
+
 
 
 
