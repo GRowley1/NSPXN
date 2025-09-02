@@ -16,40 +16,29 @@ from PIL import Image, ImageEnhance, ImageOps, ImageFilter
 import logging
 import uvicorn
 
-# Configure logging
+# ----------------------- App & logging -----------------------
 logging.basicConfig(level=logging.DEBUG, filename='app.log', filemode='a',
                     format='%(asctime)s - %(levelname)s - %(message)s')
 logger = logging.getLogger(__name__)
 
-if "OPENAI_API_KEY" not in os.environ:
-    raise RuntimeError("❌ OPENAI_API_KEY environment variable is NOT set.")
-
 app = FastAPI()
 
-# Global request logging middleware
 @app.middleware("http")
 async def log_requests(request: Request, call_next):
     try:
-        logger.debug(f"Received {request.method} {request.url.path} with headers={dict(request.headers)}")
-        body = await request.body()
-        logger.debug(f"Raw request body (hex): {body.hex()}")
-        form = await request.form() if request.method in ["POST", "PUT"] else None
-        if form:
-            logger.debug(f"Raw form data: {dict(form)}")
+        logger.debug(f"REQ {request.method} {request.url.path}")
         response = await call_next(request)
-        logger.debug(f"Response status: {response.status_code}")
+        logger.debug(f"RES {response.status_code} {request.url.path}")
         return response
     except Exception as e:
-        logger.error(f"Middleware error: {str(e)} with body={body.decode('utf-8', errors='ignore') if 'body' in locals() else 'No body'}")
-        return JSONResponse(status_code=400, content={"error": f"Invalid request: {str(e)}"})
+        logger.exception("Middleware error: %s", e)
+        return JSONResponse(status_code=500, content={"error": str(e)})
 
 app.add_middleware(
     CORSMiddleware,
     allow_origins=[
-        "https://nspxn.com",
-        "https://www.nspxn.com",
-        "http://nspxn.com",
-        "http://www.nspxn.com",
+        "https://nspxn.com", "https://www.nspxn.com",
+        "http://nspxn.com", "http://www.nspxn.com",
         "https://nspxn.onrender.com"
     ],
     allow_credentials=True,
@@ -79,8 +68,8 @@ def _discover_rules_files() -> List[Path]:
     files: List[Path] = []
     for d in CLIENT_RULES_DIRS:
         if d.is_dir():
-            files.extend(map(Path, glob.glob(str(d / "*.docx"))))
-            files.extend(map(Path, glob.glob(str(d / "*.txt"))))
+            files.extend(map(Path, glob.glob(str(d / '*.docx'))))
+            files.extend(map(Path, glob.glob(str(d / '*.txt'))))
     return files
 
 def load_rules_dir(force_refresh: bool = False) -> Dict[str, str]:
@@ -132,8 +121,8 @@ def resolve_rules(selected_client: Optional[str], pasted_text: Optional[str]) ->
         return next(iter(rules_map.values()))
 
     return ""
-# ---------------------------------------------------------------------------------------------------
 
+# ----------------------- OCR helpers -----------------------
 def preprocess_image(img: Image.Image) -> Image.Image:
     img = img.convert("L")
     img = ImageEnhance.Contrast(img).enhance(2.0)
@@ -185,62 +174,85 @@ def extract_text_from_images(image_files: List[UploadFile]) -> str:
             logger.error(f"Image {i} OCR error: {str(e)}")
     return text_output
 
+# ----------------------- API -----------------------
+@app.get("/")
+async def root():
+    return {"status": "ok"}
+
+@app.get("/client-rules/{client_name}")
+async def get_client_rules(client_name: str, force_refresh: bool = False):
+    try:
+        rules_map = load_rules_dir(force_refresh=force_refresh)
+    except Exception as e:
+        logger.exception("Failed loading rules dir: %s", e)
+        return JSONResponse(status_code=500, content={"error": f"Failed loading rules: {str(e)}"})
+
+    if not rules_map:
+        return JSONResponse(status_code=404, content={
+            "error": "No rules files found.",
+            "searched_dirs": [str(p) for p in CLIENT_RULES_DIRS],
+            "available": []
+        })
+
+    key = next((k for k in rules_map if k.lower() == client_name.lower()), None)
+    if not key:
+        lowsel = client_name.lower()
+        partials = [k for k in rules_map if lowsel in k.lower()]
+        if len(partials) == 1:
+            key = partials[0]
+
+    if key:
+        text = rules_map[key]
+        logger.debug("Resolved client '%s' → rule '%s' (%d chars).", client_name, key, len(text))
+        return {"name": key, "text": text}
+
+    return JSONResponse(status_code=404, content={
+        "error": f"Rules not found for '{client_name}'.",
+        "available": list(rules_map.keys())
+    })
+
 @app.post("/vision-review")
 async def vision_review(
-    request: Request,  # ✅ fix: we log headers below, so accept request
+    request: Request,
     file_number: str = Form(...),
     ia_company: str = Form(...),
     appraiser_id: str = Form(...),
-    # ✅ estimate (PDF/DOCX) + images
     estimate: UploadFile = File(...),
     image_files: List[UploadFile] = File(...),
-    # ✅ NEW: client rules support (backward compatible with multiple field names)
     client_name: Optional[str] = Form(default=None),
     client_rules: Optional[str] = Form(default=None),
     rules_text: Optional[str] = Form(default=None),
     rules: Optional[str] = Form(default=None),
     guidelines: Optional[str] = Form(default=None),
 ):
-    logger.debug(f"Starting vision_review with headers={dict(request.headers)}")
-    # Validate form fields with detailed logging
-    logger.debug(f"Received form data: file_number='{file_number}', ia_company='{ia_company}', appraiser_id='{appraiser_id}'")
+    logger.debug(f"Starting vision_review: file_number={file_number}, ia_company={ia_company}")
     if not all([field.strip() for field in [file_number, ia_company, appraiser_id]]):
         missing = [name for name, val in [('file_number', file_number), ('ia_company', ia_company), ('appraiser_id', appraiser_id)] if not val.strip()]
-        logger.error(f"Validation failed: Empty fields - {', '.join(missing)}")
         return JSONResponse(status_code=422, content={"error": f"Missing or empty required fields: {', '.join(missing)}"})
-    
-    # Validate estimate file type
-    logger.debug(f"Estimate file: filename='{estimate.filename}', content_type='{estimate.content_type}'")
-    if not estimate.filename.lower().endswith(('.pdf', '.docx')):
-        logger.error(f"Validation failed: Invalid estimate file type - {estimate.filename}")
-        return JSONResponse(status_code=422, content={"error": f"Estimate must be a PDF or DOCX file, got {estimate.filename}"})
-    
-    # Process estimate
-    estimate_text = extract_text_from_pdf(estimate) if estimate.filename.lower().endswith('.pdf') else extract_text_from_docx(estimate)
-    if "OCR error" in estimate_text:
-        logger.error(f"OCR error on estimate {estimate.filename}: {estimate_text}")
-        return JSONResponse(status_code=422, content={"error": "Failed to extract text from estimate due to OCR error"})
-    
-    # Process images
-    image_text = extract_text_from_images(image_files)
-    if not image_text.strip():
-        logger.warning("No valid text extracted from images")
 
-    # ✅ Resolve client guidelines:
-    #  - pasted text from any known field names wins
-    #  - else load by client_name from /client_rules
+    # Estimate text
+    if estimate.filename.lower().endswith('.pdf'):
+        estimate_text = extract_text_from_pdf(estimate)
+    elif estimate.filename.lower().endswith('.docx'):
+        estimate_text = extract_text_from_docx(estimate)
+    else:
+        return JSONResponse(status_code=422, content={"error": f"Estimate must be PDF or DOCX, got {estimate.filename}"})
+    if "OCR error" in estimate_text:
+        return JSONResponse(status_code=422, content={"error": "Failed to extract text from estimate due to OCR error"})
+
+    # Image text
+    image_text = extract_text_from_images(image_files)
+
+    # Resolve rules
     pasted_candidates = [client_rules, rules_text, rules, guidelines]
-    pasted_merged = next((x for x in pasted_candidates if (x or "").strip()), "")
+    pasted_merged = next((x for x in pasted_candidates if (x or '').strip()), '')
     effective_rules = resolve_rules(client_name, pasted_merged)
     if not effective_rules:
-        # Keep behavior graceful but explicit
         logger.warning("Client rules NOT resolved. client_name=%r; pasted_present=%r",
-                       client_name, any((x or "").strip() for x in pasted_candidates))
+                       client_name, any((x or '').strip() for x in pasted_candidates))
         effective_rules = "No client guidelines available"
 
-    logger.debug(f"Client rules (resolved) preview: {effective_rules[:500]}...")
-
-    # Simple comparison (unchanged, but now uses effective_rules)
+    # Simple comparison output
     comparison = "Comparison Report:\n"
     comparison += f"Estimate Text: {estimate_text[:500]}...\n"
     comparison += f"Image Text: {image_text[:500]}...\n"
@@ -251,34 +263,34 @@ async def vision_review(
     else:
         comparison += "No matching terms found.\n"
 
-    # Generate PDF
+    # Build PDF
     pdf = FPDF()
     pdf.add_page()
-    pdf.add_font("DejaVu", "", "DejaVuSans.ttf", uni=True)
-    pdf.set_font("DejaVu", size=11)
     try:
-        pdf.cell(200, 10, txt="NSPXN.com Comparison Report", ln=True, align='C')
-        pdf.ln(5)
-        pdf.multi_cell(0, 10, f"File Number: {file_number}")
-        pdf.multi_cell(0, 10, f"IA Company: {ia_company}")
-        pdf.multi_cell(0, 10, f"Appraiser ID #: {appraiser_id}")
-        pdf.ln(5)
-        pdf.multi_cell(0, 10, "Comparison Summary:", align='L')
-        pdf.set_font("DejaVu", size=9)
-        pdf.multi_cell(0, 10, comparison)
+        pdf.add_font("DejaVu", "", "DejaVuSans.ttf", uni=True)
+        pdf.set_font("DejaVu", size=11)
+    except Exception:
+        pdf.set_font("Arial", size=11)
+    pdf.cell(200, 10, txt="NSPXN.com Comparison Report", ln=True, align='C')
+    pdf.ln(5)
+    pdf.multi_cell(0, 10, f"File Number: {file_number}")
+    pdf.multi_cell(0, 10, f"IA Company: {ia_company}")
+    pdf.multi_cell(0, 10, f"Appraiser ID #: {appraiser_id}")
+    pdf.ln(5)
+    pdf.multi_cell(0, 10, "Comparison Summary:", align='L')
+    pdf.set_font(pdf.font_family, size=9)
+    pdf.multi_cell(0, 10, comparison)
 
-        pdf_path = f"{file_number}.pdf"
-        pdf.output(pdf_path)
-    except Exception as pdf_e:
-        logger.error(f"PDF generation error: {str(pdf_e)}")
-        return JSONResponse(status_code=500, content={"error": f"PDF generation failed: {str(pdf_e)}", "comparison": comparison})
+    pdf_path = f"{file_number}.pdf"
+    pdf.output(pdf_path)
 
-    # Send email
-    msg = EmailMessage()
-    msg["Subject"] = f"Comparison Report: {file_number}"
-    msg["From"] = "noreply@nspxn.com"
-    msg["To"] = "info@nspxn.com"
-    email_body = f"""NSPXN.com Comparison Report
+    # Email (best-effort; ignore failures)
+    try:
+        msg = EmailMessage()
+        msg["Subject"] = f"Comparison Report: {file_number}"
+        msg["From"] = "noreply@nspxn.com"
+        msg["To"] = "info@nspxn.com"
+        msg.set_content(f"""NSPXN.com Comparison Report
 
 File Number: {file_number}
 IA Company: {ia_company}
@@ -286,14 +298,12 @@ Appraiser ID #: {appraiser_id}
 
 Comparison Summary:
 {comparison}
-"""
-    msg.set_content(email_body.encode("utf-8", errors="ignore").decode("utf-8"))
-    with smtplib.SMTP_SSL("mail.tierra.net", 465) as smtp:
-        try:
+""")
+        with smtplib.SMTP_SSL("mail.tierra.net", 465) as smtp:
             smtp.login("info@nspxn.com", "grr2025GRR")
             smtp.send_message(msg)
-        except Exception as email_e:
-            logger.error(f"Email sending error: {str(email_e)}")
+    except Exception as email_e:
+        logger.error(f"Email sending error: {str(email_e)}")
 
     return {
         "comparison": comparison,
@@ -306,6 +316,8 @@ if __name__ == "__main__":
     port = int(os.getenv("PORT", 8000))
     logger.debug(f"Starting server on port {port}")
     uvicorn.run(app, host="0.0.0.0", port=port)
+
+
 
 
 
