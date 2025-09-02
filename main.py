@@ -161,13 +161,17 @@ async def vision_review(
     """
 
     try:
+        logger.debug(f"OpenAI request: prompt={prompt[:500]}..., vision_message={vision_message}")
         response = client.chat.completions.create(
             model="gpt-4o",
             messages=[{"role": "system", "content": prompt}, vision_message],
             max_tokens=3500
         )
-        gpt_output = response.choices[0].message.content or "⚠️ GPT returned no output."
-        logger.debug(f"GPT output: {gpt_output[:1000]}...")
+        gpt_output = response.choices[0].message.content if response.choices and response.choices[0].message else "⚠️ No GPT output."
+        logger.debug(f"OpenAI response: {gpt_output[:1000]}...")
+        if gpt_output.startswith("⚠️"):
+            logger.error(f"OpenAI API returned no content: response={response}")
+            return JSONResponse(status_code=500, content={"error": "OpenAI API returned no content", "review": gpt_output})
 
         # Generate PDF
         pdf = FPDF()
