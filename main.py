@@ -22,7 +22,7 @@ logging.basicConfig(level=logging.DEBUG, filename='app.log', filemode='a',
 logger = logging.getLogger(__name__)
 
 if "OPENAI_API_KEY" not in os.environ:
-    raise RuntimeError("\u274c OPENAI_API_KEY environment variable is NOT set.")
+    raise RuntimeError("\\u274c OPENAI_API_KEY environment variable is NOT set.")
 client = OpenAI(api_key=os.environ["OPENAI_API_KEY"])
 
 app = FastAPI()
@@ -61,10 +61,10 @@ def extract_text_from_pdf(file) -> str:
             except Exception as e:
                 logger.warning(f"PSM 3 failed for page {i}: {str(e)}, retrying with PSM 6")
                 ocr_text = pytesseract.image_to_string(processed, lang="eng", config='--psm 6')
-            if len(ocr_text.strip()) < 50 or re.search(r"[\:/\d\s]{50,}", ocr_text):
+            if len(ocr_text.strip()) < 50 or re.search(r"[\\:/\\d\\s]{50,}", ocr_text):
                 logger.warning(f"Page {i} OCR output skipped (garbled): {ocr_text[:100]}...")
                 continue
-            text_output += f"\n[Page {i}]\n{ocr_text}"
+            text_output += f"\\n[Page {i}]\\n{ocr_text}"
             if i == 5:
                 logger.debug(f"Page 5 OCR (labor/tax): {ocr_text[:500]}...")
         if not text_output.strip():
@@ -72,15 +72,15 @@ def extract_text_from_pdf(file) -> str:
         return text_output
     except Exception as e:
         logger.error(f"OCR error (possible network failure): {str(e)}")
-        return f"\n\u274c OCR error during combined extraction: {str(e)}"
+        return f"\\n\\u274c OCR error during combined extraction: {str(e)}"
 def extract_text_from_docx(file) -> str:
     doc = Document(file)
-    text = '\n'.join(p.text for p in doc.paragraphs if p.text.strip())
+    text = '\\n'.join(p.text for p in doc.paragraphs if p.text.strip())
     logger.debug(f"Extracted DOCX text: {text[:500]}...")
     return text
 
 def extract_field(label, text) -> str:
-    pattern = re.compile(rf"{label}\s*[:\-#=]?\s*(R226\d+.*|[A-HJ-NPR-Z0-9]{17}|[^\n\r;]+)", re.IGNORECASE)
+    pattern = re.compile(rf"{label}\\s*[:\\-#=]?\\s*(R226\\d+.*|[A-HJ-NPR-Z0-9]{17}|[^\\n\\r;]+)", re.IGNORECASE)
     matches = pattern.findall(text)
     if matches:
         from collections import Counter
@@ -137,13 +137,13 @@ def check_required_photos(image_files: List[UploadFile], ocr_text: str) -> List[
             image = Image.open(io.BytesIO(img.file.read()))
             processed = preprocess_image(image)
             ocr = pytesseract.image_to_string(processed, lang="eng")
-            if re.search(r"\b[A-HJ-NPR-Z0-9]{17}\b", ocr, re.IGNORECASE):
+            if re.search(r"\\b[A-HJ-NPR-Z0-9]{17}\\b", ocr, re.IGNORECASE):
                 found_photos.append("vin")
                 logger.debug("Found VIN photo via image OCR")
-            if re.search(r"\d{1,3}(,\d{3})*\s*(miles|km)", ocr, re.IGNORECASE):
+            if re.search(r"\\d{1,3}(,\\d{3})*\\s*(miles|km)", ocr, re.IGNORECASE):
                 found_photos.append("odometer")
                 logger.debug("Found odometer photo via image OCR")
-            if re.search(r"(license|registration)\s*plate|\b[A-Z0-9]{5,8}\b", ocr, re.IGNORECASE):
+            if re.search(r"(license|registration)\\s*plate|\\b[A-Z0-9]{5,8}\\b", ocr, re.IGNORECASE):
                 found_photos.append("license plate")
                 logger.debug("Found license plate photo via image OCR")
             corner_matches_img = [term for term in corner_keywords if term in ocr.lower()]
@@ -164,7 +164,7 @@ def check_labor_and_tax_score(text: str, client_rules: str) -> int:
     required_sections = ["body labor", "paint labor", "mechanical labor", "structural labor"]
     found_sections = []
     for section in required_sections:
-        if re.search(rf"{section}[:\s]*(?:\$?\d+\.?\d*\s*(?:/hr|hour)?)", text, re.IGNORECASE):
+        if re.search(rf"{section}[:\\s]*(?:\\$?\\d+\\.?\\d*\\s*(?:/hr|hour)?)", text, re.IGNORECASE):
             found_sections.append(section)
             logger.debug(f"Found labor rate for {section}")
     if not found_sections:
@@ -173,7 +173,7 @@ def check_labor_and_tax_score(text: str, client_rules: str) -> int:
     else:
         logger.debug(f"Found labor rates in sections: {found_sections}")
     if re.search(r"utilize applicable tax rate", client_rules, re.IGNORECASE):
-        if not re.search(r"tax[:\s]*(?:\$?\d+\.?\d*|\d+\.?\d*%?)", text, re.IGNORECASE):
+        if not re.search(r"tax[:\\s]*(?:\\$?\\d+\\.?\\d*|\\d+\\.?\\d*%?)", text, re.IGNORECASE):
             score_adj -= 25
             logger.debug("Tax rate missing")
         else:
@@ -215,17 +215,17 @@ async def vision_review(
         else:
             texts.append(f"⚠️ Skipped unsupported file: {file.filename}")
 
-    combined_text = '\n'.join(texts).lower()
+    combined_text = '\\n'.join(texts).lower()
     logger.debug(f"Combined text: {combined_text[:1000]}...")
     logger.debug(f"Client rules: {client_rules[:500]}...")
     advisor_confirmed = advisor_report_present(texts, image_files)
-    advisor_hint = "\n\nCONFIRMED: CCC Advisor Report is included based on OCR or filename." if advisor_confirmed else ""
+    advisor_hint = "\\n\\nCONFIRMED: CCC Advisor Report is included based on OCR or filename." if advisor_confirmed else ""
     missing_photos = check_required_photos(image_files, combined_text)
-    photo_hint = f"\n\nMISSING PHOTOS: {', '.join(missing_photos) if missing_photos else 'None'}"
+    photo_hint = f"\\n\\nMISSING PHOTOS: {', '.join(missing_photos) if missing_photos else 'None'}"
 
     vision_message = {"role": "user", "content": []}
     if texts:
-        vision_message["content"].append({"type": "text", "text": '\n\n'.join(texts) + advisor_hint + photo_hint})
+        vision_message["content"].append({"type": "text", "text": '\\n\\n'.join(texts) + advisor_hint + photo_hint})
     if images:
         vision_message["content"].extend(images)
     prompt = f"""
@@ -270,12 +270,25 @@ async def vision_review(
             messages=[{"role": "system", "content": prompt}, vision_message],
             max_completion_tokens=3500
         )
-        # GPT-5 often returns content as a list of dicts under .message.content
-        msg_content = response.choices[0].message.get("content", [])
-        if isinstance(msg_content, list):
-            gpt_output = "".join([part.get("text", "") for part in msg_content])
-        else:
-            gpt_output = msg_content or "⚠️ GPT returned no output."
+        # ---- Robust extraction for ChatCompletionMessage across SDKs ----
+        msg_obj = response.choices[0].message
+        gpt_output = getattr(msg_obj, "content", None)
+        if gpt_output is None:
+            try:
+                msg_dict = msg_obj.model_dump()
+                gpt_output = msg_dict.get("content")
+            except Exception:
+                gpt_output = None
+        if isinstance(gpt_output, list):
+            parts = []
+            for part in gpt_output:
+                if isinstance(part, dict) and part.get("type") == "text":
+                    parts.append(part.get("text", ""))
+                elif isinstance(part, str):
+                    parts.append(part)
+            gpt_output = "".join(parts)
+        if not gpt_output or not str(gpt_output).strip():
+            gpt_output = "⚠️ GPT returned no output."
         logger.debug(f"GPT output: {gpt_output[:1000]}...")
         claim_number = extract_field("Claim", gpt_output)
         vehicle = extract_field("Vehicle", gpt_output)
@@ -357,7 +370,7 @@ async def get_client_rules(client_name: str):
     if os.path.exists(file_path):
         try:
             doc = Document(file_path)
-            text = '\n'.join([p.text for p in doc.paragraphs if p.text.strip()])
+            text = '\\n'.join([p.text for p in doc.paragraphs if p.text.strip()])
             logger.debug(f"Client rules for {client_name}: {text[:500]}...")
             return {"text": text}
         except Exception as e:
@@ -366,6 +379,7 @@ async def get_client_rules(client_name: str):
     else:
         logger.error(f"Rules not found for client: {client_name}")
         return JSONResponse(status_code=404, content={"error": "Rules not found for this client."})
+
 
 
 
