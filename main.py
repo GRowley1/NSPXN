@@ -136,29 +136,49 @@ async def vision_review(
     if not image_text.strip():
         logger.warning("No valid text extracted from images")
 
-    # Prepare data for OpenAI
+    # Prepare data for OpenAI with hints
+    advisor_confirmed = any("advisor report" in t.lower() for t in [estimate_text, image_text]) or any("ccc advisor report" in t.lower() for t in [estimate_text, image_text])
+    advisor_hint = "\n\nCONFIRMED: CCC Advisor Report is included based on OCR or filename." if advisor_confirmed else ""
+    missing_photos = ["four corners", "odometer", "vin", "license plate"] if not image_text.strip() else []
+    photo_hint = f"\n\nMISSING PHOTOS: {', '.join(missing_photos) if missing_photos else 'None'}"
+
     vision_message = {"role": "user", "content": [
-        {"type": "text", "text": f"Estimate Text:\n{estimate_text}\n\nImage Text:\n{image_text}\n\nClient Rules:\n{client_rules}"}
+        {"type": "text", "text": f"Estimate Text:\n{estimate_text}\n\nImage Text:\n{image_text}{advisor_hint}{photo_hint}\n\nClient Rules:\n{client_rules}"}
     ]}
     prompt = f"""
-    You are an AI auto damage auditor tasked with comparing an estimate, photos, and client guidelines. Provide a full review.
+    You are an AI auto damage auditor. You have access to both text and images (or scans).
 
-    INSTRUCTIONS:
-    - Analyze the provided 'Estimate Text' and 'Image Text' to identify key details (e.g., labor rates, tax rates, vehicle info, damage descriptions).
-    - Compare these details against the 'Client Rules' to assess compliance and highlight matches or discrepancies.
-    - Include a section titled 'Full Review' with:
-      - A summary of extracted details from the estimate and photos.
-      - A comparison against client rules, noting any deviations or missing elements.
-      - Specific examples from the text where possible.
-    - Do not apply deductions or scores unless explicitly required by the client rules.
-    - Use only the provided text and images; do not assume additional data.
+    IMPORTANT RULES:
+    - If labor rates are missing for ALL sections (body, paint, mechanical, structural), reduce Compliance Score by 50%. If any labor rate is present (e.g., body or paint), no deduction applies.
+    - If tax is required by client rules but no tax rate or amount (e.g., percentage or dollar value) is found, reduce Compliance Score by 25%.
+    - Never assume compliance if required elements (like labor rates, taxes, or photos) are missing.
+    - Treat mentions or OCR detection of "Clean Retail Value", "NADA Value", "Fair Market Range", "Estimated Trade-In Value", "market value", "J.D. Power", "JD Power", or "Average Price Paid" as CONFIRMATION that the retail/market value requirement is met.
+    - Treat mentions or OCR detection of "CCC Advisor Report" or "Advisor Report" as CONFIRMATION that the Advisor Report was included.
+    - Do NOT rely on assumptions. Only acknowledge presence of documents or data when clearly present in text or visible in photos.
+    - Only evaluate Total Loss protocols if the estimate or documentation explicitly indicates the vehicle was a total loss (e.g., mentions "total loss" or "salvage"). If declared a total loss, no forms or bids are required.
+    - Do not assume a total loss condition based on estimate formatting or value alone.
+    - If no mention of Total Loss or salvage is found, do not apply deductions for missing Total Loss evaluation details.
+    - For parts usage, flag non-compliance if alternative parts (e.g., LKQ, aftermarket) are used for vehicles of the current model year (2025) or previous year (2024), as per client rules. Deduct 25% for this violation. For older models (e.g., 2012), LKQ/aftermarket parts are compliant.
+    - Deduct 25% from Compliance Score for each missing required photo type (four corners, odometer, VIN, license plate).
+    - For four corners photos, the requirement is met if at least two corner views (e.g., front left, front right, rear left, rear right, or synonyms like left front, right front, left rear, right rear) are present in text or images, as indicated in the MISSING PHOTOS hint.
+    - Do NOT apply deductions for unmentioned elements or assumed violations. Deductions must be explicitly listed in the findings and supported by evidence in the input or client rules.
+    - The Compliance Score starts at 100% and is only reduced by explicit deductions for labor rates (50% if all missing), tax (25% if missing), photos (25% per missing type), or parts (25% for violations).
+    - Respect the MISSING PHOTOS hint provided in the input to determine photo compliance.
 
-    At the top of your response, include:
-    File Number: (from input)
-    IA Company: (from input)
-    Appraiser ID: (from input)
+    PHOTO EVIDENCE RULES:
+    - Required photos: four corners, odometer, VIN, license plate.
+    - Four corners is satisfied if at least two views (e.g., front left, front right, rear left, rear right, or synonyms like left front, right front, left rear, right rear) are detected in text or images, as indicated in the MISSING PHOTOS hint.
+    - If photo types are missing (indicated in input as "MISSING PHOTOS"), deduct 25% per missing type from Compliance Score.
+    - Respect the MISSING PHOTOS hint provided in the input to determine photo compliance.
 
-    Then provide the 'Full Review' section.
+    At the top of your response, ALWAYS include:
+    Claim #: (from estimate)
+    VIN: (from estimate or photos)
+    Vehicle: (make, model, mileage from estimate)
+    Compliance Score: (0–100%)
+
+    Then summarize findings and rule violations based STRICTLY on the following rules:
+    {client_rules}
     """
 
     try:
@@ -169,42 +189,37 @@ async def vision_review(
             max_tokens=3500
         )
         logger.debug(f"OpenAI raw response: {json.dumps(response.dict(), default=str)[:1000]}...")
-        gpt_output = response.choices[0].message.content if response.choices and response.choices[0].message and response.choices[0].message.content else "⚠️ No GPT output."
+        gpt_output = response.choices[0].message.content or "⚠️ GPT returned no output."
         logger.debug(f"OpenAI extracted content: {gpt_output[:1000]}...")
-        if gpt_output.startswith("⚠️"):
-            logger.error(f"OpenAI API returned no content: raw_response={json.dumps(response.dict(), default=str)}")
-            return JSONResponse(status_code=500, content={"error": "OpenAI API returned no content", "review": gpt_output})
 
-        # Generate PDF
         pdf = FPDF()
         pdf.add_page()
         pdf.add_font("DejaVu", "", "DejaVuSans.ttf", uni=True)
         pdf.set_font("DejaVu", size=11)
-        pdf.cell(200, 10, txt="NSPXN.com Comparison Review Report", ln=True, align='C')
+        pdf.cell(200, 10, txt="NSPXN.com AI Review Report", ln=True, align='C')
         pdf.ln(5)
         pdf.multi_cell(0, 10, f"File Number: {file_number}")
         pdf.multi_cell(0, 10, f"IA Company: {ia_company}")
         pdf.multi_cell(0, 10, f"Appraiser ID #: {appraiser_id}")
         pdf.ln(5)
-        pdf.multi_cell(0, 10, "Full Review:", align='L')
+        pdf.multi_cell(0, 10, "AI-4-IA Review Summary:", align='L')
         pdf.set_font("DejaVu", size=9)
         pdf.multi_cell(0, 10, gpt_output)
 
         pdf_path = f"{file_number}.pdf"
         pdf.output(pdf_path)
 
-        # Send email
         msg = EmailMessage()
-        msg["Subject"] = f"Comparison Review Report: {file_number}"
+        msg["Subject"] = f"AI-4-IA Review: {file_number}"  # Using file_number as fallback
         msg["From"] = "noreply@nspxn.com"
         msg["To"] = "info@nspxn.com"
-        email_body = f"""NSPXN.com Comparison Review Report
+        email_body = f"""NSPXN.com AI4IA Review Report
 
 File Number: {file_number}
 IA Company: {ia_company}
 Appraiser ID #: {appraiser_id}
 
-Full Review:
+AI Review Summary:
 {gpt_output}
 """
         msg.set_content(email_body.encode("utf-8", errors="ignore").decode("utf-8"))
