@@ -270,7 +270,12 @@ async def vision_review(
             messages=[{"role": "system", "content": prompt}, vision_message],
             max_completion_tokens=3500
         )
-        gpt_output = response.choices[0].message.content or "⚠️ GPT returned no output."
+        # GPT-5 often returns content as a list of dicts under .message.content
+        msg_content = response.choices[0].message.get("content", [])
+        if isinstance(msg_content, list):
+            gpt_output = "".join([part.get("text", "") for part in msg_content])
+        else:
+            gpt_output = msg_content or "⚠️ GPT returned no output."
         logger.debug(f"GPT output: {gpt_output[:1000]}...")
         claim_number = extract_field("Claim", gpt_output)
         vehicle = extract_field("Vehicle", gpt_output)
@@ -361,6 +366,7 @@ async def get_client_rules(client_name: str):
     else:
         logger.error(f"Rules not found for client: {client_name}")
         return JSONResponse(status_code=404, content={"error": "Rules not found for this client."})
+
 
 
 
