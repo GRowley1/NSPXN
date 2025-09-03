@@ -1,3 +1,4 @@
+```text
 fastapi
 uvicorn
 python-multipart
@@ -7,6 +8,4 @@ pdf2image
 pytesseract
 Pillow
 openai
-torch
-ultralytics
-opencv-python-headless
+```

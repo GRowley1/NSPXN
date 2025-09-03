@@ -1,3 +1,4 @@
+```python
 from fastapi import FastAPI, File, UploadFile, Form
 from fastapi.responses import JSONResponse, FileResponse
 from fastapi.middleware.cors import CORSMiddleware
@@ -17,7 +18,7 @@ from openai import OpenAI
 import logging
 
 # Configure logging
-logging.basicConfig(level=logging.DEBUG, filename='app.log', filemode='a',
+logging.basicConfig(level=logging.DEBUG, filename='/app/app.log', filemode='a',
                     format='%(asctime)s - %(levelname)s - %(message)s')
 logger = logging.getLogger(__name__)
 
@@ -52,7 +53,7 @@ def preprocess_image(img: Image.Image) -> Image.Image:
 def extract_text_from_pdf(file) -> str:
     try:
         file.seek(0)
-        images = convert_from_bytes(file.read(), dpi=200)  # Stable DPI
+        images = convert_from_bytes(file.read(), dpi=200)
         text_output = ""
         for i, img in enumerate(images, 1):
             processed = preprocess_image(img)
@@ -69,8 +70,8 @@ def extract_text_from_pdf(file) -> str:
             logger.error("No valid text extracted from PDF")
         return text_output
     except Exception as e:
-        logger.error(f"OCR error (possible network failure): {str(e)}")
-        return f"\n\u274c OCR error during combined extraction: {str(e)}"
+        logger.error(f"OCR error: {str(e)}")
+        return f"\n\u274c OCR error: {str(e)}"
 
 def extract_text_from_docx(file) -> str:
     doc = Document(file)
@@ -79,40 +80,24 @@ def extract_text_from_docx(file) -> str:
     return text
 
 def extract_field(label: str, text: str) -> str:
-    """
-    Extract the value that appears after an exact label (case-insensitive).
-    Works with labels like 'Claim #', 'VIN', 'Vehicle', etc., without regex.
-    """
     if not label or not text:
         return "N/A"
-
     low_text = text.lower()
     low_label = label.lower()
-
     pos = low_text.find(low_label)
     if pos == -1:
         return "N/A"
-
-    # Start right after the label (exact text match)
     i = pos + len(label)
-
-    # Skip common separators/spaces after the label
     while i < len(text) and text[i] in " \t:#=-":
         i += 1
-
-    # Capture up to end-of-line or semicolon
     j = i
     while j < len(text) and text[j] not in "\r\n;":
         j += 1
-
     value = text[i:j].strip()
-
-    # Special handling for VIN: normalize to a 17-char VIN if present
     if label.strip().lower() == "vin":
         m = re.search(r"\b[A-HJ-NPR-Z0-9]{17}\b", value, flags=re.IGNORECASE)
         if m:
             return m.group(0).upper()
-
     return value or "N/A"
 
 @app.get("/")
@@ -132,13 +117,11 @@ async def vision_review(
 
     images = []
     texts = []
-    image_files = []
 
     for file in files:
         content = await file.read()
         name = file.filename.lower()
         if name.endswith((".jpg", ".jpeg", ".png")):
-            image_files.append(file)
             b64 = base64.b64encode(content).decode("utf-8")
             images.append({"type": "image_url", "image_url": {"url": f"data:image/jpeg;base64,{b64}"}})
         elif name.endswith(".pdf"):
@@ -180,11 +163,10 @@ async def vision_review(
 
     try:
         response = client.chat.completions.create(
-            model="gpt-5",
+            model="gpt-4-turbo",  # Fallback to a known model; replace with "gpt-5" if confirmed available
             messages=[{"role": "system", "content": prompt}, vision_message],
             max_completion_tokens=3500
         )
-        # Robust extraction for ChatCompletionMessage
         msg_obj = response.choices[0].message
         gpt_output = getattr(msg_obj, "content", None)
         if gpt_output is None:
@@ -202,7 +184,8 @@ async def vision_review(
                     parts.append(part)
             gpt_output = "".join(parts)
         if not gpt_output or not str(gpt_output).strip():
-            gpt_output = "⚠️ GPT returned no output."
+            logger.error("GPT returned no output or empty response")
+            return JSONResponse(status_code=500, content={"error": "AI review failed: No output from GPT", "gpt_output": "⚠️ GPT returned no output."})
         logger.debug(f"GPT output: {gpt_output[:1000]}...")
         claim_number = extract_field("Claim #", gpt_output)
         vin = extract_field("VIN", gpt_output)
@@ -213,6 +196,7 @@ async def vision_review(
             score = int(score_text.strip("%"))
         except:
             score = 100
+            logger.warning("Invalid Compliance Score format; defaulting to 100")
 
         logger.debug(f"Score from AI: {score}")
 
@@ -262,7 +246,7 @@ AI Review Summary:
 
     except Exception as e:
         logger.error(f"API error: {str(e)}")
-        return JSONResponse(status_code=500, content={"error": str(e), "gpt_output": "⚠️ AI review failed."})
+        return JSONResponse(status_code=500, content={"error": f"AI review failed: {str(e)}", "gpt_output": "⚠️ AI review failed."})
 
 @app.get("/download-pdf")
 async def download_pdf(file_number: str):
@@ -288,31 +272,4 @@ async def get_client_rules(client_name: str):
     else:
         logger.error(f"Rules not found for client: {client_name}")
         return JSONResponse(status_code=404, content={"error": "Rules not found for this client."})
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
+```
