@@ -20,6 +20,9 @@ WORKDIR /app
 COPY requirements.txt .
 RUN bash -c "for i in {1..5}; do pip install --no-cache-dir -r requirements.txt && break || sleep 5; done"
 
+# Copy font file for PDF generation
+COPY DejaVuSans.ttf /app/DejaVuSans.ttf
+
 # Copy all source files
 COPY . .
 
@@ -32,5 +35,6 @@ ENV QT_QPA_PLATFORM=offscreen
 EXPOSE $PORT
 
 # Start FastAPI via uvicorn (use $PORT)
+CMD ["sh", "-c", "uvicorn main:app --host 0.0.0.0 --port $PORT"]
 CMD ["sh", "-c", "uvicorn main:app --host 0.0.0.0 --port $PORT"]
 
