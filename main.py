@@ -81,32 +81,41 @@ def extract_text_from_docx(file) -> str:
 
 def extract_field(label: str, text: str) -> str:
     """
-    Extracts a value following a labeled field.
-    Handles labels that include regex metacharacters by escaping them.
-    Examples it can capture after the label:
-      - Claim numbers like R226... (first alternative)
-      - VINs (17 chars A-HJ-NPR-Z0-9)
-      - Or any run of non-newline text as a fallback
+    Extract the value that appears after an exact label (case-insensitive),
+    e.g., label 'Claim #' matches "... Claim #: 011778-030748-AP-01".
+    We intentionally avoid regex on 'label' to prevent meta-char issues.
     """
-    if not label:
+    if not label or not text:
         return "N/A"
 
-    safe_label = re.escape(label)  # ← critical fix
+    low_text = text.lower()
+    low_label = label.lower()
 
-    # Place '-' at the end of the class so it's not parsed as a range
-    # Double the curly braces for f-strings around 17
-    pattern = re.compile(
-        rf"{safe_label}\s*[:#=\-]?\s*(R226\d+.*|[A-HJ-NPR-Z0-9]{{17}}|[^\n\r;]+)",
-        re.IGNORECASE
-    )
+    pos = low_text.find(low_label)
+    if pos == -1:
+        return "N/A"
 
-    matches = pattern.findall(text or "")
-    if matches:
-        from collections import Counter
-        return Counter(matches).most_common(1)[0][0].strip()
+    # Start right after the label
+    i = pos + len(label)
 
-    return "N/A"
+    # Skip optional separators/spaces right after the label
+    while i < len(text) and text[i] in " \t:#=-":
+        i += 1
 
+    # Capture until newline or semicolon
+    j = i
+    while j < len(text) and text[j] not in "\r\n;":
+        j += 1
+
+    value = text[i:j].strip()
+
+    # If they want VIN detection when label='VIN', normalize that too:
+    if label.strip().lower() == "vin":
+        m = re.search(r"\b[A-HJ-NPR-Z0-9]{17}\b", value, flags=re.IGNORECASE)
+        if m:
+            return m.group(0).upper()
+
+    return value or "N/A"
 
 def advisor_report_present(texts: List[str], image_files: List[UploadFile]) -> bool:
     for t in texts:
@@ -400,6 +409,7 @@ async def get_client_rules(client_name: str):
     else:
         logger.error(f"Rules not found for client: {client_name}")
         return JSONResponse(status_code=404, content={"error": "Rules not found for this client."})
+
 
 
 
