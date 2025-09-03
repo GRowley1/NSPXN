@@ -81,9 +81,8 @@ def extract_text_from_docx(file) -> str:
 
 def extract_field(label: str, text: str) -> str:
     """
-    Extract the value that appears after an exact label (case-insensitive),
-    e.g., label 'Claim #' matches "... Claim #: 011778-030748-AP-01".
-    We intentionally avoid regex on 'label' to prevent meta-char issues.
+    Extract the value that appears after an exact label (case-insensitive).
+    Works with labels like 'Claim #', 'VIN', 'Vehicle', etc., without regex.
     """
     if not label or not text:
         return "N/A"
@@ -95,21 +94,21 @@ def extract_field(label: str, text: str) -> str:
     if pos == -1:
         return "N/A"
 
-    # Start right after the label
+    # Start right after the label (exact text match)
     i = pos + len(label)
 
-    # Skip optional separators/spaces right after the label
+    # Skip common separators/spaces after the label
     while i < len(text) and text[i] in " \t:#=-":
         i += 1
 
-    # Capture until newline or semicolon
+    # Capture up to end-of-line or semicolon
     j = i
     while j < len(text) and text[j] not in "\r\n;":
         j += 1
 
     value = text[i:j].strip()
 
-    # If they want VIN detection when label='VIN', normalize that too:
+    # Special handling for VIN: normalize to a 17-char VIN if present
     if label.strip().lower() == "vin":
         m = re.search(r"\b[A-HJ-NPR-Z0-9]{17}\b", value, flags=re.IGNORECASE)
         if m:
@@ -320,9 +319,10 @@ async def vision_review(
         if not gpt_output or not str(gpt_output).strip():
             gpt_output = "⚠️ GPT returned no output."
         logger.debug(f"GPT output: {gpt_output[:1000]}...")
-        claim_number = extract_field("Claim", gpt_output)
-        vehicle = extract_field("Vehicle", gpt_output)
-        score = extract_field("Compliance Score", gpt_output)
+        claim_number = extract_field("Claim #", gpt_output)
+        vin          = extract_field("VIN", gpt_output)
+        vehicle      = extract_field("Vehicle", gpt_output)
+        score_text   = extract_field("Compliance Score", gpt_output)
 
         try:
             score = int(score.strip("%"))
@@ -409,6 +409,7 @@ async def get_client_rules(client_name: str):
     else:
         logger.error(f"Rules not found for client: {client_name}")
         return JSONResponse(status_code=404, content={"error": "Rules not found for this client."})
+
 
 
 
