@@ -19,7 +19,7 @@ WORKDIR /app
 
 # Copy requirements first and install
 COPY requirements.txt .
-RUN bash -c "for i in {1..5}; do pip install --no-cache-dir -r requirements.txt && break || sleep 5; done"
+RUN pip install --no-cache-dir -r requirements.txt
 
 # Copy font file for PDF generation
 COPY DejaVuSans.ttf /app/DejaVuSans.ttf
