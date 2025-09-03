@@ -4,3 +4,4 @@ services:
     env: docker
     plan: starter
     autoDeploy: true
+    healthCheckPath: /
