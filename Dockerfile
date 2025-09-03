@@ -1,9 +1,9 @@
 # Use official slim Python image
-FROM python:3.11-bullseye
-RUN pip install --upgrade pip
+FROM python:3.11-slim-bullseye
 
 # Install system dependencies
 RUN apt-get update && apt-get install -y \
+    build-essential \
     tesseract-ocr \
     poppler-utils \
     libglib2.0-0 \
@@ -16,9 +16,11 @@ RUN apt-get update && apt-get install -y \
 # Set working directory
 WORKDIR /app
 
-# Copy requirements first and install
+# Upgrade pip and install dependencies
 COPY requirements.txt .
-RUN bash -c "for i in {1..5}; do pip install --no-cache-dir -r requirements.txt && break || sleep 5; done"
+RUN pip install --no-cache-dir --upgrade pip && \
+    pip install --no-cache-dir -r requirements.txt && \
+    pip show uvicorn || { echo "uvicorn installation failed"; exit 1; }
 
 # Copy font file for PDF generation
 COPY DejaVuSans.ttf /app/DejaVuSans.ttf
@@ -36,5 +38,3 @@ EXPOSE $PORT
 
 # Start FastAPI via uvicorn (use $PORT)
 CMD ["sh", "-c", "uvicorn main:app --host 0.0.0.0 --port $PORT"]
-CMD ["sh", "-c", "uvicorn main:app --host 0.0.0.0 --port $PORT"]
-
