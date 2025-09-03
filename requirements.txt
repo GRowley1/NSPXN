@@ -7,3 +7,6 @@ pdf2image
 pytesseract
 Pillow
 openai
+torch
+ultralytics
+opencv-python-headless
