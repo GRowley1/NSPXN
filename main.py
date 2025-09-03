@@ -272,7 +272,7 @@ async def vision_review(
         )
         gpt_output = response.choices[0].message.content or "⚠️ GPT returned no output."
         logger.debug(f"GPT output: {gpt_output[:1000]}...")
-        claim_number = extract_field("Claim", gpt_output)
+        claim_number = extract_after_label_exact("Claim #", gpt_output) or extract_field("Claim", gpt_output)
         vehicle = extract_field("Vehicle", gpt_output)
         score = extract_field("Compliance Score", gpt_output)
 
@@ -288,6 +288,11 @@ async def vision_review(
         if score < 100 and score_adj == 0:
             logger.warning(f"AI score ({score}) inconsistent with no deductions (labor_tax_adj=0, photo_adj=0). Overriding to 100.")
             score = 100
+      
+        if "registration" in (client_rules or "").lower():
+            reg_present = "registration" in combined_text
+        if not reg_present:
+            score = 75
           
         pdf = FPDF()
         pdf.add_page()
