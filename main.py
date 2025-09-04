@@ -453,11 +453,16 @@ Rules to follow from client:
     # ----------------------------
     pdf = FPDF()
     pdf.add_page()
-    try:
-        pdf.add_font("DejaVu", "", "DejaVuSans.ttf", uni=True)
-        pdf.set_font("DejaVu", size=11)
-    except Exception:
-        pdf.set_font("Arial", size=11)
+    pdf.set_auto_page_break(auto=True, margin=12)
+
+try:
+    font_dir = os.path.join(os.path.dirname(__file__), "fonts")
+    pdf.add_font("DejaVu",  "", os.path.join(font_dir, "DejaVuSans.ttf"),       uni=True)
+    pdf.add_font("DejaVu",  "B", os.path.join(font_dir, "DejaVuSans-Bold.ttf"), uni=True)
+    pdf.set_font("DejaVu", size=11)
+except Exception as e:
+    # Silent, safe fallback
+    pdf.set_font("Helvetica", size=11)
 
     pdf.cell(0, 10, txt="NSPXN.com AI Review Report", ln=True, align="C")
     pdf.ln(2)
