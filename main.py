@@ -307,10 +307,14 @@ def compare_estimate_with_photos(items: List[Dict[str, str]],
     try:
         rsp = client.chat.completions.create(
             model="gpt-5",
-            messages=[{"role": "system", "content": prompt}, vision_message],
-            max_completion_tokens=500,
-            temperature=0
-        )
+            messages=[
+                {"role": "system", "content": sys},
+                {"role": "user",   "content": user_content}
+    ],
+    max_tokens=500,
+    temperature=0
+)
+
         txt = rsp.choices[0].message.content or "{}"
         # Trim code fences if any
         txt = txt.strip().removeprefix("```json").removesuffix("```").strip()
@@ -418,9 +422,13 @@ Rules to follow from client:
     try:
         response = client.chat.completions.create(
             model="gpt-5",
-            messages=[{"role": "system", "content": prompt}, vision_message],
-            max_tokens=500
-        )
+            messages=[
+                {"role": "system", "content": system_prompt},
+                vision_message
+    ],
+    max_tokens=500
+)
+
         gpt_output = response.choices[0].message.content or "⚠️ GPT returned no output."
     except Exception as e:
         logger.error(f"OpenAI error: {e}")
