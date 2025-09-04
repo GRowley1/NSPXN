@@ -306,12 +306,9 @@ def compare_estimate_with_photos(items: List[Dict[str, str]],
 
     try:
         rsp = client.chat.completions.create(
-            model="gpt-4o",
-            messages=[
-                {"role": "system", "content": sys},
-                {"role": "user", "content": user_content},
-            ],
-            max_tokens=1500,
+            model="gpt-5",
+            messages=[{"role": "system", "content": prompt}, vision_message],
+            max_completion_tokens=500,
             temperature=0
         )
         txt = rsp.choices[0].message.content or "{}"
@@ -420,7 +417,7 @@ Rules to follow from client:
 
     try:
         response = client.chat.completions.create(
-            model="gpt-4o",
+            model="gpt-5",
             messages=[{"role": "system", "content": prompt}, vision_message],
             max_tokens=500
         )
