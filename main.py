@@ -420,9 +420,9 @@ Rules to follow from client:
 
     try:
         response = client.chat.completions.create(
-            model="gpt-5",
-            input=[{"role": "user", "content": "Keep it under ~100 tokens."}],
-            max_output_tokens=120
+            model="gpt-4o",
+            messages=[{"role": "system", "content": prompt}, vision_message],
+            max_tokens=500
         )
         gpt_output = response.choices[0].message.content or "⚠️ GPT returned no output."
     except Exception as e:
