@@ -20,6 +20,12 @@ from PIL import Image, ImageEnhance, ImageOps, ImageFilter, ImageStat
 from openai import OpenAI
 
 # =========================================
+# PDF storage (minimal change for Render)
+# =========================================
+PDF_DIR = os.getenv("PDF_DIR", "/tmp")
+os.makedirs(PDF_DIR, exist_ok=True)
+
+# =========================================
 # Logging
 # =========================================
 logging.basicConfig(
@@ -528,9 +534,12 @@ Rules to follow from client:
     pdf.ln(2)
     pdf_kv(pdf, "Consistency Overall", consistency.get("overall", ""))
 
-    pdf_path = f"{file_number}.pdf"
+    # ---------- Minimal change: write to /tmp (PDF_DIR) ----------
+    pdf_path = os.path.join(PDF_DIR, f"{file_number}.pdf")
     try:
-        pdf.output(pdf_path)
+        pdf_bytes = pdf.output(dest="S").encode("latin-1")
+        with open(pdf_path, "wb") as f:
+            f.write(pdf_bytes)
     except Exception as e:
         logger.error(f"PDF write error: {e}")
 
@@ -573,9 +582,10 @@ Rules to follow from client:
 
 @app.get("/download-pdf")
 async def download_pdf(file_number: str):
-    pdf_path = f"{file_number}.pdf"
+    # ---------- Minimal change: read from /tmp (PDF_DIR) ----------
+    pdf_path = os.path.join(PDF_DIR, f"{file_number}.pdf")
     if os.path.exists(pdf_path):
-        return FileResponse(path=pdf_path, media_type="application/pdf", filename=pdf_path)
+        return FileResponse(path=pdf_path, media_type="application/pdf", filename=f"{file_number}.pdf")
     return JSONResponse(status_code=404, content={"detail": "Not Found"})
 
 @app.get("/client-rules/{client_name}")
@@ -595,6 +605,7 @@ async def get_client_rules(client_name: str):
     else:
         logger.error(f"Rules not found for client: {client_name}")
         return JSONResponse(status_code=404, content={"error": "Rules not found for this client."})
+
 
 
 
