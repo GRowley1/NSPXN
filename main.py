@@ -487,7 +487,11 @@ Rules to follow from client:
     final_score = max(0, ai_score + labor_tax_adj + photo_adj)
     if final_score < 100 and (labor_tax_adj == 0 and photo_adj == 0):
         final_score = 100
+    # Use "Total Evaluation" percentage if the AI provided one; else fall back to final_score
+    total_eval_match = re.search(r"Total\s*Evaluation\s*[:\-]?\s*(\d{1,3})\s*%?", gpt_output, re.IGNORECASE)
+    total_eval_pct = int(total_eval_match.group(1)) if total_eval_match else final_score
 
+    
     # =========================================
     # PDF build (uses your same style)
     # =========================================
@@ -511,7 +515,7 @@ Rules to follow from client:
     pdf.multi_cell(0, 6, f"Vehicle: {vehicle_desc}")
     if odo_photos:
         pdf.multi_cell(0, 6, f"Odometer (from photos): {odo_photos}")
-    pdf.multi_cell(0, 6, f"Adjusted Compliance Score: {final_score}%")
+    pdf.multi_cell(0, 6, f"Compliance Score: {total_eval_pct}%")
 
     pdf.ln(4)
     pdf_add_section_title(pdf, "AI-4-IA Review Summary")
