@@ -20,7 +20,7 @@ from PIL import Image, ImageEnhance, ImageOps, ImageFilter, ImageStat
 from openai import OpenAI
 
 # =========================================
-# PDF storage: save to /tmp but filename stays {file_number}.pdf (no _tmp_ prefix)
+# PDF storage: save to /tmp but filename stays {file_number}.pdf
 # =========================================
 PDF_DIR = os.getenv("PDF_DIR", "/tmp")
 os.makedirs(PDF_DIR, exist_ok=True)
@@ -37,7 +37,7 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 # =========================================
-# OpenAI client (fixed to gpt-4o)
+# OpenAI client (gpt-4o)
 # =========================================
 if "OPENAI_API_KEY" not in os.environ:
     raise RuntimeError("❌ OPENAI_API_KEY environment variable is NOT set.")
@@ -109,13 +109,11 @@ VIN_ALLOWED = set("0123456789ABCDEFGHJKLMNPRSTUVWXYZ")
 def normalize_vin(s: str) -> Optional[str]:
     s = s.strip().upper()
     s = s.replace(" ", "")
-    # Common OCR fixes
     s = s.replace("O", "0").replace("I", "1").replace("Q", "0")
     if len(s) != 17 or any(ch not in VIN_ALLOWED for ch in s):
         return None
     return s
 
-# ISO 3779 VIN checksum
 _translit = {**{str(i): i for i in range(10)},
              **dict(A=1, B=2, C=3, D=4, E=5, F=6, G=7, H=8,
                     J=1, K=2, L=3, M=4, N=5, P=7, R=9,
@@ -127,8 +125,7 @@ def vin_checksum_ok(v: str) -> bool:
     try:
         total = 0
         for i, ch in enumerate(v):
-            val = _translit[ch]
-            total += val * _weights[i]
+            total += _translit[ch] * _weights[i]
         check = total % 11
         return v[8] == ("X" if check == 10 else str(check))
     except Exception:
@@ -139,7 +136,6 @@ def best_vin_candidate(cands: List[str]) -> Optional[str]:
         vin = normalize_vin(c)
         if vin and vin_checksum_ok(vin):
             return vin
-    # fallback: accept normalized even if checksum fails (some imports/older docs)
     for c in cands:
         vin = normalize_vin(c)
         if vin:
@@ -147,7 +143,7 @@ def best_vin_candidate(cands: List[str]) -> Optional[str]:
     return None
 
 # =========================================
-# Field extraction (Claim #, VIN, Vehicle)
+# Field extraction
 # =========================================
 def extract_claim_from_text(text: str) -> Optional[str]:
     patterns = [
@@ -161,13 +157,11 @@ def extract_claim_from_text(text: str) -> Optional[str]:
     return None
 
 def extract_vin_from_text(text: str) -> Optional[str]:
-    # prioritize labeled VIN lines
     label_block = re.findall(r"(?:^|\n).{0,40}VIN[:\s\-]*([A-HJ-NPR-Z0-9]{10,20}).*", text, re.IGNORECASE)
     if label_block:
         vin = best_vin_candidate(label_block)
         if vin:
             return vin
-    # fallback: any 17-char VIN-like
     candidates = re.findall(r"\b([A-HJ-NPR-Z0-9]{17})\b", text, re.IGNORECASE)
     return best_vin_candidate(candidates)
 
@@ -190,7 +184,6 @@ def _image_is_exterior_wide(img: Image.Image) -> bool:
     return len(text.strip()) < 10 and var > 150
 
 def extract_vin_from_photos(image_blobs: List[Tuple[str, bytes]]) -> Optional[str]:
-    # Try OCR at 4 rotations for robustness
     rots = [0, 90, 180, 270]
     found: List[str] = []
     for name, blob in image_blobs:
@@ -199,7 +192,6 @@ def extract_vin_from_photos(image_blobs: List[Tuple[str, bytes]]) -> Optional[st
             for r in rots:
                 img = base.rotate(r, expand=True)
                 proc = preprocess_image(img)
-                # more permissive PSMs
                 for psm in ("--psm 7", "--psm 6", "--psm 11"):
                     ocr = pytesseract.image_to_string(proc, lang="eng", config=psm)
                     cands = re.findall(r"\b([A-HJ-NPR-Z0-9]{17})\b", ocr.upper())
@@ -479,21 +471,33 @@ Rules to follow from client:
         logger.error(f"OpenAI error: {err}")
         gpt_output = f"⚠️ AI review failed: {err}"
 
-    # ----- score adjustments
-    ai_score_match = re.search(r"Compliance\s*Score\s*[:\-]?\s*(\d{1,3})\s*%?", gpt_output, re.IGNORECASE)
-    ai_score = int(ai_score_match.group(1)) if ai_score_match else 100
+    # ----- SCORE: single authoritative number used everywhere -----
+    # Prefer AI-provided percentage if present; else compute from deductions
+    score_ai = None
+    for pat in [
+        r"Total\s*Evaluation\s*[:\-]?\s*(\d{1,3})\s*%?",
+        r"Final\s*Score\s*[:\-]?\s*(\d{1,3})\s*%?",
+        r"Compliance\s*Score\s*[:\-]?\s*(\d{1,3})\s*%?",
+    ]:
+        m = re.search(pat, gpt_output, re.IGNORECASE)
+        if m:
+            score_ai = int(m.group(1))
+            break
+
     labor_tax_adj = check_labor_and_tax_score(combined_text, client_rules)
     photo_adj = -25 * len(missing_photos)
-    final_score = max(0, ai_score + labor_tax_adj + photo_adj)
-    if final_score < 100 and (labor_tax_adj == 0 and photo_adj == 0):
-        final_score = 100
-    # Use "Total Evaluation" percentage if the AI provided one; else fall back to final_score
-    total_eval_match = re.search(r"Total\s*Evaluation\s*[:\-]?\s*(\d{1,3})\s*%?", gpt_output, re.IGNORECASE)
-    total_eval_pct = int(total_eval_match.group(1)) if total_eval_match else final_score
+    computed = max(0, 100 + labor_tax_adj + photo_adj)
+    authoritative_score = max(0, min(100, score_ai if score_ai is not None else computed))
 
-    
+    # Remove any score lines from the AI paragraph before adding to PDF
+    gpt_output_clean = re.sub(
+        r'(?im)^(?:Final\s*Score|Compliance\s*Score|Total\s*Evaluation)\s*[:\-]?\s*\d{1,3}\s*%.*$',
+        '',
+        gpt_output
+    ).strip()
+
     # =========================================
-    # PDF build (uses your same style)
+    # PDF build
     # =========================================
     pdf = FPDF()
     pdf.add_page()
@@ -506,22 +510,23 @@ Rules to follow from client:
     pdf.cell(200, 10, txt="NSPXN.com AI Review Report", ln=True, align="C")
     pdf.ln(5)
     pdf.set_font_size(10)
-    pdf.multi_cell(0, 8, f"File Number: {file_number}")
-    pdf.multi_cell(0, 8, f"IA Company: {ia_company}")
-    pdf.multi_cell(0, 8, f"Appraiser ID #: {appraiser_id}")
+    pdf.multi_cell(0, 6, f"File Number: {file_number}")
+    pdf.multi_cell(0, 6, f"IA Company: {ia_company}")
+    pdf.multi_cell(0, 6, f"Appraiser ID #: {appraiser_id}")
     pdf.ln(4)
     pdf.multi_cell(0, 6, f"Claim #: {claim_number}")
     pdf.multi_cell(0, 6, f"VIN: {vin_final}")
     pdf.multi_cell(0, 6, f"Vehicle: {vehicle_desc}")
     if odo_photos:
         pdf.multi_cell(0, 6, f"Odometer (from photos): {odo_photos}")
-    pdf.multi_cell(0, 6, f"Compliance Score: {total_eval_pct}%")
+    # Use unified score label + value
+    pdf.multi_cell(0, 6, f"Compliance Score: {authoritative_score}%")
 
     pdf.ln(4)
     pdf_add_section_title(pdf, "AI-4-IA Review Summary")
-    pdf.multi_cell(0, 6, gpt_output)
+    pdf.multi_cell(0, 6, gpt_output_clean)
 
-    # ======== New: full Estimate ↔ Photos Consistency Review ========
+    # ======== Estimate ↔ Photos Consistency Review ========
     pdf.ln(4)
     pdf_add_section_title(pdf, "Estimate ↔ Photos Consistency Review")
 
@@ -553,7 +558,7 @@ Rules to follow from client:
     pdf.ln(2)
     pdf_kv(pdf, "Consistency Overall", consistency.get("overall", ""))
 
-    # ---------- Save PDF to /tmp with name {file_number}.pdf (no prefix) ----------
+    # Save PDF to /tmp with name {file_number}.pdf
     pdf_path = os.path.join(PDF_DIR, f"{file_number}.pdf")
     try:
         pdf_bytes = pdf.output(dest="S").encode("latin-1")
@@ -562,7 +567,7 @@ Rules to follow from client:
     except Exception as e:
         logger.error(f"PDF write error: {e}")
 
-    # OPTIONAL email (unchanged; comment out if undesired)
+    # OPTIONAL email (unchanged)
     try:
         msg = EmailMessage()
         msg["Subject"] = f"AI-4-IA Review: {claim_number}"
@@ -578,10 +583,10 @@ Claim #: {claim_number}
 VIN: {vin_final}
 Vehicle: {vehicle_desc}
 
-Adjusted Compliance Score: {final_score}%
+Compliance Score: {authoritative_score}%
 
 AI Review Summary:
-{gpt_output}
+{gpt_output_clean}
 """
         msg.set_content(email_body)
         with smtplib.SMTP_SSL("mail.tierra.net", 465) as smtp:
@@ -591,12 +596,12 @@ AI Review Summary:
         logger.error(f"Email error (continuing): {e}")
 
     return {
-        "gpt_output": gpt_output,
+        "gpt_output": gpt_output_clean,
         "file_number": file_number,
         "claim_number": claim_number,
         "vehicle": vehicle_desc,
         "vin": vin_final,
-        "score": f"{final_score}%",
+        "score": f"{authoritative_score}%",
         "consistency_review": consistency
     }
 
@@ -624,6 +629,7 @@ async def get_client_rules(client_name: str):
     else:
         logger.error(f"Rules not found for client: {client_name}")
         return JSONResponse(status_code=404, content={"error": "Rules not found for this client."})
+
 
 
 
