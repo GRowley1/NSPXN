@@ -363,11 +363,13 @@ async def vision_review(
     if not appraiser_id.strip():
         return JSONResponse(status_code=400, content={"error": "Appraiser ID is required."})
 
+    # ----------------------------
+    # Read uploads once
+    # ----------------------------
     texts: List[str] = []
     image_blobs: List[Tuple[str, bytes]] = []
-    images_for_vision = []
+    images_for_vision: List[Dict[str, Any]] = []
 
-    # Read uploads once
     for f in files:
         raw = await f.read()
         name = (f.filename or "upload").lower()
@@ -384,22 +386,28 @@ async def vision_review(
 
     combined_text = "\n".join(texts)
 
-    # Photo presence checks
+    # ----------------------------
+    # Photo checks + VIN/odo
+    # ----------------------------
     missing_photos = check_required_photos(image_blobs, combined_text)
 
-    # VIN & odometer consolidation
     vin_est = extract_vin_from_text(combined_text)
     vin_photos = extract_vin_from_photos(image_blobs)
     vin_final = vin_est or vin_photos or "N/A"
+
+    vehicle_desc = extract_vehicle_from_text(combined_text) or "N/A"
+    claim_number = extract_claim_from_text(combined_text) or "N/A"
     odo_photos = extract_odometer_from_photos(image_blobs)
 
-    # Parse estimate line items
+    # ----------------------------
+    # Parse estimate items & compare to photos
+    # ----------------------------
     est_items = extract_estimate_items(combined_text)
-
-    # Compare estimate ↔ photos (per item + extras)
     consistency = compare_estimate_with_photos(est_items, images_for_vision)
 
-    # Vision narrative (same as before, but we add hints)
+    # ----------------------------
+    # Vision narrative (compliance summary)
+    # ----------------------------
     photo_hint = f"\n\nMISSING PHOTOS: {', '.join(missing_photos) if missing_photos else 'None'}"
     system_prompt = f"""
 You are an AI auto damage auditor. Evaluate STRICTLY by these rules:
@@ -422,24 +430,17 @@ Rules to follow from client:
     try:
         response = client.chat.completions.create(
             model="gpt-5",
-            messages=[
-                {"role": "system", "content": system_prompt},
-                vision_message
-    ],
-    max_tokens=500
-)
-
+            messages=[{"role": "system", "content": system_prompt}, vision_message],
+            max_tokens=500
+        )
         gpt_output = response.choices[0].message.content or "⚠️ GPT returned no output."
     except Exception as e:
         logger.error(f"OpenAI error: {e}")
         gpt_output = "⚠️ AI review failed."
-    
-    # Parse core fields
-    claim_number = extract_claim_from_text(combined_text) or "N/A"
-    vehicle_desc = extract_vehicle_from_text(combined_text) or "N/A"
-    vin = vin_final
 
-    # Score adjustments
+    # ----------------------------
+    # Scoring adjustments
+    # ----------------------------
     ai_score_match = re.search(r"Compliance\s*Score\s*[:\-]?\s*(\d{1,3})\s*%?", gpt_output, re.IGNORECASE)
     ai_score = int(ai_score_match.group(1)) if ai_score_match else 100
     labor_tax_adj = check_labor_and_tax_score(combined_text, client_rules)
@@ -449,47 +450,44 @@ Rules to follow from client:
         final_score = 100
 
     # ----------------------------
-    # PDF
+    # PDF build
     # ----------------------------
     pdf = FPDF()
     pdf.add_page()
     pdf.set_auto_page_break(auto=True, margin=12)
-
-try:
-    font_dir = os.path.join(os.path.dirname(__file__), "fonts")
-    pdf.add_font("DejaVu",  "", os.path.join(font_dir, "DejaVuSans.ttf"),       uni=True)
-    pdf.add_font("DejaVu",  "B", os.path.join(font_dir, "DejaVuSans-Bold.ttf"), uni=True)
-    pdf.set_font("DejaVu", size=11)
-except Exception as e:
-    # Silent, safe fallback
-    pdf.set_font("Helvetica", size=11)
+    try:
+        pdf.add_font("DejaVu", "", "DejaVuSans.ttf", uni=True)
+        pdf.set_font("DejaVu", size=11)
+    except Exception:
+        pdf.set_font("Helvetica", size=11)
 
     pdf.cell(0, 10, txt="NSPXN.com AI Review Report", ln=True, align="C")
     pdf.ln(2)
-    pdf_kv(pdf, "File Number", file_number)
-    pdf_kv(pdf, "IA Company", ia_company)
-    pdf_kv(pdf, "Appraiser ID #", appraiser_id)
+    pdf.set_font_size(10)
+    pdf.multi_cell(0, 6, f"File Number: {file_number}")
+    pdf.multi_cell(0, 6, f"IA Company: {ia_company}")
+    pdf.multi_cell(0, 6, f"Appraiser ID #: {appraiser_id}")
     pdf.ln(2)
-    pdf_kv(pdf, "Claim #", claim_number)
-    pdf_kv(pdf, "VIN", vin)
-    pdf_kv(pdf, "Vehicle", vehicle_desc)
+    pdf.multi_cell(0, 6, f"Claim #: {claim_number}")
+    pdf.multi_cell(0, 6, f"VIN: {vin_final}")
+    pdf.multi_cell(0, 6, f"Vehicle: {vehicle_desc}")
     if odo_photos:
-        pdf_kv(pdf, "Odometer (from photos)", odo_photos)
-    pdf_kv(pdf, "Adjusted Compliance Score", f"{final_score}%")
+        pdf.multi_cell(0, 6, f"Odometer (from photos): {odo_photos}")
+    pdf.multi_cell(0, 6, f"Adjusted Compliance Score: {final_score}%")
 
     pdf.ln(4)
-    pdf_add_section_title(pdf, "AI-4-IA Review Summary")
+    pdf.set_font_size(12)
+    pdf.cell(0, 8, "AI-4-IA Review Summary", ln=True)
     pdf.set_font_size(10)
     pdf.multi_cell(0, 6, gpt_output)
 
-    # NEW: Consistency section
     pdf.ln(4)
-    pdf_add_section_title(pdf, "Estimate ↔ Photos Consistency Review")
+    pdf.set_font_size(12)
+    pdf.cell(0, 8, "Estimate ↔ Photos Consistency Review", ln=True)
+    pdf.set_font_size(10)
 
-    # Per-item table (compact)
-    if consistency["per_item"]:
-        pdf.set_font_size(10)
-        for it in consistency["per_item"][:40]:  # keep PDF compact
+    if consistency.get("per_item"):
+        for it in consistency["per_item"][:40]:
             ev = "YES" if it.get("photo_evidence") else "NO"
             conf = f"{round(float(it.get('confidence', 0))*100)}%"
             line = f"- {it['side'].title()} {it['part']} · {it['op']} → Photo: {ev} ({conf}); {it.get('note','')}"
@@ -497,23 +495,25 @@ except Exception as e:
     else:
         pdf.multi_cell(0, 6, "Per-item comparison unavailable.")
 
-    # Not in photos
-    if consistency["not_in_photos"]:
+    if consistency.get("not_in_photos"):
         pdf.ln(2)
-        pdf_add_section_title(pdf, "Items Estimated but Not Evident in Photos")
+        pdf.set_font_size(11)
+        pdf.cell(0, 6, "Items Estimated but Not Evident in Photos", ln=True)
+        pdf.set_font_size(10)
         for raw in consistency["not_in_photos"][:20]:
             pdf.multi_cell(0, 6, f"- {raw}")
 
-    # Extra damage
-    if consistency["extra_damage_in_photos"]:
+    if consistency.get("extra_damage_in_photos"):
         pdf.ln(2)
-        pdf_add_section_title(pdf, "Damage Visible in Photos but Missing on Estimate")
+        pdf.set_font_size(11)
+        pdf.cell(0, 6, "Damage Visible in Photos but Missing on Estimate", ln=True)
+        pdf.set_font_size(10)
         for d in consistency["extra_damage_in_photos"][:20]:
             pdf.multi_cell(0, 6, f"- {d}")
 
-    # Overall
     pdf.ln(2)
-    pdf_kv(pdf, "Consistency Overall", consistency.get("overall", ""))
+    pdf.set_font_size(10)
+    pdf.multi_cell(0, 6, f"Consistency Overall: {consistency.get('overall','')}")
 
     pdf_path = f"{file_number}.pdf"
     try:
@@ -521,41 +521,15 @@ except Exception as e:
     except Exception as e:
         logger.error(f"PDF write error: {e}")
 
-    # Email (best-effort; ignore failures)
-    try:
-        msg = EmailMessage()
-        msg["Subject"] = f"AI-4-IA Review: {claim_number}"
-        msg["From"] = "noreply@nspxn.com"
-        msg["To"] = "info@nspxn.com"
-        body = f"""NSPXN.com AI4IA Review Report
-
-File Number: {file_number}
-IA Company: {ia_company}
-Appraiser ID #: {appraiser_id}
-
-Claim #: {claim_number}
-VIN: {vin}
-Vehicle: {vehicle_desc}
-Adjusted Compliance Score: {final_score}%
-
-Consistency Overall: {consistency.get('overall','')}
-
-(See attached PDF for full details.)
-"""
-        msg.set_content(body)
-        # NOTE: Fill in your SMTP credentials or keep disabled in production build script
-        # with smtplib.SMTP_SSL("mail.tierra.net", 465) as smtp:
-        #     smtp.login("info@nspxn.com", "YOUR_PASSWORD")
-        #     smtp.send_message(msg)
-    except Exception as e:
-        logger.error(f"Email error: {e}")
-
+    # ----------------------------
+    # Return JSON (keep inside function)
+    # ----------------------------
     return {
         "gpt_output": gpt_output,
         "file_number": file_number,
         "claim_number": claim_number,
         "vehicle": vehicle_desc,
-        "vin": vin,
+        "vin": vin_final,
         "score": f"{final_score}%",
         "consistency_review": consistency
     }
