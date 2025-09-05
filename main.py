@@ -372,7 +372,7 @@ def extract_estimate_items(text: str) -> List[Dict[str, str]]:
 # GPT compare: estimate ↔ photos (JSON)
 # =========================================
 def compare_estimate_with_photos(items: List[Dict[str, str]],
-                                 images_for_vision: List[Dict[str, Any]]) -> Dict[str, Any]]:
+                                 images_for_vision: List[Dict[str, Any]]) -> Dict[str, Any]:
     """
     Returns dict:
       per_item: [{op,part,side,photo_evidence,confidence,note}]
