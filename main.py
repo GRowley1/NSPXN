@@ -372,7 +372,7 @@ def extract_estimate_items(text: str) -> List[Dict[str, str]]:
 # GPT compare: estimate ↔ photos (JSON)
 # =========================================
 def compare_estimate_with_photos(items: List[Dict[str, str]],
-                                 images_for_vision: List[Dict[str, Any]]) -> Dict[str, Any]:
+                                 images_for_vision: List[Dict[str, Any]]) -> Dict[str, Any]]:
     """
     Returns dict:
       per_item: [{op,part,side,photo_evidence,confidence,note}]
@@ -551,28 +551,38 @@ Rules to follow from client:
         logger.error(f"OpenAI error: {err}")
         gpt_output = f"⚠️ AI review failed: {err}"
 
-    # ----- SCORE: single authoritative number used everywhere -----
-    score_ai = None
-    for pat in [
-        r"Total\s*Evaluation\s*[:\-]?\s*(\d{1,3})\s*%?",
-        r"Final\s*Score\s*[:\-]?\s*(\d{1,3})\s*%?",
-        r"Compliance\s*Score\s*[:\-]?\s*(\d{1,3})\s*%?",
-    ]:
-        m = re.search(pat, gpt_output, re.IGNORECASE)
-        if m:
-            score_ai = int(m.group(1))
-            break
+    # ===== EDIT 1: SCORE PARSER prefers "Final Evaluation" / "Total Evaluation" etc. =====
+    SCORE_PATTERNS = [
+        r"Total\s*Evaluation\s*(?:Score)?\s*(?:is|:|-)?\s*(\d{1,3})\s*%?",
+        r"Final\s*Evaluation\s*(?:Score)?\s*(?:is|:|-)?\s*(\d{1,3})\s*%?",
+        r"Final\s*Score\s*(?:is|:|-)?\s*(\d{1,3})\s*%?",
+        r"Compliance\s*Score\s*(?:is|:|-)?\s*(\d{1,3})\s*%?",
+    ]
+
+    def parse_ai_score(text: str) -> Optional[int]:
+        for pat in SCORE_PATTERNS:
+            m = re.search(pat, text or "", re.IGNORECASE)
+            if m:
+                try:
+                    return max(0, min(100, int(m.group(1))))
+                except Exception:
+                    pass
+        return None
+
+    score_ai = parse_ai_score(gpt_output)
 
     labor_tax_adj = check_labor_and_tax_score(combined_text, client_rules)
     photo_adj = -25 * len(missing_photos)
     computed = max(0, 100 + labor_tax_adj + photo_adj)
-    authoritative_score = max(0, min(100, score_ai if score_ai is not None else computed))
 
-    # Remove any score lines from the AI paragraph before adding to PDF
+    # Authoritative score = AI score if present (e.g., "Final Evaluation"), else computed
+    authoritative_score = score_ai if score_ai is not None else computed
+
+    # ===== EDIT 2: scrub any score lines, incl. "Final Evaluation", before placing in PDF =====
     gpt_output_clean = re.sub(
-        r'(?im)^(?:Final\s*Score|Compliance\s*Score|Total\s*Evaluation)\s*[:\-]?\s*\d{1,3}\s*%.*$',
+        r'(?im)^(?:Final\s*Score|Compliance\s*Score|Total\s*Evaluation|Final\s*Evaluation)\s*(?:is|:|-)?\s*\d{1,3}\s*%.*$',
         '',
-        gpt_output
+        gpt_output or ''
     ).strip()
 
     # =========================================
@@ -708,6 +718,7 @@ async def get_client_rules(client_name: str):
     else:
         logger.error(f"Rules not found for client: {client_name}")
         return JSONResponse(status_code=404, content={"error": "Rules not found for this client."})
+
 
 
 
