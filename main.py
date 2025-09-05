@@ -8,6 +8,7 @@ import io
 import base64
 import json
 import logging
+import math
 import datetime
 
 import smtplib
@@ -21,7 +22,7 @@ from PIL import Image, ImageEnhance, ImageOps, ImageFilter, ImageStat, Image
 from openai import OpenAI
 
 # =========================================
-# PDF storage
+# PDF storage: save to /tmp with filename {file_number}.pdf
 # =========================================
 PDF_DIR = os.getenv("PDF_DIR", "/tmp")
 os.makedirs(PDF_DIR, exist_ok=True)
@@ -74,9 +75,10 @@ def preprocess_image(img: Image.Image) -> Image.Image:
     return img
 
 def extract_text_from_pdf(file_like: io.BytesIO) -> str:
+    """Lower DPI for speed while retaining heading/label accuracy."""
     try:
         file_like.seek(0)
-        images = convert_from_bytes(file_like.read(), dpi=200)
+        images = convert_from_bytes(file_like.read(), dpi=150)
         text_output = ""
         for i, img in enumerate(images, 1):
             processed = preprocess_image(img)
@@ -120,9 +122,14 @@ def count_corner_labels(text: str) -> int:
     return len(found)
 
 def harvest_photos_from_pdf(pdf_bytes: bytes, max_pages: int = 20) -> List[Tuple[str, bytes]]:
+    """
+    Convert PDF pages to images and return (name, jpeg_bytes) for pages that look like photo pages.
+    - Prefer pages whose OCR contains 'Image Report' OR corner labels.
+    - Fallback: visually rich pages (variance threshold).
+    """
     out: List[Tuple[str, bytes]] = []
     try:
-        pages = convert_from_bytes(pdf_bytes, dpi=200)[:max_pages]
+        pages = convert_from_bytes(pdf_bytes, dpi=150)[:max_pages]
         for i, page in enumerate(pages, 1):
             proc = preprocess_image(page)
             ocr = pytesseract.image_to_string(proc, lang="eng")
@@ -133,7 +140,7 @@ def harvest_photos_from_pdf(pdf_bytes: bytes, max_pages: int = 20) -> List[Tuple
 
             if is_img_report or looks_like_photos:
                 buf = io.BytesIO()
-                page.save(buf, format="JPEG", quality=85)  # original color page
+                page.convert("RGB").save(buf, format="JPEG", quality=85)  # original color page
                 tag = "imgrep" if is_img_report else ("corner" if corner_hits else "pdfphoto")
                 out.append((f"pdf-{tag}-p{i}.jpg", buf.getvalue()))
     except Exception as e:
@@ -229,8 +236,8 @@ def taxes_present(text: str) -> bool:
     return re.search(r'tax[^\n]{0,50}(\d{1,3}\s*%|\$\s*\d+(\.\d{2})?)', text, re.IGNORECASE) is not None
 
 def non_oem_used(text: str) -> bool:
-    # LKQ, aftermarket, reconditioned, CAPA, etc.
-    return re.search(r'\b(LKQ|after\s*market|aftermarket|recon(?:ditioned)?|CAPA|Alt-OE|Alt\s*OE|reman(?:ufactured)?)\b', text, re.IGNORECASE) is not None
+    # LKQ, aftermarket, reconditioned, CAPA, Alt-OE, reman, etc.
+    return re.search(r'\b(LKQ|after\s*market|aftermarket|recon(?:ditioned)?|CAPA|Alt[-\s]*OE|reman(?:ufactured)?)\b', text, re.IGNORECASE) is not None
 
 # =========================================
 # Photo parsing & requirements
@@ -242,7 +249,7 @@ def _image_is_exterior_wide(img: Image.Image) -> bool:
     return len(text.strip()) < 10 and var > 150
 
 def extract_vin_from_photos(image_blobs: List[Tuple[str, bytes]]) -> Optional[str]:
-    rots = [0, 90, 180, 270]
+    rots = [0, 90]  # faster; usually sufficient
     found: List[str] = []
     for name, blob in image_blobs:
         try:
@@ -273,6 +280,12 @@ def extract_odometer_from_photos(image_blobs: List[Tuple[str, bytes]]) -> Option
     return None
 
 def check_required_photos(image_blobs: List[Tuple[str, bytes]], ocr_text: str) -> List[str]:
+    """
+    Required: four corners, odometer, VIN, license plate.
+    Recognizes:
+      - Harvested PDF photo pages (tag 'imgrep' or 'corner')
+      - Corner labels in OCR text (LF/RF/LR/RR or full words)
+    """
     required = ["four corners", "odometer", "vin", "license plate"]
     present = set()
     txt = (ocr_text or "").lower()
@@ -315,6 +328,77 @@ def check_required_photos(image_blobs: List[Tuple[str, bytes]], ocr_text: str) -
         f"corner_labels_in_text={corner_labels_in_text}"
     )
     return missing
+
+# =========================================
+# Contact-sheet builder (include ALL photos, send fewer images to GPT)
+# =========================================
+def shrink_to_width(img: Image.Image, max_w: int) -> Image.Image:
+    if img.width <= max_w:
+        return img.convert("RGB")
+    h = int(img.height * max_w / img.width)
+    return img.convert("RGB").resize((max_w, h), Image.LANCZOS)
+
+def make_contact_sheets(
+    image_blobs: List[Tuple[str, bytes]],
+    per_sheet: int = 8,
+    thumb_w: int = 512,
+    padding: int = 8,
+    cols: int = 4,
+    jpeg_quality: int = 72
+) -> List[Tuple[str, bytes]]:
+    """
+    Pack ALL images into N contact-sheet JPEGs (no photos dropped).
+    Each sheet has `cols` columns and enough rows to fit `per_sheet`.
+    """
+    sheets: List[Tuple[str, bytes]] = []
+    if not image_blobs:
+        return sheets
+
+    # Prepare PIL images (RGB, shrunk)
+    thumbs: List[Image.Image] = []
+    for _, blob in image_blobs:
+        try:
+            img = Image.open(io.BytesIO(blob))
+            thumbs.append(shrink_to_width(img, thumb_w))
+        except Exception:
+            continue
+
+    rows = math.ceil(per_sheet / cols)
+    idx = 0
+    sheet_num = 1
+    while idx < len(thumbs):
+        chunk = thumbs[idx: idx + per_sheet]
+        # compute max row height per row
+        row_heights = []
+        for r in range(rows):
+            row_imgs = chunk[r*cols:(r+1)*cols]
+            if not row_imgs: break
+            row_heights.append(max(im.height for im in row_imgs))
+
+        canvas_w = cols * thumb_w + (cols + 1) * padding
+        canvas_h = sum(row_heights) + (len(row_heights) + 1) * padding
+        sheet = Image.new("RGB", (canvas_w, canvas_h), color=(245, 245, 245))
+
+        y = padding
+        pos = 0
+        for r, row_h in enumerate(row_heights):
+            x = padding
+            for c in range(cols):
+                if pos >= len(chunk): break
+                im = chunk[pos]
+                y_off = (row_h - im.height) // 2
+                sheet.paste(im, (x, y + y_off))
+                x += thumb_w + padding
+                pos += 1
+            y += row_h + padding
+
+        buf = io.BytesIO()
+        sheet.save(buf, format="JPEG", quality=jpeg_quality, optimize=True)
+        sheets.append((f"contact-sheet-{sheet_num}.jpg", buf.getvalue()))
+        sheet_num += 1
+        idx += per_sheet
+
+    return sheets
 
 # =========================================
 # Labor/tax compliance checks
@@ -369,6 +453,13 @@ def extract_estimate_items(text: str) -> List[Dict[str, str]]:
 # =========================================
 def compare_estimate_with_photos(items: List[Dict[str, str]],
                                  images_for_vision: List[Dict[str, Any]]) -> Dict[str, Any]:
+    """
+    Returns dict:
+      per_item: [{op,part,side,photo_evidence,confidence,note}]
+      not_in_photos: [raw...]
+      extra_damage_in_photos: ["desc"...]
+      overall: "short"
+    """
     schema = {
         "type": "object",
         "properties": {
@@ -411,7 +502,7 @@ def compare_estimate_with_photos(items: List[Dict[str, str]],
                 {"role": "system", "content": system},
                 {"role": "user",   "content": user_parts}
             ],
-            max_tokens=900,
+            max_tokens=450,
             temperature=0
         )
         txt = (rsp.choices[0].message.content or "").strip()
@@ -462,22 +553,17 @@ async def vision_review(
     # ----- read uploads once
     texts: List[str] = []
     image_blobs: List[Tuple[str, bytes]] = []
-    images_for_vision: List[Dict[str, Any]] = []
 
     for f in files:
         raw = await f.read()
         name = (f.filename or "upload").lower()
         if name.endswith((".jpg", ".jpeg", ".png", ".webp")):
             image_blobs.append((name, raw))
-            b64 = base64.b64encode(raw).decode("utf-8")
-            images_for_vision.append({"type": "image_url", "image_url": {"url": f"data:image/jpeg;base64,{b64}"}})
         elif name.endswith(".pdf"):
             texts.append(extract_text_from_pdf(io.BytesIO(raw)))
             harvested = harvest_photos_from_pdf(raw)
             for hname, hbytes in harvested:
                 image_blobs.append((hname, hbytes))
-                b64 = base64.b64encode(hbytes).decode("utf-8")
-                images_for_vision.append({"type": "image_url", "image_url": {"url": f"data:image/jpeg;base64,{b64}"}})
         elif name.endswith(".docx"):
             texts.append(extract_text_from_docx(io.BytesIO(raw)))
         elif name.endswith(".txt"):
@@ -487,7 +573,24 @@ async def vision_review(
 
     combined_text = "\n".join(texts)
 
-    # ----- photo checks + VIN/odo
+    # ----- Build contact sheets for GPT (ALL photos represented)
+    contact_sheets = make_contact_sheets(
+        image_blobs,
+        per_sheet=8,   # 4x2 per sheet
+        thumb_w=512,
+        padding=8,
+        cols=4,
+        jpeg_quality=72
+    )
+    images_for_vision: List[Dict[str, Any]] = []
+    for name, blob in contact_sheets:
+        b64 = base64.b64encode(blob).decode("utf-8")
+        images_for_vision.append({
+            "type": "image_url",
+            "image_url": {"url": f"data:image/jpeg;base64,{b64}"}
+        })
+
+    # ----- photo checks + VIN/odo (run on ORIGINAL images, not the sheets)
     missing_photos = check_required_photos(image_blobs, combined_text)
 
     vin_est = extract_vin_from_text(combined_text)
@@ -498,7 +601,7 @@ async def vision_review(
     claim_number = extract_claim_from_text(combined_text) or "N/A"
     odo_photos = extract_odometer_from_photos(image_blobs)
 
-    # ----- parse estimate items & compare to photos
+    # ----- parse estimate items & compare to photos (vision uses contact sheets)
     est_items = extract_estimate_items(combined_text)
     consistency = compare_estimate_with_photos(est_items, images_for_vision)
 
@@ -554,7 +657,7 @@ Return plain Markdown with only those six sections. Do not add any other heading
                 {"role": "system", "content": system_prompt},
                 {"role": "user",   "content": user_parts}
             ],
-            max_tokens=800,  # tighter for consistency
+            max_tokens=400,
             temperature=0
         )
         gpt_output = response.choices[0].message.content or "⚠️ GPT returned no output."
@@ -587,6 +690,7 @@ Return plain Markdown with only those six sections. Do not add any other heading
     photo_adj = -25 * len(missing_photos)
     computed = max(0, 100 + labor_tax_adj + photo_adj)
 
+    # Authoritative score = AI score if present, else computed
     authoritative_score = score_ai if score_ai is not None else computed
 
     # Scrub any score lines & any conversational filler from the AI narrative
@@ -660,7 +764,7 @@ Return plain Markdown with only those six sections. Do not add any other heading
     pdf.ln(2)
     pdf_kv(pdf, "Consistency Overall", consistency.get("overall", ""))
 
-    # Save PDF
+    # Save PDF to /tmp with name {file_number}.pdf
     pdf_path = os.path.join(PDF_DIR, f"{file_number}.pdf")
     try:
         pdf_bytes = pdf.output(dest="S").encode("latin-1")
@@ -734,6 +838,7 @@ async def get_client_rules(client_name: str):
     else:
         logger.error(f"Rules not found for client: {client_name}")
         return JSONResponse(status_code=404, content={"error": "Rules not found for this client."})
+
 
 
 
