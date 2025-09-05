@@ -8,6 +8,7 @@ import io
 import base64
 import json
 import logging
+import datetime
 
 import smtplib
 from email.message import EmailMessage
@@ -20,7 +21,7 @@ from PIL import Image, ImageEnhance, ImageOps, ImageFilter, ImageStat, Image
 from openai import OpenAI
 
 # =========================================
-# PDF storage: save to /tmp but filename stays {file_number}.pdf
+# PDF storage
 # =========================================
 PDF_DIR = os.getenv("PDF_DIR", "/tmp")
 os.makedirs(PDF_DIR, exist_ok=True)
@@ -41,7 +42,6 @@ logger = logging.getLogger(__name__)
 # =========================================
 if "OPENAI_API_KEY" not in os.environ:
     raise RuntimeError("❌ OPENAI_API_KEY environment variable is NOT set.")
-
 client = OpenAI(api_key=os.environ["OPENAI_API_KEY"])
 MODEL = "gpt-4o"
 
@@ -102,7 +102,7 @@ def extract_text_from_docx(file_like: io.BytesIO) -> str:
         return ""
 
 # =========================================
-# NEW: harvest photos from PDF & count corner labels
+# Harvest photos from PDFs & detect corner labels
 # =========================================
 CORNER_LABEL_PAT = re.compile(
     r'\b(?:left\s*front|right\s*front|left\s*rear|right\s*rear|lf|rf|lr|rr)\b',
@@ -120,11 +120,6 @@ def count_corner_labels(text: str) -> int:
     return len(found)
 
 def harvest_photos_from_pdf(pdf_bytes: bytes, max_pages: int = 20) -> List[Tuple[str, bytes]]:
-    """
-    Convert PDF pages to images and return (name, jpeg_bytes) for pages that look like photo pages.
-    - Prefer pages whose OCR contains 'Image Report' OR corner labels.
-    - Fallback: visually rich pages (variance threshold).
-    """
     out: List[Tuple[str, bytes]] = []
     try:
         pages = convert_from_bytes(pdf_bytes, dpi=200)[:max_pages]
@@ -146,7 +141,7 @@ def harvest_photos_from_pdf(pdf_bytes: bytes, max_pages: int = 20) -> List[Tuple
     return out
 
 # =========================================
-# VIN utilities (normalization + checksum)
+# VIN utilities
 # =========================================
 VIN_ALLOWED = set("0123456789ABCDEFGHJKLMNPRSTUVWXYZ")
 
@@ -186,7 +181,7 @@ def best_vin_candidate(cands: List[str]) -> Optional[str]:
     return None
 
 # =========================================
-# Field extraction & tax detection
+# Field extraction & tax/parts signals
 # =========================================
 def extract_claim_from_text(text: str) -> Optional[str]:
     patterns = [
@@ -217,11 +212,25 @@ def extract_vehicle_from_text(text: str) -> Optional[str]:
         return f"{year} {make} {model}, {miles} miles"
     return None
 
+def parse_year_miles(text: str) -> Tuple[Optional[int], Optional[int]]:
+    year = None
+    miles = None
+    m_year = re.search(r"\b(20\d{2})\b", text)
+    if m_year:
+        try: year = int(m_year.group(1))
+        except: year = None
+    m_mi = re.search(r"(?:Odometer|Mileage)\s*[:\-]?\s*([\d,]+)", text, re.IGNORECASE)
+    if m_mi:
+        try: miles = int(m_mi.group(1).replace(",", ""))
+        except: miles = None
+    return year, miles
+
 def taxes_present(text: str) -> bool:
-    """
-    Heuristic: treat taxes as present if 'tax' appears on a line with either a % or $ amount.
-    """
     return re.search(r'tax[^\n]{0,50}(\d{1,3}\s*%|\$\s*\d+(\.\d{2})?)', text, re.IGNORECASE) is not None
+
+def non_oem_used(text: str) -> bool:
+    # LKQ, aftermarket, reconditioned, CAPA, etc.
+    return re.search(r'\b(LKQ|after\s*market|aftermarket|recon(?:ditioned)?|CAPA|Alt-OE|Alt\s*OE|reman(?:ufactured)?)\b', text, re.IGNORECASE) is not None
 
 # =========================================
 # Photo parsing & requirements
@@ -264,12 +273,6 @@ def extract_odometer_from_photos(image_blobs: List[Tuple[str, bytes]]) -> Option
     return None
 
 def check_required_photos(image_blobs: List[Tuple[str, bytes]], ocr_text: str) -> List[str]:
-    """
-    Required: four corners, odometer, VIN, license plate.
-    Recognizes:
-      - Harvested PDF photo pages (tag 'imgrep' or 'corner')
-      - Corner labels in OCR text (LF/RF/LR/RR or full words)
-    """
     required = ["four corners", "odometer", "vin", "license plate"]
     present = set()
     txt = (ocr_text or "").lower()
@@ -321,7 +324,7 @@ def check_labor_and_tax_score(text: str, client_rules: str) -> int:
     def has_rate(label: str) -> bool:
         pat = rf"{label}[^\n]{{0,120}}?\$\s*\d{{2,3}}(?:\.\d+)?\s*(?:/hr|/hour|per\s*hour|hr)"
         return re.search(pat, text, re.IGNORECASE) is not None
-    labels = ["Body Labor", "Paint Labor", "Mechanical Labor", "Structural Labor"]
+    labels = ["Body Labor", "Paint Labor", "Mechanical Labor", "Structural Labor", "Frame Labor"]
     if not any(has_rate(lbl) for lbl in labels):
         adj -= 50
     # Only deduct for tax if clearly required by rules AND not present
@@ -408,7 +411,7 @@ def compare_estimate_with_photos(items: List[Dict[str, str]],
                 {"role": "system", "content": system},
                 {"role": "user",   "content": user_parts}
             ],
-            max_tokens=1200,
+            max_tokens=900,
             temperature=0
         )
         txt = (rsp.choices[0].message.content or "").strip()
@@ -501,27 +504,41 @@ async def vision_review(
 
     # ----- rule signals for GPT consistency -----
     tax_present_flag = taxes_present(combined_text)
+    year, miles = parse_year_miles(combined_text)
+    now_year = datetime.datetime.now().year
+    age_years = (now_year - year) if year else None
+    require_oem = (age_years is not None and age_years <= 2) or (miles is not None and miles <= 24000)
+    non_oem_flag = non_oem_used(combined_text)
 
+    # ===== System prompt to enforce NO chit-chat & consistent sections =====
     system_prompt = f"""
 You are an AI auto damage auditor. Follow these instructions EXACTLY:
 
-1) **Never state a percentage score line in your prose.** Do not write "Final Score", "Audit Results", "Total/Final/Compliance Evaluation" with a %.
-2) Use ONLY these section titles and order in your prose:
-   - Required Photos
-   - Labor Rates
-   - Taxes
-   - Parts Compliance
-   - Client Rules Adherence
-   - Additional Notes
-3) For **Taxes**:
-   - TAX_PRESENT = {str(tax_present_flag)}
-   - If TAX_PRESENT is True, do NOT deduct for taxes and do NOT claim taxes are missing.
-4) For photos:
-   - If four corners, odometer, VIN, and license plate are present, say so and do not deduct for photos.
-5) Keep bullets short and factual (<= 20 words each). No score lines.
+- NO chit-chat, apologies, or prefaces. Do NOT start with "Sure", "Here is", "Based on", etc.
+- Start immediately with the first section header. Use ONLY these section titles and this order:
+  ### Required Photos
+  ### Labor Rates
+  ### Taxes
+  ### Parts Compliance
+  ### Client Rules Adherence
+  ### Additional Notes
 
-Client Rules:
-{client_rules}
+Ground truth constraints (use them verbatim):
+- TAX_PRESENT = {str(tax_present_flag)}
+- VEHICLE_YEAR = {str(year) if year else "unknown"}
+- VEHICLE_MILES = {str(miles) if miles is not None else "unknown"}
+- REQUIRE_OEM = {str(bool(require_oem))}
+- NON_OEM_USED = {str(non_oem_flag)}
+
+Scoring/logic guidance you MUST follow:
+- If TAX_PRESENT is True, do NOT say taxes are missing or deduct for taxes.
+- For Parts Compliance:
+  • If REQUIRE_OEM is True and NON_OEM_USED is True → state non-compliance (non-OEM on ≤2 years or ≤24k miles).
+  • If REQUIRE_OEM is True and NON_OEM_USED is False → state compliant (OEM only).
+  • If REQUIRE_OEM is False → evaluate per general client rules; be explicit.
+- Keep bullets short and factual (≤ 20 words). NO percentage lines in prose.
+
+Return plain Markdown with only those six sections. Do not add any other headings or intro text.
 """.strip()
 
     user_parts: List[Dict[str, Any]] = []
@@ -537,7 +554,8 @@ Client Rules:
                 {"role": "system", "content": system_prompt},
                 {"role": "user",   "content": user_parts}
             ],
-            max_tokens=900
+            max_tokens=800,  # tighter for consistency
+            temperature=0
         )
         gpt_output = response.choices[0].message.content or "⚠️ GPT returned no output."
     except Exception as e:
@@ -545,7 +563,7 @@ Client Rules:
         logger.error(f"OpenAI error: {err}")
         gpt_output = f"⚠️ AI review failed: {err}"
 
-    # ===== Unified score parser (prefers Final Evaluation / Audit Results / Total Evaluation / Final Score / Compliance) =====
+    # ===== Unified score parser (support Final Evaluation / Audit Results / Total Evaluation / Final Score / Compliance) =====
     SCORE_PATTERNS = [
         r"Final\s*Evaluation\s*(?:Score)?\s*(?:is|:|-)?\s*(\d{1,3})\s*%?",
         r"Audit\s*Results?\s*(?:is|:|-)?\s*(\d{1,3})\s*%?",
@@ -569,15 +587,15 @@ Client Rules:
     photo_adj = -25 * len(missing_photos)
     computed = max(0, 100 + labor_tax_adj + photo_adj)
 
-    # Authoritative score = AI score if present, else computed
     authoritative_score = score_ai if score_ai is not None else computed
 
-    # Scrub any score lines from the AI narrative (keep wording uniform)
+    # Scrub any score lines & any conversational filler from the AI narrative
     gpt_output_clean = re.sub(
         r'(?im)^(?:Final\s*Score|Compliance\s*Score|Total\s*Evaluation|Final\s*Evaluation|Audit\s*Results?)\s*(?:is|:|-)?\s*\d{1,3}\s*%.*$',
         '',
         gpt_output or ''
-    ).strip()
+    )
+    gpt_output_clean = re.sub(r'(?im)^\s*(sure[,!]?|here(?:\'s| is)|based on|okay[,!]?|alright[,!]?).*$', '', gpt_output_clean).strip()
 
     # =========================================
     # PDF build
@@ -606,7 +624,6 @@ Client Rules:
 
     pdf.ln(4)
     pdf_add_section_title(pdf, "AI-4-IA Review Summary")
-    # Consistent wording at the top of the summary:
     pdf.multi_cell(0, 6, f"**Audit Results: {authoritative_score}%**")
     pdf.ln(1)
     pdf.multi_cell(0, 6, gpt_output_clean)
@@ -643,7 +660,7 @@ Client Rules:
     pdf.ln(2)
     pdf_kv(pdf, "Consistency Overall", consistency.get("overall", ""))
 
-    # Save PDF to /tmp with name {file_number}.pdf
+    # Save PDF
     pdf_path = os.path.join(PDF_DIR, f"{file_number}.pdf")
     try:
         pdf_bytes = pdf.output(dest="S").encode("latin-1")
@@ -717,6 +734,7 @@ async def get_client_rules(client_name: str):
     else:
         logger.error(f"Rules not found for client: {client_name}")
         return JSONResponse(status_code=404, content={"error": "Rules not found for this client."})
+
 
 
 
