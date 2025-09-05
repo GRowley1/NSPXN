@@ -110,14 +110,9 @@ CORNER_LABEL_PAT = re.compile(
 )
 
 def count_corner_labels(text: str) -> int:
-    """
-    Returns count of unique corner cues in text.
-    Accepts 'Left Front/Right Front/Left Rear/Right Rear' or LF/RF/LR/RR.
-    """
     found = set()
     for m in re.finditer(CORNER_LABEL_PAT, text or ""):
         token = m.group(0).lower().replace(" ", "")
-        # normalize tokens
         if token in ("lf", "leftfront"): found.add("lf")
         elif token in ("rf", "rightfront"): found.add("rf")
         elif token in ("lr", "leftrear"): found.add("lr")
@@ -143,8 +138,7 @@ def harvest_photos_from_pdf(pdf_bytes: bytes, max_pages: int = 20) -> List[Tuple
 
             if is_img_report or looks_like_photos:
                 buf = io.BytesIO()
-                # save the original color page for vision (better than preprocessed)
-                page.save(buf, format="JPEG", quality=85)
+                page.save(buf, format="JPEG", quality=85)  # original color page
                 tag = "imgrep" if is_img_report else ("corner" if corner_hits else "pdfphoto")
                 out.append((f"pdf-{tag}-p{i}.jpg", buf.getvalue()))
     except Exception as e:
@@ -157,8 +151,7 @@ def harvest_photos_from_pdf(pdf_bytes: bytes, max_pages: int = 20) -> List[Tuple
 VIN_ALLOWED = set("0123456789ABCDEFGHJKLMNPRSTUVWXYZ")
 
 def normalize_vin(s: str) -> Optional[str]:
-    s = s.strip().upper()
-    s = s.replace(" ", "")
+    s = s.strip().upper().replace(" ", "")
     s = s.replace("O", "0").replace("I", "1").replace("Q", "0")
     if len(s) != 17 or any(ch not in VIN_ALLOWED for ch in s):
         return None
@@ -193,7 +186,7 @@ def best_vin_candidate(cands: List[str]) -> Optional[str]:
     return None
 
 # =========================================
-# Field extraction
+# Field extraction & tax detection
 # =========================================
 def extract_claim_from_text(text: str) -> Optional[str]:
     patterns = [
@@ -223,6 +216,12 @@ def extract_vehicle_from_text(text: str) -> Optional[str]:
         miles = m2.group(1) if m2 else "Mileage unknown"
         return f"{year} {make} {model}, {miles} miles"
     return None
+
+def taxes_present(text: str) -> bool:
+    """
+    Heuristic: treat taxes as present if 'tax' appears on a line with either a % or $ amount.
+    """
+    return re.search(r'tax[^\n]{0,50}(\d{1,3}\s*%|\$\s*\d+(\.\d{2})?)', text, re.IGNORECASE) is not None
 
 # =========================================
 # Photo parsing & requirements
@@ -267,8 +266,8 @@ def extract_odometer_from_photos(image_blobs: List[Tuple[str, bytes]]) -> Option
 def check_required_photos(image_blobs: List[Tuple[str, bytes]], ocr_text: str) -> List[str]:
     """
     Required: four corners, odometer, VIN, license plate.
-    Now also recognizes:
-      - Photo pages harvested from PDF (tagged 'imgrep' or 'corner')
+    Recognizes:
+      - Harvested PDF photo pages (tag 'imgrep' or 'corner')
       - Corner labels in OCR text (LF/RF/LR/RR or full words)
     """
     required = ["four corners", "odometer", "vin", "license plate"]
@@ -299,25 +298,18 @@ def check_required_photos(image_blobs: List[Tuple[str, bytes]], ocr_text: str) -
         except Exception as e:
             logger.warning(f"Image parse error {name}: {e}")
 
-    # Count harvested PDF indicators
     imgrep_count = sum(1 for n, _ in image_blobs if "imgrep" in n.lower())
     corner_page_count = sum(1 for n, _ in image_blobs if "corner" in n.lower())
-
-    # Also parse OCR text (from the estimate PDF) for explicit corner labels
     corner_labels_in_text = count_corner_labels(ocr_text)
 
-    # Satisfy four corners if any of these hold:
-    # - Enough exterior-like photos detected
-    # - Multiple Image Report pages present
-    # - Corner labels found across pages/text
     if ext_like >= 2 or imgrep_count >= 2 or (corner_page_count + corner_labels_in_text) >= 3:
         present.add("four corners")
 
     missing = [p for p in required if p not in present]
     logger.debug(
-        f"Photo check → present={sorted(list(present))}, "
-        f"missing={missing}, ext_like={ext_like}, imgrep={imgrep_count}, "
-        f"corner_pages={corner_page_count}, corner_labels_in_text={corner_labels_in_text}"
+        f"Photo check → present={sorted(list(present))}, missing={missing}, "
+        f"ext_like={ext_like}, imgrep={imgrep_count}, corner_pages={corner_page_count}, "
+        f"corner_labels_in_text={corner_labels_in_text}"
     )
     return missing
 
@@ -332,8 +324,9 @@ def check_labor_and_tax_score(text: str, client_rules: str) -> int:
     labels = ["Body Labor", "Paint Labor", "Mechanical Labor", "Structural Labor"]
     if not any(has_rate(lbl) for lbl in labels):
         adj -= 50
+    # Only deduct for tax if clearly required by rules AND not present
     if re.search(r"tax\s*(required|must|utilize|apply)", client_rules, re.IGNORECASE):
-        if not re.search(r"(sales\s*tax|tax)[^\n]{0,80}?(\d{1,3}\.\d+%|\d{1,3}%|\$\s*\d+(\.\d{2})?)", text, re.IGNORECASE):
+        if not taxes_present(text):
             adj -= 25
     return adj
 
@@ -373,13 +366,6 @@ def extract_estimate_items(text: str) -> List[Dict[str, str]]:
 # =========================================
 def compare_estimate_with_photos(items: List[Dict[str, str]],
                                  images_for_vision: List[Dict[str, Any]]) -> Dict[str, Any]:
-    """
-    Returns dict:
-      per_item: [{op,part,side,photo_evidence,confidence,note}]
-      not_in_photos: [raw...]
-      extra_damage_in_photos: ["desc"...]
-      overall: "short"
-    """
     schema = {
         "type": "object",
         "properties": {
@@ -407,7 +393,7 @@ def compare_estimate_with_photos(items: List[Dict[str, str]],
         "Given estimate line items and vehicle photos, decide for EACH item whether visible photo evidence exists. "
         "Hidden ops (calibration, internal R&I) may not be visible → mark as no-evidence with a short 3–10 word note. "
         "Also list obvious damages seen in photos that are NOT listed in the estimate. "
-        "Return STRICT JSON ONLY per this schema:\n" + json.dumps(schema)
+        "Return STRICT JSON ONLY per this schema: " + json.dumps(schema)
     )
 
     user_parts: List[Dict[str, Any]] = [
@@ -483,9 +469,7 @@ async def vision_review(
             b64 = base64.b64encode(raw).decode("utf-8")
             images_for_vision.append({"type": "image_url", "image_url": {"url": f"data:image/jpeg;base64,{b64}"}})
         elif name.endswith(".pdf"):
-            # existing: extract estimate text
             texts.append(extract_text_from_pdf(io.BytesIO(raw)))
-            # NEW: also harvest photo-like pages from the PDF so photo checks see them
             harvested = harvest_photos_from_pdf(raw)
             for hname, hbytes in harvested:
                 image_blobs.append((hname, hbytes))
@@ -515,24 +499,34 @@ async def vision_review(
     est_items = extract_estimate_items(combined_text)
     consistency = compare_estimate_with_photos(est_items, images_for_vision)
 
-    # ----- vision narrative (compliance summary)
-    photo_hint = f"\n\nMISSING PHOTOS: {', '.join(missing_photos) if missing_photos else 'None'}"
+    # ----- rule signals for GPT consistency -----
+    tax_present_flag = taxes_present(combined_text)
+
     system_prompt = f"""
-You are an AI auto damage auditor. Evaluate STRICTLY by these rules:
+You are an AI auto damage auditor. Follow these instructions EXACTLY:
 
-- Start at 100% and deduct only for: labor (-50% if ALL sections missing), tax (-25% if rules require but not present), photos (-25% per missing type), parts (-25% if a 2024–2025 vehicle uses LKQ/AM in violation).
-- Required photos: four corners, odometer, VIN, license plate.
-- "Four corners" is satisfied if at least two exterior corner views are present (already computed for you) OR multiple Image Report pages/corner labels are present.
-- Do NOT assume total loss unless explicitly stated.
-- If any labor rate is present (body OR paint OR mechanical OR structural), do NOT apply the -50% deduction.
+1) **Never state a percentage score line in your prose.** Do not write "Final Score", "Audit Results", "Total/Final/Compliance Evaluation" with a %.
+2) Use ONLY these section titles and order in your prose:
+   - Required Photos
+   - Labor Rates
+   - Taxes
+   - Parts Compliance
+   - Client Rules Adherence
+   - Additional Notes
+3) For **Taxes**:
+   - TAX_PRESENT = {str(tax_present_flag)}
+   - If TAX_PRESENT is True, do NOT deduct for taxes and do NOT claim taxes are missing.
+4) For photos:
+   - If four corners, odometer, VIN, and license plate are present, say so and do not deduct for photos.
+5) Keep bullets short and factual (<= 20 words each). No score lines.
 
-Rules to follow from client:
+Client Rules:
 {client_rules}
 """.strip()
 
     user_parts: List[Dict[str, Any]] = []
     if combined_text:
-        user_parts.append({"type": "text", "text": combined_text + photo_hint})
+        user_parts.append({"type": "text", "text": combined_text})
     if images_for_vision:
         user_parts.extend(images_for_vision)
 
@@ -551,14 +545,14 @@ Rules to follow from client:
         logger.error(f"OpenAI error: {err}")
         gpt_output = f"⚠️ AI review failed: {err}"
 
-    # ===== EDIT 1: SCORE PARSER prefers "Final Evaluation" / "Total Evaluation" etc. =====
+    # ===== Unified score parser (prefers Final Evaluation / Audit Results / Total Evaluation / Final Score / Compliance) =====
     SCORE_PATTERNS = [
-        r"Total\s*Evaluation\s*(?:Score)?\s*(?:is|:|-)?\s*(\d{1,3})\s*%?",
         r"Final\s*Evaluation\s*(?:Score)?\s*(?:is|:|-)?\s*(\d{1,3})\s*%?",
+        r"Audit\s*Results?\s*(?:is|:|-)?\s*(\d{1,3})\s*%?",
+        r"Total\s*Evaluation\s*(?:Score)?\s*(?:is|:|-)?\s*(\d{1,3})\s*%?",
         r"Final\s*Score\s*(?:is|:|-)?\s*(\d{1,3})\s*%?",
         r"Compliance\s*Score\s*(?:is|:|-)?\s*(\d{1,3})\s*%?",
     ]
-
     def parse_ai_score(text: str) -> Optional[int]:
         for pat in SCORE_PATTERNS:
             m = re.search(pat, text or "", re.IGNORECASE)
@@ -575,12 +569,12 @@ Rules to follow from client:
     photo_adj = -25 * len(missing_photos)
     computed = max(0, 100 + labor_tax_adj + photo_adj)
 
-    # Authoritative score = AI score if present (e.g., "Final Evaluation"), else computed
+    # Authoritative score = AI score if present, else computed
     authoritative_score = score_ai if score_ai is not None else computed
 
-    # ===== EDIT 2: scrub any score lines, incl. "Final Evaluation", before placing in PDF =====
+    # Scrub any score lines from the AI narrative (keep wording uniform)
     gpt_output_clean = re.sub(
-        r'(?im)^(?:Final\s*Score|Compliance\s*Score|Total\s*Evaluation|Final\s*Evaluation)\s*(?:is|:|-)?\s*\d{1,3}\s*%.*$',
+        r'(?im)^(?:Final\s*Score|Compliance\s*Score|Total\s*Evaluation|Final\s*Evaluation|Audit\s*Results?)\s*(?:is|:|-)?\s*\d{1,3}\s*%.*$',
         '',
         gpt_output or ''
     ).strip()
@@ -612,6 +606,9 @@ Rules to follow from client:
 
     pdf.ln(4)
     pdf_add_section_title(pdf, "AI-4-IA Review Summary")
+    # Consistent wording at the top of the summary:
+    pdf.multi_cell(0, 6, f"**Audit Results: {authoritative_score}%**")
+    pdf.ln(1)
     pdf.multi_cell(0, 6, gpt_output_clean)
 
     # ======== Estimate ↔ Photos Consistency Review ========
@@ -675,6 +672,8 @@ Vehicle: {vehicle_desc}
 Compliance Score: {authoritative_score}%
 
 AI Review Summary:
+Audit Results: {authoritative_score}%
+
 {gpt_output_clean}
 """
         msg.set_content(email_body)
@@ -685,7 +684,7 @@ AI Review Summary:
         logger.error(f"Email error (continuing): {e}")
 
     return {
-        "gpt_output": gpt_output_clean,
+        "gpt_output": f"Audit Results: {authoritative_score}%\n\n{gpt_output_clean}",
         "file_number": file_number,
         "claim_number": claim_number,
         "vehicle": vehicle_desc,
@@ -718,6 +717,7 @@ async def get_client_rules(client_name: str):
     else:
         logger.error(f"Rules not found for client: {client_name}")
         return JSONResponse(status_code=404, content={"error": "Rules not found for this client."})
+
 
 
 
