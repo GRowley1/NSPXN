@@ -16,7 +16,7 @@ from fpdf import FPDF
 from docx import Document
 from pdf2image import convert_from_bytes
 import pytesseract
-from PIL import Image, ImageEnhance, ImageOps, ImageFilter, ImageStat
+from PIL import Image, ImageEnhance, ImageOps, ImageFilter, ImageStat, Image
 from openai import OpenAI
 
 # =========================================
@@ -100,6 +100,34 @@ def extract_text_from_docx(file_like: io.BytesIO) -> str:
     except Exception as e:
         logger.error(f"DOCX read error: {e}")
         return ""
+
+# =========================================
+# NEW: Harvest photos from PDF (Image Report pages & photo-like pages)
+# =========================================
+def harvest_photos_from_pdf(pdf_bytes: bytes, max_pages: int = 12) -> List[Tuple[str, bytes]]:
+    """
+    Convert PDF pages to images and return (name, jpeg_bytes) for pages that look like photo pages.
+    - Prefer pages whose OCR contains 'Image Report'
+    - Fallback: visually rich pages (variance threshold)
+    """
+    out: List[Tuple[str, bytes]] = []
+    try:
+        pages = convert_from_bytes(pdf_bytes, dpi=200)[:max_pages]
+        for i, page in enumerate(pages, 1):
+            proc = preprocess_image(page)
+            ocr = pytesseract.image_to_string(proc, lang="eng")
+            is_img_report = "image report" in ocr.lower()
+            var = ImageStat.Stat(proc).var[0] if proc.mode == "L" else sum(ImageStat.Stat(proc).var)/3
+            looks_like_photos = var > 120  # visually busy page, typical of photo grids or full-page images
+
+            if is_img_report or looks_like_photos:
+                buf = io.BytesIO()
+                page.save(buf, format="JPEG", quality=85)
+                tag = "imgrep" if is_img_report else "pdfphoto"
+                out.append((f"pdf-{tag}-p{i}.jpg", buf.getvalue()))
+    except Exception as e:
+        logger.warning(f"harvest_photos_from_pdf error: {e}")
+    return out
 
 # =========================================
 # VIN utilities (normalization + checksum)
@@ -243,7 +271,11 @@ def check_required_photos(image_blobs: List[Tuple[str, bytes]], ocr_text: str) -
         except Exception as e:
             logger.warning(f"Image parse error {name}: {e}")
 
-    if ext >= 2:
+    # NEW: count Image Report pages harvested from the PDF
+    imgrep_count = sum(1 for n, _ in image_blobs if "imgrep" in n.lower())
+
+    # Satisfy four corners by either exterior-like shots OR multiple Image Report pages
+    if ext >= 2 or imgrep_count >= 4:
         present.add("four corners")
 
     return [p for p in required if p not in present]
@@ -410,7 +442,14 @@ async def vision_review(
             b64 = base64.b64encode(raw).decode("utf-8")
             images_for_vision.append({"type": "image_url", "image_url": {"url": f"data:image/jpeg;base64,{b64}"}})
         elif name.endswith(".pdf"):
+            # existing: extract estimate text
             texts.append(extract_text_from_pdf(io.BytesIO(raw)))
+            # NEW: also harvest photo-like pages from the PDF so photo checks see them
+            harvested = harvest_photos_from_pdf(raw)
+            for hname, hbytes in harvested:
+                image_blobs.append((hname, hbytes))
+                b64 = base64.b64encode(hbytes).decode("utf-8")
+                images_for_vision.append({"type": "image_url", "image_url": {"url": f"data:image/jpeg;base64,{b64}"}})
         elif name.endswith(".docx"):
             texts.append(extract_text_from_docx(io.BytesIO(raw)))
         elif name.endswith(".txt"):
@@ -442,7 +481,7 @@ You are an AI auto damage auditor. Evaluate STRICTLY by these rules:
 
 - Start at 100% and deduct only for: labor (-50% if ALL sections missing), tax (-25% if rules require but not present), photos (-25% per missing type), parts (-25% if a 2024–2025 vehicle uses LKQ/AM in violation).
 - Required photos: four corners, odometer, VIN, license plate.
-- "Four corners" is satisfied if at least two exterior corner views are present (already computed for you).
+- "Four corners" is satisfied if at least two exterior corner views are present (already computed for you) or multiple Image Report pages are included.
 - Do NOT assume total loss unless explicitly stated.
 - If any labor rate is present (body OR paint OR mechanical OR structural), do NOT apply the -50% deduction.
 
@@ -472,7 +511,6 @@ Rules to follow from client:
         gpt_output = f"⚠️ AI review failed: {err}"
 
     # ----- SCORE: single authoritative number used everywhere -----
-    # Prefer AI-provided percentage if present; else compute from deductions
     score_ai = None
     for pat in [
         r"Total\s*Evaluation\s*[:\-]?\s*(\d{1,3})\s*%?",
@@ -519,7 +557,6 @@ Rules to follow from client:
     pdf.multi_cell(0, 6, f"Vehicle: {vehicle_desc}")
     if odo_photos:
         pdf.multi_cell(0, 6, f"Odometer (from photos): {odo_photos}")
-    # Use unified score label + value
     pdf.multi_cell(0, 6, f"Compliance Score: {authoritative_score}%")
 
     pdf.ln(4)
@@ -564,6 +601,7 @@ Rules to follow from client:
         pdf_bytes = pdf.output(dest="S").encode("latin-1")
         with open(pdf_path, "wb") as f:
             f.write(pdf_bytes)
+        logger.info(f"PDF saved → {pdf_path}")
     except Exception as e:
         logger.error(f"PDF write error: {e}")
 
@@ -629,6 +667,7 @@ async def get_client_rules(client_name: str):
     else:
         logger.error(f"Rules not found for client: {client_name}")
         return JSONResponse(status_code=404, content={"error": "Rules not found for this client."})
+
 
 
 
