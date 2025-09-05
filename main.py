@@ -102,13 +102,33 @@ def extract_text_from_docx(file_like: io.BytesIO) -> str:
         return ""
 
 # =========================================
-# NEW: Harvest photos from PDF (Image Report pages & photo-like pages)
+# NEW: harvest photos from PDF & count corner labels
 # =========================================
-def harvest_photos_from_pdf(pdf_bytes: bytes, max_pages: int = 12) -> List[Tuple[str, bytes]]:
+CORNER_LABEL_PAT = re.compile(
+    r'\b(?:left\s*front|right\s*front|left\s*rear|right\s*rear|lf|rf|lr|rr)\b',
+    re.IGNORECASE
+)
+
+def count_corner_labels(text: str) -> int:
+    """
+    Returns count of unique corner cues in text.
+    Accepts 'Left Front/Right Front/Left Rear/Right Rear' or LF/RF/LR/RR.
+    """
+    found = set()
+    for m in re.finditer(CORNER_LABEL_PAT, text or ""):
+        token = m.group(0).lower().replace(" ", "")
+        # normalize tokens
+        if token in ("lf", "leftfront"): found.add("lf")
+        elif token in ("rf", "rightfront"): found.add("rf")
+        elif token in ("lr", "leftrear"): found.add("lr")
+        elif token in ("rr", "rightrear"): found.add("rr")
+    return len(found)
+
+def harvest_photos_from_pdf(pdf_bytes: bytes, max_pages: int = 20) -> List[Tuple[str, bytes]]:
     """
     Convert PDF pages to images and return (name, jpeg_bytes) for pages that look like photo pages.
-    - Prefer pages whose OCR contains 'Image Report'
-    - Fallback: visually rich pages (variance threshold)
+    - Prefer pages whose OCR contains 'Image Report' OR corner labels.
+    - Fallback: visually rich pages (variance threshold).
     """
     out: List[Tuple[str, bytes]] = []
     try:
@@ -116,14 +136,16 @@ def harvest_photos_from_pdf(pdf_bytes: bytes, max_pages: int = 12) -> List[Tuple
         for i, page in enumerate(pages, 1):
             proc = preprocess_image(page)
             ocr = pytesseract.image_to_string(proc, lang="eng")
-            is_img_report = "image report" in ocr.lower()
+            is_img_report = "image report" in (ocr or "").lower()
+            corner_hits = count_corner_labels(ocr)
             var = ImageStat.Stat(proc).var[0] if proc.mode == "L" else sum(ImageStat.Stat(proc).var)/3
-            looks_like_photos = var > 120  # visually busy page, typical of photo grids or full-page images
+            looks_like_photos = var > 120 or corner_hits >= 2
 
             if is_img_report or looks_like_photos:
                 buf = io.BytesIO()
+                # save the original color page for vision (better than preprocessed)
                 page.save(buf, format="JPEG", quality=85)
-                tag = "imgrep" if is_img_report else "pdfphoto"
+                tag = "imgrep" if is_img_report else ("corner" if corner_hits else "pdfphoto")
                 out.append((f"pdf-{tag}-p{i}.jpg", buf.getvalue()))
     except Exception as e:
         logger.warning(f"harvest_photos_from_pdf error: {e}")
@@ -243,9 +265,15 @@ def extract_odometer_from_photos(image_blobs: List[Tuple[str, bytes]]) -> Option
     return None
 
 def check_required_photos(image_blobs: List[Tuple[str, bytes]], ocr_text: str) -> List[str]:
+    """
+    Required: four corners, odometer, VIN, license plate.
+    Now also recognizes:
+      - Photo pages harvested from PDF (tagged 'imgrep' or 'corner')
+      - Corner labels in OCR text (LF/RF/LR/RR or full words)
+    """
     required = ["four corners", "odometer", "vin", "license plate"]
     present = set()
-    txt = ocr_text.lower()
+    txt = (ocr_text or "").lower()
 
     if any(k in txt for k in ["odometer", "mileage photo", "dashboard mileage"]):
         present.add("odometer")
@@ -254,7 +282,7 @@ def check_required_photos(image_blobs: List[Tuple[str, bytes]], ocr_text: str) -
     if any(k in txt for k in ["license plate", "registration plate"]):
         present.add("license plate")
 
-    ext = 0
+    ext_like = 0
     for name, blob in image_blobs:
         try:
             img = Image.open(io.BytesIO(blob))
@@ -267,18 +295,31 @@ def check_required_photos(image_blobs: List[Tuple[str, bytes]], ocr_text: str) -
             if re.search(r"(license|registration)\s*plate|\b[A-Z0-9]{5,8}\b", ocr, re.IGNORECASE):
                 present.add("license plate")
             if _image_is_exterior_wide(img):
-                ext += 1
+                ext_like += 1
         except Exception as e:
             logger.warning(f"Image parse error {name}: {e}")
 
-    # NEW: count Image Report pages harvested from the PDF
+    # Count harvested PDF indicators
     imgrep_count = sum(1 for n, _ in image_blobs if "imgrep" in n.lower())
+    corner_page_count = sum(1 for n, _ in image_blobs if "corner" in n.lower())
 
-    # Satisfy four corners by either exterior-like shots OR multiple Image Report pages
-    if ext >= 2 or imgrep_count >= 4:
+    # Also parse OCR text (from the estimate PDF) for explicit corner labels
+    corner_labels_in_text = count_corner_labels(ocr_text)
+
+    # Satisfy four corners if any of these hold:
+    # - Enough exterior-like photos detected
+    # - Multiple Image Report pages present
+    # - Corner labels found across pages/text
+    if ext_like >= 2 or imgrep_count >= 2 or (corner_page_count + corner_labels_in_text) >= 3:
         present.add("four corners")
 
-    return [p for p in required if p not in present]
+    missing = [p for p in required if p not in present]
+    logger.debug(
+        f"Photo check → present={sorted(list(present))}, "
+        f"missing={missing}, ext_like={ext_like}, imgrep={imgrep_count}, "
+        f"corner_pages={corner_page_count}, corner_labels_in_text={corner_labels_in_text}"
+    )
+    return missing
 
 # =========================================
 # Labor/tax compliance checks
@@ -481,7 +522,7 @@ You are an AI auto damage auditor. Evaluate STRICTLY by these rules:
 
 - Start at 100% and deduct only for: labor (-50% if ALL sections missing), tax (-25% if rules require but not present), photos (-25% per missing type), parts (-25% if a 2024–2025 vehicle uses LKQ/AM in violation).
 - Required photos: four corners, odometer, VIN, license plate.
-- "Four corners" is satisfied if at least two exterior corner views are present (already computed for you) or multiple Image Report pages are included.
+- "Four corners" is satisfied if at least two exterior corner views are present (already computed for you) OR multiple Image Report pages/corner labels are present.
 - Do NOT assume total loss unless explicitly stated.
 - If any labor rate is present (body OR paint OR mechanical OR structural), do NOT apply the -50% deduction.
 
@@ -667,6 +708,7 @@ async def get_client_rules(client_name: str):
     else:
         logger.error(f"Rules not found for client: {client_name}")
         return JSONResponse(status_code=404, content={"error": "Rules not found for this client."})
+
 
 
 
