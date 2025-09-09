@@ -10,6 +10,8 @@ import json
 import logging
 import math
 import datetime
+import hashlib
+import random
 
 import smtplib
 from email.message import EmailMessage
@@ -65,7 +67,7 @@ app.add_middleware(
 )
 
 # =========================================
-# OCR helpers
+# OCR helpers (fast)
 # =========================================
 def preprocess_image(img: Image.Image) -> Image.Image:
     img = img.convert("L")
@@ -74,22 +76,33 @@ def preprocess_image(img: Image.Image) -> Image.Image:
     img = ImageOps.autocontrast(img)
     return img
 
-def extract_text_from_pdf(file_like: io.BytesIO) -> str:
-    """Lower DPI for speed while retaining heading/label accuracy."""
+def ocr_text_fast(img: Image.Image, psm: int = 6) -> str:
+    try:
+        proc = preprocess_image(img)
+        return pytesseract.image_to_string(proc, lang="eng", config=f"--psm {psm} --oem 1")
+    except Exception as e:
+        logger.warning(f"OCR fast error: {e}")
+        return ""
+
+def extract_text_from_pdf(file_like: io.BytesIO, max_ocr_pages: int = 6, dpi: int = 135) -> str:
+    """
+    OCR only the first `max_ocr_pages` pages for speed. Most estimates have all
+    the structured content (rates, VIN, parts) up front.
+    """
     try:
         file_like.seek(0)
-        images = convert_from_bytes(file_like.read(), dpi=150)
+        pages = convert_from_bytes(file_like.read(), dpi=dpi)
         text_output = ""
-        for i, img in enumerate(images, 1):
-            processed = preprocess_image(img)
-            try:
-                ocr_text = pytesseract.image_to_string(processed, lang="eng", config="--psm 6")
-            except Exception:
-                ocr_text = pytesseract.image_to_string(processed, lang="eng", config="--psm 3")
-            if len(ocr_text.strip()) < 30:
-                logger.warning(f"OCR page {i} too short; skipping noise.")
+        for i, img in enumerate(pages, 1):
+            if i > max_ocr_pages:
+                break
+            page_text = ocr_text_fast(img, psm=6)
+            if len(page_text.strip()) < 20:
+                # fallback psm if page was too sparse
+                page_text = ocr_text_fast(img, psm=3)
+            if not page_text.strip():
                 continue
-            text_output += f"\n[Page {i}]\n{ocr_text}"
+            text_output += f"\n[Page {i}]\n{page_text}"
         return text_output
     except Exception as e:
         logger.error(f"OCR error: {e}")
@@ -104,40 +117,26 @@ def extract_text_from_docx(file_like: io.BytesIO) -> str:
         return ""
 
 # =========================================
-# Harvest photos from PDFs & detect corner labels
+# Harvest photos from PDFs (no OCR, fast heuristic)
 # =========================================
-CORNER_LABEL_PAT = re.compile(
-    r'\b(?:left\s*front|right\s*front|left\s*rear|right\s*rear|lf|rf|lr|rr)\b',
-    re.IGNORECASE
-)
+def _page_var(img: Image.Image) -> float:
+    g = img.convert("L")
+    return ImageStat.Stat(g).var[0]
 
-def count_corner_labels(text: str) -> int:
-    found = set()
-    for m in re.finditer(CORNER_LABEL_PAT, text or ""):
-        token = m.group(0).lower().replace(" ", "")
-        if token in ("lf", "leftfront"): found.add("lf")
-        elif token in ("rf", "rightfront"): found.add("rf")
-        elif token in ("lr", "leftrear"): found.add("lr")
-        elif token in ("rr", "rightrear"): found.add("rr")
-    return len(found)
-
-def harvest_photos_from_pdf(pdf_bytes: bytes, max_pages: int = 20) -> List[Tuple[str, bytes]]:
+def harvest_photos_from_pdf(pdf_bytes: bytes, max_pages: int = 20, dpi: int = 135) -> List[Tuple[str, bytes]]:
+    """
+    Convert PDF pages to images and return (name, jpeg_bytes) for pages that look like photo pages.
+    Fast heuristic: high variance = photo-heavy page. No OCR.
+    """
     out: List[Tuple[str, bytes]] = []
     try:
-        pages = convert_from_bytes(pdf_bytes, dpi=150)[:max_pages]
+        pages = convert_from_bytes(pdf_bytes, dpi=dpi)[:max_pages]
         for i, page in enumerate(pages, 1):
-            proc = preprocess_image(page)
-            ocr = pytesseract.image_to_string(proc, lang="eng")
-            is_img_report = "image report" in (ocr or "").lower()
-            corner_hits = count_corner_labels(ocr)
-            var = ImageStat.Stat(proc).var[0] if proc.mode == "L" else sum(ImageStat.Stat(proc).var)/3
-            looks_like_photos = var > 120 or corner_hits >= 2
-
-            if is_img_report or looks_like_photos:
+            var = _page_var(page)
+            if var > 110:  # tuned threshold
                 buf = io.BytesIO()
-                page.convert("RGB").save(buf, format="JPEG", quality=85)
-                tag = "imgrep" if is_img_report else ("corner" if corner_hits else "pdfphoto")
-                out.append((f"pdf-{tag}-p{i}.jpg", buf.getvalue()))
+                page.convert("RGB").save(buf, format="JPEG", quality=82, optimize=True)
+                out.append((f"pdf-photo-p{i}.jpg", buf.getvalue()))
     except Exception as e:
         logger.warning(f"harvest_photos_from_pdf error: {e}")
     return out
@@ -172,26 +171,23 @@ def vin_checksum_ok(v: str) -> bool:
         return False
 
 def best_vin_candidate(cands: List[str]) -> Optional[str]:
-    """Return a VIN only if checksum-valid; else None."""
     for c in cands:
         vin = normalize_vin(c)
         if vin and vin_checksum_ok(vin):
             return vin
     return None
 
-# Re-OCR first page at high DPI to grab VIN line if bulk OCR missed it
 def extract_vin_from_pdf_first_page(pdf_bytes: bytes) -> Optional[str]:
+    """High-res single-page OCR to grab VIN line if bulk OCR missed it."""
     try:
         pages = convert_from_bytes(pdf_bytes, dpi=300)[:1]
         if not pages:
             return None
-        processed = preprocess_image(pages[0])
-        text = pytesseract.image_to_string(processed, lang="eng", config="--psm 6")
+        text = ocr_text_fast(pages[0], psm=6)
         m = re.search(r'(?i)\bVIN\s*[:\-]?\s*([A-HJ-NPR-Z0-9]{10,20})', text or "")
         if m:
             vin = best_vin_candidate([m.group(1)])
-            if vin:
-                return vin
+            if vin: return vin
         cands = re.findall(r'\b([A-HJ-NPR-Z0-9]{17})\b', text or "", re.IGNORECASE)
         return best_vin_candidate(cands)
     except Exception as e:
@@ -207,7 +203,7 @@ def extract_claim_from_text(text: str) -> Optional[str]:
         r"(?:^|\s)Claim\s*[:#]\s*([A-Za-z0-9\-]+)"
     ]
     for p in patterns:
-        m = re.search(p, text, re.IGNORECASE)
+        m = re.search(p, text or "", re.IGNORECASE)
         if m:
             return m.group(1).strip()
     return None
@@ -264,94 +260,112 @@ def non_oem_used(text: str) -> bool:
             continue
         if OPS_TOK.search(l) and re.search(PART_FLAGS, l, re.IGNORECASE) and any(p in l for p in PANELS_U):
             return True
-    # If estimate explicitly asserts OEM unless noted and we didn't hit a flagged line, treat as OEM only.
     if re.search(r'parts\s+presented\s+are\s+OEM[-\s]*parts', text or "", re.IGNORECASE):
         return False
     return False
 
 # =========================================
-# Photo parsing & requirements
+# Photo parsing: FAST required-photo checks
 # =========================================
-def _image_is_exterior_wide(img: Image.Image) -> bool:
-    processed = preprocess_image(img)
-    text = pytesseract.image_to_string(processed, lang="eng")
-    var = ImageStat.Stat(processed).var[0] if processed.mode == "L" else sum(ImageStat.Stat(processed).var)/3
-    return len(text.strip()) < 10 and var > 150
+def _is_exterior_by_edges(img: Image.Image) -> bool:
+    # Edge/variance heuristic; no OCR
+    g = img.convert("L")
+    var = ImageStat.Stat(g).var[0]
+    edges = g.filter(ImageFilter.FIND_EDGES)
+    evar = ImageStat.Stat(edges).var[0]
+    return (var > 140 and evar > 400)
 
 def extract_vin_from_photos(image_blobs: List[Tuple[str, bytes]]) -> Optional[str]:
-    rots = [0, 90]
+    # Targeted OCR with single pass
     found: List[str] = []
     for name, blob in image_blobs:
         try:
-            base = Image.open(io.BytesIO(blob))
-            for r in rots:
-                img = base.rotate(r, expand=True)
-                proc = preprocess_image(img)
-                for psm in ("--psm 7", "--psm 6", "--psm 11"):
-                    ocr = pytesseract.image_to_string(proc, lang="eng", config=psm)
-                    cands = re.findall(r"\b([A-HJ-NPR-Z0-9]{17})\b", ocr.upper())
-                    if cands:
-                        found.extend(cands)
+            img = Image.open(io.BytesIO(blob))
+            img = img.copy()
+            img.thumbnail((1600, 1600))
+            txt = ocr_text_fast(img, psm=7)
+            cands = re.findall(r"\b([A-HJ-NPR-Z0-9]{17})\b", txt.upper())
+            for c in cands:
+                vin = best_vin_candidate([c])
+                if vin:
+                    return vin
         except Exception as e:
             logger.warning(f"VIN photo OCR error ({name}): {e}")
-    vin = best_vin_candidate(found)
-    return vin if vin and vin_checksum_ok(vin) else None  # accept only checksum-valid from photos
+    return None
 
 def extract_odometer_from_photos(image_blobs: List[Tuple[str, bytes]]) -> Optional[str]:
     for name, blob in image_blobs:
         try:
             img = Image.open(io.BytesIO(blob))
-            proc = preprocess_image(img)
-            ocr = pytesseract.image_to_string(proc, lang="eng")
-            m = re.search(r"\b(\d{1,3}(?:,\d{3})+|\d{2,6})\b\s*(?:mi|miles|km)\b", ocr, re.IGNORECASE)
+            img = img.copy()
+            img.thumbnail((1400, 1400))
+            txt = ocr_text_fast(img, psm=7)
+            m = re.search(r"\b(\d{1,3}(?:,\d{3})+|\d{2,6})\b\s*(?:mi|miles|km)\b", txt, re.IGNORECASE)
             if m:
                 return m.group(1)
         except Exception as e:
             logger.warning(f"Odometer photo OCR error ({name}): {e}")
     return None
 
+def _sample_for_plate_ocr(image_blobs: List[Tuple[str, bytes]], k: int = 6) -> List[Tuple[str, bytes]]:
+    if len(image_blobs) <= k:
+        return image_blobs
+    # deterministic sample by hash so results are stable
+    pairs = []
+    for name, blob in image_blobs:
+        h = hashlib.md5(blob).hexdigest()
+        pairs.append((int(h[:8], 16), (name, blob)))
+    pairs.sort()
+    return [p[1] for p in pairs[:k]]
+
 def check_required_photos(image_blobs: List[Tuple[str, bytes]], ocr_text: str) -> List[str]:
+    """
+    Required: four corners, odometer, VIN, license plate.
+    Fast path: avoid OCR on every image.
+    """
     required = ["four corners", "odometer", "vin", "license plate"]
     present = set()
     txt = (ocr_text or "").lower()
 
-    if any(k in txt for k in ["odometer", "mileage photo", "dashboard mileage"]):
-        present.add("odometer")
-    if any(k in txt for k in ["vin", "vehicle identification number", "vin photo"]):
-        present.add("vin")
-    if any(k in txt for k in ["license plate", "registration plate"]):
-        present.add("license plate")
+    # VIN/ODO from text or targeted photo OCR
+    vin_text = bool(re.search(r'\bvin\b', txt))
+    odo_text = bool(re.search(r'\bodometer|mileage\b', txt))
 
-    ext_like = 0
-    for name, blob in image_blobs:
+    vin_photo = extract_vin_from_photos(image_blobs) is not None
+    odo_photo = extract_odometer_from_photos(image_blobs) is not None
+
+    if vin_text or vin_photo:
+        present.add("vin")
+    if odo_text or odo_photo:
+        present.add("odometer")
+
+    # License plate: OCR only a small deterministic sample
+    for name, blob in _sample_for_plate_ocr(image_blobs, k=6):
         try:
             img = Image.open(io.BytesIO(blob))
-            proc = preprocess_image(img)
-            ocr = pytesseract.image_to_string(proc, lang="eng")
-            if re.search(r"\b[A-HJ-NPR-Z0-9]{17}\b", ocr, re.IGNORECASE):
-                present.add("vin")
-            if re.search(r"\d{1,3}(,\d{3})*\s*(miles|km)", ocr, re.IGNORECASE):
-                present.add("odometer")
-            if re.search(r"(license|registration)\s*plate|\b[A-Z0-9]{5,8}\b", ocr, re.IGNORECASE):
+            img.thumbnail((1300, 1300))
+            txtp = ocr_text_fast(img, psm=7)
+            if re.search(r"(license|registration)\s*plate|\b[A-Z0-9]{5,8}\b", txtp, re.IGNORECASE):
                 present.add("license plate")
-            if _image_is_exterior_wide(img):
-                ext_like += 1
+                break
         except Exception as e:
-            logger.warning(f"Image parse error {name}: {e}")
+            logger.debug(f"Plate OCR skip ({name}): {e}")
 
-    imgrep_count = sum(1 for n, _ in image_blobs if "imgrep" in n.lower())
-    corner_page_count = sum(1 for n, _ in image_blobs if "corner" in n.lower())
-    corner_labels_in_text = count_corner_labels(ocr_text)
-
-    if ext_like >= 2 or imgrep_count >= 2 or (corner_page_count + corner_labels_in_text) >= 3:
+    # Four corners: edge/variance heuristic across images (no OCR)
+    exterior_hits = 0
+    for name, blob in image_blobs[:40]:  # cap for speed
+        try:
+            img = Image.open(io.BytesIO(blob))
+            img.thumbnail((1600, 1600))
+            if _is_exterior_by_edges(img):
+                exterior_hits += 1
+        except Exception:
+            continue
+    if exterior_hits >= 3:
         present.add("four corners")
 
     missing = [p for p in required if p not in present]
-    logger.debug(
-        f"Photo check → present={sorted(list(present))}, missing={missing}, "
-        f"ext_like={ext_like}, imgrep={imgrep_count}, corner_pages={corner_page_count}, "
-        f"corner_labels_in_text={corner_labels_in_text}"
-    )
+    logger.debug(f"Photo check fast → present={sorted(list(present))}, missing={missing}, ext_hits={exterior_hits}")
     return missing
 
 # =========================================
@@ -632,7 +646,6 @@ async def vision_review(
     if not appraiser_id.strip():
         return JSONResponse(status_code=400, content={"error": "Appraiser ID is required."})
 
-    # ----- read uploads once
     texts: List[str] = []
     image_blobs: List[Tuple[str, bytes]] = []
     first_pdf_bytes: Optional[bytes] = None  # for high-res VIN fallback
@@ -643,10 +656,10 @@ async def vision_review(
         if name.endswith((".jpg", ".jpeg", ".png", ".webp")):
             image_blobs.append((name, raw))
         elif name.endswith(".pdf"):
-            texts.append(extract_text_from_pdf(io.BytesIO(raw)))
+            texts.append(extract_text_from_pdf(io.BytesIO(raw), max_ocr_pages=6, dpi=135))
             if first_pdf_bytes is None:
-                first_pdf_bytes = raw  # keep first PDF for VIN hi-res pass
-            harvested = harvest_photos_from_pdf(raw)
+                first_pdf_bytes = raw
+            harvested = harvest_photos_from_pdf(raw, max_pages=20, dpi=135)
             for hname, hbytes in harvested:
                 image_blobs.append((hname, hbytes))
         elif name.endswith(".docx"):
@@ -680,7 +693,7 @@ async def vision_review(
 
     vin_est = extract_vin_from_text(combined_text)
     if not vin_est and first_pdf_bytes:
-        vin_est = extract_vin_from_pdf_first_page(first_pdf_bytes)  # high-res one-page VIN read
+        vin_est = extract_vin_from_pdf_first_page(first_pdf_bytes)
 
     vin_photos = extract_vin_from_photos(image_blobs)  # checksum-validated only
     vin_final = vin_est or vin_photos or "N/A"
@@ -711,12 +724,10 @@ async def vision_review(
     )
 
     # ===== Score calc
-    score_ai = None  # no narrative GPT call now; keep None
     labor_tax_adj = check_labor_and_tax_score(combined_text, client_rules)
     photo_adj = -25 * len(missing_photos)
     computed = max(0, 100 + labor_tax_adj + photo_adj)
-
-    authoritative_score = computed  # use computed directly
+    authoritative_score = computed
 
     # =========================================
     # PDF build
@@ -855,6 +866,7 @@ async def get_client_rules(client_name: str):
     else:
         logger.error(f"Rules not found for client: {client_name}")
         return JSONResponse(status_code=404, content={"error": "Rules not found for this client."})
+
 
 
 
