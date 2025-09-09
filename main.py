@@ -11,7 +11,6 @@ import logging
 import math
 import datetime
 import hashlib
-import random
 
 import smtplib
 from email.message import EmailMessage
@@ -20,7 +19,7 @@ from fpdf import FPDF
 from docx import Document
 from pdf2image import convert_from_bytes
 import pytesseract
-from PIL import Image, ImageEnhance, ImageOps, ImageFilter, ImageStat, Image
+from PIL import Image, ImageEnhance, ImageOps, ImageFilter, ImageStat
 from openai import OpenAI
 
 # =========================================
@@ -98,7 +97,6 @@ def extract_text_from_pdf(file_like: io.BytesIO, max_ocr_pages: int = 6, dpi: in
                 break
             page_text = ocr_text_fast(img, psm=6)
             if len(page_text.strip()) < 20:
-                # fallback psm if page was too sparse
                 page_text = ocr_text_fast(img, psm=3)
             if not page_text.strip():
                 continue
@@ -177,37 +175,67 @@ def best_vin_candidate(cands: List[str]) -> Optional[str]:
             return vin
     return None
 
-def extract_vin_from_pdf_first_page(pdf_bytes: bytes) -> Optional[str]:
-    """High-res single-page OCR to grab VIN line if bulk OCR missed it."""
+# High-res OCR of the first few pages to grab VIN if bulk OCR missed it
+def extract_vin_from_pdf_first_pages(pdf_bytes: bytes, pages_to_scan: int = 3, dpi: int = 240) -> Optional[str]:
+    """High-res OCR of the first few pages to grab VIN if bulk OCR missed it (fast)."""
     try:
-        pages = convert_from_bytes(pdf_bytes, dpi=300)[:1]
-        if not pages:
-            return None
-        text = ocr_text_fast(pages[0], psm=6)
-        m = re.search(r'(?i)\bVIN\s*[:\-]?\s*([A-HJ-NPR-Z0-9]{10,20})', text or "")
-        if m:
-            vin = best_vin_candidate([m.group(1)])
+        pages = convert_from_bytes(pdf_bytes, dpi=dpi)[:max(1, pages_to_scan)]
+        for img in pages:
+            text = ocr_text_fast(img, psm=6)
+            m = re.search(r'(?i)\bVIN\s*[:\-]?\s*([A-HJ-NPR-Z0-9]{10,20})', text or "")
+            if m:
+                vin = best_vin_candidate([m.group(1)])
+                if vin: return vin
+            cands = re.findall(r'\b([A-HJ-NPR-Z0-9]{17})\b', text or "", re.IGNORECASE)
+            vin = best_vin_candidate(cands)
             if vin: return vin
-        cands = re.findall(r'\b([A-HJ-NPR-Z0-9]{17})\b', text or "", re.IGNORECASE)
-        return best_vin_candidate(cands)
     except Exception as e:
-        logger.warning(f"VIN first-page OCR error: {e}")
+        logger.warning(f"VIN first-pages OCR error: {e}")
+    return None
+
+# =========================================
+# Claim extraction (robust + hi-res pages fallback)
+# =========================================
+CLAIM_PATTERNS = [
+    r'(?i)\bclaim\s*(?:#|no\.?|number|num)?\s*[:\-]?\s*([A-Z0-9][A-Z0-9\-\/\.]{2,30})',
+    r'(?i)\bloss\s*(?:#|no\.?|number|num)?\s*[:\-]?\s*([A-Z0-9][A-Z0-9\-\/\.]{2,30})',
+    r'(?i)\bfile\s*(?:#|no\.?|number|num)?\s*[:\-]?\s*([A-Z0-9][A-Z0-9\-\/\.]{2,30})',
+    r'(?i)\bref(?:erence)?\s*(?:#|no\.?|number|num)?\s*[:\-]?\s*([A-Z0-9][A-Z0-9\-\/\.]{2,30})',
+    r'(?i)\bassignment\s*(?:#|no\.?|number|num)?\s*[:\-]?\s*([A-Z0-9][A-Z0-9\-\/\.]{2,30})',
+]
+
+def extract_claim_from_text(text: str) -> Optional[str]:
+    if not text:
         return None
+    for pat in CLAIM_PATTERNS:
+        m = re.search(pat, text)
+        if m:
+            cand = m.group(1).strip().strip('.').strip('-')
+            if re.search(r'\d', cand):
+                return cand
+    return None
+
+def extract_claim_from_pdf_first_pages(pdf_bytes: bytes, pages_to_scan: int = 3, dpi: int = 240) -> Optional[str]:
+    """High-res OCR of the first few pages to grab Claim/Loss/File # if bulk OCR missed it."""
+    try:
+        pages = convert_from_bytes(pdf_bytes, dpi=dpi)[:max(1, pages_to_scan)]
+        for img in pages:
+            txt = ocr_text_fast(img, psm=6)
+            if not txt:
+                continue
+            for pat in CLAIM_PATTERNS:
+                m = re.search(pat, txt)
+                if m:
+                    cand = m.group(1).strip().strip('.').strip('-')
+                    if re.search(r'\d', cand):
+                        return cand
+    except Exception as e:
+        logger.warning(f"Claim first-pages OCR error: {e}")
+    return None
 
 # =========================================
 # Field extraction & tax/parts signals
 # =========================================
-def extract_claim_from_text(text: str) -> Optional[str]:
-    patterns = [
-        r"(?:^|\s)(?:Claim\s*(?:#|No\.?|Number)[:\s]*)\s*([A-Za-z0-9\-]+)",
-        r"(?:^|\s)Claim\s*[:#]\s*([A-Za-z0-9\-]+)"
-    ]
-    for p in patterns:
-        m = re.search(p, text or "", re.IGNORECASE)
-        if m:
-            return m.group(1).strip()
-    return None
-
 def extract_vin_from_text(text: str) -> Optional[str]:
     m = re.search(r'(?i)\bVIN\s*[:\-]?\s*([A-HJ-NPR-Z0-9]{10,20})', text or "")
     if m:
@@ -217,13 +245,31 @@ def extract_vin_from_text(text: str) -> Optional[str]:
     candidates = re.findall(r'\b([A-HJ-NPR-Z0-9]{17})\b', text or "", re.IGNORECASE)
     return best_vin_candidate(candidates)
 
+# Make/model normalizer (fix common OCR typos like "Nessan" → "Nissan")
+MAKE_FIX = {
+    "nessan": "Nissan",
+    "nisaan": "Nissan",
+    "nissan": "Nissan",
+    "toy0ta": "Toyota",
+    "chevroler": "Chevrolet",
+    "cheverolet": "Chevrolet",
+}
+def normalize_vehicle_str(s: str) -> str:
+    if not s: return s
+    s2 = s
+    for wrong, right in MAKE_FIX.items():
+        s2 = re.sub(rf'\b{re.escape(wrong)}\b', right, s2, flags=re.IGNORECASE)
+    s2 = re.sub(r'\s{2,}', ' ', s2).replace(' ,', ',')
+    return s2.strip()
+
 def extract_vehicle_from_text(text: str) -> Optional[str]:
     m1 = re.search(r"\b(20\d{2})\s+([A-Za-z]{3,})\s+([A-Za-z0-9\-]{2,})", text or "")
     m2 = re.search(r"(?:Odometer|Mileage)\s*[:\-]?\s*([\d,]+)", text or "", re.IGNORECASE)
     if m1:
         year, make, model = m1.groups()
         miles = m2.group(1) if m2 else "Mileage unknown"
-        return f"{year} {make} {model}, {miles} miles"
+        out = f"{year} {make} {model}, {miles} miles"
+        return normalize_vehicle_str(out)
     return None
 
 def parse_year_miles(text: str) -> Tuple[Optional[int], Optional[int]]:
@@ -268,7 +314,6 @@ def non_oem_used(text: str) -> bool:
 # Photo parsing: FAST required-photo checks
 # =========================================
 def _is_exterior_by_edges(img: Image.Image) -> bool:
-    # Edge/variance heuristic; no OCR
     g = img.convert("L")
     var = ImageStat.Stat(g).var[0]
     edges = g.filter(ImageFilter.FIND_EDGES)
@@ -276,7 +321,6 @@ def _is_exterior_by_edges(img: Image.Image) -> bool:
     return (var > 140 and evar > 400)
 
 def extract_vin_from_photos(image_blobs: List[Tuple[str, bytes]]) -> Optional[str]:
-    # Targeted OCR with single pass
     found: List[str] = []
     for name, blob in image_blobs:
         try:
@@ -310,7 +354,6 @@ def extract_odometer_from_photos(image_blobs: List[Tuple[str, bytes]]) -> Option
 def _sample_for_plate_ocr(image_blobs: List[Tuple[str, bytes]], k: int = 6) -> List[Tuple[str, bytes]]:
     if len(image_blobs) <= k:
         return image_blobs
-    # deterministic sample by hash so results are stable
     pairs = []
     for name, blob in image_blobs:
         h = hashlib.md5(blob).hexdigest()
@@ -319,15 +362,10 @@ def _sample_for_plate_ocr(image_blobs: List[Tuple[str, bytes]], k: int = 6) -> L
     return [p[1] for p in pairs[:k]]
 
 def check_required_photos(image_blobs: List[Tuple[str, bytes]], ocr_text: str) -> List[str]:
-    """
-    Required: four corners, odometer, VIN, license plate.
-    Fast path: avoid OCR on every image.
-    """
     required = ["four corners", "odometer", "vin", "license plate"]
     present = set()
     txt = (ocr_text or "").lower()
 
-    # VIN/ODO from text or targeted photo OCR
     vin_text = bool(re.search(r'\bvin\b', txt))
     odo_text = bool(re.search(r'\bodometer|mileage\b', txt))
 
@@ -339,7 +377,6 @@ def check_required_photos(image_blobs: List[Tuple[str, bytes]], ocr_text: str) -
     if odo_text or odo_photo:
         present.add("odometer")
 
-    # License plate: OCR only a small deterministic sample
     for name, blob in _sample_for_plate_ocr(image_blobs, k=6):
         try:
             img = Image.open(io.BytesIO(blob))
@@ -351,9 +388,8 @@ def check_required_photos(image_blobs: List[Tuple[str, bytes]], ocr_text: str) -
         except Exception as e:
             logger.debug(f"Plate OCR skip ({name}): {e}")
 
-    # Four corners: edge/variance heuristic across images (no OCR)
     exterior_hits = 0
-    for name, blob in image_blobs[:40]:  # cap for speed
+    for name, blob in image_blobs[:40]:
         try:
             img = Image.open(io.BytesIO(blob))
             img.thumbnail((1600, 1600))
@@ -648,7 +684,7 @@ async def vision_review(
 
     texts: List[str] = []
     image_blobs: List[Tuple[str, bytes]] = []
-    first_pdf_bytes: Optional[bytes] = None  # for high-res VIN fallback
+    first_pdf_bytes: Optional[bytes] = None  # for high-res VIN/Claim fallback
 
     for f in files:
         raw = await f.read()
@@ -693,13 +729,17 @@ async def vision_review(
 
     vin_est = extract_vin_from_text(combined_text)
     if not vin_est and first_pdf_bytes:
-        vin_est = extract_vin_from_pdf_first_page(first_pdf_bytes)
-
+        vin_est = extract_vin_from_pdf_first_pages(first_pdf_bytes, pages_to_scan=3, dpi=240)
     vin_photos = extract_vin_from_photos(image_blobs)  # checksum-validated only
     vin_final = vin_est or vin_photos or "N/A"
 
     vehicle_desc = extract_vehicle_from_text(combined_text) or "N/A"
-    claim_number = extract_claim_from_text(combined_text) or "N/A"
+
+    claim_number = extract_claim_from_text(combined_text)
+    if not claim_number and first_pdf_bytes:
+        claim_number = extract_claim_from_pdf_first_pages(first_pdf_bytes, pages_to_scan=3, dpi=240)
+    claim_number = claim_number or "N/A"
+
     odo_photos = extract_odometer_from_photos(image_blobs)
 
     # ----- parse estimate items & compare to photos (vision uses contact sheets)
@@ -707,7 +747,6 @@ async def vision_review(
     consistency = compare_estimate_with_photos(est_items, images_for_vision)
 
     # ----- rule signals for summary
-    tax_present_flag = taxes_present(combined_text)
     year, miles = parse_year_miles(combined_text)
     now_year = datetime.datetime.now().year
     age_years = (now_year - year) if year else None
@@ -866,6 +905,7 @@ async def get_client_rules(client_name: str):
     else:
         logger.error(f"Rules not found for client: {client_name}")
         return JSONResponse(status_code=404, content={"error": "Rules not found for this client."})
+
 
 
 
