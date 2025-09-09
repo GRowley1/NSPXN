@@ -172,18 +172,34 @@ def vin_checksum_ok(v: str) -> bool:
         return False
 
 def best_vin_candidate(cands: List[str]) -> Optional[str]:
+    """Return a VIN only if checksum-valid; else None."""
     for c in cands:
         vin = normalize_vin(c)
         if vin and vin_checksum_ok(vin):
             return vin
-    for c in cands:
-        vin = normalize_vin(c)
-        if vin:
-            return vin
     return None
 
+# Re-OCR first page at high DPI to grab VIN line if bulk OCR missed it
+def extract_vin_from_pdf_first_page(pdf_bytes: bytes) -> Optional[str]:
+    try:
+        pages = convert_from_bytes(pdf_bytes, dpi=300)[:1]
+        if not pages:
+            return None
+        processed = preprocess_image(pages[0])
+        text = pytesseract.image_to_string(processed, lang="eng", config="--psm 6")
+        m = re.search(r'(?i)\bVIN\s*[:\-]?\s*([A-HJ-NPR-Z0-9]{10,20})', text or "")
+        if m:
+            vin = best_vin_candidate([m.group(1)])
+            if vin:
+                return vin
+        cands = re.findall(r'\b([A-HJ-NPR-Z0-9]{17})\b', text or "", re.IGNORECASE)
+        return best_vin_candidate(cands)
+    except Exception as e:
+        logger.warning(f"VIN first-page OCR error: {e}")
+        return None
+
 # =========================================
-# Field extraction & tax/parts signals  (includes EDIT #2 + EDIT #3)
+# Field extraction & tax/parts signals
 # =========================================
 def extract_claim_from_text(text: str) -> Optional[str]:
     patterns = [
@@ -196,7 +212,6 @@ def extract_claim_from_text(text: str) -> Optional[str]:
             return m.group(1).strip()
     return None
 
-# EDIT #3: Prefer the explicit VIN label; fallback to 17-char candidates
 def extract_vin_from_text(text: str) -> Optional[str]:
     m = re.search(r'(?i)\bVIN\s*[:\-]?\s*([A-HJ-NPR-Z0-9]{10,20})', text or "")
     if m:
@@ -231,19 +246,28 @@ def parse_year_miles(text: str) -> Tuple[Optional[int], Optional[int]]:
 def taxes_present(text: str) -> bool:
     return re.search(r'tax[^\n]{0,50}(\d{1,3}\s*%|\$\s*\d+(\.\d{2})?)', text or "", re.IGNORECASE) is not None
 
-# EDIT #2: Only treat non-OEM as used if it appears on REPLACE/R&R part lines (ignore boilerplate)
+# ===== Parts detection tightened: require op + aftermarket flag + known panel on SAME LINE
 PART_FLAGS = r'(?:\bA/M\b|\bAFTER\s*MARKET\b|\bAFTERMARKET\b|\bLKQ\b|\bRECOND(?:ITIONED)?\b|\bCAPA\b|\bALT[-\s]*OE\b|\bREMAN(?:UFACTURED)?\b)'
+OPS_TOK = re.compile(r'\b(REPL(?:ACE)?|R&R|R & R|R&I|R & I|REPAIR|REFINISH|PAINT)\b', re.IGNORECASE)
+PANELS = [
+    "bumper","fender","door","hood","grille","headlamp","headlight","taillamp","tail lamp",
+    "quarter panel","rocker","roof","trunk","decklid","mirror","apron","radiator support",
+    "wheel","tire","pillar","garnish","molding","fog lamp","reinforcement","cover"
+]
+PANELS_U = [p.upper() for p in PANELS]
+
 def non_oem_used(text: str) -> bool:
-    non_oem_on_line_items = False
-    for line in (text or "").splitlines():
+    lines = (text or "").splitlines()
+    for line in lines:
         l = line.strip().upper()
-        if (("REPL" in l) or ("REPLACE" in l) or ("R&R" in l) or ("R & R" in l) or ("R&I" in l) or ("R & I" in l)) \
-           and re.search(PART_FLAGS, l, re.IGNORECASE):
-            non_oem_on_line_items = True
-            break
-    if not non_oem_on_line_items and re.search(r'parts\s+presented\s+are\s+OEM[-\s]*parts', text or "", re.IGNORECASE):
+        if not l:
+            continue
+        if OPS_TOK.search(l) and re.search(PART_FLAGS, l, re.IGNORECASE) and any(p in l for p in PANELS_U):
+            return True
+    # If estimate explicitly asserts OEM unless noted and we didn't hit a flagged line, treat as OEM only.
+    if re.search(r'parts\s+presented\s+are\s+OEM[-\s]*parts', text or "", re.IGNORECASE):
         return False
-    return non_oem_on_line_items
+    return False
 
 # =========================================
 # Photo parsing & requirements
@@ -270,7 +294,8 @@ def extract_vin_from_photos(image_blobs: List[Tuple[str, bytes]]) -> Optional[st
                         found.extend(cands)
         except Exception as e:
             logger.warning(f"VIN photo OCR error ({name}): {e}")
-    return best_vin_candidate(found)
+    vin = best_vin_candidate(found)
+    return vin if vin and vin_checksum_ok(vin) else None  # accept only checksum-valid from photos
 
 def extract_odometer_from_photos(image_blobs: List[Tuple[str, bytes]]) -> Optional[str]:
     for name, blob in image_blobs:
@@ -346,14 +371,9 @@ def make_contact_sheets_compact(
     base_thumb_w: int = 320,
     jpeg_quality: int = 68
 ) -> List[Tuple[str, bytes]]:
-    """
-    Pack ALL images into <= max_sheets contact sheets by adapting per-sheet capacity
-    and thumbnail width. No photos are dropped.
-    """
     if not image_blobs:
         return []
 
-    # Load thumbs (initial size; we'll re-pack if needed)
     thumbs: List[Image.Image] = []
     for _, blob in image_blobs:
         try:
@@ -363,12 +383,10 @@ def make_contact_sheets_compact(
             continue
 
     n = len(thumbs)
-    # Per-sheet target to fit into <= max_sheets
     per_sheet = max(1, math.ceil(n / max_sheets))
     rows = math.ceil(per_sheet / cols)
 
     def build_sheet(chunk: List[Image.Image], thumb_w: int) -> Image.Image:
-        # compute row heights for the chunk
         row_heights = []
         for r in range(rows):
             row_imgs = chunk[r*cols:(r+1)*cols]
@@ -394,8 +412,6 @@ def make_contact_sheets_compact(
             y += row_h + padding
         return sheet
 
-    # Try making sheets with current thumb size; if a sheet gets too tall, reduce size
-    # (simple safeguard to keep JPEG sizes small)
     sheets: List[Tuple[str, bytes]] = []
     idx = 0
     sheet_num = 1
@@ -403,7 +419,6 @@ def make_contact_sheets_compact(
 
     while idx < n:
         chunk = thumbs[idx: idx + per_sheet]
-        # iterative shrink if needed
         attempt = 0
         sheet_img = build_sheet(chunk, thumb_w)
         while sheet_img.height > 3600 and thumb_w > 160 and attempt < 3:
@@ -441,14 +456,7 @@ def labor_rates_present_any(text: str) -> bool:
 # =========================================
 # Estimate parsing (line items for comparison)
 # =========================================
-PANELS = [
-    "bumper", "fender", "door", "hood", "grille", "headlamp", "headlight",
-    "taillamp", "tail lamp", "quarter panel", "rocker", "roof", "trunk",
-    "decklid", "mirror", "apron", "radiator support", "wheel", "tire",
-    "pillar", "garnish", "molding", "fog lamp", "reinforcement", "cover"
-]
 OPS = ["replace", "repair", "refinish", "r&i", "r & i", "align", "blend", "calibrate"]
-
 def extract_estimate_items(text: str) -> List[Dict[str, str]]:
     items: List[Dict[str, str]] = []
     for line in (text or "").splitlines():
@@ -535,7 +543,7 @@ def compare_estimate_with_photos(items: List[Dict[str, str]],
         }
 
 # =========================================
-# Local narrative builder (replaces the slow second GPT call)
+# Local narrative builder (fast, deterministic)
 # =========================================
 def build_summary_markdown(
     missing_photos: List[str],
@@ -544,25 +552,21 @@ def build_summary_markdown(
     require_oem: bool,
     non_oem_flag: bool
 ) -> str:
-    # Section: Required Photos
     if not missing_photos:
         photos_lines = ["- All required photo types present (four corners, VIN, odometer, plate)."]
     else:
         photos_lines = [f"- Missing: {', '.join(missing_photos)}."]
 
-    # Section: Labor Rates
     if labor_rates_present_any(text):
         labor_lines = ["- Labor rates listed on estimate."]
     else:
         labor_lines = ["- Labor rates missing or not clearly listed."]
 
-    # Section: Taxes
     if taxes_present(text):
         taxes_lines = ["- Tax rate present on estimate."]
     else:
         taxes_lines = ["- Tax rate not found per client rules."]
 
-    # Section: Parts Compliance (deterministic & explicit)
     parts_lines: List[str] = []
     if require_oem:
         if non_oem_flag:
@@ -575,12 +579,9 @@ def build_summary_markdown(
         else:
             parts_lines.append("- Parts appear OEM or not flagged as non-OEM.")
 
-    # Section: Client Rules Adherence (light, consistent)
     client_lines = [
         "- Apply client-required documentation (labor rates, photos, taxes) where applicable."
     ]
-
-    # Section: Additional Notes (concise default)
     notes_lines = [
         "- Ensure estimate notes clearly explain damage appraisal per client requirements."
     ]
@@ -634,6 +635,7 @@ async def vision_review(
     # ----- read uploads once
     texts: List[str] = []
     image_blobs: List[Tuple[str, bytes]] = []
+    first_pdf_bytes: Optional[bytes] = None  # for high-res VIN fallback
 
     for f in files:
         raw = await f.read()
@@ -642,6 +644,8 @@ async def vision_review(
             image_blobs.append((name, raw))
         elif name.endswith(".pdf"):
             texts.append(extract_text_from_pdf(io.BytesIO(raw)))
+            if first_pdf_bytes is None:
+                first_pdf_bytes = raw  # keep first PDF for VIN hi-res pass
             harvested = harvest_photos_from_pdf(raw)
             for hname, hbytes in harvested:
                 image_blobs.append((hname, hbytes))
@@ -657,7 +661,7 @@ async def vision_review(
     # ----- Build compact contact sheets for GPT (ALL photos represented, ≤ 3 images sent)
     contact_sheets = make_contact_sheets_compact(
         image_blobs,
-        max_sheets=3,   # include ALL photos, but only up to 3 sheets by shrinking thumbs
+        max_sheets=3,
         cols=6,
         padding=6,
         base_thumb_w=320,
@@ -673,9 +677,14 @@ async def vision_review(
 
     # ----- photo checks + VIN/odo (run on ORIGINAL images)
     missing_photos = check_required_photos(image_blobs, combined_text)
+
     vin_est = extract_vin_from_text(combined_text)
-    vin_photos = extract_vin_from_photos(image_blobs)
+    if not vin_est and first_pdf_bytes:
+        vin_est = extract_vin_from_pdf_first_page(first_pdf_bytes)  # high-res one-page VIN read
+
+    vin_photos = extract_vin_from_photos(image_blobs)  # checksum-validated only
     vin_final = vin_est or vin_photos or "N/A"
+
     vehicle_desc = extract_vehicle_from_text(combined_text) or "N/A"
     claim_number = extract_claim_from_text(combined_text) or "N/A"
     odo_photos = extract_odometer_from_photos(image_blobs)
@@ -702,34 +711,12 @@ async def vision_review(
     )
 
     # ===== Score calc
-    # Optional AI score: if consistency JSON ever embeds a score in text (rare), parse it; otherwise None
-    SCORE_PATTERNS = [
-        r"Final\s*Evaluation\s*(?:Score)?\s*(?:is|:|-)?\s*(\d{1,3})\s*%?",
-        r"Audit\s*Results?\s*(?:is|:|-)?\s*(\d{1,3})\s*%?",
-        r"Total\s*Evaluation\s*(?:Score)?\s*(?:is|:|-)?\s*(\d{1,3})\s*%?",
-        r"Final\s*Score\s*(?:is|:|-)?\s*(\d{1,3})\s*%?",
-        r"Compliance\s*Score\s*(?:is|:|-)?\s*(\d{1,3})\s*%?",
-    ]
-    def parse_ai_score(text: str) -> Optional[int]:
-        for pat in SCORE_PATTERNS:
-            m = re.search(pat, text or "", re.IGNORECASE)
-            if m:
-                try:
-                    return max(0, min(100, int(m.group(1))))
-                except Exception:
-                    pass
-        return None
-
     score_ai = None  # no narrative GPT call now; keep None
     labor_tax_adj = check_labor_and_tax_score(combined_text, client_rules)
     photo_adj = -25 * len(missing_photos)
     computed = max(0, 100 + labor_tax_adj + photo_adj)
 
-    # EDIT #1: Use AI score only if close to computed (±10); else computed
-    if score_ai is not None and abs(score_ai - computed) <= 10:
-        authoritative_score = score_ai
-    else:
-        authoritative_score = computed
+    authoritative_score = computed  # use computed directly
 
     # =========================================
     # PDF build
@@ -868,6 +855,7 @@ async def get_client_rules(client_name: str):
     else:
         logger.error(f"Rules not found for client: {client_name}")
         return JSONResponse(status_code=404, content={"error": "Rules not found for this client."})
+
 
 
 
