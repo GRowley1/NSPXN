@@ -39,7 +39,7 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 # =========================================
-# OpenAI client (gpt-4o)
+# OpenAI client (gpt-4o) — only for the vision comparison JSON
 # =========================================
 if "OPENAI_API_KEY" not in os.environ:
     raise RuntimeError("❌ OPENAI_API_KEY environment variable is NOT set.")
@@ -122,11 +122,6 @@ def count_corner_labels(text: str) -> int:
     return len(found)
 
 def harvest_photos_from_pdf(pdf_bytes: bytes, max_pages: int = 20) -> List[Tuple[str, bytes]]:
-    """
-    Convert PDF pages to images and return (name, jpeg_bytes) for pages that look like photo pages.
-    - Prefer pages whose OCR contains 'Image Report' OR corner labels.
-    - Fallback: visually rich pages (variance threshold).
-    """
     out: List[Tuple[str, bytes]] = []
     try:
         pages = convert_from_bytes(pdf_bytes, dpi=150)[:max_pages]
@@ -140,7 +135,7 @@ def harvest_photos_from_pdf(pdf_bytes: bytes, max_pages: int = 20) -> List[Tuple
 
             if is_img_report or looks_like_photos:
                 buf = io.BytesIO()
-                page.convert("RGB").save(buf, format="JPEG", quality=85)  # original color page
+                page.convert("RGB").save(buf, format="JPEG", quality=85)
                 tag = "imgrep" if is_img_report else ("corner" if corner_hits else "pdfphoto")
                 out.append((f"pdf-{tag}-p{i}.jpg", buf.getvalue()))
     except Exception as e:
@@ -188,8 +183,7 @@ def best_vin_candidate(cands: List[str]) -> Optional[str]:
     return None
 
 # =========================================
-# Field extraction & tax/parts signals
-# (EDIT #3 below: improved extract_vin_from_text)
+# Field extraction & tax/parts signals  (includes EDIT #2 + EDIT #3)
 # =========================================
 def extract_claim_from_text(text: str) -> Optional[str]:
     patterns = [
@@ -202,15 +196,13 @@ def extract_claim_from_text(text: str) -> Optional[str]:
             return m.group(1).strip()
     return None
 
-# ===== EDIT #3: Prefer the explicit VIN label; fallback to 17-char candidates
+# EDIT #3: Prefer the explicit VIN label; fallback to 17-char candidates
 def extract_vin_from_text(text: str) -> Optional[str]:
-    # First: exact 'VIN:' label capture (most reliable)
     m = re.search(r'(?i)\bVIN\s*[:\-]?\s*([A-HJ-NPR-Z0-9]{10,20})', text or "")
     if m:
         vin = best_vin_candidate([m.group(1)])
         if vin:
             return vin
-    # Fallback: any 17-char candidate
     candidates = re.findall(r'\b([A-HJ-NPR-Z0-9]{17})\b', text or "", re.IGNORECASE)
     return best_vin_candidate(candidates)
 
@@ -239,18 +231,16 @@ def parse_year_miles(text: str) -> Tuple[Optional[int], Optional[int]]:
 def taxes_present(text: str) -> bool:
     return re.search(r'tax[^\n]{0,50}(\d{1,3}\s*%|\$\s*\d+(\.\d{2})?)', text or "", re.IGNORECASE) is not None
 
-# ===== EDIT #2: Only treat non-OEM as used if it appears on REPLACE/R&R part lines (ignore boilerplate)
+# EDIT #2: Only treat non-OEM as used if it appears on REPLACE/R&R part lines (ignore boilerplate)
 PART_FLAGS = r'(?:\bA/M\b|\bAFTER\s*MARKET\b|\bAFTERMARKET\b|\bLKQ\b|\bRECOND(?:ITIONED)?\b|\bCAPA\b|\bALT[-\s]*OE\b|\bREMAN(?:UFACTURED)?\b)'
 def non_oem_used(text: str) -> bool:
     non_oem_on_line_items = False
     for line in (text or "").splitlines():
         l = line.strip().upper()
-        # look for replace-like ops plus an aftermarket marker on the same line
         if (("REPL" in l) or ("REPLACE" in l) or ("R&R" in l) or ("R & R" in l) or ("R&I" in l) or ("R & I" in l)) \
            and re.search(PART_FLAGS, l, re.IGNORECASE):
             non_oem_on_line_items = True
             break
-    # If estimate explicitly says OEM unless noted and we didn't see flagged parts, treat as OEM
     if not non_oem_on_line_items and re.search(r'parts\s+presented\s+are\s+OEM[-\s]*parts', text or "", re.IGNORECASE):
         return False
     return non_oem_on_line_items
@@ -265,7 +255,7 @@ def _image_is_exterior_wide(img: Image.Image) -> bool:
     return len(text.strip()) < 10 and var > 150
 
 def extract_vin_from_photos(image_blobs: List[Tuple[str, bytes]]) -> Optional[str]:
-    rots = [0, 90]  # faster; usually sufficient
+    rots = [0, 90]
     found: List[str] = []
     for name, blob in image_blobs:
         try:
@@ -296,12 +286,6 @@ def extract_odometer_from_photos(image_blobs: List[Tuple[str, bytes]]) -> Option
     return None
 
 def check_required_photos(image_blobs: List[Tuple[str, bytes]], ocr_text: str) -> List[str]:
-    """
-    Required: four corners, odometer, VIN, license plate.
-    Recognizes:
-      - Harvested PDF photo pages (tag 'imgrep' or 'corner')
-      - Corner labels in OCR text (LF/RF/LR/RR or full words)
-    """
     required = ["four corners", "odometer", "vin", "license plate"]
     present = set()
     txt = (ocr_text or "").lower()
@@ -346,7 +330,7 @@ def check_required_photos(image_blobs: List[Tuple[str, bytes]], ocr_text: str) -
     return missing
 
 # =========================================
-# Contact-sheet builder (include ALL photos, send fewer images to GPT)
+# Contact-sheet builder (ALL photos included, ≤ 3 sheets adaptively)
 # =========================================
 def shrink_to_width(img: Image.Image, max_w: int) -> Image.Image:
     if img.width <= max_w:
@@ -354,47 +338,45 @@ def shrink_to_width(img: Image.Image, max_w: int) -> Image.Image:
     h = int(img.height * max_w / img.width)
     return img.convert("RGB").resize((max_w, h), Image.LANCZOS)
 
-def make_contact_sheets(
+def make_contact_sheets_compact(
     image_blobs: List[Tuple[str, bytes]],
-    per_sheet: int = 8,
-    thumb_w: int = 512,
-    padding: int = 8,
-    cols: int = 4,
-    jpeg_quality: int = 72
+    max_sheets: int = 3,
+    cols: int = 6,
+    padding: int = 6,
+    base_thumb_w: int = 320,
+    jpeg_quality: int = 68
 ) -> List[Tuple[str, bytes]]:
     """
-    Pack ALL images into N contact-sheet JPEGs (no photos dropped).
-    Each sheet has `cols` columns and enough rows to fit `per_sheet`.
+    Pack ALL images into <= max_sheets contact sheets by adapting per-sheet capacity
+    and thumbnail width. No photos are dropped.
     """
-    sheets: List[Tuple[str, bytes]] = []
     if not image_blobs:
-        return sheets
+        return []
 
-    # Prepare PIL images (RGB, shrunk)
+    # Load thumbs (initial size; we'll re-pack if needed)
     thumbs: List[Image.Image] = []
     for _, blob in image_blobs:
         try:
             img = Image.open(io.BytesIO(blob))
-            thumbs.append(shrink_to_width(img, thumb_w))
+            thumbs.append(shrink_to_width(img, base_thumb_w))
         except Exception:
             continue
 
+    n = len(thumbs)
+    # Per-sheet target to fit into <= max_sheets
+    per_sheet = max(1, math.ceil(n / max_sheets))
     rows = math.ceil(per_sheet / cols)
-    idx = 0
-    sheet_num = 1
-    while idx < len(thumbs):
-        chunk = thumbs[idx: idx + per_sheet]
-        # compute max row height per row
+
+    def build_sheet(chunk: List[Image.Image], thumb_w: int) -> Image.Image:
+        # compute row heights for the chunk
         row_heights = []
         for r in range(rows):
             row_imgs = chunk[r*cols:(r+1)*cols]
             if not row_imgs: break
             row_heights.append(max(im.height for im in row_imgs))
-
         canvas_w = cols * thumb_w + (cols + 1) * padding
         canvas_h = sum(row_heights) + (len(row_heights) + 1) * padding
         sheet = Image.new("RGB", (canvas_w, canvas_h), color=(245, 245, 245))
-
         y = padding
         pos = 0
         for r, row_h in enumerate(row_heights):
@@ -402,14 +384,34 @@ def make_contact_sheets(
             for c in range(cols):
                 if pos >= len(chunk): break
                 im = chunk[pos]
+                if im.width != thumb_w:
+                    h = int(im.height * (thumb_w / im.width))
+                    im = im.resize((thumb_w, h), Image.LANCZOS)
                 y_off = (row_h - im.height) // 2
                 sheet.paste(im, (x, y + y_off))
                 x += thumb_w + padding
                 pos += 1
             y += row_h + padding
+        return sheet
 
+    # Try making sheets with current thumb size; if a sheet gets too tall, reduce size
+    # (simple safeguard to keep JPEG sizes small)
+    sheets: List[Tuple[str, bytes]] = []
+    idx = 0
+    sheet_num = 1
+    thumb_w = base_thumb_w
+
+    while idx < n:
+        chunk = thumbs[idx: idx + per_sheet]
+        # iterative shrink if needed
+        attempt = 0
+        sheet_img = build_sheet(chunk, thumb_w)
+        while sheet_img.height > 3600 and thumb_w > 160 and attempt < 3:
+            thumb_w = int(thumb_w * 0.85)
+            sheet_img = build_sheet(chunk, thumb_w)
+            attempt += 1
         buf = io.BytesIO()
-        sheet.save(buf, format="JPEG", quality=jpeg_quality, optimize=True)
+        sheet_img.save(buf, format="JPEG", quality=jpeg_quality, optimize=True)
         sheets.append((f"contact-sheet-{sheet_num}.jpg", buf.getvalue()))
         sheet_num += 1
         idx += per_sheet
@@ -427,11 +429,14 @@ def check_labor_and_tax_score(text: str, client_rules: str) -> int:
     labels = ["Body Labor", "Paint Labor", "Mechanical Labor", "Structural Labor", "Frame Labor"]
     if not any(has_rate(lbl) for lbl in labels):
         adj -= 50
-    # Only deduct for tax if clearly required by rules AND not present
     if re.search(r"tax\s*(required|must|utilize|apply)", client_rules or "", re.IGNORECASE):
         if not taxes_present(text or ""):
             adj -= 25
     return adj
+
+def labor_rates_present_any(text: str) -> bool:
+    labels = ["Body", "Paint", "Mechanical", "Structural", "Frame", "Refinish", "Supplies"]
+    return any(re.search(rf"{lbl}[^\n]{{0,120}}?\$\s*\d{{2,3}}", text or "", re.IGNORECASE) for lbl in labels)
 
 # =========================================
 # Estimate parsing (line items for comparison)
@@ -465,17 +470,10 @@ def extract_estimate_items(text: str) -> List[Dict[str, str]]:
     return uniq
 
 # =========================================
-# GPT compare: estimate ↔ photos (JSON)
+# GPT compare: estimate ↔ photos (JSON only)
 # =========================================
 def compare_estimate_with_photos(items: List[Dict[str, str]],
                                  images_for_vision: List[Dict[str, Any]]) -> Dict[str, Any]:
-    """
-    Returns dict:
-      per_item: [{op,part,side,photo_evidence,confidence,note}]
-      not_in_photos: [raw...]
-      extra_damage_in_photos: ["desc"...]
-      overall: "short"
-    """
     schema = {
         "type": "object",
         "properties": {
@@ -518,7 +516,7 @@ def compare_estimate_with_photos(items: List[Dict[str, str]],
                 {"role": "system", "content": system},
                 {"role": "user",   "content": user_parts}
             ],
-            max_tokens=450,
+            max_tokens=420,
             temperature=0
         )
         txt = (rsp.choices[0].message.content or "").strip()
@@ -535,6 +533,73 @@ def compare_estimate_with_photos(items: List[Dict[str, str]],
             "extra_damage_in_photos": [],
             "overall": f"Comparison unavailable ({type(e).__name__})."
         }
+
+# =========================================
+# Local narrative builder (replaces the slow second GPT call)
+# =========================================
+def build_summary_markdown(
+    missing_photos: List[str],
+    text: str,
+    client_rules: str,
+    require_oem: bool,
+    non_oem_flag: bool
+) -> str:
+    # Section: Required Photos
+    if not missing_photos:
+        photos_lines = ["- All required photo types present (four corners, VIN, odometer, plate)."]
+    else:
+        photos_lines = [f"- Missing: {', '.join(missing_photos)}."]
+
+    # Section: Labor Rates
+    if labor_rates_present_any(text):
+        labor_lines = ["- Labor rates listed on estimate."]
+    else:
+        labor_lines = ["- Labor rates missing or not clearly listed."]
+
+    # Section: Taxes
+    if taxes_present(text):
+        taxes_lines = ["- Tax rate present on estimate."]
+    else:
+        taxes_lines = ["- Tax rate not found per client rules."]
+
+    # Section: Parts Compliance (deterministic & explicit)
+    parts_lines: List[str] = []
+    if require_oem:
+        if non_oem_flag:
+            parts_lines.append("- Non-compliance: non-OEM parts on ≤ 2 years or ≤ 24k miles.")
+        else:
+            parts_lines.append("- Compliant: OEM parts only for ≤ 2 years or ≤ 24k miles.")
+    else:
+        if non_oem_flag:
+            parts_lines.append("- Non-OEM parts noted; verify client rules allow on this vehicle.")
+        else:
+            parts_lines.append("- Parts appear OEM or not flagged as non-OEM.")
+
+    # Section: Client Rules Adherence (light, consistent)
+    client_lines = [
+        "- Apply client-required documentation (labor rates, photos, taxes) where applicable."
+    ]
+
+    # Section: Additional Notes (concise default)
+    notes_lines = [
+        "- Ensure estimate notes clearly explain damage appraisal per client requirements."
+    ]
+
+    sections = [
+        "### Required Photos",
+        *photos_lines,
+        "### Labor Rates",
+        *labor_lines,
+        "### Taxes",
+        *taxes_lines,
+        "### Parts Compliance",
+        *parts_lines,
+        "### Client Rules Adherence",
+        *client_lines,
+        "### Additional Notes",
+        *notes_lines,
+    ]
+    return "\n".join(sections)
 
 # =========================================
 # PDF helpers
@@ -589,14 +654,14 @@ async def vision_review(
 
     combined_text = "\n".join(texts)
 
-    # ----- Build contact sheets for GPT (ALL photos represented)
-    contact_sheets = make_contact_sheets(
+    # ----- Build compact contact sheets for GPT (ALL photos represented, ≤ 3 images sent)
+    contact_sheets = make_contact_sheets_compact(
         image_blobs,
-        per_sheet=8,   # 4x2 per sheet
-        thumb_w=512,
-        padding=8,
-        cols=4,
-        jpeg_quality=72
+        max_sheets=3,   # include ALL photos, but only up to 3 sheets by shrinking thumbs
+        cols=6,
+        padding=6,
+        base_thumb_w=320,
+        jpeg_quality=68
     )
     images_for_vision: List[Dict[str, Any]] = []
     for name, blob in contact_sheets:
@@ -606,13 +671,11 @@ async def vision_review(
             "image_url": {"url": f"data:image/jpeg;base64,{b64}"}
         })
 
-    # ----- photo checks + VIN/odo (run on ORIGINAL images, not the sheets)
+    # ----- photo checks + VIN/odo (run on ORIGINAL images)
     missing_photos = check_required_photos(image_blobs, combined_text)
-
     vin_est = extract_vin_from_text(combined_text)
     vin_photos = extract_vin_from_photos(image_blobs)
     vin_final = vin_est or vin_photos or "N/A"
-
     vehicle_desc = extract_vehicle_from_text(combined_text) or "N/A"
     claim_number = extract_claim_from_text(combined_text) or "N/A"
     odo_photos = extract_odometer_from_photos(image_blobs)
@@ -621,7 +684,7 @@ async def vision_review(
     est_items = extract_estimate_items(combined_text)
     consistency = compare_estimate_with_photos(est_items, images_for_vision)
 
-    # ----- rule signals for GPT consistency -----
+    # ----- rule signals for summary
     tax_present_flag = taxes_present(combined_text)
     year, miles = parse_year_miles(combined_text)
     now_year = datetime.datetime.now().year
@@ -629,60 +692,17 @@ async def vision_review(
     require_oem = (age_years is not None and age_years <= 2) or (miles is not None and miles <= 24000)
     non_oem_flag = non_oem_used(combined_text)
 
-    # ===== System prompt to enforce NO chit-chat & consistent sections =====
-    system_prompt = f"""
-You are an AI auto damage auditor. Follow these instructions EXACTLY:
+    # ===== Build deterministic narrative (FAST; no GPT)
+    summary_md = build_summary_markdown(
+        missing_photos=missing_photos,
+        text=combined_text,
+        client_rules=client_rules,
+        require_oem=require_oem,
+        non_oem_flag=non_oem_flag
+    )
 
-- NO chit-chat, apologies, or prefaces. Do NOT start with "Sure", "Here is", "Based on", etc.
-- Start immediately with the first section header. Use ONLY these section titles and this order:
-  ### Required Photos
-  ### Labor Rates
-  ### Taxes
-  ### Parts Compliance
-  ### Client Rules Adherence
-  ### Additional Notes
-
-Ground truth constraints (use them verbatim):
-- TAX_PRESENT = {str(tax_present_flag)}
-- VEHICLE_YEAR = {str(year) if year else "unknown"}
-- VEHICLE_MILES = {str(miles) if miles is not None else "unknown"}
-- REQUIRE_OEM = {str(bool(require_oem))}
-- NON_OEM_USED = {str(non_oem_flag)}
-
-Scoring/logic guidance you MUST follow:
-- If TAX_PRESENT is True, do NOT say taxes are missing or deduct for taxes.
-- For Parts Compliance:
-  • If REQUIRE_OEM is True and NON_OEM_USED is True → state non-compliance (non-OEM on ≤2 years or ≤24k miles).
-  • If REQUIRE_OEM is True and NON_OEM_USED is False → state compliant (OEM only).
-  • If REQUIRE_OEM is False → evaluate per general client rules; be explicit.
-- Keep bullets short and factual (≤ 20 words). NO percentage lines in prose.
-
-Return plain Markdown with only those six sections. Do not add any other headings or intro text.
-""".strip()
-
-    user_parts: List[Dict[str, Any]] = []
-    if combined_text:
-        user_parts.append({"type": "text", "text": combined_text})
-    if images_for_vision:
-        user_parts.extend(images_for_vision)
-
-    try:
-        response = client.chat.completions.create(
-            model=MODEL,
-            messages=[
-                {"role": "system", "content": system_prompt},
-                {"role": "user",   "content": user_parts}
-            ],
-            max_tokens=400,
-            temperature=0
-        )
-        gpt_output = response.choices[0].message.content or "⚠️ GPT returned no output."
-    except Exception as e:
-        err = f"{type(e).__name__}: {e}"
-        logger.error(f"OpenAI error: {err}")
-        gpt_output = f"⚠️ AI review failed: {err}"
-
-    # ===== Unified score parser (support Final Evaluation / Audit Results / Total Evaluation / Final Score / Compliance) =====
+    # ===== Score calc
+    # Optional AI score: if consistency JSON ever embeds a score in text (rare), parse it; otherwise None
     SCORE_PATTERNS = [
         r"Final\s*Evaluation\s*(?:Score)?\s*(?:is|:|-)?\s*(\d{1,3})\s*%?",
         r"Audit\s*Results?\s*(?:is|:|-)?\s*(\d{1,3})\s*%?",
@@ -700,25 +720,16 @@ Return plain Markdown with only those six sections. Do not add any other heading
                     pass
         return None
 
-    score_ai = parse_ai_score(gpt_output)
-
+    score_ai = None  # no narrative GPT call now; keep None
     labor_tax_adj = check_labor_and_tax_score(combined_text, client_rules)
     photo_adj = -25 * len(missing_photos)
     computed = max(0, 100 + labor_tax_adj + photo_adj)
 
-    # ===== EDIT #1: Use AI score only if it's close to the computed score (±10); else use computed
+    # EDIT #1: Use AI score only if close to computed (±10); else computed
     if score_ai is not None and abs(score_ai - computed) <= 10:
         authoritative_score = score_ai
     else:
         authoritative_score = computed
-
-    # Scrub any score lines & any conversational filler from the AI narrative
-    gpt_output_clean = re.sub(
-        r'(?im)^(?:Final\s*Score|Compliance\s*Score|Total\s*Evaluation|Final\s*Evaluation|Audit\s*Results?)\s*(?:is|:|-)?\s*\d{1,3}\s*%.*$',
-        '',
-        gpt_output or ''
-    )
-    gpt_output_clean = re.sub(r'(?im)^\s*(sure[,!]?|here(?:\'s| is)|based on|okay[,!]?|alright[,!]?).*$', '', gpt_output_clean).strip()
 
     # =========================================
     # PDF build
@@ -749,14 +760,14 @@ Return plain Markdown with only those six sections. Do not add any other heading
     pdf_add_section_title(pdf, "AI-4-IA Review Summary")
     pdf.multi_cell(0, 6, f"**Audit Results: {authoritative_score}%**")
     pdf.ln(1)
-    pdf.multi_cell(0, 6, gpt_output_clean)
+    pdf.multi_cell(0, 6, summary_md)
 
     # ======== Estimate ↔ Photos Consistency Review ========
     pdf.ln(4)
     pdf_add_section_title(pdf, "Estimate ↔ Photos Consistency Review")
 
     if consistency.get("per_item"):
-        for it in consistency["per_item"][:40]:
+        for it in consistency["per_item"][:60]:
             ev = "YES" if it.get("photo_evidence") else "NO"
             try:
                 conf = float(it.get("confidence", 0))
@@ -771,13 +782,13 @@ Return plain Markdown with only those six sections. Do not add any other heading
     if consistency.get("not_in_photos"):
         pdf.ln(2)
         pdf_add_section_title(pdf, "Items Estimated but Not Evident in Photos")
-        for raw in consistency["not_in_photos"][:20]:
+        for raw in consistency["not_in_photos"][:30]:
             pdf.multi_cell(0, 6, f"- {raw}")
 
     if consistency.get("extra_damage_in_photos"):
         pdf.ln(2)
         pdf_add_section_title(pdf, "Damage Visible in Photos but Missing on Estimate")
-        for d in consistency["extra_damage_in_photos"][:20]:
+        for d in consistency["extra_damage_in_photos"][:30]:
             pdf.multi_cell(0, 6, f"- {d}")
 
     pdf.ln(2)
@@ -814,7 +825,7 @@ Compliance Score: {authoritative_score}%
 AI Review Summary:
 Audit Results: {authoritative_score}%
 
-{gpt_output_clean}
+{summary_md}
 """
         msg.set_content(email_body)
         with smtplib.SMTP_SSL("mail.tierra.net", 465) as smtp:
@@ -824,7 +835,7 @@ Audit Results: {authoritative_score}%
         logger.error(f"Email error (continuing): {e}")
 
     return {
-        "gpt_output": f"Audit Results: {authoritative_score}%\n\n{gpt_output_clean}",
+        "gpt_output": f"Audit Results: {authoritative_score}%\n\n{summary_md}",
         "file_number": file_number,
         "claim_number": claim_number,
         "vehicle": vehicle_desc,
@@ -857,6 +868,7 @@ async def get_client_rules(client_name: str):
     else:
         logger.error(f"Rules not found for client: {client_name}")
         return JSONResponse(status_code=404, content={"error": "Rules not found for this client."})
+
 
 
 
