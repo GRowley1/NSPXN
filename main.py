@@ -189,6 +189,7 @@ def best_vin_candidate(cands: List[str]) -> Optional[str]:
 
 # =========================================
 # Field extraction & tax/parts signals
+# (EDIT #3 below: improved extract_vin_from_text)
 # =========================================
 def extract_claim_from_text(text: str) -> Optional[str]:
     patterns = [
@@ -201,18 +202,21 @@ def extract_claim_from_text(text: str) -> Optional[str]:
             return m.group(1).strip()
     return None
 
+# ===== EDIT #3: Prefer the explicit VIN label; fallback to 17-char candidates
 def extract_vin_from_text(text: str) -> Optional[str]:
-    label_block = re.findall(r"(?:^|\n).{0,40}VIN[:\s\-]*([A-HJ-NPR-Z0-9]{10,20}).*", text, re.IGNORECASE)
-    if label_block:
-        vin = best_vin_candidate(label_block)
+    # First: exact 'VIN:' label capture (most reliable)
+    m = re.search(r'(?i)\bVIN\s*[:\-]?\s*([A-HJ-NPR-Z0-9]{10,20})', text or "")
+    if m:
+        vin = best_vin_candidate([m.group(1)])
         if vin:
             return vin
-    candidates = re.findall(r"\b([A-HJ-NPR-Z0-9]{17})\b", text, re.IGNORECASE)
+    # Fallback: any 17-char candidate
+    candidates = re.findall(r'\b([A-HJ-NPR-Z0-9]{17})\b', text or "", re.IGNORECASE)
     return best_vin_candidate(candidates)
 
 def extract_vehicle_from_text(text: str) -> Optional[str]:
-    m1 = re.search(r"\b(20\d{2})\s+([A-Za-z]{3,})\s+([A-Za-z0-9\-]{2,})", text)
-    m2 = re.search(r"(?:Odometer|Mileage)\s*[:\-]?\s*([\d,]+)", text, re.IGNORECASE)
+    m1 = re.search(r"\b(20\d{2})\s+([A-Za-z]{3,})\s+([A-Za-z0-9\-]{2,})", text or "")
+    m2 = re.search(r"(?:Odometer|Mileage)\s*[:\-]?\s*([\d,]+)", text or "", re.IGNORECASE)
     if m1:
         year, make, model = m1.groups()
         miles = m2.group(1) if m2 else "Mileage unknown"
@@ -222,22 +226,34 @@ def extract_vehicle_from_text(text: str) -> Optional[str]:
 def parse_year_miles(text: str) -> Tuple[Optional[int], Optional[int]]:
     year = None
     miles = None
-    m_year = re.search(r"\b(20\d{2})\b", text)
+    m_year = re.search(r"\b(20\d{2})\b", text or "")
     if m_year:
         try: year = int(m_year.group(1))
         except: year = None
-    m_mi = re.search(r"(?:Odometer|Mileage)\s*[:\-]?\s*([\d,]+)", text, re.IGNORECASE)
+    m_mi = re.search(r"(?:Odometer|Mileage)\s*[:\-]?\s*([\d,]+)", text or "", re.IGNORECASE)
     if m_mi:
         try: miles = int(m_mi.group(1).replace(",", ""))
         except: miles = None
     return year, miles
 
 def taxes_present(text: str) -> bool:
-    return re.search(r'tax[^\n]{0,50}(\d{1,3}\s*%|\$\s*\d+(\.\d{2})?)', text, re.IGNORECASE) is not None
+    return re.search(r'tax[^\n]{0,50}(\d{1,3}\s*%|\$\s*\d+(\.\d{2})?)', text or "", re.IGNORECASE) is not None
 
+# ===== EDIT #2: Only treat non-OEM as used if it appears on REPLACE/R&R part lines (ignore boilerplate)
+PART_FLAGS = r'(?:\bA/M\b|\bAFTER\s*MARKET\b|\bAFTERMARKET\b|\bLKQ\b|\bRECOND(?:ITIONED)?\b|\bCAPA\b|\bALT[-\s]*OE\b|\bREMAN(?:UFACTURED)?\b)'
 def non_oem_used(text: str) -> bool:
-    # LKQ, aftermarket, reconditioned, CAPA, Alt-OE, reman, etc.
-    return re.search(r'\b(LKQ|after\s*market|aftermarket|recon(?:ditioned)?|CAPA|Alt[-\s]*OE|reman(?:ufactured)?)\b', text, re.IGNORECASE) is not None
+    non_oem_on_line_items = False
+    for line in (text or "").splitlines():
+        l = line.strip().upper()
+        # look for replace-like ops plus an aftermarket marker on the same line
+        if (("REPL" in l) or ("REPLACE" in l) or ("R&R" in l) or ("R & R" in l) or ("R&I" in l) or ("R & I" in l)) \
+           and re.search(PART_FLAGS, l, re.IGNORECASE):
+            non_oem_on_line_items = True
+            break
+    # If estimate explicitly says OEM unless noted and we didn't see flagged parts, treat as OEM
+    if not non_oem_on_line_items and re.search(r'parts\s+presented\s+are\s+OEM[-\s]*parts', text or "", re.IGNORECASE):
+        return False
+    return non_oem_on_line_items
 
 # =========================================
 # Photo parsing & requirements
@@ -407,13 +423,13 @@ def check_labor_and_tax_score(text: str, client_rules: str) -> int:
     adj = 0
     def has_rate(label: str) -> bool:
         pat = rf"{label}[^\n]{{0,120}}?\$\s*\d{{2,3}}(?:\.\d+)?\s*(?:/hr|/hour|per\s*hour|hr)"
-        return re.search(pat, text, re.IGNORECASE) is not None
+        return re.search(pat, text or "", re.IGNORECASE) is not None
     labels = ["Body Labor", "Paint Labor", "Mechanical Labor", "Structural Labor", "Frame Labor"]
     if not any(has_rate(lbl) for lbl in labels):
         adj -= 50
     # Only deduct for tax if clearly required by rules AND not present
-    if re.search(r"tax\s*(required|must|utilize|apply)", client_rules, re.IGNORECASE):
-        if not taxes_present(text):
+    if re.search(r"tax\s*(required|must|utilize|apply)", client_rules or "", re.IGNORECASE):
+        if not taxes_present(text or ""):
             adj -= 25
     return adj
 
@@ -430,7 +446,7 @@ OPS = ["replace", "repair", "refinish", "r&i", "r & i", "align", "blend", "calib
 
 def extract_estimate_items(text: str) -> List[Dict[str, str]]:
     items: List[Dict[str, str]] = []
-    for line in text.splitlines():
+    for line in (text or "").splitlines():
         l = line.strip().lower()
         if not l or len(l) < 6:
             continue
@@ -690,8 +706,11 @@ Return plain Markdown with only those six sections. Do not add any other heading
     photo_adj = -25 * len(missing_photos)
     computed = max(0, 100 + labor_tax_adj + photo_adj)
 
-    # Authoritative score = AI score if present, else computed
-    authoritative_score = score_ai if score_ai is not None else computed
+    # ===== EDIT #1: Use AI score only if it's close to the computed score (±10); else use computed
+    if score_ai is not None and abs(score_ai - computed) <= 10:
+        authoritative_score = score_ai
+    else:
+        authoritative_score = computed
 
     # Scrub any score lines & any conversational filler from the AI narrative
     gpt_output_clean = re.sub(
