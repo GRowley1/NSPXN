@@ -19,7 +19,7 @@ from fpdf import FPDF
 from docx import Document
 from pdf2image import convert_from_bytes
 import pytesseract
-from PIL import Image, ImageEnhance, ImageOps, ImageFilter, ImageStat, Image
+from PIL import Image, ImageEnhance, ImageOps, ImageFilter, ImageStat
 from openai import OpenAI
 
 # =========================================
@@ -111,7 +111,7 @@ def extract_text_from_docx(file_like: io.BytesIO) -> str:
         logger.error(f"DOCX read error: {e}")
         return ""
 
-# NEW: Try embedded selectable text first (fast) before OCR
+# === Embedded PDF text (no OCR). Use first; fallback to OCR ===
 def extract_text_from_pdf_embedded(pdf_bytes: bytes) -> str:
     try:
         from PyPDF2 import PdfReader
@@ -190,7 +190,7 @@ VIN_PHRASE = re.compile(r'(?i)\bVehicle\s*Identification\s*Number\b')
 # matches VIN with optional separators between each char: 3 N 1 A ... 9 9
 VIN_SEP_SEQ = re.compile(r'(?i)((?:[A-HJ-NPR-Z0-9][\s\.\-–—:_]){16}[A-HJ-NPR-Z0-9])')
 
-def _extract_vin_near_positions(text: str, positions: List[int], radius: int = 180) -> Optional[str]:
+def _extract_vin_near_positions(text: str, positions: List[int], radius: int = 220) -> Optional[str]:
     for pos in positions:
         window = text[pos: pos + radius]
         # 1) separated sequence
@@ -210,7 +210,7 @@ def extract_vin_from_text(text: str) -> Optional[str]:
     # Look near explicit labels
     label_positions = [m.end() for m in VIN_LABEL.finditer(text)]
     label_positions += [m.end() for m in VIN_PHRASE.finditer(text)]
-    vin = _extract_vin_near_positions(text, label_positions, radius=220)
+    vin = _extract_vin_near_positions(text, label_positions, radius=240)
     if vin:
         return vin
     # Global fallback: any separated or contiguous 17-char VIN
@@ -236,18 +236,17 @@ def extract_vin_from_pdf_first_pages(pdf_bytes: bytes, pages_to_scan: int = 10, 
 # =========================================
 # Claim extraction (robust + hi-res pages fallback; estimate only)
 # =========================================
-# more tolerant separators and linebreaks; handles "Claim #", "Claim No.", etc.
+# Highly tolerant to "Claim #/No./Number", Unicode punctuation & line breaks
 CLAIM_LOOSE = re.compile(
     r'(?is)\bcl[aai]m\b[^\w]{0,10}(?:no\.?|number|#)?[^\w]{0,6}([A-Z0-9][A-Z0-9\-\/\.]{2,40})'
 )
-# also accept "Loss/File/Reference/Assignment" variants
+# Also accept Loss/File/Reference/Assignment
 CLAIM_PATTERNS = [
     r'(?is)\bloss\b[^\w]{0,10}(?:no\.?|number|#)?[^\w]{0,6}([A-Z0-9][A-Z0-9\-\/\.]{2,40})',
     r'(?is)\bfile\b[^\w]{0,10}(?:no\.?|number|#)?[^\w]{0,6}([A-Z0-9][A-Z0-9\-\/\.]{2,40})',
     r'(?is)\bref(?:erence)?\b[^\w]{0,10}(?:no\.?|number|#)?[^\w]{0,6}([A-Z0-9][A-Z0-9\-\/\.]{2,40})',
     r'(?is)\bassignment\b[^\w]{0,10}(?:no\.?|number|#)?[^\w]{0,6}([A-Z0-9][A-Z0-9\-\/\.]{2,40})',
 ]
-
 def extract_claim_from_text(text: str) -> Optional[str]:
     if not text:
         return None
@@ -960,6 +959,7 @@ async def get_client_rules(client_name: str):
     else:
         logger.error(f"Rules not found for client: {client_name}")
         return JSONResponse(status_code=404, content={"error": "Rules not found for this client."})
+
 
 
 
