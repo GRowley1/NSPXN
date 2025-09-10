@@ -190,7 +190,7 @@ VIN_PHRASE = re.compile(r'(?i)\bVehicle\s*Identification\s*Number\b')
 # matches VIN with optional separators between each char: 3 N 1 A ... 9 9
 VIN_SEP_SEQ = re.compile(r'(?i)((?:[A-HJ-NPR-Z0-9][\s\.\-–—:_]){16}[A-HJ-NPR-Z0-9])')
 
-def _extract_vin_near_positions(text: str, positions: List[int], radius: int = 220) -> Optional[str]:
+def _extract_vin_near_positions(text: str, positions: List[int], radius: int = 240) -> Optional[str]:
     for pos in positions:
         window = text[pos: pos + radius]
         # 1) separated sequence
@@ -236,29 +236,35 @@ def extract_vin_from_pdf_first_pages(pdf_bytes: bytes, pages_to_scan: int = 10, 
 # =========================================
 # Claim extraction (robust + hi-res pages fallback; estimate only)
 # =========================================
-# Highly tolerant to "Claim #/No./Number", Unicode punctuation & line breaks
-CLAIM_LOOSE = re.compile(
-    r'(?is)\bcl[aai]m\b[^\w]{0,10}(?:no\.?|number|#)?[^\w]{0,6}([A-Z0-9][A-Z0-9\-\/\.]{2,40})'
+# Prefer the explicit "Claim" label; tolerate weird punctuation/line breaks.
+CLAIM_AFTER_LABEL = re.compile(
+    r'(?is)\bclaim\b\W{0,6}(?:#:?|no\.?|number)?\W{0,6}([A-Z0-9][A-Z0-9\-/\.]{2,60})'
 )
-# Also accept Loss/File/Reference/Assignment
-CLAIM_PATTERNS = [
-    r'(?is)\bloss\b[^\w]{0,10}(?:no\.?|number|#)?[^\w]{0,6}([A-Z0-9][A-Z0-9\-\/\.]{2,40})',
-    r'(?is)\bfile\b[^\w]{0,10}(?:no\.?|number|#)?[^\w]{0,6}([A-Z0-9][A-Z0-9\-\/\.]{2,40})',
-    r'(?is)\bref(?:erence)?\b[^\w]{0,10}(?:no\.?|number|#)?[^\w]{0,6}([A-Z0-9][A-Z0-9\-\/\.]{2,40})',
-    r'(?is)\bassignment\b[^\w]{0,10}(?:no\.?|number|#)?[^\w]{0,6}([A-Z0-9][A-Z0-9\-\/\.]{2,40})',
+# Also accept Loss/File/Reference/Assignment labels
+ALT_CLAIM_LABELS = [
+    re.compile(r'(?is)\bloss\b\W{0,6}(?:#:?|no\.?|number)?\W{0,6}([A-Z0-9][A-Z0-9\-/\.]{2,60})'),
+    re.compile(r'(?is)\bfile\b\W{0,6}(?:#:?|no\.?|number)?\W{0,6}([A-Z0-9][A-Z0-9\-/\.]{2,60})'),
+    re.compile(r'(?is)\bref(?:erence)?\b\W{0,6}(?:#:?|no\.?|number)?\W{0,6}([A-Z0-9][A-Z0-9\-/\.]{2,60})'),
+    re.compile(r'(?is)\bassignment\b\W{0,6}(?:#:?|no\.?|number)?\W{0,6}([A-Z0-9][A-Z0-9\-/\.]{2,60})'),
 ]
+
+def _clean_claim(c: str) -> str:
+    return c.strip().strip('.').strip('-').replace('\u2011','-').replace('\u2013','-').replace('\u2014','-')
+
 def extract_claim_from_text(text: str) -> Optional[str]:
     if not text:
         return None
-    m = CLAIM_LOOSE.search(text)
+    # 1) Exact "Claim" label first
+    m = CLAIM_AFTER_LABEL.search(text)
     if m:
-        cand = m.group(1).strip().strip('.').strip('-')
-        if re.search(r'\d', cand):
+        cand = _clean_claim(m.group(1))
+        if re.search(r'[A-Z]|-', cand):  # prefer alpha or hyphenated CCC style
             return cand
-    for pat in CLAIM_PATTERNS:
-        m = re.search(pat, text)
+    # 2) Alternate labels (Loss/File/Reference/Assignment)
+    for pat in ALT_CLAIM_LABELS:
+        m = pat.search(text)
         if m:
-            cand = m.group(1).strip().strip('.').strip('-')
+            cand = _clean_claim(m.group(1))
             if re.search(r'\d', cand):
                 return cand
     return None
@@ -352,20 +358,79 @@ def _is_exterior_by_edges(img: Image.Image) -> bool:
     evar = ImageStat.Stat(edges).var[0]
     return (var > 140 and evar > 400)
 
+# >>> REPLACED with robust VIN-from-photos routine <<<
 def extract_vin_from_photos(image_blobs: List[Tuple[str, bytes]]) -> Optional[str]:
-    """Use photo VIN ONLY for verification (never to populate the VIN field)."""
+    """
+    Pull VIN from photos for verification ONLY.
+    Improvements:
+      - Larger thumbnail (up to 2200 px)
+      - Multiple preprocessing variants (contrast, sharpen, binarize)
+      - Multiple Tesseract PSMs (6, 7, 11)
+      - Prefer VIN near the label 'VIN'/'V.I.N' before global fallback
+    """
+    VIN_NEAR_LABEL = re.compile(r'(?i)\bV[\W_]*I[\W_]*N\b')
+    VIN_17 = re.compile(r'\b([A-HJ-NPR-Z0-9]{17})\b')
+    VIN_SEP_SEQ = re.compile(r'(?i)((?:[A-HJ-NPR-Z0-9][\s\.\-–—:_]){16}[A-HJ-NPR-Z0-9])')
+
+    def _variants(im: Image.Image) -> List[Image.Image]:
+        im = im.copy()
+        max_w = 2200
+        if im.width < max_w:
+            h = int(im.height * (max_w / im.width))
+            im = im.resize((max_w, h), Image.LANCZOS)
+        g = im.convert("L")
+        v = []
+        v.append(ImageEnhance.Contrast(g).enhance(2.0))                          # base enhanced
+        v.append(ImageEnhance.Sharpness(v[0]).enhance(2.0))                      # sharpened
+        v.append(v[0].point(lambda p: 255 if p > 180 else 0, mode="1").convert("L"))  # binarized
+        v.append(ImageOps.autocontrast(g.filter(ImageFilter.MedianFilter(3))))   # autocontrast + denoise
+        return v
+
+    def _ocr_all(im: Image.Image) -> str:
+        out = []
+        for psm in (7, 6, 11):
+            try:
+                txt = pytesseract.image_to_string(im, lang="eng", config=f"--psm {psm} --oem 1")
+                if txt:
+                    out.append(txt)
+            except Exception:
+                pass
+        return "\n".join(out)
+
     for name, blob in image_blobs:
         try:
-            img = Image.open(io.BytesIO(blob))
-            img = img.copy()
-            img.thumbnail((1600, 1600))
-            txt = ocr_text_fast(img, psm=7)
-            cands = re.findall(r"\b([A-HJ-NPR-Z0-9]{17})\b", txt.upper())
-            vin = best_vin_candidate(cands)
+            im = Image.open(io.BytesIO(blob))
+            texts = []
+            for var in _variants(im):
+                texts.append(_ocr_all(var))
+            up = "\n".join(texts).upper()
+
+            # 1) VIN near label first
+            for m in VIN_NEAR_LABEL.finditer(up):
+                window = up[m.end(): m.end() + 220]
+                for mm in VIN_SEP_SEQ.finditer(window):
+                    vin = normalize_vin(mm.group(1))
+                    if vin and vin_checksum_ok(vin):
+                        return vin
+                cands = VIN_17.findall(window)
+                vin = best_vin_candidate(cands)
+                if vin:
+                    return vin
+
+            # 2) Global separated sequence
+            for mm in VIN_SEP_SEQ.finditer(up):
+                vin = normalize_vin(mm.group(1))
+                if vin and vin_checksum_ok(vin):
+                    return vin
+
+            # 3) Global contiguous
+            vin = best_vin_candidate(VIN_17.findall(up))
             if vin:
                 return vin
+
         except Exception as e:
             logger.warning(f"VIN photo OCR error ({name}): {e}")
+
     return None
 
 def extract_odometer_from_photos(image_blobs: List[Tuple[str, bytes]]) -> Optional[str]:
@@ -382,7 +447,8 @@ def extract_odometer_from_photos(image_blobs: List[Tuple[str, bytes]]) -> Option
             logger.warning(f"Odometer photo OCR error ({name}): {e}")
     return None
 
-def _sample_for_plate_ocr(image_blobs: List[Tuple[str, bytes]], k: int = 6) -> List[Tuple[str, bytes]]:
+# >>> increase sampling & better plate regex <<<
+def _sample_for_plate_ocr(image_blobs: List[Tuple[str, bytes]], k: int = 24) -> List[Tuple[str, bytes]]:
     if len(image_blobs) <= k:
         return image_blobs
     pairs = []
@@ -391,6 +457,8 @@ def _sample_for_plate_ocr(image_blobs: List[Tuple[str, bytes]], k: int = 6) -> L
         pairs.append((int(h[:8], 16), (name, blob)))
     pairs.sort()
     return [p[1] for p in pairs[:k]]
+
+PLATE_RX = re.compile(r'\b([A-Z0-9]{1,3}[-\s]?[A-Z0-9]{3,4}|[A-Z0-9]{5,8})\b')
 
 def check_required_photos(image_blobs: List[Tuple[str, bytes]], ocr_text: str) -> List[str]:
     """Required: four corners, odometer, VIN, license plate."""
@@ -409,12 +477,12 @@ def check_required_photos(image_blobs: List[Tuple[str, bytes]], ocr_text: str) -
     if odo_text or odo_photo:
         present.add("odometer")
 
-    for name, blob in _sample_for_plate_ocr(image_blobs, k=6):
+    for name, blob in _sample_for_plate_ocr(image_blobs, k=24):
         try:
             img = Image.open(io.BytesIO(blob))
             img.thumbnail((1300, 1300))
             txtp = ocr_text_fast(img, psm=7)
-            if re.search(r"(license|registration)\s*plate|\b[A-Z0-9]{5,8}\b", txtp, re.IGNORECASE):
+            if re.search(r'(license|registration)\s*plate', txtp, re.IGNORECASE) or PLATE_RX.search(txtp):
                 present.add("license plate")
                 break
         except Exception:
@@ -959,6 +1027,7 @@ async def get_client_rules(client_name: str):
     else:
         logger.error(f"Rules not found for client: {client_name}")
         return JSONResponse(status_code=404, content={"error": "Rules not found for this client."})
+
 
 
 
