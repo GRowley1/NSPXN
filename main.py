@@ -224,7 +224,7 @@ def extract_vin_from_pdf_first_pages(pdf_bytes: bytes, pages_to_scan: int = 4, d
     return None
 
 # =========================================
-# Claim extraction (robust; estimate only)
+# Claim extraction (fast/robust)
 # =========================================
 CLAIM_AFTER_LABEL = re.compile(
     r'(?is)\bclaim\b\W{0,6}(?:#:?|no\.?|number)?\W{0,6}([A-Z0-9][A-Z0-9\-/\.]{2,60})'
@@ -235,45 +235,24 @@ ALT_CLAIM_LABELS = [
     re.compile(r'(?is)\bref(?:erence)?\b\W{0,6}(?:#:?|no\.?|number)?\W{0,6}([A-Z0-9][A-Z0-9\-/\.]{2,60})'),
     re.compile(r'(?is)\bassignment\b\W{0,6}(?:#:?|no\.?|number)?\W{0,6}([A-Z0-9][A-Z0-9\-/\.]{2,60})'),
 ]
-
-# Some words we explicitly do NOT want to capture as claim numbers
-_CLAIM_BLACKLIST = {"SERVICE", "SERVICES", "PHONE", "EMAIL", "FAX", "TOTAL", "POLICY"}
-
 def _clean_claim(c: str) -> str:
-    c = c.strip().strip(':').strip().strip('.').strip('-')
-    c = c.replace('\u2011','-').replace('\u2013','-').replace('\u2014','-')
-    return re.sub(r'\s+', '', c)  # collapse any spaces inside
-
-def _valid_claim_candidate(c: str) -> bool:
-    if not c or len(c) < 3:
-        return False
-    # Must include at least one digit
-    if not re.search(r'\d', c):
-        return False
-    # Reject pure words like "SERVICES"
-    if c.upper() in _CLAIM_BLACKLIST:
-        return False
-    return True
+    return c.strip().strip('.').strip('-').replace('\u2011','-').replace('\u2013','-').replace('\u2014','-')
 
 def extract_claim_from_text(text: str) -> Optional[str]:
     if not text:
         return None
-
-    # 1) Prefer exact "Claim" label; scan all matches until a valid one is found
-    for m in CLAIM_AFTER_LABEL.finditer(text):
+    m = CLAIM_AFTER_LABEL.search(text)
+    if m:
         cand = _clean_claim(m.group(1))
-        if _valid_claim_candidate(cand):
+        if re.search(r'[A-Z]|-', cand):
             return cand
-
-    # 2) Alternate labels (Loss/File/Reference/Assignment)
     for pat in ALT_CLAIM_LABELS:
-        for m in pat.finditer(text):
+        m = pat.search(text)
+        if m:
             cand = _clean_claim(m.group(1))
-            if _valid_claim_candidate(cand):
+            if re.search(r'\d', cand):
                 return cand
-
     return None
-
 
 def extract_claim_from_pdf_first_pages(pdf_bytes: bytes, pages_to_scan: int = 4, dpi: int = 170) -> Optional[str]:
     try:
@@ -411,14 +390,14 @@ def extract_vin_from_photos(image_blobs: List[Tuple[str, bytes]]) -> Optional[st
                     vin = normalize_vin(mm.group(1))
                     if vin and vin_checksum_ok(vin):
                         return vin
-                vin = best_vin_candidate(VIN_17.findall(window))
+                vin = best_vin_candidate(re.findall(r'\b([A-HJ-NPR-Z0-9]{17})\b', window))
                 if vin: return vin
 
             for mm in VIN_SEP_SEQ.finditer(up_all):
                 vin = normalize_vin(mm.group(1))
                 if vin and vin_checksum_ok(vin): return vin
 
-            vin = best_vin_candidate(VIN_17.findall(up_all))
+            vin = best_vin_candidate(re.findall(r'\b([A-HJ-NPR-Z0-9]{17})\b', up_all))
             if vin: return vin
         except Exception as e:
             logger.warning(f"VIN photo OCR error ({name}): {e}")
@@ -438,8 +417,7 @@ def extract_odometer_from_photos(image_blobs: List[Tuple[str, bytes]]) -> Option
             logger.warning(f"Odometer photo OCR error ({name}): {e}")
     return None
 
-# Wider sample so we don't miss the plate image
-def _sample_for_plate_ocr(image_blobs: List[Tuple[str, bytes]], k: int = 24) -> List[Tuple[str, bytes]]:
+def _sample_for_plate_ocr(image_blobs: List[Tuple[str, bytes]], k: int = 10) -> List[Tuple[str, bytes]]:
     if len(image_blobs) <= k:
         return image_blobs
     pairs = []
@@ -451,31 +429,7 @@ def _sample_for_plate_ocr(image_blobs: List[Tuple[str, bytes]], k: int = 24) -> 
 
 PLATE_RX = re.compile(r'\b([A-Z0-9]{1,3}[-\s]?[A-Z0-9]{3,4}|[A-Z0-9]{5,8})\b')
 
-def _plate_ocr_variants(img: Image.Image) -> str:
-    """Multiple preprocess variants & PSMs to make plate text like 'MRK-8608' show up."""
-    def variants(im: Image.Image) -> List[Image.Image]:
-        im = im.copy()
-        im.thumbnail((1600, 1600))
-        g = im.convert("L")
-        return [
-            ImageEnhance.Contrast(g).enhance(1.8),
-            ImageEnhance.Sharpness(g).enhance(1.8),
-            ImageOps.autocontrast(g.filter(ImageFilter.MedianFilter(3))),
-            g.point(lambda p: 255 if p > 170 else 0, mode="1").convert("L"),
-            g.point(lambda p: 255 if p > 190 else 0, mode="1").convert("L"),
-        ]
-    out = []
-    for v in variants(img):
-        for psm in (6, 7, 11):
-            try:
-                t = pytesseract.image_to_string(v, lang="eng", config=f"--psm {psm} --oem 1")
-                if t: out.append(t)
-            except Exception:
-                pass
-    return "\n".join(out)
-
 def check_required_photos(image_blobs: List[Tuple[str, bytes]], ocr_text: str) -> List[str]:
-    """Required: four corners, odometer, VIN, license plate."""
     required = ["four corners", "odometer", "vin", "license plate"]
     present = set()
     txt = (ocr_text or "").lower()
@@ -491,23 +445,22 @@ def check_required_photos(image_blobs: List[Tuple[str, bytes]], ocr_text: str) -
     if odo_text or odo_photo:
         present.add("odometer")
 
-    # ---- License plate (robust OCR on a slightly larger sample)
-    for name, blob in _sample_for_plate_ocr(image_blobs, k=24):
+    for name, blob in _sample_for_plate_ocr(image_blobs, k=10):
         try:
             img = Image.open(io.BytesIO(blob))
-            txtp = _plate_ocr_variants(img)
+            img.thumbnail((1200, 1200))
+            txtp = ocr_text_fast(img, psm=7)
             if re.search(r'(license|registration)\s*plate', txtp, re.IGNORECASE) or PLATE_RX.search(txtp):
                 present.add("license plate")
                 break
         except Exception:
             pass
 
-    # ---- Four corners heuristic unchanged
     exterior_hits = 0
-    for name, blob in image_blobs[:40]:
+    for name, blob in image_blobs[:20]:
         try:
             img = Image.open(io.BytesIO(blob))
-            img.thumbnail((1600, 1600))
+            img.thumbnail((1400, 1400))
             if _is_exterior_by_edges(img):
                 exterior_hits += 1
         except Exception:
@@ -610,6 +563,124 @@ def labor_rates_present_any(text: str) -> bool:
     return any(re.search(rf"{lbl}[^\n]{{0,120}}?\$\s*\d{{2,3}}", text or "", re.IGNORECASE) for lbl in labels)
 
 # =========================================
+# Client-guideline parsing (NEW)
+# =========================================
+PHOTO_KEYWORDS = {
+    "four corners": ["four corners", "4 corners", "four-corners"],
+    "vin": ["vin", "v.i.n"],
+    "odometer": ["odometer", "mileage"],
+    "license plate": ["license plate", "registration plate", "plate photo"],
+    "damage close-ups": ["close-up", "close ups", "closeups", "detail photos", "damage photos"],
+    "interior": ["interior photo", "interior photos"],
+}
+
+def _mentions_any(s: str, needles: List[str]) -> bool:
+    s2 = (s or "").lower()
+    return any(n in s2 for n in needles)
+
+def parse_client_rules(client_rules: str) -> Dict[str, Any]:
+    cr = (client_rules or "").lower()
+    photos_req = set()
+    for key, variants in PHOTO_KEYWORDS.items():
+        if _mentions_any(cr, variants):
+            photos_req.add(key)
+    require_labor = bool(re.search(r"\blabor rate[s]?\b|\brates\s+for\s+(?:body|paint|mechanical|frame)", cr))
+    require_tax = bool(re.search(r"\bapply\s+tax\b|\btax\s+required\b|\binclude\s+tax\b", cr))
+    require_market_doc = bool(re.search(r"\b(nada|kelley|kbb|black\s*book|retail|market\s+value)\b", cr))
+    require_valuation_includes_tax = bool(re.search(r"\bvaluation\b.*\btax\b|\binclude\b.*\btax\b.*\bvaluation\b", cr, re.DOTALL))
+    require_total_loss_decl = bool(re.search(r"\btotal\s+loss\b.*\bdeclare|\bdeclare\b.*\btotal\s+loss\b", cr, re.DOTALL))
+    oem_recent = bool(re.search(r"(?:<=?|less\s+than|under)\s*2\s*year", cr)) or bool(re.search(r"(?:<=?|less\s+than|under)\s*24\s*[,k]*\s*mi", cr))
+    return {
+        "photos_required": photos_req,
+        "require_labor_rates": require_labor,
+        "require_tax": require_tax,
+        "require_market_doc": require_market_doc,
+        "require_valuation_includes_tax": require_valuation_includes_tax,
+        "require_total_loss_decl": require_total_loss_decl,
+        "oem_required_if_recent": oem_recent,
+    }
+
+def has_market_value_doc(text: str) -> bool:
+    t = (text or "").lower()
+    return bool(re.search(r"\b(nada|kelley|kbb|black\s*book)\b", t)) or \
+           bool(re.search(r"\b(retail|market)\s+value\b", t))
+
+def build_client_adherence_lines(
+    guidelines: Dict[str, Any],
+    missing_photos: List[str],
+    text: str,
+    year: Optional[int],
+    miles: Optional[int],
+    non_oem_flag: bool,
+) -> List[str]:
+    lines: List[str] = []
+    req_photos = guidelines.get("photos_required", set())
+
+    # Photos
+    if req_photos:
+        for p in sorted(req_photos):
+            if p in missing_photos:
+                lines.append(f"- Non-compliant: required photo '{p}' missing.")
+            else:
+                lines.append(f"- Compliant: required photo '{p}' provided.")
+    else:
+        if missing_photos:
+            lines.append(f"- Non-compliant: missing required photo(s): {', '.join(missing_photos)}.")
+        else:
+            lines.append("- Compliant: required photo set present.")
+
+    # Labor rates
+    if guidelines.get("require_labor_rates"):
+        if labor_rates_present_any(text):
+            lines.append("- Compliant: labor rates listed on estimate.")
+        else:
+            lines.append("- Non-compliant: labor rates not listed per client rules.")
+
+    # Taxes
+    if guidelines.get("require_tax"):
+        if taxes_present(text):
+            lines.append("- Compliant: tax rate present per client rules.")
+        else:
+            lines.append("- Non-compliant: tax rate not found per client rules.")
+
+    # Market/retail value doc
+    if guidelines.get("require_market_doc"):
+        if has_market_value_doc(text):
+            lines.append("- Compliant: required retail/market value documentation present (e.g., NADA/KBB).")
+        else:
+            lines.append("- Non-compliant: required retail/market value documentation not found.")
+
+    # Valuation includes tax
+    if guidelines.get("require_valuation_includes_tax"):
+        if re.search(r"valuation[^\n]{0,80}(tax|incl(?:uded)?|with\s+tax)", text, re.IGNORECASE):
+            lines.append("- Compliant: valuation indicates tax inclusion.")
+        elif taxes_present(text):
+            lines.append("- Unable to verify: tax present but valuation line not explicit about inclusion.")
+        else:
+            lines.append("- Non-compliant: valuation tax inclusion not indicated.")
+
+    # Total loss declaration
+    if guidelines.get("require_total_loss_decl"):
+        if re.search(r"\btotal\s+loss\b", text, re.IGNORECASE):
+            lines.append("- Compliant: total loss declaration present.")
+        else:
+            lines.append("- Unable to verify: total loss declaration not found.")
+
+    # Parts policy vs. vehicle age/mileage
+    if guidelines.get("oem_required_if_recent"):
+        recent = ((year is not None and (datetime.datetime.now().year - year) <= 2) or
+                  (miles is not None and miles <= 24000))
+        if recent:
+            if non_oem_flag:
+                lines.append("- Non-compliant: non-OEM parts used on a ≤2 years or ≤24k miles vehicle.")
+            else:
+                lines.append("- Compliant: OEM parts used per ≤2 years/≤24k miles rule.")
+        else:
+            lines.append("- N/A: vehicle exceeds OEM-only recent threshold in rules.")
+
+    return lines
+
+# =========================================
 # Estimate parsing
 # =========================================
 OPS = ["replace", "repair", "refinish", "r&i", "r & i", "align", "blend", "calibrate"]
@@ -676,16 +747,31 @@ def compare_estimate_with_photos(items: List[Dict[str, str]],
         return {"per_item": [],"not_in_photos": [],"extra_damage_in_photos": [],"overall": f"Comparison unavailable ({type(e).__name__})."}
 
 # =========================================
-# Summary builder
+# Summary builder (UPDATED to accept override)
 # =========================================
-def build_summary_markdown(missing_photos: List[str], text: str, client_rules: str,
-                           require_oem: bool, non_oem_flag: bool) -> str:
+def build_summary_markdown(
+    missing_photos: List[str],
+    text: str,
+    client_rules: str,
+    require_oem: bool,
+    non_oem_flag: bool,
+    client_lines_override: Optional[List[str]] = None,   # NEW
+) -> str:
     if not missing_photos:
         photos_lines = ["- All required photo types present (four corners, VIN, odometer, plate)."]
     else:
         photos_lines = [f"- Missing: {', '.join(missing_photos)}."]
-    labor_lines = ["- Labor rates listed on estimate."] if labor_rates_present_any(text) else ["- Labor rates missing or not clearly listed."]
-    taxes_lines = ["- Tax rate present on estimate."] if taxes_present(text) else ["- Tax rate not found per client rules."]
+
+    if labor_rates_present_any(text):
+        labor_lines = ["- Labor rates listed on estimate."]
+    else:
+        labor_lines = ["- Labor rates missing or not clearly listed."]
+
+    if taxes_present(text):
+        taxes_lines = ["- Tax rate present on estimate."]
+    else:
+        taxes_lines = ["- Tax rate not found per client rules."]
+
     parts_lines: List[str] = []
     if require_oem:
         parts_lines.append("- Non-compliance: non-OEM parts on ≤ 2 years or ≤ 24k miles." if non_oem_flag
@@ -693,10 +779,23 @@ def build_summary_markdown(missing_photos: List[str], text: str, client_rules: s
     else:
         parts_lines.append("- Non-OEM parts noted; verify client rules allow on this vehicle." if non_oem_flag
                            else "- Parts appear OEM or not flagged as non-OEM.")
-    client_lines = ["- Apply client-required documentation (labor rates, photos, taxes) where applicable."]
+
+    # Use structured client lines when provided
+    if client_lines_override:
+        client_lines = client_lines_override
+    else:
+        client_lines = ["- Apply client-required documentation (labor rates, photos, taxes) where applicable."]
+
     notes_lines = ["- Ensure estimate notes clearly explain damage appraisal per client requirements."]
-    sections = ["### Required Photos", *photos_lines, "### Labor Rates", *labor_lines, "### Taxes", *taxes_lines,
-                "### Parts Compliance", *parts_lines, "### Client Rules Adherence", *client_lines, "### Additional Notes", *notes_lines]
+
+    sections = [
+        "### Required Photos", *photos_lines,
+        "### Labor Rates", *labor_lines,
+        "### Taxes", *taxes_lines,
+        "### Parts Compliance", *parts_lines,
+        "### Client Rules Adherence", *client_lines,
+        "### Additional Notes", *notes_lines,
+    ]
     return "\n".join(sections)
 
 # =========================================
@@ -797,7 +896,25 @@ async def vision_review(
     require_oem = (age_years is not None and age_years <= 2) or (miles is not None and miles <= 24000)
     non_oem_flag = non_oem_used(combined_text)
 
-    summary_md = build_summary_markdown(missing_photos, combined_text, client_rules, require_oem, non_oem_flag)
+    # ===== Client guideline adherence lines (NEW) =====
+    guidelines = parse_client_rules(client_rules)
+    client_lines = build_client_adherence_lines(
+        guidelines=guidelines,
+        missing_photos=missing_photos,
+        text=combined_text,
+        year=year,
+        miles=miles,
+        non_oem_flag=non_oem_flag,
+    )
+
+    summary_md = build_summary_markdown(
+        missing_photos=missing_photos,
+        text=combined_text,
+        client_rules=client_rules,
+        require_oem=require_oem,
+        non_oem_flag=non_oem_flag,
+        client_lines_override=client_lines,   # NEW
+    )
 
     labor_tax_adj = check_labor_and_tax_score(combined_text, client_rules)
     photo_adj = -25 * len(missing_photos)
