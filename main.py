@@ -19,7 +19,7 @@ from fpdf import FPDF
 from docx import Document
 from pdf2image import convert_from_bytes
 import pytesseract
-from PIL import Image, ImageEnhance, ImageOps, ImageFilter, ImageStat, Image
+from PIL import Image, ImageEnhance, ImageOps, ImageFilter, ImageStat
 from openai import OpenAI
 
 # =========================================
@@ -109,6 +109,20 @@ def extract_text_from_docx(file_like: io.BytesIO) -> str:
         return "\n".join(p.text for p in doc.paragraphs if p.text.strip())
     except Exception as e:
         logger.error(f"DOCX read error: {e}")
+        return ""
+
+# NEW: Try embedded selectable text first (fast) before OCR
+def extract_text_from_pdf_embedded(pdf_bytes: bytes) -> str:
+    try:
+        from PyPDF2 import PdfReader
+        reader = PdfReader(io.BytesIO(pdf_bytes))
+        parts = []
+        for p in reader.pages:
+            t = p.extract_text() or ""
+            parts.append(t)
+        return "\n".join(parts)
+    except Exception as e:
+        logger.debug(f"Embedded text extraction failed: {e}")
         return ""
 
 # =========================================
@@ -227,7 +241,6 @@ def extract_claim_from_text(text: str) -> Optional[str]:
         m = re.search(pat, text)
         if m:
             cand = m.group(1).strip().strip('.').strip('-')
-            # must contain at least one digit; allow all-digit or mixed
             if re.search(r'\d', cand):
                 return cand
     # fuzzy key then capture next token
@@ -701,11 +714,16 @@ async def vision_review(
         if name.endswith((".jpg", ".jpeg", ".png", ".webp")):
             image_blobs.append((name, raw))
         elif name.endswith(".pdf"):
-            # Treat all PDFs as potential estimate sources for text OCR
+            # 1) Fast: embedded selectable text (CCC/Shop PDFs)
+            embedded_txt = extract_text_from_pdf_embedded(raw)
+            if embedded_txt:
+                texts.append(embedded_txt)
+            # 2) Add a small amount of OCR for safety (first pages only)
             texts.append(extract_text_from_pdf(io.BytesIO(raw), max_ocr_pages=8, dpi=140))
+            # Keep this PDF for hi-res fallback of VIN/Claim if needed
             if first_pdf_bytes is None:
-                first_pdf_bytes = raw  # used ONLY to re-OCR estimate pages for VIN/Claim
-            # Also harvest photo-like pages for contact sheets
+                first_pdf_bytes = raw
+            # 3) Harvest photo-like pages for contact sheets
             harvested = harvest_photos_from_pdf(raw, max_pages=20, dpi=135)
             for hname, hbytes in harvested:
                 image_blobs.append((hname, hbytes))
@@ -931,6 +949,7 @@ async def get_client_rules(client_name: str):
     else:
         logger.error(f"Rules not found for client: {client_name}")
         return JSONResponse(status_code=404, content={"error": "Rules not found for this client."})
+
 
 
 
