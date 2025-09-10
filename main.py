@@ -224,7 +224,7 @@ def extract_vin_from_pdf_first_pages(pdf_bytes: bytes, pages_to_scan: int = 4, d
     return None
 
 # =========================================
-# Claim extraction (fast/robust)
+# Claim extraction (robust; estimate only)
 # =========================================
 CLAIM_AFTER_LABEL = re.compile(
     r'(?is)\bclaim\b\W{0,6}(?:#:?|no\.?|number)?\W{0,6}([A-Z0-9][A-Z0-9\-/\.]{2,60})'
@@ -235,24 +235,45 @@ ALT_CLAIM_LABELS = [
     re.compile(r'(?is)\bref(?:erence)?\b\W{0,6}(?:#:?|no\.?|number)?\W{0,6}([A-Z0-9][A-Z0-9\-/\.]{2,60})'),
     re.compile(r'(?is)\bassignment\b\W{0,6}(?:#:?|no\.?|number)?\W{0,6}([A-Z0-9][A-Z0-9\-/\.]{2,60})'),
 ]
+
+# Some words we explicitly do NOT want to capture as claim numbers
+_CLAIM_BLACKLIST = {"SERVICE", "SERVICES", "PHONE", "EMAIL", "FAX", "TOTAL", "POLICY"}
+
 def _clean_claim(c: str) -> str:
-    return c.strip().strip('.').strip('-').replace('\u2011','-').replace('\u2013','-').replace('\u2014','-')
+    c = c.strip().strip(':').strip().strip('.').strip('-')
+    c = c.replace('\u2011','-').replace('\u2013','-').replace('\u2014','-')
+    return re.sub(r'\s+', '', c)  # collapse any spaces inside
+
+def _valid_claim_candidate(c: str) -> bool:
+    if not c or len(c) < 3:
+        return False
+    # Must include at least one digit
+    if not re.search(r'\d', c):
+        return False
+    # Reject pure words like "SERVICES"
+    if c.upper() in _CLAIM_BLACKLIST:
+        return False
+    return True
 
 def extract_claim_from_text(text: str) -> Optional[str]:
     if not text:
         return None
-    m = CLAIM_AFTER_LABEL.search(text)
-    if m:
+
+    # 1) Prefer exact "Claim" label; scan all matches until a valid one is found
+    for m in CLAIM_AFTER_LABEL.finditer(text):
         cand = _clean_claim(m.group(1))
-        if re.search(r'[A-Z]|-', cand):
+        if _valid_claim_candidate(cand):
             return cand
+
+    # 2) Alternate labels (Loss/File/Reference/Assignment)
     for pat in ALT_CLAIM_LABELS:
-        m = pat.search(text)
-        if m:
+        for m in pat.finditer(text):
             cand = _clean_claim(m.group(1))
-            if re.search(r'\d', cand):
+            if _valid_claim_candidate(cand):
                 return cand
+
     return None
+
 
 def extract_claim_from_pdf_first_pages(pdf_bytes: bytes, pages_to_scan: int = 4, dpi: int = 170) -> Optional[str]:
     try:
@@ -417,7 +438,8 @@ def extract_odometer_from_photos(image_blobs: List[Tuple[str, bytes]]) -> Option
             logger.warning(f"Odometer photo OCR error ({name}): {e}")
     return None
 
-def _sample_for_plate_ocr(image_blobs: List[Tuple[str, bytes]], k: int = 10) -> List[Tuple[str, bytes]]:
+# Wider sample so we don't miss the plate image
+def _sample_for_plate_ocr(image_blobs: List[Tuple[str, bytes]], k: int = 24) -> List[Tuple[str, bytes]]:
     if len(image_blobs) <= k:
         return image_blobs
     pairs = []
@@ -429,7 +451,31 @@ def _sample_for_plate_ocr(image_blobs: List[Tuple[str, bytes]], k: int = 10) -> 
 
 PLATE_RX = re.compile(r'\b([A-Z0-9]{1,3}[-\s]?[A-Z0-9]{3,4}|[A-Z0-9]{5,8})\b')
 
+def _plate_ocr_variants(img: Image.Image) -> str:
+    """Multiple preprocess variants & PSMs to make plate text like 'MRK-8608' show up."""
+    def variants(im: Image.Image) -> List[Image.Image]:
+        im = im.copy()
+        im.thumbnail((1600, 1600))
+        g = im.convert("L")
+        return [
+            ImageEnhance.Contrast(g).enhance(1.8),
+            ImageEnhance.Sharpness(g).enhance(1.8),
+            ImageOps.autocontrast(g.filter(ImageFilter.MedianFilter(3))),
+            g.point(lambda p: 255 if p > 170 else 0, mode="1").convert("L"),
+            g.point(lambda p: 255 if p > 190 else 0, mode="1").convert("L"),
+        ]
+    out = []
+    for v in variants(img):
+        for psm in (6, 7, 11):
+            try:
+                t = pytesseract.image_to_string(v, lang="eng", config=f"--psm {psm} --oem 1")
+                if t: out.append(t)
+            except Exception:
+                pass
+    return "\n".join(out)
+
 def check_required_photos(image_blobs: List[Tuple[str, bytes]], ocr_text: str) -> List[str]:
+    """Required: four corners, odometer, VIN, license plate."""
     required = ["four corners", "odometer", "vin", "license plate"]
     present = set()
     txt = (ocr_text or "").lower()
@@ -445,22 +491,23 @@ def check_required_photos(image_blobs: List[Tuple[str, bytes]], ocr_text: str) -
     if odo_text or odo_photo:
         present.add("odometer")
 
-    for name, blob in _sample_for_plate_ocr(image_blobs, k=10):
+    # ---- License plate (robust OCR on a slightly larger sample)
+    for name, blob in _sample_for_plate_ocr(image_blobs, k=24):
         try:
             img = Image.open(io.BytesIO(blob))
-            img.thumbnail((1200, 1200))
-            txtp = ocr_text_fast(img, psm=7)
+            txtp = _plate_ocr_variants(img)
             if re.search(r'(license|registration)\s*plate', txtp, re.IGNORECASE) or PLATE_RX.search(txtp):
                 present.add("license plate")
                 break
         except Exception:
             pass
 
+    # ---- Four corners heuristic unchanged
     exterior_hits = 0
-    for name, blob in image_blobs[:20]:  # first 20 only
+    for name, blob in image_blobs[:40]:
         try:
             img = Image.open(io.BytesIO(blob))
-            img.thumbnail((1400, 1400))
+            img.thumbnail((1600, 1600))
             if _is_exterior_by_edges(img):
                 exterior_hits += 1
         except Exception:
