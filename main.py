@@ -224,34 +224,40 @@ def extract_vin_from_pdf_first_pages(pdf_bytes: bytes, pages_to_scan: int = 4, d
     return None
 
 # =========================================
-# Claim extraction (fast/robust)
+# Claim extraction (robust; requires digits)
 # =========================================
 CLAIM_AFTER_LABEL = re.compile(
-    r'(?is)\bclaim\b\W{0,6}(?:#:?|no\.?|number)?\W{0,6}([A-Z0-9][A-Z0-9\-/\.]{2,60})'
+    r'(?is)\bclaim\b\W{0,6}(?:#:?|no\.?|number)?\W{0,6}([A-Z0-9][A-Z0-9\-/\. ]{2,60})'
 )
 ALT_CLAIM_LABELS = [
-    re.compile(r'(?is)\bloss\b\W{0,6}(?:#:?|no\.?|number)?\W{0,6}([A-Z0-9][A-Z0-9\-/\.]{2,60})'),
-    re.compile(r'(?is)\bfile\b\W{0,6}(?:#:?|no\.?|number)?\W{0,6}([A-Z0-9][A-Z0-9\-/\.]{2,60})'),
-    re.compile(r'(?is)\bref(?:erence)?\b\W{0,6}(?:#:?|no\.?|number)?\W{0,6}([A-Z0-9][A-Z0-9\-/\.]{2,60})'),
-    re.compile(r'(?is)\bassignment\b\W{0,6}(?:#:?|no\.?|number)?\W{0,6}([A-Z0-9][A-Z0-9\-/\.]{2,60})'),
+    re.compile(r'(?is)\bloss\b\W{0,6}(?:#:?|no\.?|number)?\W{0,6}([A-Z0-9][A-Z0-9\-/\. ]{2,60})'),
+    re.compile(r'(?is)\bfile\b\W{0,6}(?:#:?|no\.?|number)?\W{0,6}([A-Z0-9][A-Z0-9\-/\. ]{2,60})'),
+    re.compile(r'(?is)\bref(?:erence)?\b\W{0,6}(?:#:?|no\.?|number)?\W{0,6}([A-Z0-9][A-Z0-9\-/\. ]{2,60})'),
+    re.compile(r'(?is)\bassignment\b\W{0,6}(?:#:?|no\.?|number)?\W{0,6}([A-Z0-9][A-Z0-9\-/\. ]{2,60})'),
 ]
+_CLAIM_BLACKLIST = {"SERVICE", "SERVICES", "PHONE", "EMAIL", "FAX", "TOTAL", "POLICY"}
+
 def _clean_claim(c: str) -> str:
-    return c.strip().strip('.').strip('-').replace('\u2011','-').replace('\u2013','-').replace('\u2014','-')
+    c = c.strip().strip(':').strip().strip('.').strip('-')
+    c = c.replace('\u2011','-').replace('\u2013','-').replace('\u2014','-')
+    return re.sub(r'\s+', '', c)
+
+def _valid_claim_candidate(c: str) -> bool:
+    if not c or len(c) < 3: return False
+    if not re.search(r'\d', c): return False
+    if c.upper() in _CLAIM_BLACKLIST: return False
+    return True
 
 def extract_claim_from_text(text: str) -> Optional[str]:
     if not text:
         return None
-    m = CLAIM_AFTER_LABEL.search(text)
-    if m:
+    for m in CLAIM_AFTER_LABEL.finditer(text):
         cand = _clean_claim(m.group(1))
-        if re.search(r'[A-Z]|-', cand):
-            return cand
+        if _valid_claim_candidate(cand): return cand
     for pat in ALT_CLAIM_LABELS:
-        m = pat.search(text)
-        if m:
+        for m in pat.finditer(text):
             cand = _clean_claim(m.group(1))
-            if re.search(r'\d', cand):
-                return cand
+            if _valid_claim_candidate(cand): return cand
     return None
 
 def extract_claim_from_pdf_first_pages(pdf_bytes: bytes, pages_to_scan: int = 4, dpi: int = 170) -> Optional[str]:
@@ -268,8 +274,10 @@ def extract_claim_from_pdf_first_pages(pdf_bytes: bytes, pages_to_scan: int = 4,
 # =========================================
 # Vehicle & tax/parts helpers
 # =========================================
-MAKE_FIX = {"nessan": "Nissan","nisaan": "Nissan","nissan": "Nissan","toy0ta": "Toyota",
-            "chevroler": "Chevrolet","cheverolet": "Chevrolet"}
+MAKE_FIX = {
+    "nessan": "Nissan","nisaan": "Nissan","nissan": "Nissan","niss": "Nissan","niss.": "Nissan",
+    "toy0ta": "Toyota","chevroler": "Chevrolet","cheverolet": "Chevrolet"
+}
 def normalize_vehicle_str(s: str) -> str:
     if not s: return s
     s2 = s
@@ -337,7 +345,7 @@ def extract_vin_from_photos(image_blobs: List[Tuple[str, bytes]]) -> Optional[st
     VIN_17 = re.compile(r'\b([A-HJ-NPR-Z0-9]{17})\b')
     VIN_SEP_SEQ = re.compile(r'(?i)((?:[A-HJ-NPR-Z0-9][\s\.\-–—:_]){16}[A-HJ-NPR-Z0-9])')
 
-    # 1) FAST prescan of all images to find likely VIN candidates
+    # FAST prescan of all images to find likely VIN candidates
     candidates: List[Tuple[str, bytes]] = []
     for name, blob in image_blobs:
         try:
@@ -349,8 +357,7 @@ def extract_vin_from_photos(image_blobs: List[Tuple[str, bytes]]) -> Optional[st
                 candidates.append((name, blob))
         except Exception:
             continue
-    # cap heavy OCR to at most 6 images
-    candidates = candidates[:6]
+    candidates = candidates[:6]  # limit heavy OCR
 
     def _variants(im: Image.Image) -> List[Image.Image]:
         im = im.copy()
@@ -359,13 +366,12 @@ def extract_vin_from_photos(image_blobs: List[Tuple[str, bytes]]) -> Optional[st
             h = int(im.height * (max_w / im.width))
             im = im.resize((max_w, h), Image.LANCZOS)
         g = im.convert("L")
-        v = [
+        return [
             ImageEnhance.Contrast(g).enhance(2.0),
             ImageEnhance.Sharpness(g).enhance(2.0),
             g.point(lambda p: 255 if p > 180 else 0, mode="1").convert("L"),
             ImageOps.autocontrast(g.filter(ImageFilter.MedianFilter(3))),
         ]
-        return v
 
     def _ocr_all(im: Image.Image) -> str:
         out = []
@@ -417,17 +423,28 @@ def extract_odometer_from_photos(image_blobs: List[Tuple[str, bytes]]) -> Option
             logger.warning(f"Odometer photo OCR error ({name}): {e}")
     return None
 
-def _sample_for_plate_ocr(image_blobs: List[Tuple[str, bytes]], k: int = 10) -> List[Tuple[str, bytes]]:
-    if len(image_blobs) <= k:
-        return image_blobs
-    pairs = []
-    for name, blob in image_blobs:
-        h = hashlib.md5(blob).hexdigest()
-        pairs.append((int(h[:8], 16), (name, blob)))
-    pairs.sort()
-    return [p[1] for p in pairs[:k]]
-
+# ---- License plate OCR: scan ALL images robustly
 PLATE_RX = re.compile(r'\b([A-Z0-9]{1,3}[-\s]?[A-Z0-9]{3,4}|[A-Z0-9]{5,8})\b')
+def _plate_ocr_variants(img: Image.Image) -> str:
+    def variants(im: Image.Image) -> List[Image.Image]:
+        im = im.copy(); im.thumbnail((1600, 1600))
+        g = im.convert("L")
+        return [
+            ImageEnhance.Contrast(g).enhance(1.8),
+            ImageEnhance.Sharpness(g).enhance(1.8),
+            ImageOps.autocontrast(g.filter(ImageFilter.MedianFilter(3))),
+            g.point(lambda p: 255 if p > 170 else 0, mode="1").convert("L"),
+            g.point(lambda p: 255 if p > 190 else 0, mode="1").convert("L"),
+        ]
+    out = []
+    for v in variants(img):
+        for psm in (6, 7, 11):
+            try:
+                t = pytesseract.image_to_string(v, lang="eng", config=f"--psm {psm} --oem 1")
+                if t: out.append(t)
+            except Exception:
+                pass
+    return "\n".join(out)
 
 def check_required_photos(image_blobs: List[Tuple[str, bytes]], ocr_text: str) -> List[str]:
     required = ["four corners", "odometer", "vin", "license plate"]
@@ -445,22 +462,23 @@ def check_required_photos(image_blobs: List[Tuple[str, bytes]], ocr_text: str) -
     if odo_text or odo_photo:
         present.add("odometer")
 
-    for name, blob in _sample_for_plate_ocr(image_blobs, k=10):
+    # License plate: scan ALL images (robust OCR)
+    for name, blob in image_blobs:
         try:
             img = Image.open(io.BytesIO(blob))
-            img.thumbnail((1200, 1200))
-            txtp = ocr_text_fast(img, psm=7)
+            txtp = _plate_ocr_variants(img)
             if re.search(r'(license|registration)\s*plate', txtp, re.IGNORECASE) or PLATE_RX.search(txtp):
                 present.add("license plate")
                 break
         except Exception:
             pass
 
+    # Four corners heuristic (first 40 to bound cost)
     exterior_hits = 0
-    for name, blob in image_blobs[:20]:
+    for name, blob in image_blobs[:40]:
         try:
             img = Image.open(io.BytesIO(blob))
-            img.thumbnail((1400, 1400))
+            img.thumbnail((1600, 1600))
             if _is_exterior_by_edges(img):
                 exterior_hits += 1
         except Exception:
@@ -563,7 +581,7 @@ def labor_rates_present_any(text: str) -> bool:
     return any(re.search(rf"{lbl}[^\n]{{0,120}}?\$\s*\d{{2,3}}", text or "", re.IGNORECASE) for lbl in labels)
 
 # =========================================
-# Client-guideline parsing (NEW)
+# Client-guideline parsing & adherence (full review)
 # =========================================
 PHOTO_KEYWORDS = {
     "four corners": ["four corners", "4 corners", "four-corners"],
@@ -747,7 +765,7 @@ def compare_estimate_with_photos(items: List[Dict[str, str]],
         return {"per_item": [],"not_in_photos": [],"extra_damage_in_photos": [],"overall": f"Comparison unavailable ({type(e).__name__})."}
 
 # =========================================
-# Summary builder (UPDATED to accept override)
+# Summary builder
 # =========================================
 def build_summary_markdown(
     missing_photos: List[str],
@@ -755,7 +773,7 @@ def build_summary_markdown(
     client_rules: str,
     require_oem: bool,
     non_oem_flag: bool,
-    client_lines_override: Optional[List[str]] = None,   # NEW
+    client_lines_override: Optional[List[str]] = None,
 ) -> str:
     if not missing_photos:
         photos_lines = ["- All required photo types present (four corners, VIN, odometer, plate)."]
@@ -780,12 +798,7 @@ def build_summary_markdown(
         parts_lines.append("- Non-OEM parts noted; verify client rules allow on this vehicle." if non_oem_flag
                            else "- Parts appear OEM or not flagged as non-OEM.")
 
-    # Use structured client lines when provided
-    if client_lines_override:
-        client_lines = client_lines_override
-    else:
-        client_lines = ["- Apply client-required documentation (labor rates, photos, taxes) where applicable."]
-
+    client_lines = client_lines_override if client_lines_override else ["- Apply client-required documentation (labor rates, photos, taxes) where applicable."]
     notes_lines = ["- Ensure estimate notes clearly explain damage appraisal per client requirements."]
 
     sections = [
@@ -841,7 +854,6 @@ async def vision_review(
             texts.append(extract_text_from_pdf(io.BytesIO(raw), max_ocr_pages=8, dpi=140))
             if first_pdf_bytes is None:
                 first_pdf_bytes = raw
-            # SKIP photo harvesting if this PDF looks like an estimate (has Claim+VIN text)
             looks_like_estimate = bool(re.search(r'\bclaim\b', embedded_txt or "", re.IGNORECASE) and
                                        re.search(r'\bvin\b', embedded_txt or "", re.IGNORECASE))
             if not looks_like_estimate:
@@ -857,7 +869,7 @@ async def vision_review(
 
     combined_text = "\n".join(texts)
 
-    # Contact sheets (3 images) for the vision step
+    # Contact sheets for vision step
     contact_sheets = make_contact_sheets_compact(image_blobs, max_sheets=3, cols=6, padding=6, base_thumb_w=320, jpeg_quality=68)
     images_for_vision: List[Dict[str, Any]] = []
     for name, blob in contact_sheets:
@@ -867,7 +879,7 @@ async def vision_review(
     # Required photos presence
     missing_photos = check_required_photos(image_blobs, combined_text)
 
-    # VIN & Claim from estimate (hi-res fallback reduced)
+    # VIN & Claim from estimate
     vin_est = extract_vin_from_text(combined_text) or (extract_vin_from_pdf_first_pages(first_pdf_bytes, 4, 170) if first_pdf_bytes else None)
     claim_number = extract_claim_from_text(combined_text) or (extract_claim_from_pdf_first_pages(first_pdf_bytes, 4, 170) if first_pdf_bytes else None)
     claim_number = claim_number or "N/A"
@@ -896,7 +908,7 @@ async def vision_review(
     require_oem = (age_years is not None and age_years <= 2) or (miles is not None and miles <= 24000)
     non_oem_flag = non_oem_used(combined_text)
 
-    # ===== Client guideline adherence lines (NEW) =====
+    # === Build a full Client Rules Adherence review (specific bullets) ===
     guidelines = parse_client_rules(client_rules)
     client_lines = build_client_adherence_lines(
         guidelines=guidelines,
@@ -913,7 +925,7 @@ async def vision_review(
         client_rules=client_rules,
         require_oem=require_oem,
         non_oem_flag=non_oem_flag,
-        client_lines_override=client_lines,   # NEW
+        client_lines_override=client_lines,
     )
 
     labor_tax_adj = check_labor_and_tax_score(combined_text, client_rules)
@@ -1037,6 +1049,7 @@ async def get_client_rules(client_name: str):
     else:
         logger.error(f"Rules not found for client: {client_name}")
         return JSONResponse(status_code=404, content={"error": "Rules not found for this client."})
+
 
 
 
