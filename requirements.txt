@@ -6,7 +6,5 @@ python-docx
 pdf2image
 pytesseract
 Pillow
-openai
-torch
-ultralytics
-opencv-python-headless
+openai>=1.30.0
+PyPDF2
