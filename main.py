@@ -19,7 +19,7 @@ from fpdf import FPDF
 from docx import Document
 from pdf2image import convert_from_bytes
 import pytesseract
-from PIL import Image, ImageEnhance, ImageOps, ImageFilter, ImageStat
+from PIL import Image, ImageEnhance, ImageOps, ImageFilter, ImageStat, Image
 from openai import OpenAI
 
 # =========================================
@@ -153,7 +153,8 @@ def harvest_photos_from_pdf(pdf_bytes: bytes, max_pages: int = 20, dpi: int = 13
 VIN_ALLOWED = set("0123456789ABCDEFGHJKLMNPRSTUVWXYZ")
 
 def normalize_vin(s: str) -> Optional[str]:
-    s = s.strip().upper().replace(" ", "")
+    s = s.strip().upper()
+    s = re.sub(r"[^A-HJ-NPR-Z0-9]", "", s)  # drop spaces/dots/dashes etc.
     s = s.replace("O", "0").replace("I", "1").replace("Q", "0")
     if len(s) != 17 or any(ch not in VIN_ALLOWED for ch in s):
         return None
@@ -184,31 +185,41 @@ def best_vin_candidate(cands: List[str]) -> Optional[str]:
     return None
 
 # ---------- Stronger VIN parsing (estimate only) ----------
-VIN_LABEL = re.compile(r'(?i)\bV[\W_]*I[\W_]*N\b')  # matches VIN / V I N / V.I.N
+VIN_LABEL = re.compile(r'(?i)\bV[\W_]*I[\W_]*N\b')  # VIN / V I N / V.I.N
 VIN_PHRASE = re.compile(r'(?i)\bVehicle\s*Identification\s*Number\b')
+# matches VIN with optional separators between each char: 3 N 1 A ... 9 9
+VIN_SEP_SEQ = re.compile(r'(?i)((?:[A-HJ-NPR-Z0-9][\s\.\-–—:_]){16}[A-HJ-NPR-Z0-9])')
+
+def _extract_vin_near_positions(text: str, positions: List[int], radius: int = 180) -> Optional[str]:
+    for pos in positions:
+        window = text[pos: pos + radius]
+        # 1) separated sequence
+        for m in VIN_SEP_SEQ.finditer(window):
+            vin = normalize_vin(m.group(1))
+            if vin and vin_checksum_ok(vin):
+                return vin
+        # 2) contiguous
+        cands = re.findall(r'([A-HJ-NPR-Z0-9]{17})', window)
+        vin = best_vin_candidate(cands)
+        if vin: return vin
+    return None
 
 def extract_vin_from_text(text: str) -> Optional[str]:
     if not text:
         return None
-    # 1) Look for VIN label/phrase and capture nearby 17-char token (same line or next ~100 chars)
-    for m in VIN_LABEL.finditer(text):
-        window = text[m.end(): m.end()+140]
-        cands = re.findall(r'([A-HJ-NPR-Z0-9]{17})', window)
-        vin = best_vin_candidate(cands)
-        if vin: return vin
-    for m in VIN_PHRASE.finditer(text):
-        window = text[m.end(): m.end()+160]
-        cands = re.findall(r'([A-HJ-NPR-Z0-9]{17})', window)
-        vin = best_vin_candidate(cands)
-        if vin: return vin
-    # 2) As a fallback, accept any 17-char candidate ONLY if within +/-120 chars of VIN label/phrase
-    positions = [m.start() for m in VIN_LABEL.finditer(text)] + [m.start() for m in VIN_PHRASE.finditer(text)]
-    if positions:
-        for m in re.finditer(r'([A-HJ-NPR-Z0-9]{17})', text):
-            if any(abs(m.start() - p) <= 120 for p in positions):
-                vin = best_vin_candidate([m.group(1)])
-                if vin: return vin
-    return None
+    # Look near explicit labels
+    label_positions = [m.end() for m in VIN_LABEL.finditer(text)]
+    label_positions += [m.end() for m in VIN_PHRASE.finditer(text)]
+    vin = _extract_vin_near_positions(text, label_positions, radius=220)
+    if vin:
+        return vin
+    # Global fallback: any separated or contiguous 17-char VIN
+    for m in VIN_SEP_SEQ.finditer(text):
+        vin = normalize_vin(m.group(1))
+        if vin and vin_checksum_ok(vin):
+            return vin
+    cands = re.findall(r'\b([A-HJ-NPR-Z0-9]{17})\b', text)
+    return best_vin_candidate(cands)
 
 def extract_vin_from_pdf_first_pages(pdf_bytes: bytes, pages_to_scan: int = 10, dpi: int = 220) -> Optional[str]:
     """High-res OCR of the first few estimate pages to grab VIN if bulk OCR missed it."""
@@ -225,30 +236,30 @@ def extract_vin_from_pdf_first_pages(pdf_bytes: bytes, pages_to_scan: int = 10, 
 # =========================================
 # Claim extraction (robust + hi-res pages fallback; estimate only)
 # =========================================
+# more tolerant separators and linebreaks; handles "Claim #", "Claim No.", etc.
+CLAIM_LOOSE = re.compile(
+    r'(?is)\bcl[aai]m\b[^\w]{0,10}(?:no\.?|number|#)?[^\w]{0,6}([A-Z0-9][A-Z0-9\-\/\.]{2,40})'
+)
+# also accept "Loss/File/Reference/Assignment" variants
 CLAIM_PATTERNS = [
-    r'(?i)\bclaim\s*(?:#|no\.?|number|num)?\s*[:\-]?\s*([A-Z0-9][A-Z0-9\-\/\.]{2,30})',
-    r'(?i)\bloss\s*(?:#|no\.?|number|num)?\s*[:\-]?\s*([A-Z0-9][A-Z0-9\-\/\.]{2,30})',
-    r'(?i)\bfile\s*(?:#|no\.?|number|num)?\s*[:\-]?\s*([A-Z0-9][A-Z0-9\-\/\.]{2,30})',
-    r'(?i)\bref(?:erence)?\s*(?:#|no\.?|number|num)?\s*[:\-]?\s*([A-Z0-9][A-Z0-9\-\/\.]{2,30})',
-    r'(?i)\bassignment\s*(?:#|no\.?|number|num)?\s*[:\-]?\s*([A-Z0-9][A-Z0-9\-\/\.]{2,30})',
+    r'(?is)\bloss\b[^\w]{0,10}(?:no\.?|number|#)?[^\w]{0,6}([A-Z0-9][A-Z0-9\-\/\.]{2,40})',
+    r'(?is)\bfile\b[^\w]{0,10}(?:no\.?|number|#)?[^\w]{0,6}([A-Z0-9][A-Z0-9\-\/\.]{2,40})',
+    r'(?is)\bref(?:erence)?\b[^\w]{0,10}(?:no\.?|number|#)?[^\w]{0,6}([A-Z0-9][A-Z0-9\-\/\.]{2,40})',
+    r'(?is)\bassignment\b[^\w]{0,10}(?:no\.?|number|#)?[^\w]{0,6}([A-Z0-9][A-Z0-9\-\/\.]{2,40})',
 ]
-CLAIM_WORD_FUZZY = re.compile(r'(?i)\bC[l1I][aA][iI1][mMnN]\b')
 
 def extract_claim_from_text(text: str) -> Optional[str]:
     if not text:
         return None
+    m = CLAIM_LOOSE.search(text)
+    if m:
+        cand = m.group(1).strip().strip('.').strip('-')
+        if re.search(r'\d', cand):
+            return cand
     for pat in CLAIM_PATTERNS:
         m = re.search(pat, text)
         if m:
             cand = m.group(1).strip().strip('.').strip('-')
-            if re.search(r'\d', cand):
-                return cand
-    # fuzzy key then capture next token
-    for m in CLAIM_WORD_FUZZY.finditer(text or ""):
-        tail = text[m.end(): m.end()+100]
-        m2 = re.search(r'[:#\-\s]*([A-Z0-9][A-Z0-9\-\/\.]{2,30})', tail, re.IGNORECASE)
-        if m2:
-            cand = m2.group(1).strip().strip('.').strip('-')
             if re.search(r'\d', cand):
                 return cand
     return None
@@ -949,6 +960,7 @@ async def get_client_rules(client_name: str):
     else:
         logger.error(f"Rules not found for client: {client_name}")
         return JSONResponse(status_code=404, content={"error": "Rules not found for this client."})
+
 
 
 
