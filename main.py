@@ -23,7 +23,7 @@ from PIL import Image, ImageEnhance, ImageOps, ImageFilter, ImageStat
 from openai import OpenAI
 
 # =========================================
-# PDF storage: save to /tmp with filename {file_number}.pdf
+# PDF storage
 # =========================================
 PDF_DIR = os.getenv("PDF_DIR", "/tmp")
 os.makedirs(PDF_DIR, exist_ok=True)
@@ -40,7 +40,7 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 # =========================================
-# OpenAI client (gpt-4o) — only for the vision comparison JSON
+# OpenAI client (gpt-4o)
 # =========================================
 if "OPENAI_API_KEY" not in os.environ:
     raise RuntimeError("❌ OPENAI_API_KEY environment variable is NOT set.")
@@ -66,7 +66,7 @@ app.add_middleware(
 )
 
 # =========================================
-# OCR helpers (fast)
+# OCR helpers
 # =========================================
 def preprocess_image(img: Image.Image) -> Image.Image:
     img = img.convert("L")
@@ -84,7 +84,6 @@ def ocr_text_fast(img: Image.Image, psm: int = 6) -> str:
         return ""
 
 def extract_text_from_pdf(file_like: io.BytesIO, max_ocr_pages: int = 8, dpi: int = 140) -> str:
-    """OCR only the first pages for speed. Most estimate details are up front."""
     try:
         file_like.seek(0)
         pages = convert_from_bytes(file_like.read(), dpi=dpi)
@@ -111,7 +110,6 @@ def extract_text_from_docx(file_like: io.BytesIO) -> str:
         logger.error(f"DOCX read error: {e}")
         return ""
 
-# === Embedded PDF text (no OCR). Use first; fallback to OCR ===
 def extract_text_from_pdf_embedded(pdf_bytes: bytes) -> str:
     try:
         from PyPDF2 import PdfReader
@@ -126,14 +124,13 @@ def extract_text_from_pdf_embedded(pdf_bytes: bytes) -> str:
         return ""
 
 # =========================================
-# Harvest photos from PDFs (no OCR, fast heuristic)
+# Photo harvesting (skip for estimates)
 # =========================================
 def _page_var(img: Image.Image) -> float:
     g = img.convert("L")
     return ImageStat.Stat(g).var[0]
 
 def harvest_photos_from_pdf(pdf_bytes: bytes, max_pages: int = 20, dpi: int = 135) -> List[Tuple[str, bytes]]:
-    """Return pages that look like photo pages. Fast variance heuristic; no OCR."""
     out: List[Tuple[str, bytes]] = []
     try:
         pages = convert_from_bytes(pdf_bytes, dpi=dpi)[:max_pages]
@@ -154,7 +151,7 @@ VIN_ALLOWED = set("0123456789ABCDEFGHJKLMNPRSTUVWXYZ")
 
 def normalize_vin(s: str) -> Optional[str]:
     s = s.strip().upper()
-    s = re.sub(r"[^A-HJ-NPR-Z0-9]", "", s)  # drop spaces/dots/dashes etc.
+    s = re.sub(r"[^A-HJ-NPR-Z0-9]", "", s)
     s = s.replace("O", "0").replace("I", "1").replace("Q", "0")
     if len(s) != 17 or any(ch not in VIN_ALLOWED for ch in s):
         return None
@@ -184,21 +181,17 @@ def best_vin_candidate(cands: List[str]) -> Optional[str]:
             return vin
     return None
 
-# ---------- Stronger VIN parsing (estimate only) ----------
-VIN_LABEL = re.compile(r'(?i)\bV[\W_]*I[\W_]*N\b')  # VIN / V I N / V.I.N
+VIN_LABEL = re.compile(r'(?i)\bV[\W_]*I[\W_]*N\b')
 VIN_PHRASE = re.compile(r'(?i)\bVehicle\s*Identification\s*Number\b')
-# matches VIN with optional separators between each char: 3 N 1 A ... 9 9
 VIN_SEP_SEQ = re.compile(r'(?i)((?:[A-HJ-NPR-Z0-9][\s\.\-–—:_]){16}[A-HJ-NPR-Z0-9])')
 
 def _extract_vin_near_positions(text: str, positions: List[int], radius: int = 240) -> Optional[str]:
     for pos in positions:
         window = text[pos: pos + radius]
-        # 1) separated sequence
         for m in VIN_SEP_SEQ.finditer(window):
             vin = normalize_vin(m.group(1))
             if vin and vin_checksum_ok(vin):
                 return vin
-        # 2) contiguous
         cands = re.findall(r'([A-HJ-NPR-Z0-9]{17})', window)
         vin = best_vin_candidate(cands)
         if vin: return vin
@@ -207,13 +200,11 @@ def _extract_vin_near_positions(text: str, positions: List[int], radius: int = 2
 def extract_vin_from_text(text: str) -> Optional[str]:
     if not text:
         return None
-    # Look near explicit labels
     label_positions = [m.end() for m in VIN_LABEL.finditer(text)]
     label_positions += [m.end() for m in VIN_PHRASE.finditer(text)]
     vin = _extract_vin_near_positions(text, label_positions, radius=240)
     if vin:
         return vin
-    # Global fallback: any separated or contiguous 17-char VIN
     for m in VIN_SEP_SEQ.finditer(text):
         vin = normalize_vin(m.group(1))
         if vin and vin_checksum_ok(vin):
@@ -221,8 +212,7 @@ def extract_vin_from_text(text: str) -> Optional[str]:
     cands = re.findall(r'\b([A-HJ-NPR-Z0-9]{17})\b', text)
     return best_vin_candidate(cands)
 
-def extract_vin_from_pdf_first_pages(pdf_bytes: bytes, pages_to_scan: int = 10, dpi: int = 220) -> Optional[str]:
-    """High-res OCR of the first few estimate pages to grab VIN if bulk OCR missed it."""
+def extract_vin_from_pdf_first_pages(pdf_bytes: bytes, pages_to_scan: int = 4, dpi: int = 170) -> Optional[str]:
     try:
         pages = convert_from_bytes(pdf_bytes, dpi=dpi)[:max(1, pages_to_scan)]
         for img in pages:
@@ -234,33 +224,28 @@ def extract_vin_from_pdf_first_pages(pdf_bytes: bytes, pages_to_scan: int = 10, 
     return None
 
 # =========================================
-# Claim extraction (robust + hi-res pages fallback; estimate only)
+# Claim extraction (fast/robust)
 # =========================================
-# Prefer the explicit "Claim" label; tolerate weird punctuation/line breaks.
 CLAIM_AFTER_LABEL = re.compile(
     r'(?is)\bclaim\b\W{0,6}(?:#:?|no\.?|number)?\W{0,6}([A-Z0-9][A-Z0-9\-/\.]{2,60})'
 )
-# Also accept Loss/File/Reference/Assignment labels
 ALT_CLAIM_LABELS = [
     re.compile(r'(?is)\bloss\b\W{0,6}(?:#:?|no\.?|number)?\W{0,6}([A-Z0-9][A-Z0-9\-/\.]{2,60})'),
     re.compile(r'(?is)\bfile\b\W{0,6}(?:#:?|no\.?|number)?\W{0,6}([A-Z0-9][A-Z0-9\-/\.]{2,60})'),
     re.compile(r'(?is)\bref(?:erence)?\b\W{0,6}(?:#:?|no\.?|number)?\W{0,6}([A-Z0-9][A-Z0-9\-/\.]{2,60})'),
     re.compile(r'(?is)\bassignment\b\W{0,6}(?:#:?|no\.?|number)?\W{0,6}([A-Z0-9][A-Z0-9\-/\.]{2,60})'),
 ]
-
 def _clean_claim(c: str) -> str:
     return c.strip().strip('.').strip('-').replace('\u2011','-').replace('\u2013','-').replace('\u2014','-')
 
 def extract_claim_from_text(text: str) -> Optional[str]:
     if not text:
         return None
-    # 1) Exact "Claim" label first
     m = CLAIM_AFTER_LABEL.search(text)
     if m:
         cand = _clean_claim(m.group(1))
-        if re.search(r'[A-Z]|-', cand):  # prefer alpha or hyphenated CCC style
+        if re.search(r'[A-Z]|-', cand):
             return cand
-    # 2) Alternate labels (Loss/File/Reference/Assignment)
     for pat in ALT_CLAIM_LABELS:
         m = pat.search(text)
         if m:
@@ -269,8 +254,7 @@ def extract_claim_from_text(text: str) -> Optional[str]:
                 return cand
     return None
 
-def extract_claim_from_pdf_first_pages(pdf_bytes: bytes, pages_to_scan: int = 10, dpi: int = 220) -> Optional[str]:
-    """High-res OCR of the first few estimate pages for Claim/Loss/File #."""
+def extract_claim_from_pdf_first_pages(pdf_bytes: bytes, pages_to_scan: int = 4, dpi: int = 170) -> Optional[str]:
     try:
         pages = convert_from_bytes(pdf_bytes, dpi=dpi)[:max(1, pages_to_scan)]
         for img in pages:
@@ -282,16 +266,10 @@ def extract_claim_from_pdf_first_pages(pdf_bytes: bytes, pages_to_scan: int = 10
     return None
 
 # =========================================
-# Field extraction & tax/parts signals (vehicle string normalization)
+# Vehicle & tax/parts helpers
 # =========================================
-MAKE_FIX = {
-    "nessan": "Nissan",
-    "nisaan": "Nissan",
-    "nissan": "Nissan",
-    "toy0ta": "Toyota",
-    "chevroler": "Chevrolet",
-    "cheverolet": "Chevrolet",
-}
+MAKE_FIX = {"nessan": "Nissan","nisaan": "Nissan","nissan": "Nissan","toy0ta": "Toyota",
+            "chevroler": "Chevrolet","cheverolet": "Chevrolet"}
 def normalize_vehicle_str(s: str) -> str:
     if not s: return s
     s2 = s
@@ -311,8 +289,7 @@ def extract_vehicle_from_text(text: str) -> Optional[str]:
     return None
 
 def parse_year_miles(text: str) -> Tuple[Optional[int], Optional[int]]:
-    year = None
-    miles = None
+    year = None; miles = None
     m_year = re.search(r"\b(20\d{2})\b", text or "")
     if m_year:
         try: year = int(m_year.group(1))
@@ -326,22 +303,18 @@ def parse_year_miles(text: str) -> Tuple[Optional[int], Optional[int]]:
 def taxes_present(text: str) -> bool:
     return re.search(r'tax[^\n]{0,50}(\d{1,3}\s*%|\$\s*\d+(\.\d{2})?)', text or "", re.IGNORECASE) is not None
 
-# ===== Parts detection tightened: require op + aftermarket flag + known panel on SAME LINE
 PART_FLAGS = r'(?:\bA/M\b|\bAFTER\s*MARKET\b|\bAFTERMARKET\b|\bLKQ\b|\bRECOND(?:ITIONED)?\b|\bCAPA\b|\bALT[-\s]*OE\b|\bREMAN(?:UFACTURED)?\b)'
 OPS_TOK = re.compile(r'\b(REPL(?:ACE)?|R&R|R & R|R&I|R & I|REPAIR|REFINISH|PAINT)\b', re.IGNORECASE)
-PANELS = [
-    "bumper","fender","door","hood","grille","headlamp","headlight","taillamp","tail lamp",
-    "quarter panel","rocker","roof","trunk","decklid","mirror","apron","radiator support",
-    "wheel","tire","pillar","garnish","molding","fog lamp","reinforcement","cover"
-]
+PANELS = ["bumper","fender","door","hood","grille","headlamp","headlight","taillamp","tail lamp",
+          "quarter panel","rocker","roof","trunk","decklid","mirror","apron","radiator support",
+          "wheel","tire","pillar","garnish","molding","fog lamp","reinforcement","cover"]
 PANELS_U = [p.upper() for p in PANELS]
 
 def non_oem_used(text: str) -> bool:
     lines = (text or "").splitlines()
     for line in lines:
         l = line.strip().upper()
-        if not l:
-            continue
+        if not l: continue
         if OPS_TOK.search(l) and re.search(PART_FLAGS, l, re.IGNORECASE) and any(p in l for p in PANELS_U):
             return True
     if re.search(r'parts\s+presented\s+are\s+OEM[-\s]*parts', text or "", re.IGNORECASE):
@@ -349,7 +322,7 @@ def non_oem_used(text: str) -> bool:
     return False
 
 # =========================================
-# Photo parsing: VIN/ODO detection (for verification & presence only)
+# Photo parsing (VIN/ODO/plate presence)
 # =========================================
 def _is_exterior_by_edges(img: Image.Image) -> bool:
     g = img.convert("L")
@@ -358,19 +331,26 @@ def _is_exterior_by_edges(img: Image.Image) -> bool:
     evar = ImageStat.Stat(edges).var[0]
     return (var > 140 and evar > 400)
 
-# >>> REPLACED with robust VIN-from-photos routine <<<
+# ---- FAST+ROBUST VIN from photos ----
 def extract_vin_from_photos(image_blobs: List[Tuple[str, bytes]]) -> Optional[str]:
-    """
-    Pull VIN from photos for verification ONLY.
-    Improvements:
-      - Larger thumbnail (up to 2200 px)
-      - Multiple preprocessing variants (contrast, sharpen, binarize)
-      - Multiple Tesseract PSMs (6, 7, 11)
-      - Prefer VIN near the label 'VIN'/'V.I.N' before global fallback
-    """
     VIN_NEAR_LABEL = re.compile(r'(?i)\bV[\W_]*I[\W_]*N\b')
     VIN_17 = re.compile(r'\b([A-HJ-NPR-Z0-9]{17})\b')
     VIN_SEP_SEQ = re.compile(r'(?i)((?:[A-HJ-NPR-Z0-9][\s\.\-–—:_]){16}[A-HJ-NPR-Z0-9])')
+
+    # 1) FAST prescan of all images to find likely VIN candidates
+    candidates: List[Tuple[str, bytes]] = []
+    for name, blob in image_blobs:
+        try:
+            im = Image.open(io.BytesIO(blob)).convert("L")
+            im.thumbnail((1100, 1100))
+            txt = pytesseract.image_to_string(im, lang="eng", config="--psm 6 --oem 1")
+            up = (txt or "").upper()
+            if "VIN" in up or VIN_17.search(up) or VIN_SEP_SEQ.search(up):
+                candidates.append((name, blob))
+        except Exception:
+            continue
+    # cap heavy OCR to at most 6 images
+    candidates = candidates[:6]
 
     def _variants(im: Image.Image) -> List[Image.Image]:
         im = im.copy()
@@ -379,58 +359,48 @@ def extract_vin_from_photos(image_blobs: List[Tuple[str, bytes]]) -> Optional[st
             h = int(im.height * (max_w / im.width))
             im = im.resize((max_w, h), Image.LANCZOS)
         g = im.convert("L")
-        v = []
-        v.append(ImageEnhance.Contrast(g).enhance(2.0))                          # base enhanced
-        v.append(ImageEnhance.Sharpness(v[0]).enhance(2.0))                      # sharpened
-        v.append(v[0].point(lambda p: 255 if p > 180 else 0, mode="1").convert("L"))  # binarized
-        v.append(ImageOps.autocontrast(g.filter(ImageFilter.MedianFilter(3))))   # autocontrast + denoise
+        v = [
+            ImageEnhance.Contrast(g).enhance(2.0),
+            ImageEnhance.Sharpness(g).enhance(2.0),
+            g.point(lambda p: 255 if p > 180 else 0, mode="1").convert("L"),
+            ImageOps.autocontrast(g.filter(ImageFilter.MedianFilter(3))),
+        ]
         return v
 
     def _ocr_all(im: Image.Image) -> str:
         out = []
         for psm in (7, 6, 11):
             try:
-                txt = pytesseract.image_to_string(im, lang="eng", config=f"--psm {psm} --oem 1")
-                if txt:
-                    out.append(txt)
+                out.append(pytesseract.image_to_string(im, lang="eng", config=f"--psm {psm} --oem 1"))
             except Exception:
                 pass
-        return "\n".join(out)
+        return "\n".join([t for t in out if t])
 
-    for name, blob in image_blobs:
+    for name, blob in candidates:
         try:
             im = Image.open(io.BytesIO(blob))
-            texts = []
+            up_all = ""
             for var in _variants(im):
-                texts.append(_ocr_all(var))
-            up = "\n".join(texts).upper()
+                up_all += "\n" + _ocr_all(var)
+            up_all = up_all.upper()
 
-            # 1) VIN near label first
-            for m in VIN_NEAR_LABEL.finditer(up):
-                window = up[m.end(): m.end() + 220]
+            for m in VIN_NEAR_LABEL.finditer(up_all):
+                window = up_all[m.end(): m.end() + 220]
                 for mm in VIN_SEP_SEQ.finditer(window):
                     vin = normalize_vin(mm.group(1))
                     if vin and vin_checksum_ok(vin):
                         return vin
-                cands = VIN_17.findall(window)
-                vin = best_vin_candidate(cands)
-                if vin:
-                    return vin
+                vin = best_vin_candidate(VIN_17.findall(window))
+                if vin: return vin
 
-            # 2) Global separated sequence
-            for mm in VIN_SEP_SEQ.finditer(up):
+            for mm in VIN_SEP_SEQ.finditer(up_all):
                 vin = normalize_vin(mm.group(1))
-                if vin and vin_checksum_ok(vin):
-                    return vin
+                if vin and vin_checksum_ok(vin): return vin
 
-            # 3) Global contiguous
-            vin = best_vin_candidate(VIN_17.findall(up))
-            if vin:
-                return vin
-
+            vin = best_vin_candidate(VIN_17.findall(up_all))
+            if vin: return vin
         except Exception as e:
             logger.warning(f"VIN photo OCR error ({name}): {e}")
-
     return None
 
 def extract_odometer_from_photos(image_blobs: List[Tuple[str, bytes]]) -> Optional[str]:
@@ -447,8 +417,7 @@ def extract_odometer_from_photos(image_blobs: List[Tuple[str, bytes]]) -> Option
             logger.warning(f"Odometer photo OCR error ({name}): {e}")
     return None
 
-# >>> increase sampling & better plate regex <<<
-def _sample_for_plate_ocr(image_blobs: List[Tuple[str, bytes]], k: int = 24) -> List[Tuple[str, bytes]]:
+def _sample_for_plate_ocr(image_blobs: List[Tuple[str, bytes]], k: int = 10) -> List[Tuple[str, bytes]]:
     if len(image_blobs) <= k:
         return image_blobs
     pairs = []
@@ -461,7 +430,6 @@ def _sample_for_plate_ocr(image_blobs: List[Tuple[str, bytes]], k: int = 24) -> 
 PLATE_RX = re.compile(r'\b([A-Z0-9]{1,3}[-\s]?[A-Z0-9]{3,4}|[A-Z0-9]{5,8})\b')
 
 def check_required_photos(image_blobs: List[Tuple[str, bytes]], ocr_text: str) -> List[str]:
-    """Required: four corners, odometer, VIN, license plate."""
     required = ["four corners", "odometer", "vin", "license plate"]
     present = set()
     txt = (ocr_text or "").lower()
@@ -477,10 +445,10 @@ def check_required_photos(image_blobs: List[Tuple[str, bytes]], ocr_text: str) -
     if odo_text or odo_photo:
         present.add("odometer")
 
-    for name, blob in _sample_for_plate_ocr(image_blobs, k=24):
+    for name, blob in _sample_for_plate_ocr(image_blobs, k=10):
         try:
             img = Image.open(io.BytesIO(blob))
-            img.thumbnail((1300, 1300))
+            img.thumbnail((1200, 1200))
             txtp = ocr_text_fast(img, psm=7)
             if re.search(r'(license|registration)\s*plate', txtp, re.IGNORECASE) or PLATE_RX.search(txtp):
                 present.add("license plate")
@@ -489,10 +457,10 @@ def check_required_photos(image_blobs: List[Tuple[str, bytes]], ocr_text: str) -
             pass
 
     exterior_hits = 0
-    for name, blob in image_blobs[:40]:
+    for name, blob in image_blobs[:20]:  # first 20 only
         try:
             img = Image.open(io.BytesIO(blob))
-            img.thumbnail((1600, 1600))
+            img.thumbnail((1400, 1400))
             if _is_exterior_by_edges(img):
                 exterior_hits += 1
         except Exception:
@@ -505,7 +473,7 @@ def check_required_photos(image_blobs: List[Tuple[str, bytes]], ocr_text: str) -
     return missing
 
 # =========================================
-# Contact-sheet builder (ALL photos included, ≤ 3 sheets adaptively)
+# Contact sheets (unchanged behavior)
 # =========================================
 def shrink_to_width(img: Image.Image, max_w: int) -> Image.Image:
     if img.width <= max_w:
@@ -523,7 +491,6 @@ def make_contact_sheets_compact(
 ) -> List[Tuple[str, bytes]]:
     if not image_blobs:
         return []
-
     thumbs: List[Image.Image] = []
     for _, blob in image_blobs:
         try:
@@ -531,7 +498,6 @@ def make_contact_sheets_compact(
             thumbs.append(shrink_to_width(img, base_thumb_w))
         except Exception:
             continue
-
     n = len(thumbs)
     per_sheet = max(1, math.ceil(n / max_sheets))
     rows = math.ceil(per_sheet / cols)
@@ -545,8 +511,7 @@ def make_contact_sheets_compact(
         canvas_w = cols * thumb_w + (cols + 1) * padding
         canvas_h = sum(row_heights) + (len(row_heights) + 1) * padding
         sheet = Image.new("RGB", (canvas_w, canvas_h), color=(245, 245, 245))
-        y = padding
-        pos = 0
+        y = padding; pos = 0
         for r, row_h in enumerate(row_heights):
             x = padding
             for c in range(cols):
@@ -563,24 +528,18 @@ def make_contact_sheets_compact(
         return sheet
 
     sheets: List[Tuple[str, bytes]] = []
-    idx = 0
-    sheet_num = 1
-    thumb_w = base_thumb_w
-
+    idx = 0; sheet_num = 1; thumb_w = base_thumb_w
     while idx < n:
         chunk = thumbs[idx: idx + per_sheet]
         attempt = 0
         sheet_img = build_sheet(chunk, thumb_w)
         while sheet_img.height > 3600 and thumb_w > 160 and attempt < 3:
             thumb_w = int(thumb_w * 0.85)
-            sheet_img = build_sheet(chunk, thumb_w)
-            attempt += 1
+            sheet_img = build_sheet(chunk, thumb_w); attempt += 1
         buf = io.BytesIO()
         sheet_img.save(buf, format="JPEG", quality=jpeg_quality, optimize=True)
         sheets.append((f"contact-sheet-{sheet_num}.jpg", buf.getvalue()))
-        sheet_num += 1
-        idx += per_sheet
-
+        sheet_num += 1; idx += per_sheet
     return sheets
 
 # =========================================
@@ -604,7 +563,7 @@ def labor_rates_present_any(text: str) -> bool:
     return any(re.search(rf"{lbl}[^\n]{{0,120}}?\$\s*\d{{2,3}}", text or "", re.IGNORECASE) for lbl in labels)
 
 # =========================================
-# Estimate parsing (line items for comparison)
+# Estimate parsing
 # =========================================
 OPS = ["replace", "repair", "refinish", "r&i", "r & i", "align", "blend", "calibrate"]
 def extract_estimate_items(text: str) -> List[Dict[str, str]]:
@@ -628,53 +587,35 @@ def extract_estimate_items(text: str) -> List[Dict[str, str]]:
     return uniq
 
 # =========================================
-# GPT compare: estimate ↔ photos (JSON only)
+# GPT compare (smaller response)
 # =========================================
 def compare_estimate_with_photos(items: List[Dict[str, str]],
                                  images_for_vision: List[Dict[str, Any]]) -> Dict[str, Any]:
-    schema = {
-        "type": "object",
-        "properties": {
-            "per_item": {"type":"array","items":{
-                "type":"object",
-                "properties":{
-                    "op":{"type":"string"},
-                    "part":{"type":"string"},
-                    "side":{"type":"string"},
-                    "photo_evidence":{"type":"boolean"},
-                    "confidence":{"type":"number"},
-                    "note":{"type":"string"}
-                },
-                "required":["op","part","side","photo_evidence","confidence","note"]
-            }},
-            "not_in_photos":{"type":"array","items":{"type":"string"}},
-            "extra_damage_in_photos":{"type":"array","items":{"type":"string"}},
-            "overall":{"type":"string"}
-        },
-        "required":["per_item","not_in_photos","extra_damage_in_photos","overall"]
-    }
+    schema = {"type":"object","properties":{
+        "per_item":{"type":"array","items":{"type":"object","properties":{
+            "op":{"type":"string"},"part":{"type":"string"},"side":{"type":"string"},
+            "photo_evidence":{"type":"boolean"},"confidence":{"type":"number"},"note":{"type":"string"}},
+            "required":["op","part","side","photo_evidence","confidence","note"]}},
+        "not_in_photos":{"type":"array","items":{"type":"string"}},
+        "extra_damage_in_photos":{"type":"array","items":{"type":"string"}},
+        "overall":{"type":"string"}}, "required":["per_item","not_in_photos","extra_damage_in_photos","overall"]}
 
     system = (
         "You are an auto-damage visual auditor. "
         "Given estimate line items and vehicle photos, decide for EACH item whether visible photo evidence exists. "
-        "Hidden ops (calibration, internal R&I) may not be visible → mark as no-evidence with a short 3–10 word note. "
-        "Also list obvious damages seen in photos that are NOT listed in the estimate. "
+        "Hidden ops may not be visible; mark as no-evidence with a short 3–10 word note. "
+        "List obvious damages seen in photos that are NOT listed in the estimate. "
         "Return STRICT JSON ONLY per this schema: " + json.dumps(schema)
     )
 
-    user_parts: List[Dict[str, Any]] = [
-        {"type": "text", "text": "Estimate items:\n" + json.dumps(items, ensure_ascii=False)}
-    ]
+    user_parts: List[Dict[str, Any]] = [{"type": "text", "text": "Estimate items:\n" + json.dumps(items, ensure_ascii=False)}]
     user_parts.extend(images_for_vision)
 
     try:
         rsp = client.chat.completions.create(
             model=MODEL,
-            messages=[
-                {"role": "system", "content": system},
-                {"role": "user",   "content": user_parts}
-            ],
-            max_tokens=420,
+            messages=[{"role": "system", "content": system},{"role": "user", "content": user_parts}],
+            max_tokens=220,
             temperature=0
         )
         txt = (rsp.choices[0].message.content or "").strip()
@@ -685,84 +626,40 @@ def compare_estimate_with_photos(items: List[Dict[str, str]],
         return data
     except Exception as e:
         logger.error(f"Vision compare JSON error: {type(e).__name__}: {e}")
-        return {
-            "per_item": [],
-            "not_in_photos": [],
-            "extra_damage_in_photos": [],
-            "overall": f"Comparison unavailable ({type(e).__name__})."
-        }
+        return {"per_item": [],"not_in_photos": [],"extra_damage_in_photos": [],"overall": f"Comparison unavailable ({type(e).__name__})."}
 
 # =========================================
-# Local narrative builder (fast, deterministic)
+# Summary builder
 # =========================================
-def build_summary_markdown(
-    missing_photos: List[str],
-    text: str,
-    client_rules: str,
-    require_oem: bool,
-    non_oem_flag: bool
-) -> str:
+def build_summary_markdown(missing_photos: List[str], text: str, client_rules: str,
+                           require_oem: bool, non_oem_flag: bool) -> str:
     if not missing_photos:
         photos_lines = ["- All required photo types present (four corners, VIN, odometer, plate)."]
     else:
         photos_lines = [f"- Missing: {', '.join(missing_photos)}."]
-
-    if labor_rates_present_any(text):
-        labor_lines = ["- Labor rates listed on estimate."]
-    else:
-        labor_lines = ["- Labor rates missing or not clearly listed."]
-
-    if taxes_present(text):
-        taxes_lines = ["- Tax rate present on estimate."]
-    else:
-        taxes_lines = ["- Tax rate not found per client rules."]
-
+    labor_lines = ["- Labor rates listed on estimate."] if labor_rates_present_any(text) else ["- Labor rates missing or not clearly listed."]
+    taxes_lines = ["- Tax rate present on estimate."] if taxes_present(text) else ["- Tax rate not found per client rules."]
     parts_lines: List[str] = []
     if require_oem:
-        if non_oem_flag:
-            parts_lines.append("- Non-compliance: non-OEM parts on ≤ 2 years or ≤ 24k miles.")
-        else:
-            parts_lines.append("- Compliant: OEM parts only for ≤ 2 years or ≤ 24k miles.")
+        parts_lines.append("- Non-compliance: non-OEM parts on ≤ 2 years or ≤ 24k miles." if non_oem_flag
+                           else "- Compliant: OEM parts only for ≤ 2 years or ≤ 24k miles.")
     else:
-        if non_oem_flag:
-            parts_lines.append("- Non-OEM parts noted; verify client rules allow on this vehicle.")
-        else:
-            parts_lines.append("- Parts appear OEM or not flagged as non-OEM.")
-
-    client_lines = [
-        "- Apply client-required documentation (labor rates, photos, taxes) where applicable."
-    ]
-    notes_lines = [
-        "- Ensure estimate notes clearly explain damage appraisal per client requirements."
-    ]
-
-    sections = [
-        "### Required Photos",
-        *photos_lines,
-        "### Labor Rates",
-        *labor_lines,
-        "### Taxes",
-        *taxes_lines,
-        "### Parts Compliance",
-        *parts_lines,
-        "### Client Rules Adherence",
-        *client_lines,
-        "### Additional Notes",
-        *notes_lines,
-    ]
+        parts_lines.append("- Non-OEM parts noted; verify client rules allow on this vehicle." if non_oem_flag
+                           else "- Parts appear OEM or not flagged as non-OEM.")
+    client_lines = ["- Apply client-required documentation (labor rates, photos, taxes) where applicable."]
+    notes_lines = ["- Ensure estimate notes clearly explain damage appraisal per client requirements."]
+    sections = ["### Required Photos", *photos_lines, "### Labor Rates", *labor_lines, "### Taxes", *taxes_lines,
+                "### Parts Compliance", *parts_lines, "### Client Rules Adherence", *client_lines, "### Additional Notes", *notes_lines]
     return "\n".join(sections)
 
 # =========================================
 # PDF helpers
 # =========================================
 def pdf_add_section_title(pdf: FPDF, title: str):
-    pdf.set_font_size(12)
-    pdf.cell(0, 8, txt=title, ln=True)
-    pdf.set_font_size(10)
+    pdf.set_font_size(12); pdf.cell(0, 8, txt=title, ln=True); pdf.set_font_size(10)
 
 def pdf_kv(pdf: FPDF, key: str, val: str):
-    pdf.set_font_size(10)
-    pdf.multi_cell(0, 6, f"{key}: {val}")
+    pdf.set_font_size(10); pdf.multi_cell(0, 6, f"{key}: {val}")
 
 # =========================================
 # Routes
@@ -784,7 +681,7 @@ async def vision_review(
 
     texts: List[str] = []
     image_blobs: List[Tuple[str, bytes]] = []
-    first_pdf_bytes: Optional[bytes] = None  # estimate PDF for hi-res VIN/Claim fallback
+    first_pdf_bytes: Optional[bytes] = None
 
     for f in files:
         raw = await f.read()
@@ -792,19 +689,19 @@ async def vision_review(
         if name.endswith((".jpg", ".jpeg", ".png", ".webp")):
             image_blobs.append((name, raw))
         elif name.endswith(".pdf"):
-            # 1) Fast: embedded selectable text (CCC/Shop PDFs)
             embedded_txt = extract_text_from_pdf_embedded(raw)
             if embedded_txt:
                 texts.append(embedded_txt)
-            # 2) Add a small amount of OCR for safety (first pages only)
             texts.append(extract_text_from_pdf(io.BytesIO(raw), max_ocr_pages=8, dpi=140))
-            # Keep this PDF for hi-res fallback of VIN/Claim if needed
             if first_pdf_bytes is None:
                 first_pdf_bytes = raw
-            # 3) Harvest photo-like pages for contact sheets
-            harvested = harvest_photos_from_pdf(raw, max_pages=20, dpi=135)
-            for hname, hbytes in harvested:
-                image_blobs.append((hname, hbytes))
+            # SKIP photo harvesting if this PDF looks like an estimate (has Claim+VIN text)
+            looks_like_estimate = bool(re.search(r'\bclaim\b', embedded_txt or "", re.IGNORECASE) and
+                                       re.search(r'\bvin\b', embedded_txt or "", re.IGNORECASE))
+            if not looks_like_estimate:
+                harvested = harvest_photos_from_pdf(raw, max_pages=16, dpi=130)
+                for hname, hbytes in harvested:
+                    image_blobs.append((hname, hbytes))
         elif name.endswith(".docx"):
             texts.append(extract_text_from_docx(io.BytesIO(raw)))
         elif name.endswith(".txt"):
@@ -814,38 +711,23 @@ async def vision_review(
 
     combined_text = "\n".join(texts)
 
-    # ----- Build compact contact sheets for GPT (ALL photos represented, ≤ 3 images sent)
-    contact_sheets = make_contact_sheets_compact(
-        image_blobs,
-        max_sheets=3,
-        cols=6,
-        padding=6,
-        base_thumb_w=320,
-        jpeg_quality=68
-    )
+    # Contact sheets (3 images) for the vision step
+    contact_sheets = make_contact_sheets_compact(image_blobs, max_sheets=3, cols=6, padding=6, base_thumb_w=320, jpeg_quality=68)
     images_for_vision: List[Dict[str, Any]] = []
     for name, blob in contact_sheets:
         b64 = base64.b64encode(blob).decode("utf-8")
-        images_for_vision.append({
-            "type": "image_url",
-            "image_url": {"url": f"data:image/jpeg;base64,{b64}"}
-        })
+        images_for_vision.append({"type": "image_url","image_url": {"url": f"data:image/jpeg;base64,{b64}"}})
 
-    # ----- REQUIRED PHOTOS (presence only)
+    # Required photos presence
     missing_photos = check_required_photos(image_blobs, combined_text)
 
-    # ----- VIN & CLAIM: from estimate ONLY (with hi-res estimate pages fallback)
-    vin_est = extract_vin_from_text(combined_text)
-    if not vin_est and first_pdf_bytes:
-        vin_est = extract_vin_from_pdf_first_pages(first_pdf_bytes, pages_to_scan=10, dpi=220)
-
-    claim_number = extract_claim_from_text(combined_text)
-    if not claim_number and first_pdf_bytes:
-        claim_number = extract_claim_from_pdf_first_pages(first_pdf_bytes, pages_to_scan=10, dpi=220)
+    # VIN & Claim from estimate (hi-res fallback reduced)
+    vin_est = extract_vin_from_text(combined_text) or (extract_vin_from_pdf_first_pages(first_pdf_bytes, 4, 170) if first_pdf_bytes else None)
+    claim_number = extract_claim_from_text(combined_text) or (extract_claim_from_pdf_first_pages(first_pdf_bytes, 4, 170) if first_pdf_bytes else None)
     claim_number = claim_number or "N/A"
 
-    # ----- VIN photo verification (compare only; do NOT populate with photo)
-    vin_photo = extract_vin_from_photos(image_blobs)  # may be None
+    # VIN photo verification
+    vin_photo = extract_vin_from_photos(image_blobs)
     if vin_est and vin_photo:
         vin_verification = "Match" if vin_est == vin_photo else f"No Match (photo shows {vin_photo})"
     elif vin_est and not vin_photo:
@@ -854,53 +736,36 @@ async def vision_review(
         vin_verification = "VIN not found in estimate"
     else:
         vin_verification = "VIN unavailable"
+    vin_final = vin_est or "N/A"
 
-    vin_final = vin_est or "N/A"  # always from estimate only
-
-    # ----- Vehicle & odo
     vehicle_desc = extract_vehicle_from_text(combined_text) or "N/A"
     odo_photos = extract_odometer_from_photos(image_blobs)
 
-    # ----- parse estimate items & compare to photos (vision uses contact sheets)
     est_items = extract_estimate_items(combined_text)
     consistency = compare_estimate_with_photos(est_items, images_for_vision)
 
-    # ----- rules for summary
     year, miles = parse_year_miles(combined_text)
     now_year = datetime.datetime.now().year
     age_years = (now_year - year) if year else None
     require_oem = (age_years is not None and age_years <= 2) or (miles is not None and miles <= 24000)
     non_oem_flag = non_oem_used(combined_text)
 
-    # ===== Build deterministic narrative (FAST; no GPT)
-    summary_md = build_summary_markdown(
-        missing_photos=missing_photos,
-        text=combined_text,
-        client_rules=client_rules,
-        require_oem=require_oem,
-        non_oem_flag=non_oem_flag
-    )
+    summary_md = build_summary_markdown(missing_photos, combined_text, client_rules, require_oem, non_oem_flag)
 
-    # ===== Score calc
     labor_tax_adj = check_labor_and_tax_score(combined_text, client_rules)
     photo_adj = -25 * len(missing_photos)
     computed = max(0, 100 + labor_tax_adj + photo_adj)
     authoritative_score = computed
 
-    # =========================================
-    # PDF build
-    # =========================================
-    pdf = FPDF()
-    pdf.add_page()
+    # Build PDF
+    pdf = FPDF(); pdf.add_page()
     try:
-        pdf.add_font("DejaVu", "", "DejaVuSans.ttf", uni=True)
-        pdf.set_font("DejaVu", size=11)
+        pdf.add_font("DejaVu", "", "DejaVuSans.ttf", uni=True); pdf.set_font("DejaVu", size=11)
     except Exception:
         pdf.set_font("Arial", size=11)
 
     pdf.cell(200, 10, txt="NSPXN.com AI Review Report", ln=True, align="C")
-    pdf.ln(5)
-    pdf.set_font_size(10)
+    pdf.ln(5); pdf.set_font_size(10)
     pdf.multi_cell(0, 6, f"File Number: {file_number}")
     pdf.multi_cell(0, 6, f"IA Company: {ia_company}")
     pdf.multi_cell(0, 6, f"Appraiser ID #: {appraiser_id}")
@@ -909,27 +774,19 @@ async def vision_review(
     pdf.multi_cell(0, 6, f"VIN: {vin_final}")
     pdf.multi_cell(0, 6, f"VIN Photo Verification: {vin_verification}")
     pdf.multi_cell(0, 6, f"Vehicle: {vehicle_desc}")
-    if odo_photos:
-        pdf.multi_cell(0, 6, f"Odometer (from photos): {odo_photos}")
+    if odo_photos: pdf.multi_cell(0, 6, f"Odometer (from photos): {odo_photos}")
     pdf.multi_cell(0, 6, f"Compliance Score: {authoritative_score}%")
 
-    pdf.ln(4)
-    pdf_add_section_title(pdf, "AI-4-IA Review Summary")
+    pdf.ln(4); pdf_add_section_title(pdf, "AI-4-IA Review Summary")
     pdf.multi_cell(0, 6, f"**Audit Results: {authoritative_score}%**")
-    pdf.ln(1)
-    pdf.multi_cell(0, 6, summary_md)
+    pdf.ln(1); pdf.multi_cell(0, 6, summary_md)
 
-    # ======== Estimate ↔ Photos Consistency Review ========
-    pdf.ln(4)
-    pdf_add_section_title(pdf, "Estimate ↔ Photos Consistency Review")
-
+    pdf.ln(4); pdf_add_section_title(pdf, "Estimate ↔ Photos Consistency Review")
     if consistency.get("per_item"):
         for it in consistency["per_item"][:60]:
             ev = "YES" if it.get("photo_evidence") else "NO"
-            try:
-                conf = float(it.get("confidence", 0))
-            except Exception:
-                conf = 0.0
+            try: conf = float(it.get("confidence", 0))
+            except Exception: conf = 0.0
             conf_txt = f"{round(conf*100)}%"
             line = f"- {it.get('side','unspecified').title()} {it.get('part','component')} · {it.get('op','op')} → Photo: {ev} ({conf_txt}); {it.get('note','')}"
             pdf.multi_cell(0, 6, line)
@@ -937,36 +794,28 @@ async def vision_review(
         pdf.multi_cell(0, 6, "Per-item comparison unavailable.")
 
     if consistency.get("not_in_photos"):
-        pdf.ln(2)
-        pdf_add_section_title(pdf, "Items Estimated but Not Evident in Photos")
-        for raw in consistency["not_in_photos"][:30]:
-            pdf.multi_cell(0, 6, f"- {raw}")
+        pdf.ln(2); pdf_add_section_title(pdf, "Items Estimated but Not Evident in Photos")
+        for raw in consistency["not_in_photos"][:30]: pdf.multi_cell(0, 6, f"- {raw}")
 
     if consistency.get("extra_damage_in_photos"):
-        pdf.ln(2)
-        pdf_add_section_title(pdf, "Damage Visible in Photos but Missing on Estimate")
-        for d in consistency["extra_damage_in_photos"][:30]:
-            pdf.multi_cell(0, 6, f"- {d}")
+        pdf.ln(2); pdf_add_section_title(pdf, "Damage Visible in Photos but Missing on Estimate")
+        for d in consistency["extra_damage_in_photos"][:30]: pdf.multi_cell(0, 6, f"- {d}")
 
-    pdf.ln(2)
-    pdf_kv(pdf, "Consistency Overall", consistency.get("overall", ""))
+    pdf.ln(2); pdf_kv(pdf, "Consistency Overall", consistency.get("overall", ""))
 
-    # Save PDF to /tmp with name {file_number}.pdf
     pdf_path = os.path.join(PDF_DIR, f"{file_number}.pdf")
     try:
         pdf_bytes = pdf.output(dest="S").encode("latin-1")
-        with open(pdf_path, "wb") as f:
-            f.write(pdf_bytes)
+        with open(pdf_path, "wb") as f: f.write(pdf_bytes)
         logger.info(f"PDF saved → {pdf_path}")
     except Exception as e:
         logger.error(f"PDF write error: {e}")
 
-    # OPTIONAL email (unchanged)
+    # OPTIONAL email
     try:
         msg = EmailMessage()
         msg["Subject"] = f"AI-4-IA Review: {claim_number}"
-        msg["From"] = "noreply@nspxn.com"
-        msg["To"] = "info@nspxn.com"
+        msg["From"] = "noreply@nspxn.com"; msg["To"] = "info@nspxn.com"
         email_body = f"""NSPXN.com AI4IA Review Report
 
 File Number: {file_number}
@@ -987,8 +836,7 @@ Audit Results: {authoritative_score}%
 """
         msg.set_content(email_body)
         with smtplib.SMTP_SSL("mail.tierra.net", 465) as smtp:
-            smtp.login("info@nspxn.com", "grr2025GRR")
-            smtp.send_message(msg)
+            smtp.login("info@nspxn.com", "grr2025GRR"); smtp.send_message(msg)
     except Exception as e:
         logger.error(f"Email error (continuing): {e}")
 
@@ -1012,9 +860,7 @@ async def download_pdf(file_number: str):
 
 @app.get("/client-rules/{client_name}")
 async def get_client_rules(client_name: str):
-    rules_dir = "client_rules"
-    file_name = f"{client_name}.docx"
-    file_path = os.path.join(rules_dir, file_name)
+    rules_dir = "client_rules"; file_name = f"{client_name}.docx"; file_path = os.path.join(rules_dir, file_name)
     if os.path.exists(file_path):
         try:
             doc = Document(file_path)
@@ -1027,6 +873,7 @@ async def get_client_rules(client_name: str):
     else:
         logger.error(f"Rules not found for client: {client_name}")
         return JSONResponse(status_code=404, content={"error": "Rules not found for this client."})
+
 
 
 
