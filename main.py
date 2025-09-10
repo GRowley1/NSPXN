@@ -83,8 +83,8 @@ def ocr_text_fast(img: Image.Image, psm: int = 6) -> str:
         logger.warning(f"OCR fast error: {e}")
         return ""
 
-def extract_text_from_pdf(file_like: io.BytesIO, max_ocr_pages: int = 6, dpi: int = 135) -> str:
-    """OCR only the first `max_ocr_pages` pages for speed. Most estimate details are up front."""
+def extract_text_from_pdf(file_like: io.BytesIO, max_ocr_pages: int = 8, dpi: int = 140) -> str:
+    """OCR only the first pages for speed. Most estimate details are up front."""
     try:
         file_like.seek(0)
         pages = convert_from_bytes(file_like.read(), dpi=dpi)
@@ -169,19 +169,41 @@ def best_vin_candidate(cands: List[str]) -> Optional[str]:
             return vin
     return None
 
-# Hi-res OCR of the first few pages (estimate only) to grab VIN/Claim if bulk OCR missed it
-def extract_vin_from_pdf_first_pages(pdf_bytes: bytes, pages_to_scan: int = 3, dpi: int = 240) -> Optional[str]:
+# ---------- Stronger VIN parsing (estimate only) ----------
+VIN_LABEL = re.compile(r'(?i)\bV[\W_]*I[\W_]*N\b')  # matches VIN / V I N / V.I.N
+VIN_PHRASE = re.compile(r'(?i)\bVehicle\s*Identification\s*Number\b')
+
+def extract_vin_from_text(text: str) -> Optional[str]:
+    if not text:
+        return None
+    # 1) Look for VIN label/phrase and capture nearby 17-char token (same line or next ~100 chars)
+    for m in VIN_LABEL.finditer(text):
+        window = text[m.end(): m.end()+140]
+        cands = re.findall(r'([A-HJ-NPR-Z0-9]{17})', window)
+        vin = best_vin_candidate(cands)
+        if vin: return vin
+    for m in VIN_PHRASE.finditer(text):
+        window = text[m.end(): m.end()+160]
+        cands = re.findall(r'([A-HJ-NPR-Z0-9]{17})', window)
+        vin = best_vin_candidate(cands)
+        if vin: return vin
+    # 2) As a fallback, accept any 17-char candidate ONLY if within +/-120 chars of VIN label/phrase
+    positions = [m.start() for m in VIN_LABEL.finditer(text)] + [m.start() for m in VIN_PHRASE.finditer(text)]
+    if positions:
+        for m in re.finditer(r'([A-HJ-NPR-Z0-9]{17})', text):
+            if any(abs(m.start() - p) <= 120 for p in positions):
+                vin = best_vin_candidate([m.group(1)])
+                if vin: return vin
+    return None
+
+def extract_vin_from_pdf_first_pages(pdf_bytes: bytes, pages_to_scan: int = 10, dpi: int = 220) -> Optional[str]:
+    """High-res OCR of the first few estimate pages to grab VIN if bulk OCR missed it."""
     try:
         pages = convert_from_bytes(pdf_bytes, dpi=dpi)[:max(1, pages_to_scan)]
         for img in pages:
-            text = ocr_text_fast(img, psm=6)
-            m = re.search(r'(?i)\bVIN\s*[:\-]?\s*([A-HJ-NPR-Z0-9]{10,20})', text or "")
-            if m:
-                vin = best_vin_candidate([m.group(1)])
-                if vin: return vin
-            cands = re.findall(r'\b([A-HJ-NPR-Z0-9]{17})\b', text or "", re.IGNORECASE)
-            vin = best_vin_candidate(cands)
-            if vin: return vin
+            txt = ocr_text_fast(img, psm=6)
+            v = extract_vin_from_text(txt)
+            if v: return v
     except Exception as e:
         logger.warning(f"VIN first-pages OCR error: {e}")
     return None
@@ -196,22 +218,21 @@ CLAIM_PATTERNS = [
     r'(?i)\bref(?:erence)?\s*(?:#|no\.?|number|num)?\s*[:\-]?\s*([A-Z0-9][A-Z0-9\-\/\.]{2,30})',
     r'(?i)\bassignment\s*(?:#|no\.?|number|num)?\s*[:\-]?\s*([A-Z0-9][A-Z0-9\-\/\.]{2,30})',
 ]
-# tolerate common OCR mistakes for the word CLAIM (e.g., Clalm, CIaim)
 CLAIM_WORD_FUZZY = re.compile(r'(?i)\bC[l1I][aA][iI1][mMnN]\b')
 
 def extract_claim_from_text(text: str) -> Optional[str]:
     if not text:
         return None
-    # direct patterns first
     for pat in CLAIM_PATTERNS:
         m = re.search(pat, text)
         if m:
             cand = m.group(1).strip().strip('.').strip('-')
+            # must contain at least one digit; allow all-digit or mixed
             if re.search(r'\d', cand):
                 return cand
-    # fuzzy: find "claim" with OCR noise then grab the next token
+    # fuzzy key then capture next token
     for m in CLAIM_WORD_FUZZY.finditer(text or ""):
-        tail = text[m.end(): m.end()+80]
+        tail = text[m.end(): m.end()+100]
         m2 = re.search(r'[:#\-\s]*([A-Z0-9][A-Z0-9\-\/\.]{2,30})', tail, re.IGNORECASE)
         if m2:
             cand = m2.group(1).strip().strip('.').strip('-')
@@ -219,17 +240,14 @@ def extract_claim_from_text(text: str) -> Optional[str]:
                 return cand
     return None
 
-def extract_claim_from_pdf_first_pages(pdf_bytes: bytes, pages_to_scan: int = 3, dpi: int = 240) -> Optional[str]:
+def extract_claim_from_pdf_first_pages(pdf_bytes: bytes, pages_to_scan: int = 10, dpi: int = 220) -> Optional[str]:
     """High-res OCR of the first few estimate pages for Claim/Loss/File #."""
     try:
         pages = convert_from_bytes(pdf_bytes, dpi=dpi)[:max(1, pages_to_scan)]
         for img in pages:
             txt = ocr_text_fast(img, psm=6)
-            if not txt:
-                continue
             c = extract_claim_from_text(txt)
-            if c:
-                return c
+            if c: return c
     except Exception as e:
         logger.warning(f"Claim first-pages OCR error: {e}")
     return None
@@ -237,15 +255,6 @@ def extract_claim_from_pdf_first_pages(pdf_bytes: bytes, pages_to_scan: int = 3,
 # =========================================
 # Field extraction & tax/parts signals (vehicle string normalization)
 # =========================================
-def extract_vin_from_text(text: str) -> Optional[str]:
-    m = re.search(r'(?i)\bVIN\s*[:\-]?\s*([A-HJ-NPR-Z0-9]{10,20})', text or "")
-    if m:
-        vin = best_vin_candidate([m.group(1)])
-        if vin:
-            return vin
-    candidates = re.findall(r'\b([A-HJ-NPR-Z0-9]{17})\b', text or "", re.IGNORECASE)
-    return best_vin_candidate(candidates)
-
 MAKE_FIX = {
     "nessan": "Nissan",
     "nisaan": "Nissan",
@@ -684,7 +693,7 @@ async def vision_review(
 
     texts: List[str] = []
     image_blobs: List[Tuple[str, bytes]] = []
-    first_pdf_bytes: Optional[bytes] = None  # for hi-res estimate-only fallback (VIN/Claim)
+    first_pdf_bytes: Optional[bytes] = None  # estimate PDF for hi-res VIN/Claim fallback
 
     for f in files:
         raw = await f.read()
@@ -692,9 +701,11 @@ async def vision_review(
         if name.endswith((".jpg", ".jpeg", ".png", ".webp")):
             image_blobs.append((name, raw))
         elif name.endswith(".pdf"):
-            texts.append(extract_text_from_pdf(io.BytesIO(raw), max_ocr_pages=6, dpi=135))
+            # Treat all PDFs as potential estimate sources for text OCR
+            texts.append(extract_text_from_pdf(io.BytesIO(raw), max_ocr_pages=8, dpi=140))
             if first_pdf_bytes is None:
                 first_pdf_bytes = raw  # used ONLY to re-OCR estimate pages for VIN/Claim
+            # Also harvest photo-like pages for contact sheets
             harvested = harvest_photos_from_pdf(raw, max_pages=20, dpi=135)
             for hname, hbytes in harvested:
                 image_blobs.append((hname, hbytes))
@@ -730,11 +741,11 @@ async def vision_review(
     # ----- VIN & CLAIM: from estimate ONLY (with hi-res estimate pages fallback)
     vin_est = extract_vin_from_text(combined_text)
     if not vin_est and first_pdf_bytes:
-        vin_est = extract_vin_from_pdf_first_pages(first_pdf_bytes, pages_to_scan=3, dpi=240)
+        vin_est = extract_vin_from_pdf_first_pages(first_pdf_bytes, pages_to_scan=10, dpi=220)
 
     claim_number = extract_claim_from_text(combined_text)
     if not claim_number and first_pdf_bytes:
-        claim_number = extract_claim_from_pdf_first_pages(first_pdf_bytes, pages_to_scan=3, dpi=240)
+        claim_number = extract_claim_from_pdf_first_pages(first_pdf_bytes, pages_to_scan=10, dpi=220)
     claim_number = claim_number or "N/A"
 
     # ----- VIN photo verification (compare only; do NOT populate with photo)
@@ -748,7 +759,7 @@ async def vision_review(
     else:
         vin_verification = "VIN unavailable"
 
-    vin_final = vin_est or "N/A"  # value is always from estimate only
+    vin_final = vin_est or "N/A"  # always from estimate only
 
     # ----- Vehicle & odo
     vehicle_desc = extract_vehicle_from_text(combined_text) or "N/A"
