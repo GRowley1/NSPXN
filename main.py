@@ -1015,7 +1015,11 @@ async def vision_review(
     try:
         msg = EmailMessage()
         msg["Subject"] = f"AI-4-IA Review: {claim_number}"
-        msg["From"] = "noreply@nspxn.com"; msg["To"] = "info@nspxn.com"
+        msg["From"] = "noreply@nspxn.com"
+        msg["To"] = "info@nspxn.com"
+        # (Optional) help deliverability & replies
+        msg["Reply-To"] = "info@nspxn.com"
+
         email_body = f"""NSPXN.com AI4IA Review Report
 
 File Number: {file_number}
@@ -1035,10 +1039,12 @@ Audit Results: {authoritative_score}%
 {summary_md}
 """
         msg.set_content(email_body)
-        # Comment out SMTP in serverless environments if needed
-        # with smtplib.SMTP_SSL("mail.tierra.net", 465) as smtp:
-        #     smtp.login("info@nspxn.com", "grr2025GRR")
-        #     smtp.send_message(msg)
+
+        # ✅ Re-enable SMTP send
+        with smtplib.SMTP_SSL("mail.tierra.net", 465, timeout=20) as smtp:
+            smtp.login("info@nspxn.com", "grr2025GRR")
+            smtp.send_message(msg)
+        logger.info("✅ Email sent to info@nspxn.com")
     except Exception as e:
         logger.error(f"Email error (continuing): {e}")
 
