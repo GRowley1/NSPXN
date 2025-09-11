@@ -436,7 +436,7 @@ def _plate_ocr_variants(img: Image.Image) -> str:
             g.point(lambda p: 255 if p > 190 else 0, mode="1").convert("L"),
         ]
     out = []
-    for v in variants(img):
+    for v in variants(im):
         for psm in (6, 7, 11):
             try:
                 t = pytesseract.image_to_string(v, lang="eng", config=f"--psm {psm} --oem 1")
@@ -940,7 +940,7 @@ def build_summary_markdown(
     else:
         taxes_lines = ["- Tax rate not found per client rules."]
 
-    # Parts Compliance (respect client preference if present)  **UPDATED**
+    # Parts Compliance (respect client preference if present)
     parts_lines: List[str] = []
     prefer_aftermarket = bool(re.search(
         r"(heavy\s+on\s+the\s+use\s+of\s+aftermarket|consider\s+.*aftermarket\s+.*before\s+(?:lkq|oem)|"
@@ -1102,7 +1102,17 @@ async def vision_review(
     # ----- Scoring -----
     labor_tax_adj = check_labor_and_tax_score(combined_text, client_rules)
     photo_adj = -25 * len(missing_photos)
-    computed = max(0, 100 + labor_tax_adj + photo_adj)
+
+    # parts adjustment for client preference or OEM-when-recent
+    parts_adj = 0
+    prefer_aftermarket = bool(guidelines.get("prefer_aftermarket"))
+    recent = ((year is not None and (now_year - year) <= 2) or (miles is not None and miles <= 24000))
+    if prefer_aftermarket and not non_oem_flag:
+        parts_adj -= 25
+    elif guidelines.get("oem_required_if_recent") and recent and non_oem_flag:
+        parts_adj -= 25
+
+    computed = max(0, 100 + labor_tax_adj + photo_adj + parts_adj)
     authoritative_score = computed
 
     # Build PDF
@@ -1178,11 +1188,15 @@ async def vision_review(
     except Exception as e:
         logger.error(f"PDF write error: {e}")
 
-    # OPTIONAL email (best-effort) — disabled by default
+    # Email — enabled (no attachment)
     try:
         msg = EmailMessage()
         msg["Subject"] = f"AI-4-IA Review: {claim_number}"
-        msg["From"] = "noreply@nspxn.com"; msg["To"] = "info@nspxn.com"
+        smtp_from = os.getenv("SMTP_FROM", "info@nspxn.com")
+        smtp_to = os.getenv("SMTP_TO", "info@nspxn.com")
+        msg["From"] = smtp_from
+        msg["To"] = smtp_to
+
         email_body = f"""NSPXN.com AI4IA Review Report
 
 File Number: {file_number}
@@ -1202,11 +1216,32 @@ Audit Results: {authoritative_score}%
 {summary_md}
 """
         msg.set_content(email_body)
-        # with smtplib.SMTP_SSL("mail.tierra.net", 465) as smtp:
-        #     smtp.login("info@nspxn.com", "grr2025GRR")
-        #     smtp.send_message(msg)
+
+        smtp_host = os.getenv("SMTP_HOST", "mail.tierra.net")
+        smtp_port = int(os.getenv("SMTP_PORT", "465"))
+        smtp_user = os.getenv("SMTP_USER", "info@nspxn.com")
+        smtp_pass = os.getenv("SMTP_PASS")  # must be set in env
+
+        if smtp_port == 465:
+            with smtplib.SMTP_SSL(smtp_host, smtp_port, timeout=20) as smtp:
+                if smtp_user and smtp_pass:
+                    smtp.login(smtp_user, smtp_pass)
+                smtp.send_message(msg)
+        else:
+            with smtplib.SMTP(smtp_host, smtp_port, timeout=20) as smtp:
+                smtp.ehlo()
+                try:
+                    smtp.starttls()
+                    smtp.ehlo()
+                except Exception:
+                    logger.info("STARTTLS not supported or failed; continuing without TLS.")
+                if smtp_user and smtp_pass:
+                    smtp.login(smtp_user, smtp_pass)
+                smtp.send_message(msg)
+
+        logger.info("Email sent successfully (no attachment).")
     except Exception as e:
-        logger.error(f"Email error (continuing): {e}")
+        logger.error(f"Email error: {e}")
 
     return {
         "gpt_output": f"Audit Results: {authoritative_score}%\n\n{summary_md}",
@@ -1241,6 +1276,7 @@ async def get_client_rules(client_name: str):
     else:
         logger.error(f"Rules not found for client: {client_name}")
         return JSONResponse(status_code=404, content={"error": "Rules not found for this client."})
+
 
 
 
