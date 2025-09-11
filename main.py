@@ -699,25 +699,52 @@ def build_client_adherence_lines(
     return lines
 
 # =========================================
-# Estimate parsing
+# Estimate parsing (PATCHED to avoid false 'cover replacement')
 # =========================================
 OPS = ["replace", "repair", "refinish", "r&i", "r & i", "align", "blend", "calibrate"]
+
+OP_RX = re.compile(r'\b(repl(?:ace)?|r&r|r & r|r&i|r & i|repair|refinish|paint|align|blend|calibrate)\b', re.I)
+PANEL_RX = re.compile(r'\b(' + '|'.join(re.escape(p) for p in PANELS) + r')\b', re.I)
+PRICE_OR_LABOR_RX = re.compile(r'(\$\s*\d|\bhrs?\s*@\s*\$|\brate\b)', re.I)
+
 def extract_estimate_items(text: str) -> List[Dict[str, str]]:
+    """
+    Stricter line parser:
+      - Only parse inside the line-items table (between header and totals/notes).
+      - Require word-boundary op, a real panel word, and price/labor token.
+      - Prevents prose like "warranty covers replacement..." from becoming items.
+    """
     items: List[Dict[str, str]] = []
-    for line in (text or "").splitlines():
-        l = line.strip().lower()
-        if not l or len(l) < 6:
+    in_lines = False
+    for raw in (text or "").splitlines():
+        line = raw.strip()
+        if not line:
             continue
-        if any(op in l for op in OPS) and any(p in l for p in PANELS):
+
+        # enter the line-items block
+        if re.search(r'\bLine\s+Oper\s+Description\b', line, re.I):
+            in_lines = True
+            continue
+        # exit when reaching totals/notes
+        if in_lines and re.search(r'\b(ESTIMATE\s+TOTALS|NOTES|REQUEST A SUPPLEMENT|ALTERNATE PARTS USAGE|RECALL INFO)\b', line, re.I):
+            in_lines = False
+
+        if not in_lines:
+            continue
+
+        l = line.lower()
+        if OP_RX.search(l) and PANEL_RX.search(l) and PRICE_OR_LABOR_RX.search(l):
             side = "unspecified"
-            if "left" in l or re.search(r"\blh\b", l): side = "left"
-            if "right" in l or re.search(r"\brh\b", l): side = "right"
-            op = next((op for op in OPS if op in l), "unspecified")
-            panel = next((p for p in PANELS if p in l), "component")
-            items.append({"op": op, "part": panel, "side": side, "raw": line.strip()})
+            if re.search(r'\b(left|lh)\b', l): side = "left"
+            elif re.search(r'\b(right|rh)\b', l): side = "right"
+            op = OP_RX.search(l).group(1)
+            part = PANEL_RX.search(l).group(1)
+            items.append({"op": op, "part": part, "side": side, "raw": raw})
+
+    # de-dupe
     uniq, seen = [], set()
     for it in items:
-        key = (it["op"], it["part"], it["side"])
+        key = (it["op"].lower(), it["part"].lower(), it["side"].lower())
         if key not in seen:
             uniq.append(it); seen.add(key)
     return uniq
@@ -908,7 +935,7 @@ async def vision_review(
     require_oem = (age_years is not None and age_years <= 2) or (miles is not None and miles <= 24000)
     non_oem_flag = non_oem_used(combined_text)
 
-    # === Build a full Client Rules Adherence review (specific bullets) ===
+    # Client guideline adherence lines
     guidelines = parse_client_rules(client_rules)
     client_lines = build_client_adherence_lines(
         guidelines=guidelines,
