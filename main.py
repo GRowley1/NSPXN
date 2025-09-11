@@ -597,12 +597,20 @@ def parse_client_rules(client_rules: str) -> Dict[str, Any]:
     for key, variants in PHOTO_KEYWORDS.items():
         if _mentions_any(cr, variants):
             photos_req.add(key)
+
     require_labor = bool(re.search(r"\blabor rate[s]?\b|\brates\s+for\s+(?:body|paint|mechanical|frame)", cr))
     require_tax = bool(re.search(r"\bapply\s+tax\b|\btax\s+required\b|\binclude\s+tax\b", cr))
     require_market_doc = bool(re.search(r"\b(nada|kelley|kbb|black\s*book|retail|market\s+value)\b", cr))
     require_valuation_includes_tax = bool(re.search(r"\bvaluation\b.*\btax\b|\binclude\b.*\btax\b.*\bvaluation\b", cr, re.DOTALL))
     require_total_loss_decl = bool(re.search(r"\btotal\s+loss\b.*\bdeclare|\bdeclare\b.*\btotal\s+loss\b", cr, re.DOTALL))
     oem_recent = bool(re.search(r"(?:<=?|less\s+than|under)\s*2\s*year", cr)) or bool(re.search(r"(?:<=?|less\s+than|under)\s*24\s*[,k]*\s*mi", cr))
+
+    # Prefer aftermarket/LKQ/recon regardless of year/miles (NEW)
+    prefer_aftermarket = bool(re.search(
+        r"(heavy\s+on\s+the\s+use\s+of\s+aftermarket|consider\s+.*aftermarket\s+.*before\s+(?:lkq|oem)|"
+        r"utilize\s+(?:lkq|recon|aftermarket)\s+parts\s+regardless\s+of\s+year|regardless\s+of\s+year\s+or\s+mileage)",
+        cr, re.DOTALL))
+
     return {
         "photos_required": photos_req,
         "require_labor_rates": require_labor,
@@ -611,6 +619,7 @@ def parse_client_rules(client_rules: str) -> Dict[str, Any]:
         "require_valuation_includes_tax": require_valuation_includes_tax,
         "require_total_loss_decl": require_total_loss_decl,
         "oem_required_if_recent": oem_recent,
+        "prefer_aftermarket": prefer_aftermarket,   # NEW
     }
 
 def has_market_value_doc(text: str) -> bool:
@@ -679,8 +688,16 @@ def build_client_adherence_lines(
         else:
             lines.append("- Unable to verify: total loss declaration not found.")
 
-    # Parts policy vs. vehicle age/mileage
-    if guidelines.get("oem_required_if_recent"):
+    # Parts policy vs. vehicle age/mileage and client preference (UPDATED)
+    prefer_aftermarket = bool(guidelines.get("prefer_aftermarket"))
+    if prefer_aftermarket:
+        # Client wants aftermarket/LKQ/recon first regardless of year/miles
+        if non_oem_flag:
+            lines.append("- Compliant: aftermarket/LKQ/recon parts used per client preference.")
+        else:
+            lines.append("- Non-compliant: OEM used; document why alternative parts were not utilized per client preference.")
+    elif guidelines.get("oem_required_if_recent"):
+        # OEM-only if recent rule
         recent = ((year is not None and (datetime.datetime.now().year - year) <= 2) or
                   (miles is not None and miles <= 24000))
         if recent:
@@ -689,7 +706,17 @@ def build_client_adherence_lines(
             else:
                 lines.append("- Compliant: OEM parts used per ≤2 years/≤24k miles rule.")
         else:
-            lines.append("- N/A: vehicle exceeds OEM-only recent threshold in rules.")
+            # No special requirement—treat non-OEM neutrally unless other rules say otherwise
+            if non_oem_flag:
+                lines.append("- Non-OEM parts noted; verify usage aligns with remaining client rules.")
+            else:
+                lines.append("- Parts appear OEM; acceptable absent a client preference for alternatives.")
+    else:
+        # No explicit parts direction in rules; keep neutral
+        if non_oem_flag:
+            lines.append("- Non-OEM parts noted; verify client rules allow on this vehicle.")
+        else:
+            lines.append("- Parts appear OEM or not flagged as non-OEM.")
 
     return lines
 
@@ -700,7 +727,7 @@ OP_RX = re.compile(r'\b(repl(?:ace)?|r&r|r & r|r&i|r & i|repair|refinish|paint|a
 PANEL_RX = re.compile(r'\b(' + '|'.join(re.escape(p) for p in PANELS) + r')\b', re.I)
 PRICE_OR_LABOR_RX = re.compile(r'(\$\s*\d|\bhrs?\s*@\s*\$|\brate\b)', re.I)
 
-# ---- Side/part normalization helpers (NEW) ---------------------------------
+# ---- Side/part normalization helpers ---------------------------------
 SIDE_PATTERNS = [
     (re.compile(r'\b(RR|R/R|RIGHT\s*REAR)\b', re.I), "right rear"),
     (re.compile(r'\b(LR|L/R|LEFT\s*REAR)\b', re.I), "left rear"),
@@ -761,7 +788,7 @@ def extract_estimate_items(text: str) -> List[Dict[str, str]]:
             uniq.append(it); seen.add(key)
     return uniq
 
-# --- Loose estimate scanner when strict table not found (UPDATED) ----
+# --- Loose estimate scanner when strict table not found ----
 LOOSE_OP = re.compile(r'\b(repair|repl(?:ace)?|r&r|r&i|refinish|paint|align|blend|calibrate|scan|clear)\b', re.I)
 LOOSE_PART = re.compile(r'\b(' + '|'.join(re.escape(p) for p in PANELS + ["valance","finish panel","combo lamp","lamp","sensor","bracket"]) + r')\b', re.I)
 SIDE_RX = re.compile(r'\b(left|lh|right|rh|rear|front)\b', re.I)
@@ -786,7 +813,7 @@ def extract_estimate_items_loose(text: str) -> List[Dict[str, str]]:
     return uniq[:30]
 
 # =========================================
-# GPT compare (richer notes/overall)  **REPLACED**
+# GPT compare (richer notes/overall)
 # =========================================
 def compare_estimate_with_photos(items: List[Dict[str, str]],
                                  images_for_vision: List[Dict[str, Any]]) -> Dict[str, Any]:
@@ -821,7 +848,7 @@ def compare_estimate_with_photos(items: List[Dict[str, str]],
             model=MODEL,
             messages=[{"role": "system", "content": system},
                       {"role": "user", "content": user_parts}],
-            max_tokens=450,   # ↑ allow fuller review
+            max_tokens=450,
             temperature=0
         )
         txt = (rsp.choices[0].message.content or "").strip()
@@ -834,7 +861,7 @@ def compare_estimate_with_photos(items: List[Dict[str, str]],
         logger.error(f"Vision compare JSON error: {type(e).__name__}: {e}")
         return {"per_item": [],"not_in_photos": [],"extra_damage_in_photos": [],"overall": f"Comparison unavailable ({type(e).__name__})."}
 
-# ---------- Text fallback (kept) ----------
+# ---------- Text fallback ----------
 POI_RX = re.compile(r'Point\s+of\s+Impact\s*:\s*([^\n]+)', re.I)
 
 def build_text_consistency_review(items: List[Dict[str, str]], estimate_text: str) -> Tuple[List[str], str]:
@@ -913,13 +940,29 @@ def build_summary_markdown(
     else:
         taxes_lines = ["- Tax rate not found per client rules."]
 
+    # Parts Compliance (respect client preference if present)  **UPDATED**
     parts_lines: List[str] = []
-    if require_oem:
-        parts_lines.append("- Non-compliance: non-OEM parts on ≤ 2 years or ≤ 24k miles." if non_oem_flag
-                           else "- Compliant: OEM parts only for ≤ 2 years or ≤ 24k miles.")
+    prefer_aftermarket = bool(re.search(
+        r"(heavy\s+on\s+the\s+use\s+of\s+aftermarket|consider\s+.*aftermarket\s+.*before\s+(?:lkq|oem)|"
+        r"utilize\s+(?:lkq|recon|aftermarket)\s+parts\s+regardless\s+of\s+year|regardless\s+of\s+year\s+or\s+mileage)",
+        (client_rules or "").lower(), re.DOTALL))
+
+    if prefer_aftermarket:
+        if non_oem_flag:
+            parts_lines.append("- Compliant: aftermarket/LKQ/recon parts used per client preference.")
+        else:
+            parts_lines.append("- Non-compliant: OEM used; document why alternatives were not used per client preference.")
     else:
-        parts_lines.append("- Non-OEM parts noted; verify client rules allow on this vehicle." if non_oem_flag
-                           else "- Parts appear OEM or not flagged as non-OEM.")
+        if require_oem:
+            parts_lines.append(
+                "- Non-compliant: non-OEM parts on ≤ 2 years or ≤ 24k miles." if non_oem_flag
+                else "- Compliant: OEM parts only for ≤ 2 years or ≤ 24k miles."
+            )
+        else:
+            parts_lines.append(
+                "- Non-OEM parts noted; verify client rules allow on this vehicle." if non_oem_flag
+                else "- Parts appear OEM or not flagged as non-OEM."
+            )
 
     client_lines = client_lines_override if client_lines_override else ["- Apply client-required documentation (labor rates, photos, taxes) where applicable."]
     notes_lines = ["- Ensure estimate notes clearly explain damage appraisal per client requirements."]
@@ -1102,7 +1145,7 @@ async def vision_review(
             note = it.get('note','').strip()
             pdf.multi_cell(0, 6, f"- {side} {part} · {op} → Photo: {'YES' if ev else 'NO'} ({conf_txt}); {note}")
 
-        # NEW: comparison summary block
+        # Comparison summary block
         pdf.ln(2); pdf_add_section_title(pdf, "Comparison Summary")
         pdf.multi_cell(0, 6, f"Supported by photos: {supported} of {total}")
         if consistency.get("not_in_photos"):
