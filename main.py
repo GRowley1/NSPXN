@@ -310,14 +310,15 @@ def parse_year_miles(text: str) -> Tuple[Optional[int], Optional[int]]:
 def taxes_present(text: str) -> bool:
     return re.search(r'tax[^\n]{0,50}(\d{1,3}\s*%|\$\s*\d+(\.\d{2})?)', text or "", re.IGNORECASE) is not None
 
-PART_FLAGS = r'(?:\bA/M\b|\bAFTER\s*MARKET\b|\bAFTERMARKET\b|\bLKQ\b|\bRECOND(?:ITIONED)?\b|\bCAPA\b|\bALT[-\s]*OE\b|\bREMAN(?:UFACTURED)?\b)'
+PART_FLAGS = r'(?:\bA/M\b|\bAFTER\s*MARKET\b|\bAFTERMARKET\b|\bLKQ\b|\bRECOND(?:ITIONED)?\b|\bCAPA\b|\bALT[-\s]*OE\b|\bREMAN(?:UFACTURED)?\b|\bNSF\b)'
 OPS_TOK = re.compile(r'\b(REPL(?:ACE)?|R&R|R & R|R&I|R & I|REPAIR|REFINISH|PAINT)\b', re.IGNORECASE)
 PANELS = ["bumper","fender","door","hood","grille","headlamp","headlight","taillamp","tail lamp",
           "quarter panel","rocker","roof","trunk","decklid","mirror","apron","radiator support",
-          "wheel","tire","pillar","garnish","molding","fog lamp","reinforcement","cover"]
+          "wheel","tire","pillar","garnish","molding","fog lamp","reinforcement","cover","finish panel","combo lamp","sensor","bracket"]
 PANELS_U = [p.upper() for p in PANELS]
 
 def non_oem_used(text: str) -> bool:
+    """Legacy flag (kept): True if any line suggests non-OEM on a real panel/part."""
     lines = (text or "").splitlines()
     for line in lines:
         l = line.strip().upper()
@@ -327,6 +328,35 @@ def non_oem_used(text: str) -> bool:
     if re.search(r'parts\s+presented\s+are\s+OEM[-\s]*parts', text or "", re.IGNORECASE):
         return False
     return False
+
+# ---- Stronger parts mix read ----
+PART_TOKEN_MAP = {
+    "A/M": "aftermarket", "AFTERMARKET": "aftermarket",
+    "LKQ": "lkq",
+    "RECOND": "recon", "RECONDITIONED": "recon", "REMAN": "recon", "REMANUFACTURED": "recon",
+    "CAPA": "capa",
+    "NSF": "nsf",
+    "ALT OE": "alt_oe", "ALT-OE": "alt_oe", "ALTOE": "alt_oe",
+    "OEM": "oem"
+}
+PART_TOKEN_RX = re.compile(r'\b(A/M|AFTERMARKET|LKQ|RECOND(?:ITIONED)?|REMAN(?:UFACTURED)?|CAPA|NSF|ALT[-\s]*OE|OEM)\b', re.I)
+PN_RX = re.compile(r'\b(?=[A-Z0-9]*[A-Z])(?=[A-Z0-9]*\d)[A-Z0-9\-]{6,}\b')  # PN with letters+digits length>=6
+MONEY_RX = re.compile(r'\$\s*(\d+(?:\.\d{2})?)')
+TRIPLE_RX = re.compile(r'\b(\d+)\s+(\d+\.\d{2})\s+(\d+(?:\.\d+)?)\b')  # qty price hours (common CCC end)
+HOURS_RX = re.compile(r'(\d+(?:\.\d+)?)\s*h', re.I)
+
+def estimate_parts_mix(text: str) -> Dict[str, int]:
+    """Count parts tokens to summarize mix."""
+    counts = {"oem":0,"aftermarket":0,"lkq":0,"recon":0,"capa":0,"nsf":0,"alt_oe":0}
+    for m in PART_TOKEN_RX.finditer(text or ""):
+        tok = m.group(1).upper().replace("  "," ").replace("OE","OE")
+        norm = PART_TOKEN_MAP.get(tok, None)
+        if not norm:
+            # Normalize ALT forms
+            if "ALT" in tok and "OE" in tok: norm = "alt_oe"
+        if norm:
+            counts[norm] += 1
+    return counts
 
 # =========================================
 # Photo parsing (VIN/ODO/plate presence)
@@ -560,170 +590,9 @@ def make_contact_sheets_compact(
     return sheets
 
 # =========================================
-# Labor/tax compliance checks (aligned with display logic)
-# =========================================
-def labor_rates_present_any(text: str) -> bool:
-    labels = ["Body", "Paint", "Mechanical", "Structural", "Frame", "Refinish", "Supplies"]
-    return any(re.search(rf"{lbl}[^\n]{{0,120}}?\$\s*\d{{2,3}}", text or "", re.IGNORECASE) for lbl in labels)
-
-def check_labor_and_tax_score(text: str, client_rules: str) -> int:
-    adj = 0
-    if not labor_rates_present_any(text or ""):
-        adj -= 50
-    if re.search(r"tax\s*(required|must|utilize|apply|include)", (client_rules or ""), re.IGNORECASE):
-        if not taxes_present(text or ""):
-            adj -= 25
-    return adj
-
-# =========================================
-# Client-guideline parsing & adherence (full review)
-# =========================================
-PHOTO_KEYWORDS = {
-    "four corners": ["four corners", "4 corners", "four-corners"],
-    "vin": ["vin", "v.i.n"],
-    "odometer": ["odometer", "mileage"],
-    "license plate": ["license plate", "registration plate", "plate photo"],
-    "damage close-ups": ["close-up", "close ups", "closeups", "detail photos", "damage photos"],
-    "interior": ["interior photo", "interior photos"],
-}
-
-def _mentions_any(s: str, needles: List[str]) -> bool:
-    s2 = (s or "").lower()
-    return any(n in s2 for n in needles)
-
-def parse_client_rules(client_rules: str) -> Dict[str, Any]:
-    cr = (client_rules or "").lower()
-    photos_req = set()
-    for key, variants in PHOTO_KEYWORDS.items():
-        if _mentions_any(cr, variants):
-            photos_req.add(key)
-
-    require_labor = bool(re.search(r"\blabor rate[s]?\b|\brates\s+for\s+(?:body|paint|mechanical|frame)", cr))
-    require_tax = bool(re.search(r"\bapply\s+tax\b|\btax\s+required\b|\binclude\s+tax\b", cr))
-    require_market_doc = bool(re.search(r"\b(nada|kelley|kbb|black\s*book|retail|market\s+value)\b", cr))
-    require_valuation_includes_tax = bool(re.search(r"\bvaluation\b.*\btax\b|\binclude\b.*\btax\b.*\bvaluation\b", cr, re.DOTALL))
-    require_total_loss_decl = bool(re.search(r"\btotal\s+loss\b.*\bdeclare|\bdeclare\b.*\btotal\s+loss\b", cr, re.DOTALL))
-    oem_recent = bool(re.search(r"(?:<=?|less\s+than|under)\s*2\s*year", cr)) or bool(re.search(r"(?:<=?|less\s+than|under)\s*24\s*[,k]*\s*mi", cr))
-
-    # Prefer aftermarket/LKQ/recon regardless of year/miles (NEW)
-    prefer_aftermarket = bool(re.search(
-        r"(heavy\s+on\s+the\s+use\s+of\s+aftermarket|consider\s+.*aftermarket\s+.*before\s+(?:lkq|oem)|"
-        r"utilize\s+(?:lkq|recon|aftermarket)\s+parts\s+regardless\s+of\s+year|regardless\s+of\s+year\s+or\s+mileage)",
-        cr, re.DOTALL))
-
-    return {
-        "photos_required": photos_req,
-        "require_labor_rates": require_labor,
-        "require_tax": require_tax,
-        "require_market_doc": require_market_doc,
-        "require_valuation_includes_tax": require_valuation_includes_tax,
-        "require_total_loss_decl": require_total_loss_decl,
-        "oem_required_if_recent": oem_recent,
-        "prefer_aftermarket": prefer_aftermarket,   # NEW
-    }
-
-def has_market_value_doc(text: str) -> bool:
-    t = (text or "").lower()
-    return bool(re.search(r"\b(nada|kelley|kbb|black\s*book)\b", t)) or \
-           bool(re.search(r"\b(retail|market)\s+value\b", t))
-
-def build_client_adherence_lines(
-    guidelines: Dict[str, Any],
-    missing_photos: List[str],
-    text: str,
-    year: Optional[int],
-    miles: Optional[int],
-    non_oem_flag: bool,
-) -> List[str]:
-    lines: List[str] = []
-    req_photos = guidelines.get("photos_required", set())
-
-    # Photos
-    if req_photos:
-        for p in sorted(req_photos):
-            if p in missing_photos:
-                lines.append(f"- Non-compliant: required photo '{p}' missing.")
-            else:
-                lines.append(f"- Compliant: required photo '{p}' provided.")
-    else:
-        if missing_photos:
-            lines.append(f"- Non-compliant: missing required photo(s): {', '.join(missing_photos)}.")
-        else:
-            lines.append("- Compliant: required photo set present.")
-
-    # Labor rates
-    if guidelines.get("require_labor_rates"):
-        if labor_rates_present_any(text):
-            lines.append("- Compliant: labor rates listed on estimate.")
-        else:
-            lines.append("- Non-compliant: labor rates not listed per client rules.")
-
-    # Taxes
-    if guidelines.get("require_tax"):
-        if taxes_present(text):
-            lines.append("- Compliant: tax rate present per client rules.")
-        else:
-            lines.append("- Non-compliant: tax rate not found per client rules.")
-
-    # Market/retail value doc
-    if guidelines.get("require_market_doc"):
-        if has_market_value_doc(text):
-            lines.append("- Compliant: required retail/market value documentation present (e.g., NADA/KBB).")
-        else:
-            lines.append("- Non-compliant: required retail/market value documentation not found.")
-
-    # Valuation includes tax
-    if guidelines.get("require_valuation_includes_tax"):
-        if re.search(r"valuation[^\n]{0,80}(tax|incl(?:ued)?|with\s+tax)", text, re.IGNORECASE):
-            lines.append("- Compliant: valuation indicates tax inclusion.")
-        elif taxes_present(text):
-            lines.append("- Unable to verify: tax present but valuation line not explicit about inclusion.")
-        else:
-            lines.append("- Non-compliant: valuation tax inclusion not indicated.")
-
-    # Total loss declaration
-    if guidelines.get("require_total_loss_decl"):
-        if re.search(r"\btotal\s+loss\b", text, re.IGNORECASE):
-            lines.append("- Compliant: total loss declaration present.")
-        else:
-            lines.append("- Unable to verify: total loss declaration not found.")
-
-    # Parts policy vs. vehicle age/mileage and client preference (UPDATED)
-    prefer_aftermarket = bool(guidelines.get("prefer_aftermarket"))
-    if prefer_aftermarket:
-        # Client wants aftermarket/LKQ/recon first regardless of year/miles
-        if non_oem_flag:
-            lines.append("- Compliant: aftermarket/LKQ/recon parts used per client preference.")
-        else:
-            lines.append("- Non-compliant: OEM used; document why alternative parts were not utilized per client preference.")
-    elif guidelines.get("oem_required_if_recent"):
-        # OEM-only if recent rule
-        recent = ((year is not None and (datetime.datetime.now().year - year) <= 2) or
-                  (miles is not None and miles <= 24000))
-        if recent:
-            if non_oem_flag:
-                lines.append("- Non-compliant: non-OEM parts used on a ≤2 years or ≤24k miles vehicle.")
-            else:
-                lines.append("- Compliant: OEM parts used per ≤2 years/≤24k miles rule.")
-        else:
-            # No special requirement—treat non-OEM neutrally unless other rules say otherwise
-            if non_oem_flag:
-                lines.append("- Non-OEM parts noted; verify usage aligns with remaining client rules.")
-            else:
-                lines.append("- Parts appear OEM; acceptable absent a client preference for alternatives.")
-    else:
-        # No explicit parts direction in rules; keep neutral
-        if non_oem_flag:
-            lines.append("- Non-OEM parts noted; verify client rules allow on this vehicle.")
-        else:
-            lines.append("- Parts appear OEM or not flagged as non-OEM.")
-
-    return lines
-
-# =========================================
 # Estimate parsing
 # =========================================
-OP_RX = re.compile(r'\b(repl(?:ace)?|r&r|r & r|r&i|r & i|repair|refinish|paint|align|blend|calibrate)\b', re.I)
+OP_RX = re.compile(r'\b(repl(?:ace)?|r&r|r & r|r&i|r & i|repair|refinish|paint|align|blend|calibrate|scan|clear)\b', re.I)
 PANEL_RX = re.compile(r'\b(' + '|'.join(re.escape(p) for p in PANELS) + r')\b', re.I)
 PRICE_OR_LABOR_RX = re.compile(r'(\$\s*\d|\bhrs?\s*@\s*\$|\brate\b)', re.I)
 
@@ -752,6 +621,10 @@ def canonicalize_part(raw_line: str, part: str) -> str:
         return "bumper cover"
     if p in {"lamp", "taillamp", "tail lamp"} and ("tail" in l or "rear" in l):
         return "tail lamp"
+    if p == "finish panel" and "bumper" in l:
+        return "bumper finish panel"
+    if p == "combo lamp" and "rear" in l:
+        return "rear combo lamp"
     return part
 
 def extract_estimate_items(text: str) -> List[Dict[str, str]]:
@@ -789,9 +662,8 @@ def extract_estimate_items(text: str) -> List[Dict[str, str]]:
     return uniq
 
 # --- Loose estimate scanner when strict table not found ----
-LOOSE_OP = re.compile(r'\b(repair|repl(?:ace)?|r&r|r&i|refinish|paint|align|blend|calibrate|scan|clear)\b', re.I)
-LOOSE_PART = re.compile(r'\b(' + '|'.join(re.escape(p) for p in PANELS + ["valance","finish panel","combo lamp","lamp","sensor","bracket"]) + r')\b', re.I)
-SIDE_RX = re.compile(r'\b(left|lh|right|rh|rear|front)\b', re.I)
+LOOSE_OP = OP_RX
+LOOSE_PART = re.compile(r'\b(' + '|'.join(re.escape(p) for p in PANELS) + r')\b', re.I)
 
 def extract_estimate_items_loose(text: str) -> List[Dict[str, str]]:
     items: List[Dict[str, str]] = []
@@ -810,7 +682,126 @@ def extract_estimate_items_loose(text: str) -> List[Dict[str, str]]:
         key = (it["op"].lower(), it["part"].lower(), it["side"].lower())
         if key not in seen:
             uniq.append(it); seen.add(key)
-    return uniq[:30]
+    return uniq[:40]
+
+# ---- Estimate Details (sections + per-line parsing) -------------------
+SEC_STOP_RX = re.compile(r'\b(SUBTOTALS|ESTIMATE\s+TOTALS|TOTALS|NOTES|REQUEST A SUPPLEMENT)\b', re.I)
+
+def _is_section_header(line: str) -> Optional[str]:
+    s = re.sub(r'^\s*\d+[\.\)]?\s*', '', (line or '').strip())
+    if not s: return None
+    if SEC_STOP_RX.search(s): return None
+    if len(s) > 60: return None
+    # Treat all-caps phrases as section headers (common CCC export)
+    if s.upper() == s and re.search(r'[A-Z]', s) and not re.search(r'(\$|@|hrs?|rate)', s, re.I):
+        return s
+    return None
+
+def _parse_item_line(raw: str) -> Dict[str, Any]:
+    """Best-effort parse for op/part, tokens (A/M, CAPA, LKQ, etc.), PN, qty/price/hours."""
+    line = (raw or '').strip()
+    low = line.lower()
+    op = "Replace" if re.search(r'\brepl(?:ace)?\b', low) else \
+         "Repair"  if re.search(r'\brpr|repair\b', low) else \
+         "R&I"     if re.search(r'\br\s*&\s*i\b|\br&i\b', low) else \
+         "Refinish" if re.search(r'\brefinish|paint|blend\b', low) else \
+         "Operation"
+    # part name from known panels
+    mpart = LOOSE_PART.search(low)
+    part = canonicalize_part(raw, mpart.group(1) if mpart else "component")
+
+    # tokens
+    tokens = []
+    for m in PART_TOKEN_RX.finditer(raw):
+        tokens.append(m.group(1).upper().replace("  ", " ").replace("ALTOE","ALT OE"))
+
+    # PN
+    pn = ""
+    # prefer alphanumeric with both letters and digits
+    pnm = None
+    for m in PN_RX.finditer(raw):
+        cand = m.group(0)
+        # skip obvious money amounts or time
+        if not re.match(r'^\d+(\.\d+)?$', cand):
+            pnm = cand
+            break
+    pn = pnm or ""
+
+    qty = None; price = None; hours = None
+    # qty price hours triple
+    m3 = TRIPLE_RX.search(raw)
+    if m3:
+        try:
+            qty = int(m3.group(1))
+        except:
+            qty = None
+        price = float(m3.group(2))
+        hours = float(m3.group(3))
+    else:
+        # money
+        mm = MONEY_RX.search(raw)
+        if mm:
+            price = float(mm.group(1))
+        # hours hints
+        mh = HOURS_RX.findall(raw)
+        if mh:
+            try:
+                hours = float(mh[-1])
+            except:
+                hours = None
+        # simple qty: a lone int near start
+        mq = re.match(r'^\s*\**\#*\**\s*(\d+)\b', raw)
+        if mq:
+            try: qty = int(mq.group(1))
+            except: qty = None
+
+    return {
+        "raw": raw, "op": op, "part": part, "tokens": tokens,
+        "pn": pn, "qty": qty, "price": price, "hours": hours
+    }
+
+def parse_estimate_details(text: str) -> Dict[str, List[Dict[str, Any]]]:
+    """Return {section: [items...]}."""
+    sections: Dict[str, List[Dict[str, Any]]] = {}
+    current = None
+    for raw in (text or "").splitlines():
+        line = raw.strip()
+        if not line:
+            continue
+        h = _is_section_header(line)
+        if h:
+            current = h
+            if current not in sections:
+                sections[current] = []
+            continue
+        if current is None:
+            continue
+        if SEC_STOP_RX.search(line):
+            current = None
+            continue
+        # treat any non-header as an item row
+        itm = _parse_item_line(raw)
+        sections[current].append(itm)
+    # prune empty sections
+    return {k: v for k, v in sections.items() if v}
+
+def render_estimate_details_for_pdf(pdf: FPDF, sections: Dict[str, List[Dict[str, Any]]], max_lines: int = 60):
+    count = 0
+    for sec, items in sections.items():
+        if count >= max_lines: break
+        pdf.set_font_size(11); pdf.multi_cell(0, 6, f"- {sec.title()}")
+        pdf.set_font_size(10)
+        for it in items:
+            if count >= max_lines: break
+            tok = (", ".join(it["tokens"])) if it["tokens"] else ""
+            pn = f" (PN {it['pn']})" if it["pn"] else ""
+            qty = f" · Qty {it['qty']}" if it["qty"] is not None else ""
+            price = f" · ${it['price']:.2f}" if it["price"] is not None else ""
+            hrs = f" · {it['hours']:.1f} h" if it["hours"] is not None else ""
+            tok_str = f" [{tok}]" if tok else ""
+            line = f"    • {it['op']} {it['part']}{tok_str}{pn}{qty}{price}{hrs}"
+            pdf.multi_cell(0, 6, line)
+            count += 1
 
 # =========================================
 # GPT compare (richer notes/overall)
@@ -852,7 +843,7 @@ def compare_estimate_with_photos(items: List[Dict[str, str]],
             temperature=0
         )
         txt = (rsp.choices[0].message.content or "").strip()
-        txt = txt.removeprefix("```json").removesuffix("```").strip()
+        txt = txt.removesuffix("```").removeprefix("```json").strip()
         data = json.loads(txt)
         if not isinstance(data, dict) or "per_item" not in data:
             raise ValueError("JSON shape mismatch")
@@ -978,6 +969,22 @@ def build_summary_markdown(
     return "\n".join(sections)
 
 # =========================================
+# Labor/tax compliance checks (aligned with display logic)
+# =========================================
+def labor_rates_present_any(text: str) -> bool:
+    labels = ["Body", "Paint", "Mechanical", "Structural", "Frame", "Refinish", "Supplies"]
+    return any(re.search(rf"{lbl}[^\n]{{0,120}}?\$\s*\d{{2,3}}", text or "", re.IGNORECASE) for lbl in labels)
+
+def check_labor_and_tax_score(text: str, client_rules: str) -> int:
+    adj = 0
+    if not labor_rates_present_any(text or ""):
+        adj -= 50
+    if re.search(r"tax\s*(required|must|utilize|apply|include)", (client_rules or ""), re.IGNORECASE):
+        if not taxes_present(text or ""):
+            adj -= 25
+    return adj
+
+# =========================================
 # PDF helpers
 # =========================================
 def pdf_add_section_title(pdf: FPDF, title: str):
@@ -1070,6 +1077,13 @@ async def vision_review(
     if not est_items:
         est_items = extract_estimate_items_loose(combined_text)
 
+    # Build Estimate Details (sections/items) and Parts Mix
+    est_sections = parse_estimate_details(combined_text)
+    parts_mix = estimate_parts_mix(combined_text)
+    # Strengthen non_oem_flag with parts_mix
+    non_oem_flag_legacy = non_oem_used(combined_text)
+    non_oem_flag = non_oem_flag_legacy or (parts_mix.get("aftermarket",0)+parts_mix.get("lkq",0)+parts_mix.get("recon",0)+parts_mix.get("capa",0)+parts_mix.get("nsf",0)+parts_mix.get("alt_oe",0) > 0)
+
     # Vision compare (richer)
     consistency = compare_estimate_with_photos(est_items, images_for_vision)
 
@@ -1077,7 +1091,6 @@ async def vision_review(
     now_year = datetime.datetime.now().year
     age_years = (now_year - year) if year else None
     require_oem = (age_years is not None and age_years <= 2) or (miles is not None and miles <= 24000)
-    non_oem_flag = non_oem_used(combined_text)
 
     # Client guideline adherence lines
     guidelines = parse_client_rules(client_rules)
@@ -1135,10 +1148,34 @@ async def vision_review(
     if odo_photos: pdf.multi_cell(0, 6, f"Odometer (from photos): {odo_photos}")
     pdf.multi_cell(0, 6, f"Compliance Score: {authoritative_score}%")
 
+    # --- AI-4-IA Review Summary
     pdf.ln(4); pdf_add_section_title(pdf, "AI-4-IA Review Summary")
     pdf.multi_cell(0, 6, f"**Audit Results: {authoritative_score}%**")
     pdf.ln(1); pdf.multi_cell(0, 6, summary_md)
 
+    # --- Estimate Details (NEW)
+    pdf.ln(4); pdf_add_section_title(pdf, "Estimate Details")
+    MAX_DETAIL_LINES = 60
+    if est_sections:
+        render_estimate_details_for_pdf(pdf, est_sections, max_lines=MAX_DETAIL_LINES)
+        # Parts mix summary
+        pdf.ln(2); pdf_add_section_title(pdf, "Parts Mix Summary")
+        pm = parts_mix
+        mix_line = (f"OEM: {pm.get('oem',0)} | Aftermarket: {pm.get('aftermarket',0)} | CAPA: {pm.get('capa',0)} | "
+                    f"LKQ: {pm.get('lkq',0)} | Recon/Reman: {pm.get('recon',0)} | NSF: {pm.get('nsf',0)} | ALT-OE: {pm.get('alt_oe',0)}")
+        pdf.multi_cell(0, 6, mix_line)
+        dominant_note = "Dominant usage: "
+        if pm.get('aftermarket',0)+pm.get('capa',0)+pm.get('nsf',0)+pm.get('alt_oe',0)+pm.get('lkq',0)+pm.get('recon',0) > pm.get('oem',0):
+            dominant_note += "Non-OEM / alternative parts appear prevalent."
+        elif pm.get('oem',0) > 0 and sum(v for k,v in pm.items() if k!='oem') == 0:
+            dominant_note += "OEM only."
+        else:
+            dominant_note += "Mixed."
+        pdf.multi_cell(0, 6, dominant_note)
+    else:
+        pdf.multi_cell(0, 6, "- No parseable sections found; showing summarized scope only.")
+
+    # --- Estimate ↔ Photos Consistency Review
     pdf.ln(4); pdf_add_section_title(pdf, "Estimate ↔ Photos Consistency Review")
     if consistency.get("per_item"):
         supported = 0
@@ -1188,6 +1225,9 @@ async def vision_review(
     except Exception as e:
         logger.error(f"PDF write error: {e}")
 
+    # =========================
+    # Email — original behavior
+    # =========================
     try:
         msg = EmailMessage()
         msg["Subject"] = f"AI-4-IA Review: {claim_number}"
@@ -1214,14 +1254,13 @@ Audit Results: {authoritative_score}%
 """
         msg.set_content(email_body)
 
-        # Match the exact working settings (SSL 465, no env switching, no attachment)
         with smtplib.SMTP_SSL("mail.tierra.net", 465, timeout=20) as smtp:
             smtp.login("info@nspxn.com", "grr2025GRR")
             smtp.send_message(msg)
 
         logger.info("Email sent successfully (original settings, no attachment).")
     except Exception as e:
-        logger.error(f"Email error (continuing): {e}")
+        logger.error(f"Email error: {e}")
 
     return {
         "gpt_output": f"Audit Results: {authoritative_score}%\n\n{summary_md}",
@@ -1231,7 +1270,8 @@ Audit Results: {authoritative_score}%
         "vin": vin_final,
         "vin_photo_verification": vin_verification,
         "score": f"{authoritative_score}%",
-        "consistency_review": consistency
+        "consistency_review": consistency,
+        "parts_mix": parts_mix
     }
 
 @app.get("/download-pdf")
@@ -1256,6 +1296,7 @@ async def get_client_rules(client_name: str):
     else:
         logger.error(f"Rules not found for client: {client_name}")
         return JSONResponse(status_code=404, content={"error": "Rules not found for this client."})
+
 
 
 
