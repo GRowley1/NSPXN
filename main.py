@@ -591,18 +591,22 @@ OP_RX = re.compile(r'\b(repl(?:ace)?|r&r|r & r|r&i|r & i|repair|refinish|paint|a
 PANEL_RX = re.compile(r'\b(' + '|'.join(re.escape(p) for p in PANELS) + r')\b', re.I)
 PRICE_OR_LABOR_RX = re.compile(r'(\$\s*\d|\bhrs?\s*@\s*\$|\brate\b)', re.I)
 
-SIDE_PATTERNS = [
-    (re.compile(r'\b(RR|R/R|RIGHT\s*REAR)\b', re.I), "right rear"),
-    (re.compile(r'\b(LR|L/R|LEFT\s*REAR)\b', re.I), "left rear"),
-    (re.compile(r'\b(RF|R/F|RIGHT\s*FRONT)\b', re.I), "right front"),
-    (re.compile(r'\b(LF|L/F|LEFT\s*FRONT)\b', re.I), "left front"),
-    (re.compile(r'\b(REAR)\b', re.I), "rear"),
-    (re.compile(r'\b(FRONT)\b', re.I), "front"),
-    (re.compile(r'\b(RIGHT|RH)\b', re.I), "right"),
-    (re.compile(r'\b(LEFT|LH)\b', re.I), "left"),
-]
+# --- Section parsing helpers (UPDATED) ---
+SEC_STOP_RX = re.compile(r'\b(SUBTOTALS|ESTIMATE\s+TOTALS|TOTALS|NOTES|REQUEST A SUPPLEMENT|ALTERNATE PARTS USAGE|RECALL INFO)\b', re.I)
+SECTION_ALLOW_WORDS = re.compile(r'\b(bumper|lamp|combo lamp|finish panel|fender|door|hood|grille|quarter|rocker|roof|trunk|decklid|mirror|diagnostic|scan|calibrate|miscellaneous|operations|other charges|vehicle diagnostics|refinish|paint|blend)\b', re.I)
+SECTION_DENY_WORDS = re.compile(r'\b(j\.?\s*d\.?\s*power|contact|phone|fax|advisor|policy|coverage|insured|deductible|payment|claimant|shop info)\b', re.I)
 
 def detect_side(raw: str) -> str:
+    SIDE_PATTERNS = [
+        (re.compile(r'\b(RR|R/R|RIGHT\s*REAR)\b', re.I), "right rear"),
+        (re.compile(r'\b(LR|L/R|LEFT\s*REAR)\b', re.I), "left rear"),
+        (re.compile(r'\b(RF|R/F|RIGHT\s*FRONT)\b', re.I), "right front"),
+        (re.compile(r'\b(LF|L/F|LEFT\s*FRONT)\b', re.I), "left front"),
+        (re.compile(r'\b(REAR)\b', re.I), "rear"),
+        (re.compile(r'\b(FRONT)\b', re.I), "front"),
+        (re.compile(r'\b(RIGHT|RH)\b', re.I), "right"),
+        (re.compile(r'\b(LEFT|LH)\b', re.I), "left"),
+    ]
     for rx, name in SIDE_PATTERNS:
         if rx.search(raw or ""):
             return name
@@ -621,162 +625,171 @@ def canonicalize_part(raw_line: str, part: str) -> str:
         return "rear combo lamp"
     return part
 
-def extract_estimate_items(text: str) -> List[Dict[str, str]]:
-    items: List[Dict[str, str]] = []
-    in_lines = False
-    for raw in (text or "").splitlines():
-        line = raw.strip()
-        if not line:
-            continue
-
-        if re.search(r'\bLine\s+Oper\s+Description\b', line, re.I):
-            in_lines = True
-            continue
-        if in_lines and re.search(r'\b(ESTIMATE\s+TOTALS|NOTES|REQUEST A SUPPLEMENT|ALTERNATE PARTS USAGE|RECALL INFO)\b', line, re.I):
-            in_lines = False
-
-        if not in_lines:
-            continue
-
-        l = line.lower()
-        if OP_RX.search(l) and PANEL_RX.search(l) and PRICE_OR_LABOR_RX.search(l):
-            op = OP_RX.search(l).group(1) if OP_RX.search(l) else "op"
-            part = PANEL_RX.search(l).group(1) if PANEL_RX.search(l) else "component"
-            part = canonicalize_part(raw, part)
-            side = detect_side(raw)
-            items.append({"op": op, "part": part, "side": side, "raw": raw})
-
-    uniq, seen = [], set()
-    for it in items:
-        key = (it["op"].lower(), it["part"].lower(), it["side"].lower())
-        if key not in seen:
-            uniq.append(it); seen.add(key)
-    return uniq
-
-LOOSE_OP = OP_RX
-LOOSE_PART = re.compile(r'\b(' + '|'.join(re.escape(p) for p in PANELS) + r')\b', re.I)
-
-def extract_estimate_items_loose(text: str) -> List[Dict[str, str]]:
-    items: List[Dict[str, str]] = []
-    for raw in (text or "").splitlines():
-        l = raw.lower()
-        if LOOSE_OP.search(l) and LOOSE_PART.search(l):
-            op = LOOSE_OP.search(l).group(1)
-            part = LOOSE_PART.search(l).group(1)
-            part = canonicalize_part(raw, part)
-            side = detect_side(raw)
-            items.append({"op": op, "part": part, "side": side, "raw": raw})
-
-    uniq, seen = [], set()
-    for it in items:
-        key = (it["op"].lower(), it["part"].lower(), it["side"].lower())
-        if key not in seen:
-            uniq.append(it); seen.add(key)
-    return uniq[:40]
-
-SEC_STOP_RX = re.compile(r'\b(SUBTOTALS|ESTIMATE\s+TOTALS|TOTALS|NOTES|REQUEST A SUPPLEMENT)\b', re.I)
-
+# --- UPDATED: header detection tightened ---
 def _is_section_header(line: str) -> Optional[str]:
+    """Treat only relevant all-caps-ish lines as section headers; ignore valuation/contact blocks."""
     s = re.sub(r'^\s*\d+[\.\)]?\s*', '', (line or '').strip())
-    if not s: return None
-    if SEC_STOP_RX.search(s): return None
-    if len(s) > 60: return None
-    if s.upper() == s and re.search(r'[A-Z]', s) and not re.search(r'(\$|@|hrs?|rate)', s, re.I):
-        return s
+    if not s:
+        return None
+    if SEC_STOP_RX.search(s):
+        return None
+    if SECTION_DENY_WORDS.search(s):
+        return None
+    if SECTION_ALLOW_WORDS.search(s) and len(s) <= 64:
+        if s.upper() == s or s.istitle():
+            if not re.search(r'(\$|@|hrs?|rate)', s, re.I):
+                return s
     return None
 
-def _parse_item_line(raw: str) -> Dict[str, Any]:
+# --- UPDATED: stricter item parser (returns Optional) ---
+def _parse_item_line(raw: str) -> Optional[Dict[str, Any]]:
+    """
+    Parse a single estimate row. Return None if it doesn't look like a real line item.
+    Requires at least one of: explicit operation token, known panel/part, or a numeric (qty/price/hours).
+    """
     line = (raw or '').strip()
+    if not line:
+        return None
+
+    # skip obvious non-line content (contacts, phones, JD Power, addresses, etc.)
+    if re.match(r'^\s*(o:|f:|tel:|phone:|fax:)\b', line, re.I):
+        return None
+    if SECTION_DENY_WORDS.search(line):
+        return None
+
     low = line.lower()
-    op = "Replace" if re.search(r'\brepl(?:ace)?\b', low) else \
-         "Repair"  if re.search(r'\brpr|repair\b', low) else \
-         "R&I"     if re.search(r'\br\s*&\s*i\b|\br&i\b', low) else \
-         "Refinish" if re.search(r'\brefinish|paint|blend\b', low) else \
-         "Operation"
-    mpart = LOOSE_PART.search(low)
-    part = canonicalize_part(raw, mpart.group(1) if mpart else "component")
 
-    tokens = []
-    for m in PART_TOKEN_RX.finditer(raw):
-        tokens.append(m.group(1).upper().replace("  ", " ").replace("ALTOE","ALT OE"))
+    # operation
+    op = None
+    if re.search(r'\brepl(?:ace)?\b', low):
+        op = "Replace"
+    elif re.search(r'\brpr\b|\brepair\b', low):
+        op = "Repair"
+    elif re.search(r'\br\s*&\s*i\b|\br&i\b', low):
+        op = "R&I"
+    elif re.search(r'\brefinish|paint|blend\b', low):
+        op = "Refinish"
+    elif re.search(r'\bscan|calibrate|align|clear\b', low):
+        op = "Operation"  # procedural
 
+    # part/panel
+    mpart = PANEL_RX.search(low)
+    part = canonicalize_part(raw, mpart.group(1) if mpart else "component") if mpart else None
+
+    # tokens (A/M, CAPA, LKQ, etc.)
+    tokens = [m.group(1).upper().replace("  ", " ").replace("ALTOE", "ALT OE") for m in PART_TOKEN_RX.finditer(raw)]
+
+    # part number (prefer alphanumeric with letters+digits)
     pn = ""
-    pnm = None
     for m in PN_RX.finditer(raw):
         cand = m.group(0)
         if not re.match(r'^\d+(\.\d+)?$', cand):
-            pnm = cand
+            pn = cand
             break
-    pn = pnm or ""
 
+    # qty / price / hours
     qty = None; price = None; hours = None
     m3 = TRIPLE_RX.search(raw)
     if m3:
-        try:
-            qty = int(m3.group(1))
-        except:
-            qty = None
-        price = float(m3.group(2))
-        hours = float(m3.group(3))
+        try: qty = int(m3.group(1))
+        except: qty = None
+        price = float(m3.group(2)); hours = float(m3.group(3))
     else:
         mm = MONEY_RX.search(raw)
         if mm:
             price = float(mm.group(1))
         mh = HOURS_RX.findall(raw)
         if mh:
-            try:
-                hours = float(mh[-1])
-            except:
-                hours = None
+            try: hours = float(mh[-1])
+            except: hours = None
         mq = re.match(r'^\s*\**\#*\**\s*(\d+)\b', raw)
         if mq:
             try: qty = int(mq.group(1))
             except: qty = None
 
+    # require signal that this is a real item
+    has_signal = any([
+        op is not None and op != "Operation",
+        part is not None and part != "component",
+        qty is not None,
+        price is not None,
+        hours is not None,
+        bool(tokens),
+        bool(pn),
+    ])
+    if not has_signal:
+        return None
+
+    # side
+    side = detect_side(raw)
+
     return {
-        "raw": raw, "op": op, "part": part, "tokens": tokens,
-        "pn": pn, "qty": qty, "price": price, "hours": hours
+        "raw": raw,
+        "op": op or "Operation",
+        "part": (part or "component"),
+        "tokens": tokens,
+        "pn": pn,
+        "qty": qty,
+        "price": price,
+        "hours": hours
     }
 
+# --- UPDATED: chunk-aware estimate-details parser ---
+EST_LINES_START_RX = re.compile(r'\bLine\s+Oper\s+Description\b', re.I)
+EST_LINES_END_RX = SEC_STOP_RX  # reuse stop markers
+
 def parse_estimate_details(text: str) -> Dict[str, List[Dict[str, Any]]]:
+    """
+    Prefer parsing ONLY the main estimate table between 'Line  Oper  Description'
+    and the next totals/notes block. If that block isn't found, fall back to
+    conservative section+item scan with strict filters.
+    """
     sections: Dict[str, List[Dict[str, Any]]] = {}
+
+    if not text:
+        return sections
+
+    # Try to isolate the estimate line table region first.
+    start = EST_LINES_START_RX.search(text or "")
+    if start:
+        end = EST_LINES_END_RX.search(text, pos=start.end())
+        chunk = text[start.end(): end.start()] if end else text[start.end():]
+        current = "Estimate Lines"
+        sections[current] = []
+        for raw in chunk.splitlines():
+            raw = raw.strip()
+            if not raw:
+                continue
+            itm = _parse_item_line(raw)
+            if itm:
+                sections[current].append(itm)
+        if sections[current]:
+            return sections
+        else:
+            sections.pop(current, None)
+
+    # Fallback: conservative scan over entire text with header gating
     current = None
     for raw in (text or "").splitlines():
         line = raw.strip()
         if not line:
             continue
-        h = _is_section_header(line)
-        if h:
-            current = h
-            if current not in sections:
-                sections[current] = []
-            continue
-        if current is None:
-            continue
         if SEC_STOP_RX.search(line):
             current = None
             continue
+        h = _is_section_header(line)
+        if h:
+            current = h
+            sections.setdefault(current, [])
+            continue
+        if current is None:
+            continue
         itm = _parse_item_line(raw)
-        sections[current].append(itm)
-    return {k: v for k, v in sections.items() if v}
+        if itm:
+            sections[current].append(itm)
 
-def render_estimate_details_for_pdf(pdf: FPDF, sections: Dict[str, List[Dict[str, Any]]], max_lines: int = 60):
-    count = 0
-    for sec, items in sections.items():
-        if count >= max_lines: break
-        pdf.set_font_size(11); pdf.multi_cell(0, 6, f"- {sec.title()}")
-        pdf.set_font_size(10)
-        for it in items:
-            if count >= max_lines: break
-            tok = (", ".join(it["tokens"])) if it["tokens"] else ""
-            pn = f" (PN {it['pn']})" if it["pn"] else ""
-            qty = f" · Qty {it['qty']}" if it["qty"] is not None else ""
-            price = f" · ${it['price']:.2f}" if it["price"] is not None else ""
-            hrs = f" · {it['hours']:.1f} h" if it["hours"] is not None else ""
-            tok_str = f" [{tok}]" if tok else ""
-            line = f"    • {it['op']} {it['part']}{tok_str}{pn}{qty}{price}{hrs}"
-            pdf.multi_cell(0, 6, line)
-            count += 1
+    # prune empty sections
+    return {k: v for k, v in sections.items() if v}
 
 # =========================================
 # GPT compare (richer notes/overall)
@@ -1259,6 +1272,7 @@ async def vision_review(
         pdf.multi_cell(0, 6, "- No parseable sections found; showing summarized scope only.")
 
     pdf.ln(4); pdf_add_section_title(pdf, "Estimate ↔ Photos Consistency Review")
+    consistency = consistency  # already computed
     if consistency.get("per_item"):
         supported = 0
         total = len(consistency["per_item"])
