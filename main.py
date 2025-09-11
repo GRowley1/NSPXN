@@ -1188,16 +1188,11 @@ async def vision_review(
     except Exception as e:
         logger.error(f"PDF write error: {e}")
 
-    # =========================
-    # Email — original behavior
-    # =========================
     try:
         msg = EmailMessage()
         msg["Subject"] = f"AI-4-IA Review: {claim_number}"
-        smtp_from = os.getenv("SMTP_FROM", "info@nspxn.com")
-        smtp_to = os.getenv("SMTP_TO", "info@nspxn.com")
-        msg["From"] = smtp_from
-        msg["To"] = smtp_to
+        msg["From"] = "noreply@nspxn.com"
+        msg["To"] = "info@nspxn.com"
 
         email_body = f"""NSPXN.com AI4IA Review Report
 
@@ -1219,20 +1214,14 @@ Audit Results: {authoritative_score}%
 """
         msg.set_content(email_body)
 
-        # Original: SSL 465 by default; no attachment
-        smtp_host = os.getenv("SMTP_HOST", "mail.tierra.net")
-        smtp_port = int(os.getenv("SMTP_PORT", "465"))
-        smtp_user = os.getenv("SMTP_USER", "info@nspxn.com")
-        smtp_pass = os.getenv("SMTP_PASS")  # must be set in env
-
-        with smtplib.SMTP_SSL(smtp_host, smtp_port, timeout=20) as smtp:
-            if smtp_user and smtp_pass:
-                smtp.login(smtp_user, smtp_pass)
+        # Match the exact working settings (SSL 465, no env switching, no attachment)
+        with smtplib.SMTP_SSL("mail.tierra.net", 465, timeout=20) as smtp:
+            smtp.login("info@nspxn.com", "grr2025GRR")
             smtp.send_message(msg)
 
         logger.info("Email sent successfully (original settings, no attachment).")
     except Exception as e:
-        logger.error(f"Email error: {e}")
+        logger.error(f"Email error (continuing): {e}")
 
     return {
         "gpt_output": f"Audit Results: {authoritative_score}%\n\n{summary_md}",
