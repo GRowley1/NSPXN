@@ -436,7 +436,7 @@ def _plate_ocr_variants(img: Image.Image) -> str:
             g.point(lambda p: 255 if p > 190 else 0, mode="1").convert("L"),
         ]
     out = []
-    for v in variants(im):
+    for v in variants(img):
         for psm in (6, 7, 11):
             try:
                 t = pytesseract.image_to_string(v, lang="eng", config=f"--psm {psm} --oem 1")
@@ -674,7 +674,7 @@ def build_client_adherence_lines(
 
     # Valuation includes tax
     if guidelines.get("require_valuation_includes_tax"):
-        if re.search(r"valuation[^\n]{0,80}(tax|incl(?:uded)?|with\s+tax)", text, re.IGNORECASE):
+        if re.search(r"valuation[^\n]{0,80}(tax|incl(?:ued)?|with\s+tax)", text, re.IGNORECASE):
             lines.append("- Compliant: valuation indicates tax inclusion.")
         elif taxes_present(text):
             lines.append("- Unable to verify: tax present but valuation line not explicit about inclusion.")
@@ -1188,7 +1188,9 @@ async def vision_review(
     except Exception as e:
         logger.error(f"PDF write error: {e}")
 
-    # Email — enabled (no attachment)
+    # =========================
+    # Email — original behavior
+    # =========================
     try:
         msg = EmailMessage()
         msg["Subject"] = f"AI-4-IA Review: {claim_number}"
@@ -1217,29 +1219,18 @@ Audit Results: {authoritative_score}%
 """
         msg.set_content(email_body)
 
+        # Original: SSL 465 by default; no attachment
         smtp_host = os.getenv("SMTP_HOST", "mail.tierra.net")
         smtp_port = int(os.getenv("SMTP_PORT", "465"))
         smtp_user = os.getenv("SMTP_USER", "info@nspxn.com")
         smtp_pass = os.getenv("SMTP_PASS")  # must be set in env
 
-        if smtp_port == 465:
-            with smtplib.SMTP_SSL(smtp_host, smtp_port, timeout=20) as smtp:
-                if smtp_user and smtp_pass:
-                    smtp.login(smtp_user, smtp_pass)
-                smtp.send_message(msg)
-        else:
-            with smtplib.SMTP(smtp_host, smtp_port, timeout=20) as smtp:
-                smtp.ehlo()
-                try:
-                    smtp.starttls()
-                    smtp.ehlo()
-                except Exception:
-                    logger.info("STARTTLS not supported or failed; continuing without TLS.")
-                if smtp_user and smtp_pass:
-                    smtp.login(smtp_user, smtp_pass)
-                smtp.send_message(msg)
+        with smtplib.SMTP_SSL(smtp_host, smtp_port, timeout=20) as smtp:
+            if smtp_user and smtp_pass:
+                smtp.login(smtp_user, smtp_pass)
+            smtp.send_message(msg)
 
-        logger.info("Email sent successfully (no attachment).")
+        logger.info("Email sent successfully (original settings, no attachment).")
     except Exception as e:
         logger.error(f"Email error: {e}")
 
@@ -1276,6 +1267,7 @@ async def get_client_rules(client_name: str):
     else:
         logger.error(f"Rules not found for client: {client_name}")
         return JSONResponse(status_code=404, content={"error": "Rules not found for this client."})
+
 
 
 
