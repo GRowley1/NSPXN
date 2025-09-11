@@ -993,6 +993,67 @@ def pdf_add_section_title(pdf: FPDF, title: str):
 def pdf_kv(pdf: FPDF, key: str, val: str):
     pdf.set_font_size(10); pdf.multi_cell(0, 6, f"{key}: {val}")
 
+# ---- Client-guideline parsing (restored) ----
+PHOTO_KEYWORDS = {
+    "four corners": ["four corners", "4 corners", "four-corners"],
+    "vin": ["vin", "v.i.n"],
+    "odometer": ["odometer", "mileage"],
+    "license plate": ["license plate", "registration plate", "plate photo"],
+    "damage close-ups": ["close-up", "close ups", "closeups", "detail photos", "damage photos"],
+    "interior": ["interior photo", "interior photos"],
+}
+
+def _mentions_any(s: str, needles: list[str]) -> bool:
+    s2 = (s or "").lower()
+    return any(n in s2 for n in needles)
+
+def parse_client_rules(client_rules: str) -> dict[str, object]:
+    """
+    Extracts structured expectations from free-text client guidelines:
+      - which photos are required
+      - whether labor/tax/market docs are required
+      - whether valuation must include tax
+      - whether total-loss declaration is expected
+      - parts preferences (OEM-only if recent vs. aftermarket-first)
+    Returns a dict with boolean flags and a photos_required set.
+    """
+    cr = (client_rules or "").lower()
+
+    # Photos required (keyword-heuristic)
+    photos_req = set()
+    for key, variants in PHOTO_KEYWORDS.items():
+        if _mentions_any(cr, variants):
+            photos_req.add(key)
+
+    require_labor_rates = bool(re.search(r"\blabor rate[s]?\b|\brates\s+for\s+(?:body|paint|mechanical|frame)", cr))
+    require_tax = bool(re.search(r"\b(apply|include|utilize)\s+tax\b|\btax\s+(required|must)\b", cr))
+    require_market_doc = bool(re.search(r"\b(nada|kelley|kbb|black\s*book|retail\s+value|market\s+value)\b", cr))
+    require_valuation_includes_tax = bool(re.search(r"\bvaluation\b.*\btax\b|\binclude\b.*\btax\b.*\bvaluation\b", cr, re.DOTALL))
+    require_total_loss_decl = bool(re.search(r"\b(total\s+loss).*(declare|declaration)|\bdeclare\b.*\btotal\s+loss\b", cr, re.DOTALL))
+
+    # OEM-only when recent (≤2 yrs or ≤24k mi)
+    oem_recent = bool(re.search(r"(?:<=?|less\s+than|under)\s*2\s*year", cr)) \
+                 or bool(re.search(r"(?:<=?|less\s+than|under)\s*24\s*[,k]*\s*mi", cr))
+
+    # Aftermarket-first preference regardless of year/miles
+    prefer_aftermarket = bool(re.search(
+        r"(heavy\s+on\s+the\s+use\s+of\s+aftermarket|"
+        r"consider\s+.*aftermarket\s+.*before\s+(?:lkq|oem)|"
+        r"utilize\s+(?:lkq|recon|aftermarket)\s+parts\s+regardless\s+of\s+year|"
+        r"regardless\s+of\s+year\s+or\s+mileage)",
+        cr, re.DOTALL))
+
+    return {
+        "photos_required": photos_req,
+        "require_labor_rates": require_labor_rates,
+        "require_tax": require_tax,
+        "require_market_doc": require_market_doc,
+        "require_valuation_includes_tax": require_valuation_includes_tax,
+        "require_total_loss_decl": require_total_loss_decl,
+        "oem_required_if_recent": oem_recent,
+        "prefer_aftermarket": prefer_aftermarket,
+    }
+
 # =========================================
 # Routes
 # =========================================
