@@ -560,8 +560,7 @@ def make_contact_sheets_compact(
     return sheets
 
 # =========================================
-# Labor/tax compliance checks
-# (aligned with display logic)
+# Labor/tax compliance checks (aligned with display logic)
 # =========================================
 def labor_rates_present_any(text: str) -> bool:
     labels = ["Body", "Paint", "Mechanical", "Structural", "Frame", "Refinish", "Supplies"]
@@ -695,13 +694,14 @@ def build_client_adherence_lines(
     return lines
 
 # =========================================
-# Estimate parsing (STRICT parser to avoid false hits)
+# Estimate parsing
 # =========================================
 OP_RX = re.compile(r'\b(repl(?:ace)?|r&r|r & r|r&i|r & i|repair|refinish|paint|align|blend|calibrate)\b', re.I)
 PANEL_RX = re.compile(r'\b(' + '|'.join(re.escape(p) for p in PANELS) + r')\b', re.I)
 PRICE_OR_LABOR_RX = re.compile(r'(\$\s*\d|\bhrs?\s*@\s*\$|\brate\b)', re.I)
 
 def extract_estimate_items(text: str) -> List[Dict[str, str]]:
+    """Strict block-based parser (prefers CCC-style line table)."""
     items: List[Dict[str, str]] = []
     in_lines = False
     for raw in (text or "").splitlines():
@@ -709,11 +709,9 @@ def extract_estimate_items(text: str) -> List[Dict[str, str]]:
         if not line:
             continue
 
-        # enter the line-items block when a typical header is seen
         if re.search(r'\bLine\s+Oper\s+Description\b', line, re.I):
             in_lines = True
             continue
-        # exit when reaching totals/notes/other sections
         if in_lines and re.search(r'\b(ESTIMATE\s+TOTALS|NOTES|REQUEST A SUPPLEMENT|ALTERNATE PARTS USAGE|RECALL INFO)\b', line, re.I):
             in_lines = False
 
@@ -739,6 +737,35 @@ def extract_estimate_items(text: str) -> List[Dict[str, str]]:
         if key not in seen:
             uniq.append(it); seen.add(key)
     return uniq
+
+# --- NEW: loose estimate scanner when strict table not found ----
+LOOSE_OP = re.compile(r'\b(repair|repl(?:ace)?|r&r|r&i|refinish|paint|align|blend|calibrate|scan|clear)\b', re.I)
+LOOSE_PART = re.compile(r'\b(' + '|'.join(re.escape(p) for p in PANELS + ["valance","finish panel","combo lamp","lamp","sensor","bracket"]) + r')\b', re.I)
+SIDE_RX = re.compile(r'\b(left|lh|right|rh|rear|front)\b', re.I)
+
+def extract_estimate_items_loose(text: str) -> List[Dict[str, str]]:
+    items: List[Dict[str, str]] = []
+    for raw in (text or "").splitlines():
+        l = raw.lower()
+        if LOOSE_OP.search(l) and LOOSE_PART.search(l):
+            side = "unspecified"
+            sm = SIDE_RX.search(l)
+            if sm:
+                token = sm.group(1).lower()
+                if token in ("left","lh"): side="left"
+                elif token in ("right","rh"): side="right"
+                elif token in ("rear","front"): side=token
+            op = LOOSE_OP.search(l).group(1)
+            part = LOOSE_PART.search(l).group(1)
+            items.append({"op": op, "part": part, "side": side, "raw": raw})
+
+    # de-dupe & cap
+    uniq, seen = [], set()
+    for it in items:
+        key = (it["op"].lower(), it["part"].lower(), it["side"].lower())
+        if key not in seen:
+            uniq.append(it); seen.add(key)
+    return uniq[:20]
 
 # =========================================
 # GPT compare (smaller response)
@@ -782,40 +809,65 @@ def compare_estimate_with_photos(items: List[Dict[str, str]],
         logger.error(f"Vision compare JSON error: {type(e).__name__}: {e}")
         return {"per_item": [],"not_in_photos": [],"extra_damage_in_photos": [],"overall": f"Comparison unavailable ({type(e).__name__})."}
 
-# ---------- NEW: brief text fallback when per-item comparison is unavailable ----------
-def build_text_consistency_review(items: List[Dict[str, str]]) -> Tuple[List[str], str]:
+# ---------- NEW: richer text fallback when per-item comparison is unavailable ----------
+POI_RX = re.compile(r'Point\s+of\s+Impact\s*:\s*([^\n]+)', re.I)
+
+def build_text_consistency_review(items: List[Dict[str, str]], estimate_text: str) -> Tuple[List[str], str]:
     """
-    Create a short, human-readable review from estimate line items only.
-    No image analysis here—just sensible defaults so the section is never empty.
+    Create a fuller, human-readable review from the estimate text:
+    - Summarizes selected scope items (op/part/side)
+    - Notes refinish/paint lines
+    - Notes procedural items (scan/clear/calibration/R&I)
+    - Includes Point of Impact if present
     """
     bullets: List[str] = []
-    seen_any = False
 
+    # Point of Impact
+    poi = ""
+    m = POI_RX.search(estimate_text or "")
+    if m:
+        poi = m.group(1).strip()
+        bullets.append(f"- Point of impact per estimate: {poi}")
+
+    # If items empty, try to recover with loose scan
+    if not items:
+        items = extract_estimate_items_loose(estimate_text)
+
+    # Bucket items
+    scope, refinish, procedural = [], [], []
     for it in items:
         op = (it.get("op","") or "").lower()
         part = (it.get("part","") or "").lower()
-        raw = (it.get("raw","") or "")
+        side = it.get("side","unspecified")
         label_op = "Repair" if "repair" in op else "Replace" if "repl" in op else it.get("op","").title() or "Operation"
+        pretty = f"{side.title()} {part}".strip().replace("Unspecified ","").replace("unspecified ","").title()
+        entry = f"{pretty} — *{label_op}*"
 
-        # Heuristic mapping for common rear-impact scope
-        if ("bumper" in part or "cover" in part):
-            bullets.append(f"- Rear bumper cover — *{label_op}*: Supported by photos of right-rear scuffs/deformation.")
-            seen_any = True
-        elif ("valance" in part) or ("finish" in part and "panel" in part) or ("lower" in raw.lower() and "panel" in raw.lower()):
-            bullets.append("- Lower finish panel/valance — *Replace*: Supported; scrapes consistent with replacement.")
-            seen_any = True
-        elif ("lamp" in part or "tail" in part):
-            bullets.append("- Right combo tail lamp — *Replace*: Inconclusive from photos; no clear break visible.")
-            seen_any = True
+        if "refinish" in op or "paint" in op or "blend" in op:
+            refinish.append(entry)
+        elif any(tok in op for tok in ["scan","calibrate","clear","r&r","r&i","align"]):
+            procedural.append(entry)
         else:
-            # Generic fallback for hidden/procedural items
-            bullets.append(f"- {it.get('part','Component').title()} — *{label_op}*: Procedural/hidden; not photo-verifiable.")
-            seen_any = True
+            scope.append(entry)
 
-    if not seen_any:
+    # Compose bullets
+    if scope:
+        bullets.append("- Items in estimate (selected):")
+        for s in scope[:12]:
+            bullets.append(f"  • {s}")
+    if refinish:
+        bullets.append("- Refinish/Paint operations:")
+        for r in refinish[:8]:
+            bullets.append(f"  • {r}")
+    if procedural:
+        bullets.append("- Procedural/administrative operations:")
+        for p in procedural[:10]:
+            bullets.append(f"  • {p}")
+
+    if not bullets:
         bullets.append("- No parseable line items found in the estimate text.")
 
-    overall = "Photos show right-rear impact; estimate scope generally aligns, tail lamp replacement is the least certain."
+    overall = "Estimate scope summarized above; use photos to validate visible exterior items and keep procedural lines as non-photo-verifiable."
     return bullets, overall
 # ----------------------------------------------------------------------
 
@@ -954,7 +1006,12 @@ async def vision_review(
     vehicle_desc = extract_vehicle_from_text(combined_text) or "N/A"
     odo_photos = extract_odometer_from_photos(image_blobs)
 
+    # Parse estimate items (strict, then loose if needed)
     est_items = extract_estimate_items(combined_text)
+    if not est_items:
+        est_items = extract_estimate_items_loose(combined_text)
+
+    # Try vision compare
     consistency = compare_estimate_with_photos(est_items, images_for_vision)
 
     year, miles = parse_year_miles(combined_text)
@@ -1023,8 +1080,8 @@ async def vision_review(
             line = f"- {it.get('side','unspecified').title()} {it.get('part','component')} · {it.get('op','op')} → Photo: {ev} ({conf_txt}); {it.get('note','')}"
             pdf.multi_cell(0, 6, line)
     else:
-        # NEW: brief text fallback so this section is never blank
-        fb_bullets, fb_overall = build_text_consistency_review(est_items)
+        # NEW: richer text fallback (multi-bullet)
+        fb_bullets, fb_overall = build_text_consistency_review(est_items, combined_text)
         for b in fb_bullets:
             pdf.multi_cell(0, 6, b)
         consistency["fallback_text"] = fb_bullets
@@ -1048,7 +1105,7 @@ async def vision_review(
     except Exception as e:
         logger.error(f"PDF write error: {e}")
 
-    # OPTIONAL email (best-effort) — enable if desired
+    # OPTIONAL email (best-effort) — disabled by default
     try:
         msg = EmailMessage()
         msg["Subject"] = f"AI-4-IA Review: {claim_number}"
