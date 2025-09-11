@@ -700,6 +700,33 @@ OP_RX = re.compile(r'\b(repl(?:ace)?|r&r|r & r|r&i|r & i|repair|refinish|paint|a
 PANEL_RX = re.compile(r'\b(' + '|'.join(re.escape(p) for p in PANELS) + r')\b', re.I)
 PRICE_OR_LABOR_RX = re.compile(r'(\$\s*\d|\bhrs?\s*@\s*\$|\brate\b)', re.I)
 
+# ---- Side/part normalization helpers (NEW) ---------------------------------
+SIDE_PATTERNS = [
+    (re.compile(r'\b(RR|R/R|RIGHT\s*REAR)\b', re.I), "right rear"),
+    (re.compile(r'\b(LR|L/R|LEFT\s*REAR)\b', re.I), "left rear"),
+    (re.compile(r'\b(RF|R/F|RIGHT\s*FRONT)\b', re.I), "right front"),
+    (re.compile(r'\b(LF|L/F|LEFT\s*FRONT)\b', re.I), "left front"),
+    (re.compile(r'\b(REAR)\b', re.I), "rear"),
+    (re.compile(r'\b(FRONT)\b', re.I), "front"),
+    (re.compile(r'\b(RIGHT|RH)\b', re.I), "right"),
+    (re.compile(r'\b(LEFT|LH)\b', re.I), "left"),
+]
+
+def detect_side(raw: str) -> str:
+    for rx, name in SIDE_PATTERNS:
+        if rx.search(raw or ""):
+            return name
+    return "unspecified"
+
+def canonicalize_part(raw_line: str, part: str) -> str:
+    l = (raw_line or "").lower()
+    p = (part or "").lower()
+    if p == "cover" and "bumper" in l:
+        return "bumper cover"
+    if p in {"lamp", "taillamp", "tail lamp"} and ("tail" in l or "rear" in l):
+        return "tail lamp"
+    return part
+
 def extract_estimate_items(text: str) -> List[Dict[str, str]]:
     """Strict block-based parser (prefers CCC-style line table)."""
     items: List[Dict[str, str]] = []
@@ -720,14 +747,10 @@ def extract_estimate_items(text: str) -> List[Dict[str, str]]:
 
         l = line.lower()
         if OP_RX.search(l) and PANEL_RX.search(l) and PRICE_OR_LABOR_RX.search(l):
-            side = "unspecified"
-            if re.search(r'\b(left|lh)\b', l): side = "left"
-            elif re.search(r'\b(right|rh)\b', l): side = "right"
-
-            op_m = OP_RX.search(l)
-            panel_m = PANEL_RX.search(l)
-            op = op_m.group(1) if op_m else "op"
-            part = panel_m.group(1) if panel_m else "component"
+            op = OP_RX.search(l).group(1) if OP_RX.search(l) else "op"
+            part = PANEL_RX.search(l).group(1) if PANEL_RX.search(l) else "component"
+            part = canonicalize_part(raw, part)
+            side = detect_side(raw)
             items.append({"op": op, "part": part, "side": side, "raw": raw})
 
     # de-dupe
@@ -738,7 +761,7 @@ def extract_estimate_items(text: str) -> List[Dict[str, str]]:
             uniq.append(it); seen.add(key)
     return uniq
 
-# --- NEW: loose estimate scanner when strict table not found ----
+# --- Loose estimate scanner when strict table not found (UPDATED) ----
 LOOSE_OP = re.compile(r'\b(repair|repl(?:ace)?|r&r|r&i|refinish|paint|align|blend|calibrate|scan|clear)\b', re.I)
 LOOSE_PART = re.compile(r'\b(' + '|'.join(re.escape(p) for p in PANELS + ["valance","finish panel","combo lamp","lamp","sensor","bracket"]) + r')\b', re.I)
 SIDE_RX = re.compile(r'\b(left|lh|right|rh|rear|front)\b', re.I)
@@ -748,15 +771,10 @@ def extract_estimate_items_loose(text: str) -> List[Dict[str, str]]:
     for raw in (text or "").splitlines():
         l = raw.lower()
         if LOOSE_OP.search(l) and LOOSE_PART.search(l):
-            side = "unspecified"
-            sm = SIDE_RX.search(l)
-            if sm:
-                token = sm.group(1).lower()
-                if token in ("left","lh"): side="left"
-                elif token in ("right","rh"): side="right"
-                elif token in ("rear","front"): side=token
             op = LOOSE_OP.search(l).group(1)
             part = LOOSE_PART.search(l).group(1)
+            part = canonicalize_part(raw, part)
+            side = detect_side(raw)
             items.append({"op": op, "part": part, "side": side, "raw": raw})
 
     # de-dupe & cap
@@ -765,17 +783,19 @@ def extract_estimate_items_loose(text: str) -> List[Dict[str, str]]:
         key = (it["op"].lower(), it["part"].lower(), it["side"].lower())
         if key not in seen:
             uniq.append(it); seen.add(key)
-    return uniq[:20]
+    return uniq[:30]
 
 # =========================================
-# GPT compare (smaller response)
+# GPT compare (richer notes/overall)  **REPLACED**
 # =========================================
 def compare_estimate_with_photos(items: List[Dict[str, str]],
                                  images_for_vision: List[Dict[str, Any]]) -> Dict[str, Any]:
+    # same schema, but we’ll request richer content in 'note' and 'overall'
     schema = {"type":"object","properties":{
         "per_item":{"type":"array","items":{"type":"object","properties":{
             "op":{"type":"string"},"part":{"type":"string"},"side":{"type":"string"},
-            "photo_evidence":{"type":"boolean"},"confidence":{"type":"number"},"note":{"type":"string"}},
+            "photo_evidence":{"type":"boolean"},"confidence":{"type":"number"},
+            "note":{"type":"string"}},
             "required":["op","part","side","photo_evidence","confidence","note"]}},
         "not_in_photos":{"type":"array","items":{"type":"string"}},
         "extra_damage_in_photos":{"type":"array","items":{"type":"string"}},
@@ -784,19 +804,24 @@ def compare_estimate_with_photos(items: List[Dict[str, str]],
     system = (
         "You are an auto-damage visual auditor. "
         "Given estimate line items and vehicle photos, decide for EACH item whether visible photo evidence exists. "
-        "Hidden ops may not be visible; mark as no-evidence with a short 3–10 word note. "
-        "List obvious damages seen in photos that are NOT listed in the estimate. "
+        "Treat generic terms like 'cover' as 'bumper cover' when the context suggests bumper work. "
+        "Notes must be concise but substantive (1–2 full sentences), pointing to the visible area (e.g., 'RR bumper shows scuff/deformation'). "
+        "The 'overall' must be a compact multi-sentence summary (3–5 sentences) describing what is supported vs not, "
+        "any extra visible damage, and any items likely procedural/hidden (scans/R&I/clear, etc.). "
         "Return STRICT JSON ONLY per this schema: " + json.dumps(schema)
     )
 
-    user_parts: List[Dict[str, Any]] = [{"type": "text", "text": "Estimate items:\n" + json.dumps(items, ensure_ascii=False)}]
+    user_parts: List[Dict[str, Any]] = [
+        {"type": "text", "text": "Estimate items (normalized):\n" + json.dumps(items, ensure_ascii=False)}
+    ]
     user_parts.extend(images_for_vision)
 
     try:
         rsp = client.chat.completions.create(
             model=MODEL,
-            messages=[{"role": "system", "content": system},{"role": "user", "content": user_parts}],
-            max_tokens=220,
+            messages=[{"role": "system", "content": system},
+                      {"role": "user", "content": user_parts}],
+            max_tokens=450,   # ↑ allow fuller review
             temperature=0
         )
         txt = (rsp.choices[0].message.content or "").strip()
@@ -809,17 +834,10 @@ def compare_estimate_with_photos(items: List[Dict[str, str]],
         logger.error(f"Vision compare JSON error: {type(e).__name__}: {e}")
         return {"per_item": [],"not_in_photos": [],"extra_damage_in_photos": [],"overall": f"Comparison unavailable ({type(e).__name__})."}
 
-# ---------- NEW: richer text fallback when per-item comparison is unavailable ----------
+# ---------- Text fallback (kept) ----------
 POI_RX = re.compile(r'Point\s+of\s+Impact\s*:\s*([^\n]+)', re.I)
 
 def build_text_consistency_review(items: List[Dict[str, str]], estimate_text: str) -> Tuple[List[str], str]:
-    """
-    Create a fuller, human-readable review from the estimate text:
-    - Summarizes selected scope items (op/part/side)
-    - Notes refinish/paint lines
-    - Notes procedural items (scan/clear/calibration/R&I)
-    - Includes Point of Impact if present
-    """
     bullets: List[str] = []
 
     # Point of Impact
@@ -850,7 +868,6 @@ def build_text_consistency_review(items: List[Dict[str, str]], estimate_text: st
         else:
             scope.append(entry)
 
-    # Compose bullets
     if scope:
         bullets.append("- Items in estimate (selected):")
         for s in scope[:12]:
@@ -869,7 +886,6 @@ def build_text_consistency_review(items: List[Dict[str, str]], estimate_text: st
 
     overall = "Estimate scope summarized above; use photos to validate visible exterior items and keep procedural lines as non-photo-verifiable."
     return bullets, overall
-# ----------------------------------------------------------------------
 
 # =========================================
 # Summary builder
@@ -1011,7 +1027,7 @@ async def vision_review(
     if not est_items:
         est_items = extract_estimate_items_loose(combined_text)
 
-    # Try vision compare
+    # Vision compare (richer)
     consistency = compare_estimate_with_photos(est_items, images_for_vision)
 
     year, miles = parse_year_miles(combined_text)
@@ -1072,15 +1088,29 @@ async def vision_review(
 
     pdf.ln(4); pdf_add_section_title(pdf, "Estimate ↔ Photos Consistency Review")
     if consistency.get("per_item"):
-        for it in consistency["per_item"][:60]:
-            ev = "YES" if it.get("photo_evidence") else "NO"
+        supported = 0
+        total = len(consistency["per_item"])
+        for it in consistency["per_item"][:80]:
+            ev = bool(it.get("photo_evidence"))
+            if ev: supported += 1
             try: conf = float(it.get("confidence", 0))
             except Exception: conf = 0.0
             conf_txt = f"{round(conf*100)}%"
-            line = f"- {it.get('side','unspecified').title()} {it.get('part','component')} · {it.get('op','op')} → Photo: {ev} ({conf_txt}); {it.get('note','')}"
-            pdf.multi_cell(0, 6, line)
+            side = it.get('side','unspecified').title()
+            part = it.get('part','component')
+            op = it.get('op','op')
+            note = it.get('note','').strip()
+            pdf.multi_cell(0, 6, f"- {side} {part} · {op} → Photo: {'YES' if ev else 'NO'} ({conf_txt}); {note}")
+
+        # NEW: comparison summary block
+        pdf.ln(2); pdf_add_section_title(pdf, "Comparison Summary")
+        pdf.multi_cell(0, 6, f"Supported by photos: {supported} of {total}")
+        if consistency.get("not_in_photos"):
+            pdf.multi_cell(0, 6, f"Estimated but not evident: {', '.join(consistency['not_in_photos'][:12])}")
+        if consistency.get("extra_damage_in_photos"):
+            pdf.multi_cell(0, 6, f"Visible but not estimated: {', '.join(consistency['extra_damage_in_photos'][:12])}")
     else:
-        # NEW: richer text fallback (multi-bullet)
+        # richer text fallback (multi-bullet)
         fb_bullets, fb_overall = build_text_consistency_review(est_items, combined_text)
         for b in fb_bullets:
             pdf.multi_cell(0, 6, b)
@@ -1168,6 +1198,7 @@ async def get_client_rules(client_name: str):
     else:
         logger.error(f"Rules not found for client: {client_name}")
         return JSONResponse(status_code=404, content={"error": "Rules not found for this client."})
+
 
 
 
