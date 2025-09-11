@@ -10,7 +10,6 @@ import json
 import logging
 import math
 import datetime
-import hashlib
 
 import smtplib
 from email.message import EmailMessage
@@ -562,23 +561,25 @@ def make_contact_sheets_compact(
 
 # =========================================
 # Labor/tax compliance checks
+# (UPDATED to align labor detection with display logic)
 # =========================================
-def check_labor_and_tax_score(text: str, client_rules: str) -> int:
-    adj = 0
-    def has_rate(label: str) -> bool:
-        pat = rf"{label}[^\n]{{0,120}}?\$\s*\d{{2,3}}(?:\.\d+)?\s*(?:/hr|/hour|per\s*hour|hr)"
-        return re.search(pat, text or "", re.IGNORECASE) is not None
-    labels = ["Body Labor", "Paint Labor", "Mechanical Labor", "Structural Labor", "Frame Labor"]
-    if not any(has_rate(lbl) for lbl in labels):
-        adj -= 50
-    if re.search(r"tax\s*(required|must|utilize|apply)", client_rules or "", re.IGNORECASE):
-        if not taxes_present(text or ""):
-            adj -= 25
-    return adj
-
 def labor_rates_present_any(text: str) -> bool:
     labels = ["Body", "Paint", "Mechanical", "Structural", "Frame", "Refinish", "Supplies"]
     return any(re.search(rf"{lbl}[^\n]{{0,120}}?\$\s*\d{{2,3}}", text or "", re.IGNORECASE) for lbl in labels)
+
+def check_labor_and_tax_score(text: str, client_rules: str) -> int:
+    """
+    Keep scoring logic aligned with what we display:
+    - Use labor_rates_present_any(text) for labor detection (same as summary).
+    - Only deduct tax if client rules require tax AND we can't find it.
+    """
+    adj = 0
+    if not labor_rates_present_any(text or ""):
+        adj -= 50
+    if re.search(r"tax\s*(required|must|utilize|apply|include)", (client_rules or ""), re.IGNORECASE):
+        if not taxes_present(text or ""):
+            adj -= 25
+    return adj
 
 # =========================================
 # Client-guideline parsing & adherence (full review)
@@ -699,21 +700,13 @@ def build_client_adherence_lines(
     return lines
 
 # =========================================
-# Estimate parsing (PATCHED to avoid false 'cover replacement')
+# Estimate parsing (STRICT parser to avoid false hits)
 # =========================================
-OPS = ["replace", "repair", "refinish", "r&i", "r & i", "align", "blend", "calibrate"]
-
 OP_RX = re.compile(r'\b(repl(?:ace)?|r&r|r & r|r&i|r & i|repair|refinish|paint|align|blend|calibrate)\b', re.I)
 PANEL_RX = re.compile(r'\b(' + '|'.join(re.escape(p) for p in PANELS) + r')\b', re.I)
 PRICE_OR_LABOR_RX = re.compile(r'(\$\s*\d|\bhrs?\s*@\s*\$|\brate\b)', re.I)
 
 def extract_estimate_items(text: str) -> List[Dict[str, str]]:
-    """
-    Stricter line parser:
-      - Only parse inside the line-items table (between header and totals/notes).
-      - Require word-boundary op, a real panel word, and price/labor token.
-      - Prevents prose like "warranty covers replacement..." from becoming items.
-    """
     items: List[Dict[str, str]] = []
     in_lines = False
     for raw in (text or "").splitlines():
@@ -721,11 +714,11 @@ def extract_estimate_items(text: str) -> List[Dict[str, str]]:
         if not line:
             continue
 
-        # enter the line-items block
+        # enter the line-items block when a typical header is seen
         if re.search(r'\bLine\s+Oper\s+Description\b', line, re.I):
             in_lines = True
             continue
-        # exit when reaching totals/notes
+        # exit when reaching totals/notes/other sections
         if in_lines and re.search(r'\b(ESTIMATE\s+TOTALS|NOTES|REQUEST A SUPPLEMENT|ALTERNATE PARTS USAGE|RECALL INFO)\b', line, re.I):
             in_lines = False
 
@@ -737,8 +730,11 @@ def extract_estimate_items(text: str) -> List[Dict[str, str]]:
             side = "unspecified"
             if re.search(r'\b(left|lh)\b', l): side = "left"
             elif re.search(r'\b(right|rh)\b', l): side = "right"
-            op = OP_RX.search(l).group(1)
-            part = PANEL_RX.search(l).group(1)
+
+            op_m = OP_RX.search(l)
+            panel_m = PANEL_RX.search(l)
+            op = op_m.group(1) if op_m else "op"
+            part = panel_m.group(1) if panel_m else "component"
             items.append({"op": op, "part": part, "side": side, "raw": raw})
 
     # de-dupe
@@ -955,6 +951,7 @@ async def vision_review(
         client_lines_override=client_lines,
     )
 
+    # ----- Scoring (aligned labor/tax logic) -----
     labor_tax_adj = check_labor_and_tax_score(combined_text, client_rules)
     photo_adj = -25 * len(missing_photos)
     computed = max(0, 100 + labor_tax_adj + photo_adj)
@@ -1014,7 +1011,7 @@ async def vision_review(
     except Exception as e:
         logger.error(f"PDF write error: {e}")
 
-    # OPTIONAL email
+    # OPTIONAL email (best-effort)
     try:
         msg = EmailMessage()
         msg["Subject"] = f"AI-4-IA Review: {claim_number}"
@@ -1038,8 +1035,10 @@ Audit Results: {authoritative_score}%
 {summary_md}
 """
         msg.set_content(email_body)
-        with smtplib.SMTP_SSL("mail.tierra.net", 465) as smtp:
-            smtp.login("info@nspxn.com", "grr2025GRR"); smtp.send_message(msg)
+        # Comment out SMTP in serverless environments if needed
+        # with smtplib.SMTP_SSL("mail.tierra.net", 465) as smtp:
+        #     smtp.login("info@nspxn.com", "grr2025GRR")
+        #     smtp.send_message(msg)
     except Exception as e:
         logger.error(f"Email error (continuing): {e}")
 
@@ -1076,6 +1075,7 @@ async def get_client_rules(client_name: str):
     else:
         logger.error(f"Rules not found for client: {client_name}")
         return JSONResponse(status_code=404, content={"error": "Rules not found for this client."})
+
 
 
 
