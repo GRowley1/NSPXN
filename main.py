@@ -627,7 +627,6 @@ def canonicalize_part(raw_line: str, part: str) -> str:
 
 # --- UPDATED: header detection tightened ---
 def _is_section_header(line: str) -> Optional[str]:
-    """Treat only relevant all-caps-ish lines as section headers; ignore valuation/contact blocks."""
     s = re.sub(r'^\s*\d+[\.\)]?\s*', '', (line or '').strip())
     if not s:
         return None
@@ -643,15 +642,9 @@ def _is_section_header(line: str) -> Optional[str]:
 
 # --- UPDATED: stricter item parser (returns Optional) ---
 def _parse_item_line(raw: str) -> Optional[Dict[str, Any]]:
-    """
-    Parse a single estimate row. Return None if it doesn't look like a real line item.
-    Requires at least one of: explicit operation token, known panel/part, or a numeric (qty/price/hours).
-    """
     line = (raw or '').strip()
     if not line:
         return None
-
-    # skip obvious non-line content (contacts, phones, JD Power, addresses, etc.)
     if re.match(r'^\s*(o:|f:|tel:|phone:|fax:)\b', line, re.I):
         return None
     if SECTION_DENY_WORDS.search(line):
@@ -659,7 +652,6 @@ def _parse_item_line(raw: str) -> Optional[Dict[str, Any]]:
 
     low = line.lower()
 
-    # operation
     op = None
     if re.search(r'\brepl(?:ace)?\b', low):
         op = "Replace"
@@ -670,16 +662,13 @@ def _parse_item_line(raw: str) -> Optional[Dict[str, Any]]:
     elif re.search(r'\brefinish|paint|blend\b', low):
         op = "Refinish"
     elif re.search(r'\bscan|calibrate|align|clear\b', low):
-        op = "Operation"  # procedural
+        op = "Operation"
 
-    # part/panel
     mpart = PANEL_RX.search(low)
     part = canonicalize_part(raw, mpart.group(1) if mpart else "component") if mpart else None
 
-    # tokens (A/M, CAPA, LKQ, etc.)
     tokens = [m.group(1).upper().replace("  ", " ").replace("ALTOE", "ALT OE") for m in PART_TOKEN_RX.finditer(raw)]
 
-    # part number (prefer alphanumeric with letters+digits)
     pn = ""
     for m in PN_RX.finditer(raw):
         cand = m.group(0)
@@ -687,7 +676,6 @@ def _parse_item_line(raw: str) -> Optional[Dict[str, Any]]:
             pn = cand
             break
 
-    # qty / price / hours
     qty = None; price = None; hours = None
     m3 = TRIPLE_RX.search(raw)
     if m3:
@@ -707,7 +695,6 @@ def _parse_item_line(raw: str) -> Optional[Dict[str, Any]]:
             try: qty = int(mq.group(1))
             except: qty = None
 
-    # require signal that this is a real item
     has_signal = any([
         op is not None and op != "Operation",
         part is not None and part != "component",
@@ -720,7 +707,6 @@ def _parse_item_line(raw: str) -> Optional[Dict[str, Any]]:
     if not has_signal:
         return None
 
-    # side
     side = detect_side(raw)
 
     return {
@@ -739,17 +725,10 @@ EST_LINES_START_RX = re.compile(r'\bLine\s+Oper\s+Description\b', re.I)
 EST_LINES_END_RX = SEC_STOP_RX  # reuse stop markers
 
 def parse_estimate_details(text: str) -> Dict[str, List[Dict[str, Any]]]:
-    """
-    Prefer parsing ONLY the main estimate table between 'Line  Oper  Description'
-    and the next totals/notes block. If that block isn't found, fall back to
-    conservative section+item scan with strict filters.
-    """
     sections: Dict[str, List[Dict[str, Any]]] = {}
-
     if not text:
         return sections
 
-    # Try to isolate the estimate line table region first.
     start = EST_LINES_START_RX.search(text or "")
     if start:
         end = EST_LINES_END_RX.search(text, pos=start.end())
@@ -768,7 +747,6 @@ def parse_estimate_details(text: str) -> Dict[str, List[Dict[str, Any]]]:
         else:
             sections.pop(current, None)
 
-    # Fallback: conservative scan over entire text with header gating
     current = None
     for raw in (text or "").splitlines():
         line = raw.strip()
@@ -788,18 +766,13 @@ def parse_estimate_details(text: str) -> Dict[str, List[Dict[str, Any]]]:
         if itm:
             sections[current].append(itm)
 
-    # prune empty sections
     return {k: v for k, v in sections.items() if v}
 
-# ---------- (RE-ADDED) high-level item scanners for consistency & GPT prompt ----------
+# ---------- high-level item scanners ----------
 LOOSE_OP = OP_RX
 LOOSE_PART = PANEL_RX
 
 def extract_estimate_items(text: str) -> List[Dict[str, str]]:
-    """
-    Extract approximate (op, part, side) tuples from the main estimate table region
-    bounded by the 'Line  Oper  Description' header through the next totals/notes block.
-    """
     items: List[Dict[str, str]] = []
     if not text:
         return items
@@ -828,7 +801,6 @@ def extract_estimate_items(text: str) -> List[Dict[str, str]]:
             side = detect_side(raw)
             items.append({"op": op, "part": part, "side": side, "raw": raw})
 
-    # dedupe
     uniq, seen = [], set()
     for it in items:
         key = (it["op"].lower(), it["part"].lower(), it["side"].lower())
@@ -837,10 +809,6 @@ def extract_estimate_items(text: str) -> List[Dict[str, str]]:
     return uniq
 
 def extract_estimate_items_loose(text: str) -> List[Dict[str, str]]:
-    """
-    Conservative whole-text pass: any line with an operation + panel becomes a candidate.
-    Useful when the table header isn't found in OCR.
-    """
     items: List[Dict[str, str]] = []
     if not text:
         return items
@@ -960,7 +928,7 @@ def build_text_consistency_review(items: List[Dict[str, str]], estimate_text: st
     return bullets, overall
 
 # =========================================
-# Client-guideline parsing & adherence (RESTORED)
+# Client-guideline parsing & adherence
 # =========================================
 PHOTO_KEYWORDS = {
     "four corners": ["four corners", "4 corners", "four-corners"],
@@ -1175,6 +1143,57 @@ def pdf_add_section_title(pdf: FPDF, title: str):
 def pdf_kv(pdf: FPDF, key: str, val: str):
     pdf.set_font_size(10); pdf.multi_cell(0, 6, f"{key}: {val}")
 
+# ---------- MISSING RENDERER (ADDED) ----------
+def render_estimate_details_for_pdf(pdf: FPDF, sections: Dict[str, List[Dict[str, Any]]], max_lines: int = 60) -> None:
+    """
+    Render parsed estimate details into the PDF.
+    Keeps output compact and bounded by max_lines.
+    """
+    lines_used = 0
+
+    def add_line(s: str):
+        nonlocal lines_used
+        if lines_used >= max_lines:
+            return False
+        pdf.multi_cell(0, 6, s)
+        lines_used += 1
+        return lines_used < max_lines
+
+    # Iterate in insertion/view order
+    for sec_name, items in sections.items():
+        if not items:
+            continue
+        if not add_line(f"- {sec_name}:"):
+            break
+        for it in items:
+            if lines_used >= max_lines:
+                break
+            op = (it.get("op") or "").title()
+            side = (it.get("side") or "unspecified").title()
+            part = it.get("part") or "component"
+            tokens = it.get("tokens") or []
+            pn = it.get("pn") or ""
+            qty = it.get("qty")
+            hrs = it.get("hours")
+            price = it.get("price")
+            tok_str = f" [{', '.join(tokens)}]" if tokens else ""
+            parts = [f"{side} {part}".strip()]
+            if pn:
+                parts.append(f"PN {pn}")
+            if qty is not None:
+                parts.append(f"Qty {qty}")
+            if hrs is not None:
+                parts.append(f"{hrs} h")
+            if price is not None:
+                parts.append(f"${price:0.2f}")
+            detail = " · ".join(parts)
+            if not add_line(f"  • {op}{tok_str} — {detail}"):
+                break
+        if lines_used >= max_lines:
+            break
+    if lines_used >= max_lines:
+        pdf.multi_cell(0, 6, "  • … (truncated)")
+
 # =========================================
 # Routes
 # =========================================
@@ -1343,6 +1362,7 @@ async def vision_review(
         pdf.multi_cell(0, 6, "- No parseable sections found; showing summarized scope only.")
 
     pdf.ln(4); pdf_add_section_title(pdf, "Estimate ↔ Photos Consistency Review")
+    consistency = compare_estimate_with_photos(est_items, images_for_vision)
     if consistency.get("per_item"):
         supported = 0
         total = len(consistency["per_item"])
@@ -1460,6 +1480,7 @@ async def get_client_rules(client_name: str):
     else:
         logger.error(f"Rules not found for client: {client_name}")
         return JSONResponse(status_code=404, content={"error": "Rules not found for this client."})
+
 
 
 
