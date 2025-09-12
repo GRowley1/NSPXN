@@ -587,132 +587,101 @@ def make_contact_sheets_compact(
 # =========================================
 # Estimate parsing
 # =========================================
-OP_RX = re.compile(r'\b(repl(?:ace)?|r&r|r & r|r&i|r & i|repair|refinish|paint|align|blend|calibrate|scan|clear)\b', re.I)
-PANEL_RX = re.compile(r'\b(' + '|'.join(re.escape(p) for p in PANELS) + r')\b', re.I)
-PRICE_OR_LABOR_RX = re.compile(r'(\$\s*\d|\bhrs?\s*@\s*\$|\brate\b)', re.I)
+# ====== REPLACEMENT: smarter row parsing & rendering ======
+SIDE_TOK_RX = re.compile(r'\b(RR|LR|RF|LF|RIGHT\s*REAR|LEFT\s*REAR|RIGHT\s*FRONT|LEFT\s*FRONT|RIGHT|LEFT|FRONT|REAR|RH|LH)\b', re.I)
+OP_WORD_RX = re.compile(r'\b(Repl(?:ace)?|R&R|R & R|R&I|R & I|Rpr|Repair|Refinish|Blend|Paint|Scan|Calibrate|Pre[- ]?repair scan|Post[- ]?repair scan|Clear|Add for Clear Coat)\b', re.I)
+TRAIL_NUMS_RX = re.compile(r'(?:\s+(\d+))?(?:\s+\$?(\d+(?:\.\d{2})?))?(?:\s+(\d+(?:\.\d+)?))?(?:\s+(\d+(?:\.\d+)?))?$')
 
-# --- Section parsing helpers (UPDATED) ---
-SEC_STOP_RX = re.compile(r'\b(SUBTOTALS|ESTIMATE\s+TOTALS|TOTALS|NOTES|REQUEST A SUPPLEMENT|ALTERNATE PARTS USAGE|RECALL INFO)\b', re.I)
-SECTION_ALLOW_WORDS = re.compile(r'\b(bumper|lamp|combo lamp|finish panel|fender|door|hood|grille|quarter|rocker|roof|trunk|decklid|mirror|diagnostic|scan|calibrate|miscellaneous|operations|other charges|vehicle diagnostics|refinish|paint|blend)\b', re.I)
-SECTION_DENY_WORDS = re.compile(r'\b(j\.?\s*d\.?\s*power|contact|phone|fax|advisor|policy|coverage|insured|deductible|payment|claimant|shop info)\b', re.I)
+def _detect_side_from_text(s: str) -> str:
+    m = SIDE_TOK_RX.search(s or "")
+    if not m:
+        return "unspecified"
+    tok = m.group(1).upper()
+    mapping = {
+        "RF": "right front", "RR": "right rear", "LF": "left front", "LR": "left rear",
+        "RIGHT FRONT": "right front", "RIGHT REAR": "right rear",
+        "LEFT FRONT": "left front", "LEFT REAR": "left rear",
+        "RH": "right", "LH": "left", "RIGHT": "right", "LEFT": "left",
+        "FRONT": "front", "REAR": "rear",
+    }
+    return mapping.get(tok, tok.lower())
 
-def detect_side(raw: str) -> str:
-    SIDE_PATTERNS = [
-        (re.compile(r'\b(RR|R/R|RIGHT\s*REAR)\b', re.I), "right rear"),
-        (re.compile(r'\b(LR|L/R|LEFT\s*REAR)\b', re.I), "left rear"),
-        (re.compile(r'\b(RF|R/F|RIGHT\s*FRONT)\b', re.I), "right front"),
-        (re.compile(r'\b(LF|L/F|LEFT\s*FRONT)\b', re.I), "left front"),
-        (re.compile(r'\b(REAR)\b', re.I), "rear"),
-        (re.compile(r'\b(FRONT)\b', re.I), "front"),
-        (re.compile(r'\b(RIGHT|RH)\b', re.I), "right"),
-        (re.compile(r'\b(LEFT|LH)\b', re.I), "left"),
-    ]
-    for rx, name in SIDE_PATTERNS:
-        if rx.search(raw or ""):
-            return name
-    return "unspecified"
+def _clean_part_desc(rest: str) -> str:
+    tmp = PART_TOKEN_RX.sub("", rest)    # drop A/M, CAPA, LKQ tokens
+    tmp = PN_RX.sub("", tmp)             # drop PN
+    tmp = re.sub(r'\s{2,}', ' ', tmp).strip(' -•:·')
+    tmp = re.sub(r'\b(Qty|EA|Each)\b.*$', '', tmp, flags=re.I).strip()
+    return tmp.strip()
 
-def canonicalize_part(raw_line: str, part: str) -> str:
-    l = (raw_line or "").lower()
-    p = (part or "").lower()
-    if p == "cover" and "bumper" in l:
-        return "bumper cover"
-    if p in {"lamp", "taillamp", "tail lamp"} and ("tail" in l or "rear" in l):
-        return "tail lamp"
-    if p == "finish panel" and "bumper" in l:
-        return "bumper finish panel"
-    if p == "combo lamp" and "rear" in l:
-        return "rear combo lamp"
-    return part
-
-# --- UPDATED: header detection tightened ---
-def _is_section_header(line: str) -> Optional[str]:
-    s = re.sub(r'^\s*\d+[\.\)]?\s*', '', (line or '').strip())
-    if not s:
-        return None
-    if SEC_STOP_RX.search(s):
-        return None
-    if SECTION_DENY_WORDS.search(s):
-        return None
-    if SECTION_ALLOW_WORDS.search(s) and len(s) <= 64:
-        if s.upper() == s or s.istitle():
-            if not re.search(r'(\$|@|hrs?|rate)', s, re.I):
-                return s
-    return None
-
-# --- UPDATED: stricter item parser (returns Optional) ---
-def _parse_item_line(raw: str) -> Optional[Dict[str, Any]]:
-    line = (raw or '').strip()
-    if not line:
-        return None
-    if re.match(r'^\s*(o:|f:|tel:|phone:|fax:)\b', line, re.I):
-        return None
-    if SECTION_DENY_WORDS.search(line):
+def _parse_estimate_row(line: str) -> Optional[Dict[str, Any]]:
+    raw = (line or "").strip()
+    if not raw or SECTION_DENY_WORDS.search(raw):
         return None
 
-    low = line.lower()
+    # strip leading numbering / bullets
+    s = re.sub(r'^\s*\d+[\.\)]?\s*[*#]*\s*', '', raw)
 
-    op = None
-    if re.search(r'\brepl(?:ace)?\b', low):
-        op = "Replace"
-    elif re.search(r'\brpr\b|\brepair\b', low):
-        op = "Repair"
-    elif re.search(r'\br\s*&\s*i\b|\br&i\b', low):
-        op = "R&I"
-    elif re.search(r'\brefinish|paint|blend\b', low):
-        op = "Refinish"
-    elif re.search(r'\bscan|calibrate|align|clear\b', low):
-        op = "Operation"
+    # operation
+    mop = OP_WORD_RX.search(s)
+    if not mop:
+        return None
+    op = mop.group(1).strip().title()
 
-    mpart = PANEL_RX.search(low)
-    part = canonicalize_part(raw, mpart.group(1) if mpart else "component") if mpart else None
+    rest = s[mop.end():].strip()
+    if not rest:
+        return None
 
-    tokens = [m.group(1).upper().replace("  ", " ").replace("ALTOE", "ALT OE") for m in PART_TOKEN_RX.finditer(raw)]
+    # tokens (A/M, CAPA, LKQ, OEM, etc.)
+    tokens = [m.group(1).upper().replace("  ", " ").replace("ALTOE", "ALT OE")
+              for m in PART_TOKEN_RX.finditer(rest)]
 
+    # part number
     pn = ""
-    for m in PN_RX.finditer(raw):
+    for m in PN_RX.finditer(rest):
         cand = m.group(0)
         if not re.match(r'^\d+(\.\d+)?$', cand):
             pn = cand
             break
 
+    # trailing numbers: qty / price / hours (and sometimes second hours)
     qty = None; price = None; hours = None
-    m3 = TRIPLE_RX.search(raw)
-    if m3:
-        try: qty = int(m3.group(1))
-        except: qty = None
-        price = float(m3.group(2)); hours = float(m3.group(3))
-    else:
-        mm = MONEY_RX.search(raw)
-        if mm:
-            price = float(mm.group(1))
-        mh = HOURS_RX.findall(raw)
-        if mh:
-            try: hours = float(mh[-1])
-            except: hours = None
-        mq = re.match(r'^\s*\**\#*\**\s*(\d+)\b', raw)
-        if mq:
-            try: qty = int(mq.group(1))
-            except: qty = None
+    tnums = TRAIL_NUMS_RX.search(rest)
+    if tnums:
+        g = [tnums.group(i) for i in range(1,5)]
+        has_dollar = '$' in rest
+        nums = [float(x) for x in g if x and re.match(r'^\d+(?:\.\d+)?$', x)]
+        ints = [int(x) for x in g if x and x.isdigit()]
+        if ints:
+            qty = ints[0]
+        if has_dollar:
+            if len(nums) >= 2:
+                price = nums[0]
+                hours = nums[1]
+        else:
+            if len(nums) == 1:
+                hours = nums[0]
+            elif len(nums) >= 2:
+                if qty is not None:
+                    price = nums[0]
+                    hours = nums[1]
+                else:
+                    hours = nums[-1]
 
-    has_signal = any([
-        op is not None and op != "Operation",
-        part is not None and part != "component",
-        qty is not None,
-        price is not None,
-        hours is not None,
-        bool(tokens),
-        bool(pn),
-    ])
-    if not has_signal:
+    side = _detect_side_from_text(rest)
+    part_desc = _clean_part_desc(rest)
+
+    pm = PANEL_RX.search(rest)
+    part = canonicalize_part(rest, pm.group(1) if pm else "component") if pm else "component"
+
+    if not part_desc and part == "component":
         return None
-
-    side = detect_side(raw)
 
     return {
         "raw": raw,
-        "op": op or "Operation",
-        "part": (part or "component"),
+        "op": op,
+        "side": side,
+        "part": part,
+        "part_desc": part_desc,
         "tokens": tokens,
         "pn": pn,
         "qty": qty,
@@ -720,15 +689,17 @@ def _parse_item_line(raw: str) -> Optional[Dict[str, Any]]:
         "hours": hours
     }
 
-# --- UPDATED: chunk-aware estimate-details parser ---
-EST_LINES_START_RX = re.compile(r'\bLine\s+Oper\s+Description\b', re.I)
-EST_LINES_END_RX = SEC_STOP_RX  # reuse stop markers
+# === REPLACE the existing thin parser wrapper ===
+def _parse_item_line(raw: str) -> Optional[Dict[str, Any]]:
+    return _parse_estimate_row(raw)
 
+# === REPLACE parse_estimate_details to rely on the row parser ===
 def parse_estimate_details(text: str) -> Dict[str, List[Dict[str, Any]]]:
     sections: Dict[str, List[Dict[str, Any]]] = {}
     if not text:
         return sections
 
+    # Prefer explicit lines block if present
     start = EST_LINES_START_RX.search(text or "")
     if start:
         end = EST_LINES_END_RX.search(text, pos=start.end())
@@ -736,10 +707,7 @@ def parse_estimate_details(text: str) -> Dict[str, List[Dict[str, Any]]]:
         current = "Estimate Lines"
         sections[current] = []
         for raw in chunk.splitlines():
-            raw = raw.strip()
-            if not raw:
-                continue
-            itm = _parse_item_line(raw)
+            itm = _parse_estimate_row(raw)
             if itm:
                 sections[current].append(itm)
         if sections[current]:
@@ -747,6 +715,7 @@ def parse_estimate_details(text: str) -> Dict[str, List[Dict[str, Any]]]:
         else:
             sections.pop(current, None)
 
+    # Fallback: scan whole text and cluster
     current = None
     for raw in (text or "").splitlines():
         line = raw.strip()
@@ -761,74 +730,96 @@ def parse_estimate_details(text: str) -> Dict[str, List[Dict[str, Any]]]:
             sections.setdefault(current, [])
             continue
         if current is None:
+            itm = _parse_estimate_row(raw)
+            if itm:
+                sections.setdefault("Estimate Lines", []).append(itm)
             continue
-        itm = _parse_item_line(raw)
+        itm = _parse_estimate_row(raw)
         if itm:
             sections[current].append(itm)
 
     return {k: v for k, v in sections.items() if v}
 
-# ---------- high-level item scanners ----------
-LOOSE_OP = OP_RX
-LOOSE_PART = PANEL_RX
-
+# === REPLACE extract_estimate_items so downstream logic sees better items ===
 def extract_estimate_items(text: str) -> List[Dict[str, str]]:
     items: List[Dict[str, str]] = []
     if not text:
         return items
 
-    in_lines = False
+    start = EST_LINES_START_RX.search(text or "")
+    if start:
+        end = EST_LINES_END_RX.search(text, pos=start.end())
+        chunk = text[start.end(): end.start()] if end else text[start.end():]
+        for raw in chunk.splitlines():
+            parsed = _parse_estimate_row(raw)
+            if parsed:
+                items.append({
+                    "op": parsed["op"],
+                    "part": parsed.get("part_desc") or parsed.get("part") or "component",
+                    "side": parsed.get("side","unspecified"),
+                    "raw": parsed["raw"]
+                })
+        if items:
+            uniq, seen = [], set()
+            for it in items:
+                key = (it["op"].lower(), it["part"].lower(), it["side"].lower())
+                if key not in seen:
+                    uniq.append(it); seen.add(key)
+            return uniq
+
     for raw in (text or "").splitlines():
-        line = raw.strip()
-        if not line:
-            continue
-
-        if EST_LINES_START_RX.search(line):
-            in_lines = True
-            continue
-        if in_lines and SEC_STOP_RX.search(line):
-            in_lines = False
-            continue
-        if not in_lines:
-            continue
-
-        low = line.lower()
-        if OP_RX.search(low) and PANEL_RX.search(low) and PRICE_OR_LABOR_RX.search(low):
-            opm = OP_RX.search(low)
-            op = opm.group(1) if opm else "op"
-            pm = PANEL_RX.search(low)
-            part = canonicalize_part(raw, pm.group(1) if pm else "component")
-            side = detect_side(raw)
-            items.append({"op": op, "part": part, "side": side, "raw": raw})
-
+        parsed = _parse_estimate_row(raw)
+        if parsed:
+            items.append({
+                "op": parsed["op"],
+                    "part": parsed.get("part_desc") or parsed.get("part") or "component",
+                    "side": parsed.get("side","unspecified"),
+                    "raw": parsed["raw"]
+            })
     uniq, seen = [], set()
     for it in items:
         key = (it["op"].lower(), it["part"].lower(), it["side"].lower())
         if key not in seen:
             uniq.append(it); seen.add(key)
-    return uniq
+    return uniq[:80]
 
-def extract_estimate_items_loose(text: str) -> List[Dict[str, str]]:
-    items: List[Dict[str, str]] = []
-    if not text:
-        return items
+# === REPLACE the PDF renderer to prefer part_desc ===
+def render_estimate_details_for_pdf(pdf: FPDF, sections: Dict[str, List[Dict[str, Any]]], max_lines: int = 60) -> None:
+    lines_used = 0
+    def add_line(s: str):
+        nonlocal lines_used
+        if lines_used >= max_lines:
+            return False
+        pdf.multi_cell(0, 6, s)
+        lines_used += 1
+        return lines_used < max_lines
 
-    for raw in (text or "").splitlines():
-        low = raw.lower()
-        if LOOSE_OP.search(low) and LOOSE_PART.search(low):
-            opm = LOOSE_OP.search(low)
-            op = opm.group(1) if opm else "op"
-            pm = LOOSE_PART.search(low)
-            part = canonicalize_part(raw, pm.group(1) if pm else "component")
-            side = detect_side(raw)
-            items.append({"op": op, "part": part, "side": side, "raw": raw})
-
-    uniq, seen = [], set()
-    for it in items:
-        key = (it["op"].lower(), it["part"].lower(), it["side"].lower())
-        if key not in seen:
-            uniq.append(it); seen.add(key)
-    return uniq[:40]
+    for sec_name, items in sections.items():
+        if not items:
+            continue
+        if not add_line(f"- {sec_name}:"):
+            break
+        for it in items:
+            if lines_used >= max_lines:
+                break
+            op = (it.get("op") or "").title()
+            side = (it.get("side") or "unspecified").title()
+            part_desc = it.get("part_desc") or it.get("part") or "component"
+            tokens = it.get("tokens") or []
+            pn = it.get("pn") or ""
+            qty = it.get("qty"); hrs = it.get("hours"); price = it.get("price")
+            tok_str = f" [{', '.join(tokens)}]" if tokens else ""
+            bits = [f"{side} {part_desc}".strip()]
+            if pn: bits.append(f"PN {pn}")
+            if qty is not None: bits.append(f"Qty {qty}")
+            if price is not None: bits.append(f"${price:0.2f}")
+            if hrs is not None: bits.append(f"{hrs} h")
+            if not add_line(f"  • {op}{tok_str} — " + " · ".join(bits)):
+                break
+        if lines_used >= max_lines:
+            break
+    if lines_used >= max_lines:
+        pdf.multi_cell(0, 6, "  • … (truncated)")
 
 # =========================================
 # GPT compare (richer notes/overall)
