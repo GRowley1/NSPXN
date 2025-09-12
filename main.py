@@ -587,6 +587,49 @@ def make_contact_sheets_compact(
 # =========================================
 # Estimate parsing
 # =========================================
+# ---- Minimal helpers added so the parser works (ONLY this correction) ----
+# Section-stop markers for parsing (keep lightweight)
+SEC_STOP_RX = re.compile(r'\b(SUBTOTALS?|ESTIMATE\s+TOTALS?|NOTES?)\b', re.I)
+
+# Panel matcher built from PANELS (already defined above)
+PANEL_RX = re.compile(r'\b(' + '|'.join(re.escape(p) for p in PANELS) + r')\b', re.I)
+
+# Lines we should ignore when parsing individual items
+SECTION_DENY_WORDS = re.compile(r'^\s*(SUBTOTALS?|ESTIMATE\s+TOTALS?|NOTES?|CATEGORY\s+BASIS|ESTIMATE\s+TOTALS)\b', re.I)
+
+def canonicalize_part(rest: str, matched: str) -> str:
+    # Keep a simple canonical representation; don’t alter behavior elsewhere
+    return (matched or "component").strip().lower()
+
+def _is_section_header(line: str) -> Optional[str]:
+    # Keep header detection permissive-minimal; returning None groups lines under "Estimate Lines"
+    return None
+
+# Explicit “Line / Oper / Description” block markers (used by parsers)
+EST_LINES_START_RX = re.compile(r'\bLine\s+Oper\s+Description\b', re.I)
+EST_LINES_END_RX   = SEC_STOP_RX  # reuse stop markers
+
+def extract_estimate_items_loose(text: str) -> List[Dict[str, str]]:
+    """Fallback when structured block isn't found; thin wrapper over row parser."""
+    items: List[Dict[str, str]] = []
+    for raw in (text or "").splitlines():
+        it = _parse_estimate_row(raw)
+        if it:
+            items.append({
+                "op": it.get("op",""),
+                "part": it.get("part_desc") or it.get("part") or "component",
+                "side": it.get("side","unspecified"),
+                "raw": it.get("raw","")
+            })
+    # Deduplicate a bit
+    seen, uniq = set(), []
+    for it in items:
+        key = (it["op"].lower(), it["part"].lower(), it["side"].lower())
+        if key not in seen:
+            uniq.append(it); seen.add(key)
+    return uniq[:80]
+# ---- END minimal helpers ----
+
 # ====== REPLACEMENT: smarter row parsing & rendering ======
 SIDE_TOK_RX = re.compile(r'\b(RR|LR|RF|LF|RIGHT\s*REAR|LEFT\s*REAR|RIGHT\s*FRONT|LEFT\s*FRONT|RIGHT|LEFT|FRONT|REAR|RH|LH)\b', re.I)
 OP_WORD_RX = re.compile(r'\b(Repl(?:ace)?|R&R|R & R|R&I|R & I|Rpr|Repair|Refinish|Blend|Paint|Scan|Calibrate|Pre[- ]?repair scan|Post[- ]?repair scan|Clear|Add for Clear Coat)\b', re.I)
@@ -772,9 +815,9 @@ def extract_estimate_items(text: str) -> List[Dict[str, str]]:
         if parsed:
             items.append({
                 "op": parsed["op"],
-                    "part": parsed.get("part_desc") or parsed.get("part") or "component",
-                    "side": parsed.get("side","unspecified"),
-                    "raw": parsed["raw"]
+                "part": parsed.get("part_desc") or parsed.get("part") or "component",
+                "side": parsed.get("side","unspecified"),
+                "raw": parsed["raw"]
             })
     uniq, seen = [], set()
     for it in items:
@@ -1134,57 +1177,6 @@ def pdf_add_section_title(pdf: FPDF, title: str):
 def pdf_kv(pdf: FPDF, key: str, val: str):
     pdf.set_font_size(10); pdf.multi_cell(0, 6, f"{key}: {val}")
 
-# ---------- MISSING RENDERER (ADDED) ----------
-def render_estimate_details_for_pdf(pdf: FPDF, sections: Dict[str, List[Dict[str, Any]]], max_lines: int = 60) -> None:
-    """
-    Render parsed estimate details into the PDF.
-    Keeps output compact and bounded by max_lines.
-    """
-    lines_used = 0
-
-    def add_line(s: str):
-        nonlocal lines_used
-        if lines_used >= max_lines:
-            return False
-        pdf.multi_cell(0, 6, s)
-        lines_used += 1
-        return lines_used < max_lines
-
-    # Iterate in insertion/view order
-    for sec_name, items in sections.items():
-        if not items:
-            continue
-        if not add_line(f"- {sec_name}:"):
-            break
-        for it in items:
-            if lines_used >= max_lines:
-                break
-            op = (it.get("op") or "").title()
-            side = (it.get("side") or "unspecified").title()
-            part = it.get("part") or "component"
-            tokens = it.get("tokens") or []
-            pn = it.get("pn") or ""
-            qty = it.get("qty")
-            hrs = it.get("hours")
-            price = it.get("price")
-            tok_str = f" [{', '.join(tokens)}]" if tokens else ""
-            parts = [f"{side} {part}".strip()]
-            if pn:
-                parts.append(f"PN {pn}")
-            if qty is not None:
-                parts.append(f"Qty {qty}")
-            if hrs is not None:
-                parts.append(f"{hrs} h")
-            if price is not None:
-                parts.append(f"${price:0.2f}")
-            detail = " · ".join(parts)
-            if not add_line(f"  • {op}{tok_str} — {detail}"):
-                break
-        if lines_used >= max_lines:
-            break
-    if lines_used >= max_lines:
-        pdf.multi_cell(0, 6, "  • … (truncated)")
-
 # =========================================
 # Routes
 # =========================================
@@ -1471,6 +1463,7 @@ async def get_client_rules(client_name: str):
     else:
         logger.error(f"Rules not found for client: {client_name}")
         return JSONResponse(status_code=404, content={"error": "Rules not found for this client."})
+
 
 
 
