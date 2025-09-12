@@ -791,6 +791,77 @@ def parse_estimate_details(text: str) -> Dict[str, List[Dict[str, Any]]]:
     # prune empty sections
     return {k: v for k, v in sections.items() if v}
 
+# ---------- (RE-ADDED) high-level item scanners for consistency & GPT prompt ----------
+LOOSE_OP = OP_RX
+LOOSE_PART = PANEL_RX
+
+def extract_estimate_items(text: str) -> List[Dict[str, str]]:
+    """
+    Extract approximate (op, part, side) tuples from the main estimate table region
+    bounded by the 'Line  Oper  Description' header through the next totals/notes block.
+    """
+    items: List[Dict[str, str]] = []
+    if not text:
+        return items
+
+    in_lines = False
+    for raw in (text or "").splitlines():
+        line = raw.strip()
+        if not line:
+            continue
+
+        if EST_LINES_START_RX.search(line):
+            in_lines = True
+            continue
+        if in_lines and SEC_STOP_RX.search(line):
+            in_lines = False
+            continue
+        if not in_lines:
+            continue
+
+        low = line.lower()
+        if OP_RX.search(low) and PANEL_RX.search(low) and PRICE_OR_LABOR_RX.search(low):
+            opm = OP_RX.search(low)
+            op = opm.group(1) if opm else "op"
+            pm = PANEL_RX.search(low)
+            part = canonicalize_part(raw, pm.group(1) if pm else "component")
+            side = detect_side(raw)
+            items.append({"op": op, "part": part, "side": side, "raw": raw})
+
+    # dedupe
+    uniq, seen = [], set()
+    for it in items:
+        key = (it["op"].lower(), it["part"].lower(), it["side"].lower())
+        if key not in seen:
+            uniq.append(it); seen.add(key)
+    return uniq
+
+def extract_estimate_items_loose(text: str) -> List[Dict[str, str]]:
+    """
+    Conservative whole-text pass: any line with an operation + panel becomes a candidate.
+    Useful when the table header isn't found in OCR.
+    """
+    items: List[Dict[str, str]] = []
+    if not text:
+        return items
+
+    for raw in (text or "").splitlines():
+        low = raw.lower()
+        if LOOSE_OP.search(low) and LOOSE_PART.search(low):
+            opm = LOOSE_OP.search(low)
+            op = opm.group(1) if opm else "op"
+            pm = LOOSE_PART.search(low)
+            part = canonicalize_part(raw, pm.group(1) if pm else "component")
+            side = detect_side(raw)
+            items.append({"op": op, "part": part, "side": side, "raw": raw})
+
+    uniq, seen = [], set()
+    for it in items:
+        key = (it["op"].lower(), it["part"].lower(), it["side"].lower())
+        if key not in seen:
+            uniq.append(it); seen.add(key)
+    return uniq[:40]
+
 # =========================================
 # GPT compare (richer notes/overall)
 # =========================================
@@ -1272,7 +1343,6 @@ async def vision_review(
         pdf.multi_cell(0, 6, "- No parseable sections found; showing summarized scope only.")
 
     pdf.ln(4); pdf_add_section_title(pdf, "Estimate ↔ Photos Consistency Review")
-    consistency = consistency  # already computed
     if consistency.get("per_item"):
         supported = 0
         total = len(consistency["per_item"])
@@ -1390,6 +1460,7 @@ async def get_client_rules(client_name: str):
     else:
         logger.error(f"Rules not found for client: {client_name}")
         return JSONResponse(status_code=404, content={"error": "Rules not found for this client."})
+
 
 
 
