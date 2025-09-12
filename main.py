@@ -38,12 +38,32 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 # =========================================
-# OpenAI client (gpt-4o as requested)
+# OpenAI client (gpt-4o default; vision uses VISION_MODEL below)
 # =========================================
 if "OPENAI_API_KEY" not in os.environ:
     raise RuntimeError("❌ OPENAI_API_KEY environment variable is NOT set.")
 client = OpenAI(api_key=os.environ["OPENAI_API_KEY"])
 MODEL = "gpt-4o"
+
+# ------- Speed knobs (override with ENV to tune without redeploy) -------
+FAST_MODE = os.getenv("FAST_MODE", "1") == "1"   # set FAST_MODE=0 to disable
+
+# OCR/page controls
+OCR_MAX_PAGES = int(os.getenv("OCR_MAX_PAGES", "4" if FAST_MODE else "8"))
+OCR_DPI = int(os.getenv("OCR_DPI", "120" if FAST_MODE else "140"))
+
+# Contact sheet controls
+CONTACT_MAX_SHEETS = int(os.getenv("CONTACT_MAX_SHEETS", "2" if FAST_MODE else "3"))
+CONTACT_COLS = int(os.getenv("CONTACT_COLS", "7" if FAST_MODE else "6"))
+CONTACT_THUMB_W = int(os.getenv("CONTACT_THUMB_W", "260" if FAST_MODE else "320"))
+CONTACT_JPEG_QUALITY = int(os.getenv("CONTACT_JPEG_QUALITY", "55" if FAST_MODE else "68"))
+
+# VIN scan controls
+VIN_UPSCALE_WIDTH = int(os.getenv("VIN_UPSCALE_WIDTH", "2000" if FAST_MODE else "2400"))
+VIN_MAX_PHOTOS_SCAN = int(os.getenv("VIN_MAX_PHOTOS_SCAN", "20" if FAST_MODE else "9999"))
+
+# Vision model (faster but still good enough)
+VISION_MODEL = os.getenv("VISION_MODEL", "gpt-4o-mini" if FAST_MODE else "gpt-4o")
 
 # =========================================
 # FastAPI app + CORS
@@ -81,21 +101,23 @@ def ocr_text_fast(img: Image.Image, psm: int = 6) -> str:
         logger.warning(f"OCR fast error: {e}")
         return ""
 
-def extract_text_from_pdf(file_like: io.BytesIO, max_ocr_pages: int = 8, dpi: int = 140) -> str:
+def extract_text_from_pdf(file_like: io.BytesIO, max_ocr_pages: int = None, dpi: int = None) -> str:
+    """Faster OCR: fewer pages, lower DPI, single-PSM retry if needed."""
+    max_ocr_pages = max_ocr_pages or OCR_MAX_PAGES
+    dpi = dpi or OCR_DPI
     try:
         file_like.seek(0)
         pages = convert_from_bytes(file_like.read(), dpi=dpi)
-        text_output = ""
+        text_output = []
         for i, img in enumerate(pages, 1):
             if i > max_ocr_pages:
                 break
-            page_text = ocr_text_fast(img, psm=6)
-            if len(page_text.strip()) < 20:
-                page_text = ocr_text_fast(img, psm=3)
-            if not page_text.strip():
-                continue
-            text_output += f"\n[Page {i}]\n{page_text}"
-        return text_output
+            t = ocr_text_fast(img, psm=6)
+            if len((t or "").strip()) < 20:
+                t = ocr_text_fast(img, psm=3)
+            if t:
+                text_output.append(f"\n[Page {i}]\n{t}")
+        return "".join(text_output)
     except Exception as e:
         logger.error(f"OCR error: {e}")
         return ""
@@ -270,7 +292,7 @@ def extract_claim_from_pdf_first_pages(pdf_bytes: bytes, pages_to_scan: int = 4,
     return None
 
 # =========================================
-# Vehicle & tax/parts helpers (UPDATED vehicle parsing)
+# Vehicle & tax/parts helpers (robust vehicle parsing)
 # =========================================
 MAKE_ALIASES = {
     "CHEV": "Chevrolet", "CHEVROLET": "Chevrolet", "CHEVY": "Chevrolet",
@@ -299,13 +321,8 @@ def normalize_vehicle_str(s: str) -> str:
     return s2.strip()
 
 def extract_vehicle_from_text(text: str) -> Optional[str]:
-    """
-    Find 'YEAR MAKE ...' using a known make list to avoid matching narrative lines like 'Some 2024 vehicles ...'.
-    Returns 'YEAR Make Model, <miles> miles' when possible.
-    """
     if not text:
         return None
-
     best_line = None
     for m in MAKE_RE.finditer(text):
         year = m.group(1)
@@ -320,11 +337,9 @@ def extract_vehicle_from_text(text: str) -> Optional[str]:
         if not model:
             model = "Model"
         best_line = f"{year} {make} {model}"
-        break  # first good hit wins
-
+        break
     if not best_line:
         return None
-
     m_mi = re.search(r"(?:Odometer|Mileage)\s*[:\-]?\s*([\d,]+)", text, re.IGNORECASE)
     miles = m_mi.group(1) if m_mi else "unknown"
     return normalize_vehicle_str(f"{best_line}, {miles} miles")
@@ -344,7 +359,7 @@ def parse_year_miles(text: str) -> Tuple[Optional[int], Optional[int]]:
 def taxes_present(text: str) -> bool:
     return re.search(r'tax[^\n]{0,50}(\d{1,3}\s*%|\$\s*\d+(\.\d{2})?)', text or "", re.IGNORECASE) is not None
 
-# Parts token counting (brief)
+# Parts token counting
 PART_TOKEN_RX = re.compile(r'\b(A/M|AFTERMARKET|LKQ|RECOND(?:ITIONED)?|REMAN(?:UFACTURED)?|CAPA|NSF|ALT[-\s]*OE|OEM)\b', re.I)
 def estimate_parts_mix(text: str) -> Dict[str, int]:
     counts = {"oem":0,"aftermarket":0,"lkq":0,"recon":0,"capa":0,"nsf":0,"alt_oe":0}
@@ -369,57 +384,57 @@ def _is_exterior_by_edges(img: Image.Image) -> bool:
     evar = ImageStat.Stat(edges).var[0]
     return (var > 140 and evar > 400)
 
-# UPDATED: scan *all* images for VIN; upscale small labels; multi-psm OCR
 def extract_vin_from_photos(image_blobs: List[Tuple[str, bytes]]) -> Optional[str]:
     VIN_NEAR_LABEL = re.compile(r'(?i)\bV[\W_]*I[\W_]*N\b')
-    VIN_17 = re.compile(r'\b([A-HJ-NPR-Z0-9]{17})\b')
     VIN_SEP_SEQ = re.compile(r'(?i)((?:[A-HJ-NPR-Z0-9][\s\.\-–—:_]){16}[A-HJ-NPR-Z0-9])')
 
     def variants(im: Image.Image) -> List[Image.Image]:
         base = im.convert("L")
-        if base.width < 2400:
-            h = int(base.height * (2400 / max(base.width, 1)))
-            base = base.resize((2400, h), Image.LANCZOS)
+        if base.width < VIN_UPSCALE_WIDTH:
+            h = int(base.height * (VIN_UPSCALE_WIDTH / max(base.width, 1)))
+            base = base.resize((VIN_UPSCALE_WIDTH, h), Image.LANCZOS)
         return [
             base,
-            ImageEnhance.Contrast(base).enhance(2.2),
-            ImageEnhance.Sharpness(base).enhance(2.0),
+            ImageEnhance.Contrast(base).enhance(2.0),
             ImageOps.autocontrast(base.filter(ImageFilter.MedianFilter(3))),
-            base.point(lambda p: 255 if p > 185 else 0, mode="1").convert("L"),
         ]
 
     def ocr_all(im: Image.Image) -> str:
         out = []
         for v in variants(im):
-            for psm in (7, 6, 11, 12, 13):
+            for psm in (7, 6):  # fewer PSMs = faster
                 try:
                     t = pytesseract.image_to_string(v, lang="eng", config=f"--psm {psm} --oem 1")
                     if t: out.append(t)
                 except Exception:
                     pass
-        return "\n".join(out)
+        return "\n".join(out).upper()
 
+    scanned = 0
     for name, blob in image_blobs:
+        if scanned >= VIN_MAX_PHOTOS_SCAN:
+            break
+        scanned += 1
         try:
             im = Image.open(io.BytesIO(blob))
         except Exception:
             continue
-        up = ocr_all(im).upper()
+        up = ocr_all(im)
 
         for m in VIN_NEAR_LABEL.finditer(up):
-            window = up[m.end(): m.end() + 260]
+            window = up[m.end(): m.end() + 240]
             for mm in VIN_SEP_SEQ.finditer(window):
                 vin = normalize_vin(mm.group(1))
                 if vin and vin_checksum_ok(vin):
                     return vin
-            vin = best_vin_candidate(re.findall(r'\b([A-HJ-NPR-Z0-9]{17})\b', window))
-            if vin: return vin
 
         for mm in VIN_SEP_SEQ.finditer(up):
             vin = normalize_vin(mm.group(1))
             if vin and vin_checksum_ok(vin):
                 return vin
-        vin = best_vin_candidate(re.findall(r'\b([A-HJ-NPR-Z0-9]{17})\b', up))
+
+        cands = re.findall(r'\b([A-HJ-NPR-Z0-9]{17})\b', up)
+        vin = best_vin_candidate(cands)
         if vin: return vin
 
     return None
@@ -461,6 +476,9 @@ def _plate_ocr_variants(img: Image.Image) -> str:
     return "\n".join(out)
 
 def check_required_photos(image_blobs: List[Tuple[str, bytes]], ocr_text: str) -> List[str]:
+    if FAST_MODE and len(image_blobs) > 60:
+        image_blobs = image_blobs[:60]  # cap for presence checks
+
     required = ["four corners", "odometer", "vin", "license plate"]
     present = set()
     txt = (ocr_text or "").lower()
@@ -580,10 +598,10 @@ def compare_estimate_with_photos_brief(estimate_text: str,
 
     try:
         rsp = client.chat.completions.create(
-            model=MODEL,
+            model=VISION_MODEL,   # faster model for vision
             messages=[{"role": "system", "content": system},
                       {"role": "user", "content": user_parts}],
-            max_tokens=500,
+            max_tokens=400 if FAST_MODE else 500,
             temperature=0
         )
         txt = (rsp.choices[0].message.content or "").strip()
@@ -739,7 +757,6 @@ def build_summary_markdown(
     if not missing_photos:
         photos_lines = ["- All required photo types present (four corners, VIN, odometer, plate)."]
     else:
-        # fixed single-item message
         photos_lines = [f"- Missing: {missing_photos[0]}."] if len(missing_photos) == 1 else [f"- Missing: {', '.join(missing_photos)}."]
 
     labor_lines = ["- Labor rates listed on estimate."] if labor_rates_present_any(text) else ["- Labor rates missing or not clearly listed."]
@@ -791,13 +808,81 @@ def check_labor_and_tax_score(text: str, client_rules: str) -> int:
     return adj
 
 # =========================================
-# PDF helpers
+# Helpers for contact sheets
 # =========================================
-def pdf_add_section_title(pdf: FPDF, title: str):
-    pdf.set_font_size(12); pdf.cell(0, 8, txt=title, ln=True); pdf.set_font_size(10)
+def shrink_to_width(img: Image.Image, max_w: int) -> Image.Image:
+    if img.width <= max_w:
+        return img.convert("RGB")
+    h = int(img.height * max_w / img.width)
+    return img.convert("RGB").resize((max_w, h), Image.LANCZOS)
 
-def pdf_kv(pdf: FPDF, key: str, val: str):
-    pdf.set_font_size(10); pdf.multi_cell(0, 6, f"{key}: {val}")
+def make_contact_sheets_compact(
+    image_blobs: List[Tuple[str, bytes]],
+    max_sheets: int = None,
+    cols: int = None,
+    padding: int = 6,
+    base_thumb_w: int = None,
+    jpeg_quality: int = None
+) -> List[Tuple[str, bytes]]:
+    max_sheets = max_sheets or CONTACT_MAX_SHEETS
+    cols = cols or CONTACT_COLS
+    base_thumb_w = base_thumb_w or CONTACT_THUMB_W
+    jpeg_quality = jpeg_quality or CONTACT_JPEG_QUALITY
+
+    if not image_blobs:
+        return []
+    thumbs: List[Image.Image] = []
+    for _, blob in image_blobs:
+        try:
+            img = Image.open(io.BytesIO(blob))
+            thumbs.append(shrink_to_width(img, base_thumb_w))
+        except Exception:
+            continue
+    n = len(thumbs)
+    if n == 0:
+        return []
+    per_sheet = max(1, math.ceil(n / max_sheets))
+    rows = math.ceil(per_sheet / cols)
+
+    def build_sheet(chunk: List[Image.Image], thumb_w: int) -> Image.Image:
+        row_heights = []
+        for r in range(rows):
+            row_imgs = chunk[r*cols:(r+1)*cols]
+            if not row_imgs: break
+            row_heights.append(max(im.height for im in row_imgs))
+        canvas_w = cols * thumb_w + (cols + 1) * padding
+        canvas_h = sum(row_heights) + (len(row_heights) + 1) * padding
+        sheet = Image.new("RGB", (canvas_w, canvas_h), color=(245, 245, 245))
+        y = padding; pos = 0
+        for r, row_h in enumerate(row_heights):
+            x = padding
+            for c in range(cols):
+                if pos >= len(chunk): break
+                im = chunk[pos]
+                if im.width != thumb_w:
+                    h = int(im.height * (thumb_w / im.width))
+                    im = im.resize((thumb_w, h), Image.LANCZOS)
+                y_off = (row_h - im.height) // 2
+                sheet.paste(im, (x, y + y_off))
+                x += thumb_w + padding
+                pos += 1
+            y += row_h + padding
+        return sheet
+
+    sheets: List[Tuple[str, bytes]] = []
+    idx = 0; sheet_num = 1; thumb_w = base_thumb_w
+    while idx < n:
+        chunk = thumbs[idx: idx + per_sheet]
+        attempt = 0
+        sheet_img = build_sheet(chunk, thumb_w)
+        while sheet_img.height > 3600 and thumb_w > 160 and attempt < 3:
+            thumb_w = int(thumb_w * 0.85)
+            sheet_img = build_sheet(chunk, thumb_w); attempt += 1
+        buf = io.BytesIO()
+        sheet_img.save(buf, format="JPEG", quality=jpeg_quality, optimize=True)
+        sheets.append((f"contact-sheet-{sheet_num}.jpg", buf.getvalue()))
+        sheet_num += 1; idx += per_sheet
+    return sheets
 
 # =========================================
 # Routes
@@ -814,6 +899,11 @@ async def vision_review(
     ia_company: str = Form(...),
     appraiser_id: str = Form(...)
 ):
+    start_ts = datetime.datetime.now()
+    def stage(msg: str):
+        dt = (datetime.datetime.now() - start_ts).total_seconds()
+        logger.info(f"[T+{dt:0.2f}s] {msg}")
+
     if not appraiser_id.strip():
         return JSONResponse(status_code=400, content={"error": "Appraiser ID is required."})
 
@@ -830,7 +920,7 @@ async def vision_review(
             embedded_txt = extract_text_from_pdf_embedded(raw)
             if embedded_txt:
                 texts.append(embedded_txt)
-            texts.append(extract_text_from_pdf(io.BytesIO(raw), max_ocr_pages=8, dpi=140))
+            texts.append(extract_text_from_pdf(io.BytesIO(raw), max_ocr_pages=OCR_MAX_PAGES, dpi=OCR_DPI))
             if first_pdf_bytes is None:
                 first_pdf_bytes = raw
             looks_like_estimate = bool(re.search(r'\bclaim\b', embedded_txt or "", re.IGNORECASE) and
@@ -846,81 +936,22 @@ async def vision_review(
         else:
             texts.append(f"⚠️ Skipped unsupported file: {f.filename}")
 
+    stage("uploads received / OCR done")
     combined_text = "\n".join(texts)
 
     # Build contact sheets for GPT vision
-    def shrink_to_width(img: Image.Image, max_w: int) -> Image.Image:
-        if img.width <= max_w:
-            return img.convert("RGB")
-        h = int(img.height * max_w / img.width)
-        return img.convert("RGB").resize((max_w, h), Image.LANCZOS)
-
-    def make_contact_sheets_compact(
-        image_blobs: List[Tuple[str, bytes]],
-        max_sheets: int = 3,
-        cols: int = 6,
-        padding: int = 6,
-        base_thumb_w: int = 320,
-        jpeg_quality: int = 68
-    ) -> List[Tuple[str, bytes]]:
-        if not image_blobs:
-            return []
-        thumbs: List[Image.Image] = []
-        for _, blob in image_blobs:
-            try:
-                img = Image.open(io.BytesIO(blob))
-                thumbs.append(shrink_to_width(img, base_thumb_w))
-            except Exception:
-                continue
-        n = len(thumbs)
-        per_sheet = max(1, math.ceil(n / max_sheets))
-        rows = math.ceil(per_sheet / cols)
-
-        def build_sheet(chunk: List[Image.Image], thumb_w: int) -> Image.Image:
-            row_heights = []
-            for r in range(rows):
-                row_imgs = chunk[r*cols:(r+1)*cols]
-                if not row_imgs: break
-                row_heights.append(max(im.height for im in row_imgs))
-            canvas_w = cols * thumb_w + (cols + 1) * padding
-            canvas_h = sum(row_heights) + (len(row_heights) + 1) * padding
-            sheet = Image.new("RGB", (canvas_w, canvas_h), color=(245, 245, 245))
-            y = padding; pos = 0
-            for r, row_h in enumerate(row_heights):
-                x = padding
-                for c in range(cols):
-                    if pos >= len(chunk): break
-                    im = chunk[pos]
-                    if im.width != thumb_w:
-                        h = int(im.height * (thumb_w / im.width))
-                        im = im.resize((thumb_w, h), Image.LANCZOS)
-                    y_off = (row_h - im.height) // 2
-                    sheet.paste(im, (x, y + y_off))
-                    x += thumb_w + padding
-                    pos += 1
-                y += row_h + padding
-            return sheet
-
-        sheets: List[Tuple[str, bytes]] = []
-        idx = 0; sheet_num = 1; thumb_w = base_thumb_w
-        while idx < n:
-            chunk = thumbs[idx: idx + per_sheet]
-            attempt = 0
-            sheet_img = build_sheet(chunk, thumb_w)
-            while sheet_img.height > 3600 and thumb_w > 160 and attempt < 3:
-                thumb_w = int(thumb_w * 0.85)
-                sheet_img = build_sheet(chunk, thumb_w); attempt += 1
-            buf = io.BytesIO()
-            sheet_img.save(buf, format="JPEG", quality=jpeg_quality, optimize=True)
-            sheets.append((f"contact-sheet-{sheet_num}.jpg", buf.getvalue()))
-            sheet_num += 1; idx += per_sheet
-        return sheets
-
-    contact_sheets = make_contact_sheets_compact(image_blobs, max_sheets=3, cols=6, padding=6, base_thumb_w=320, jpeg_quality=68)
+    contact_sheets = make_contact_sheets_compact(
+        image_blobs,
+        max_sheets=CONTACT_MAX_SHEETS,
+        cols=CONTACT_COLS,
+        base_thumb_w=CONTACT_THUMB_W,
+        jpeg_quality=CONTACT_JPEG_QUALITY
+    )
     images_for_vision: List[Dict[str, Any]] = []
     for name, blob in contact_sheets:
         b64 = base64.b64encode(blob).decode("utf-8")
         images_for_vision.append({"type": "image_url","image_url": {"url": f"data:image/jpeg;base64,{b64}"}})
+    stage("contact sheets built")
 
     # Required photos assessment
     missing_photos = check_required_photos(image_blobs, combined_text)
@@ -941,6 +972,8 @@ async def vision_review(
         vin_verification = "VIN unavailable"
     vin_final = vin_est or "N/A"
 
+    stage("VIN/claim extracted")
+
     # Vehicle + parts mix
     vehicle_desc = extract_vehicle_from_text(combined_text) or "N/A"
     odo_photos = extract_odometer_from_photos(image_blobs)
@@ -949,8 +982,9 @@ async def vision_review(
 
     # GPT comparison
     consistency = compare_estimate_with_photos_brief(combined_text, images_for_vision)
+    stage("GPT vision compare done")
 
-    # Scoring (SCRUTINIZED)
+    # Scoring
     year, miles = parse_year_miles(combined_text)
     now_year = datetime.datetime.now().year
     recent_vehicle = ((year is not None and (now_year - year) <= 2) or (miles is not None and miles <= 24000))
@@ -959,7 +993,6 @@ async def vision_review(
     prefer_aftermarket = bool(guidelines.get("prefer_aftermarket"))
     require_oem_due_to_rules = bool(guidelines.get("oem_required_if_recent")) and recent_vehicle
 
-    # Determine parts non-compliance & reason
     parts_noncompliant = False
     parts_reason = ""
     if prefer_aftermarket and not non_oem_flag:
@@ -969,16 +1002,13 @@ async def vision_review(
         parts_noncompliant = True
         parts_reason = "Non-OEM parts used on a ≤2 years or ≤24k miles vehicle."
 
-    # Deductions
     labor_tax_adj = check_labor_and_tax_score(combined_text, client_rules)
     photo_adj = -25 * len(missing_photos)
     parts_adj = -25 if parts_noncompliant else 0
 
-    # Final score bounded [0,100]
     computed_score = 100 + labor_tax_adj + photo_adj + parts_adj
     authoritative_score = max(0, min(100, computed_score))
 
-    # Build client adherence lines (uses same logic -> consistent wording)
     client_lines = build_client_adherence_lines(
         guidelines=guidelines,
         missing_photos=missing_photos,
@@ -988,7 +1018,6 @@ async def vision_review(
         non_oem_flag=non_oem_flag,
     )
 
-    # Summary (narrative) mirrors the same compliance logic
     summary_md = build_summary_markdown(
         missing_photos=missing_photos,
         text=combined_text,
@@ -1018,7 +1047,8 @@ async def vision_review(
     if odo_photos: pdf.multi_cell(0, 6, f"Odometer (from photos): {odo_photos}")
     pdf.multi_cell(0, 6, f"Compliance Score: {authoritative_score}%")
 
-    pdf.ln(4); pdf_add_section_title(pdf, "AI-4-IA Review Summary")
+    pdf.ln(4)
+    pdf.set_font_size(12); pdf.cell(0, 8, txt="AI-4-IA Review Summary", ln=True); pdf.set_font_size(10)
     pdf.multi_cell(0, 6, f"**Audit Results: {authoritative_score}%**")
     if parts_noncompliant and parts_reason:
         pdf.multi_cell(0, 6, f"Deduction applied: -25% (Parts) – {parts_reason}")
@@ -1026,22 +1056,19 @@ async def vision_review(
         pdf.multi_cell(0, 6, f"Deduction applied: -{25*len(missing_photos)}% (Missing photos)")
     if labor_tax_adj != 0:
         pdf.multi_cell(0, 6, f"Deduction applied: {labor_tax_adj}% (Labor/Tax rules)")
-
     pdf.ln(1); pdf.multi_cell(0, 6, summary_md)
 
-    # === Estimate Details (Brief)
-    pdf.ln(4); pdf_add_section_title(pdf, "Estimate Details (Brief)")
+    # Estimate Details (Brief)
+    pdf.ln(4); pdf.set_font_size(12); pdf.cell(0, 8, txt="Estimate Details (Brief)", ln=True); pdf.set_font_size(10)
     for line in build_estimate_brief(combined_text):
         pdf.multi_cell(0, 6, line)
-
-    # Parts Mix line
     pm = parts_mix
     mix_line = (f"OEM: {pm.get('oem',0)} | Aftermarket: {pm.get('aftermarket',0)} | CAPA: {pm.get('capa',0)} | "
                 f"LKQ: {pm.get('lkq',0)} | Recon/Reman: {pm.get('recon',0)} | NSF: {pm.get('nsf',0)} | ALT-OE: {pm.get('alt_oe',0)}")
     pdf.multi_cell(0, 6, f"Parts Mix: {mix_line}")
 
-    # === Estimate ↔ Photos Consistency Review
-    pdf.ln(4); pdf_add_section_title(pdf, "Estimate ↔ Photos Consistency Review")
+    # Estimate ↔ Photos Consistency Review
+    pdf.ln(4); pdf.set_font_size(12); pdf.cell(0, 8, txt="Estimate ↔ Photos Consistency Review", ln=True); pdf.set_font_size(10)
     if consistency.get("per_item"):
         for it in consistency["per_item"][:12]:
             ev = bool(it.get("photo_evidence"))
@@ -1051,20 +1078,16 @@ async def vision_review(
             item = it.get("item","(item)")
             note = it.get("note","").strip()
             pdf.multi_cell(0, 6, f"- {item} → Photo: {'YES' if ev else 'NO'} ({conf_txt}); {note}")
-
         if consistency.get("not_in_photos"):
-            pdf.ln(2); pdf_add_section_title(pdf, "Items Estimated but Not Evident in Photos")
+            pdf.ln(2); pdf.set_font_size(12); pdf.cell(0, 8, txt="Items Estimated but Not Evident in Photos", ln=True); pdf.set_font_size(10)
             for raw in consistency["not_in_photos"][:20]: pdf.multi_cell(0, 6, f"- {raw}")
-
         if consistency.get("extra_damage_in_photos"):
-            pdf.ln(2); pdf_add_section_title(pdf, "Damage Visible in Photos but Missing on Estimate")
+            pdf.ln(2); pdf.set_font_size(12); pdf.cell(0, 8, txt="Damage Visible in Photos but Missing on Estimate", ln=True); pdf.set_font_size(10)
             for d in consistency["extra_damage_in_photos"][:20]: pdf.multi_cell(0, 6, f"- {d}")
-
-        pdf.ln(2); pdf_kv(pdf, "Consistency Overall", consistency.get("overall", ""))
+        pdf.ln(2); pdf.set_font_size(10); pdf.multi_cell(0, 6, f"Consistency Overall: {consistency.get('overall', '')}")
     else:
         pdf.multi_cell(0, 6, "- Comparison unavailable.")
 
-    # Save PDF
     pdf_path = os.path.join(PDF_DIR, f"{file_number}.pdf")
     try:
         pdf_bytes = pdf.output(dest="S").encode("latin-1")
@@ -1072,6 +1095,7 @@ async def vision_review(
         logger.info(f"PDF saved → {pdf_path}")
     except Exception as e:
         logger.error(f"PDF write error: {e}")
+    stage("PDF written")
 
     # Email (unchanged; plain text – no attachment per your last working setup)
     try:
@@ -1104,6 +1128,7 @@ Compliance Score / Audit Results: {authoritative_score}%
         logger.info("Email sent successfully (original settings, no attachment).")
     except Exception as e:
         logger.error(f"Email error: {e}")
+    stage("email attempted")
 
     return {
         "gpt_output": f"Audit Results: {authoritative_score}%\n\n{summary_md}",
