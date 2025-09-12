@@ -476,24 +476,29 @@ def _plate_ocr_variants(img: Image.Image) -> str:
     return "\n".join(out)
 
 def check_required_photos(image_blobs: List[Tuple[str, bytes]], ocr_text: str) -> List[str]:
+    """
+    Photo presence must be proven by photos only (no text fallback).
+    This prevents contradictions like 'VIN photo not found' while claiming
+    the VIN required photo is provided.
+    """
+    # Optional cap: still allows plenty of images to satisfy presence checks
     if FAST_MODE and len(image_blobs) > 60:
-        image_blobs = image_blobs[:60]  # cap for presence checks
+        image_blobs = image_blobs[:60]
 
     required = ["four corners", "odometer", "vin", "license plate"]
     present = set()
-    txt = (ocr_text or "").lower()
 
-    vin_text = bool(re.search(r'\bvin\b', txt))
-    odo_text = bool(re.search(r'\bodometer|mileage\b', txt))
-
-    vin_photo = extract_vin_from_photos(image_blobs) is not None
-    odo_photo = extract_odometer_from_photos(image_blobs) is not None
-
-    if vin_text or vin_photo:
+    # --- VIN (PHOTOS ONLY) ---
+    vin_photo_found = (extract_vin_from_photos(image_blobs) is not None)
+    if vin_photo_found:
         present.add("vin")
-    if odo_text or odo_photo:
+
+    # --- ODOMETER (PHOTOS ONLY) ---
+    odo_photo_val = extract_odometer_from_photos(image_blobs)
+    if odo_photo_val is not None:
         present.add("odometer")
 
+    # --- LICENSE PLATE (PHOTOS ONLY) ---
     for name, blob in image_blobs:
         try:
             img = Image.open(io.BytesIO(blob))
@@ -504,6 +509,7 @@ def check_required_photos(image_blobs: List[Tuple[str, bytes]], ocr_text: str) -
         except Exception:
             pass
 
+    # --- FOUR CORNERS heuristic (PHOTOS ONLY) ---
     exterior_hits = 0
     for name, blob in image_blobs[:40]:
         try:
@@ -517,7 +523,7 @@ def check_required_photos(image_blobs: List[Tuple[str, bytes]], ocr_text: str) -
         present.add("four corners")
 
     missing = [p for p in required if p not in present]
-    logger.debug(f"Photo check → present={sorted(list(present))}, missing={missing}, ext_hits={exterior_hits}")
+    logger.debug(f"[photos-only] present={sorted(list(present))}, missing={missing}, ext_hits={exterior_hits}")
     return missing
 
 # =========================================
