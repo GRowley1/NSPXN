@@ -38,7 +38,7 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 # =========================================
-# OpenAI client (keep gpt-4o)
+# OpenAI client (gpt-4o as requested)
 # =========================================
 if "OPENAI_API_KEY" not in os.environ:
     raise RuntimeError("❌ OPENAI_API_KEY environment variable is NOT set.")
@@ -122,7 +122,7 @@ def extract_text_from_pdf_embedded(pdf_bytes: bytes) -> str:
         return ""
 
 # =========================================
-# Photo harvesting (skip for estimates)
+# Photo harvesting (skip for obvious estimates)
 # =========================================
 def _page_var(img: Image.Image) -> float:
     g = img.convert("L")
@@ -270,35 +270,70 @@ def extract_claim_from_pdf_first_pages(pdf_bytes: bytes, pages_to_scan: int = 4,
     return None
 
 # =========================================
-# Vehicle & tax/parts helpers
+# Vehicle & tax/parts helpers (UPDATED vehicle parsing)
 # =========================================
-MAKE_FIX = {
-    "nessan": "Nissan","nisaan": "Nissan","nissan": "Nissan","niss": "Nissan","niss.": "Nissan",
-    "toy0ta": "Toyota","chevroler": "Chevrolet","cheverolet": "Chevrolet"
+MAKE_ALIASES = {
+    "CHEV": "Chevrolet", "CHEVROLET": "Chevrolet", "CHEVY": "Chevrolet",
+    "MERCEDES-BENZ": "Mercedes-Benz", "MERCEDES": "Mercedes-Benz",
+    "LAND ROVER": "Land Rover", "VW": "Volkswagen",
 }
+KNOWN_MAKES = [
+    "ACURA","ALFA ROMEO","AUDI","BMW","BUICK","CADILLAC","CHEV","CHEVROLET","CHEVY",
+    "CHRYSLER","DODGE","FIAT","FORD","GMC","HONDA","HYUNDAI","INFINITI","ISUZU",
+    "JAGUAR","JEEP","KIA","LAND ROVER","LEXUS","LINCOLN","MAZDA","MERCEDES","MERCEDES-BENZ",
+    "MINI","MITSUBISHI","NISSAN","PORSCHE","RAM","SAAB","SUBARU","SUZUKI","TESLA",
+    "TOYOTA","VOLKSWAGEN","VW","VOLVO"
+]
+MAKE_RE = re.compile(
+    r"\b(20\d{2}|\d{4})\s+(" + "|".join(re.escape(m) for m in KNOWN_MAKES) + r")\b[^\n]{0,60}",
+    re.IGNORECASE
+)
+
+def _normalize_make(m: str) -> str:
+    m = m.upper()
+    return MAKE_ALIASES.get(m, m.title())
+
 def normalize_vehicle_str(s: str) -> str:
     if not s: return s
-    s2 = s
-    for wrong, right in MAKE_FIX.items():
-        s2 = re.sub(rf'\b{re.escape(wrong)}\b', right, s2, flags=re.IGNORECASE)
-    s2 = re.sub(r'\s{2,}', ' ', s2).replace(' ,', ',')
+    s2 = re.sub(r'\s{2,}', ' ', s).replace(' ,', ',')
     return s2.strip()
 
 def extract_vehicle_from_text(text: str) -> Optional[str]:
-    m1 = re.search(r"\b(20\d{2})\s+([A-Za-z]{3,})\s+([A-Za-z0-9\-]{2,})", text or "")
-    m2 = re.search(r"(?:Odometer|Mileage)\s*[:\-]?\s*([\d,]+)", text or "", re.IGNORECASE)
-    if m1:
-        year, make, model = m1.groups()
-        miles = m2.group(1) if m2 else "Mileage unknown"
-        out = f"{year} {make} {model}, {miles} miles"
-        return normalize_vehicle_str(out)
-    return None
+    """
+    Find 'YEAR MAKE ...' using a known make list to avoid matching narrative lines like 'Some 2024 vehicles ...'.
+    Returns 'YEAR Make Model, <miles> miles' when possible.
+    """
+    if not text:
+        return None
+
+    best_line = None
+    for m in MAKE_RE.finditer(text):
+        year = m.group(1)
+        make = _normalize_make(m.group(2))
+        line_end = text.find("\n", m.start())
+        if line_end == -1:
+            line_end = m.end() + 60
+        chunk = text[m.end():line_end]
+        model = re.sub(r"[,/].*$", "", chunk).strip()
+        model = re.sub(r"\b(vehicles?|contain|minor|turbocharged|diesel|indirect|fi|4dr?|4d|p/u)\b.*", "", model, flags=re.I)
+        model = re.sub(r"\s{2,}", " ", model).strip(" -·")
+        if not model:
+            model = "Model"
+        best_line = f"{year} {make} {model}"
+        break  # first good hit wins
+
+    if not best_line:
+        return None
+
+    m_mi = re.search(r"(?:Odometer|Mileage)\s*[:\-]?\s*([\d,]+)", text, re.IGNORECASE)
+    miles = m_mi.group(1) if m_mi else "unknown"
+    return normalize_vehicle_str(f"{best_line}, {miles} miles")
 
 def parse_year_miles(text: str) -> Tuple[Optional[int], Optional[int]]:
     year = None; miles = None
-    m_year = re.search(r"\b(20\d{2})\b", text or "")
+    m_year = re.search(r"\b(19|20)\d{2}\b", text or "")
     if m_year:
-        try: year = int(m_year.group(1))
+        try: year = int(m_year.group(0))
         except: year = None
     m_mi = re.search(r"(?:Odometer|Mileage)\s*[:\-]?\s*([\d,]+)", text or "", re.IGNORECASE)
     if m_mi:
@@ -309,12 +344,12 @@ def parse_year_miles(text: str) -> Tuple[Optional[int], Optional[int]]:
 def taxes_present(text: str) -> bool:
     return re.search(r'tax[^\n]{0,50}(\d{1,3}\s*%|\$\s*\d+(\.\d{2})?)', text or "", re.IGNORECASE) is not None
 
-# Basic parts token counting (for a brief summary only)
+# Parts token counting (brief)
 PART_TOKEN_RX = re.compile(r'\b(A/M|AFTERMARKET|LKQ|RECOND(?:ITIONED)?|REMAN(?:UFACTURED)?|CAPA|NSF|ALT[-\s]*OE|OEM)\b', re.I)
 def estimate_parts_mix(text: str) -> Dict[str, int]:
     counts = {"oem":0,"aftermarket":0,"lkq":0,"recon":0,"capa":0,"nsf":0,"alt_oe":0}
     for m in PART_TOKEN_RX.finditer(text or ""):
-        tok = m.group(1).upper().replace("  "," ").replace("ALTOE","ALT OE")
+        tok = m.group(1).upper().replace("ALTOE","ALT OE")
         if tok in ("A/M","AFTERMARKET"): counts["aftermarket"] += 1
         elif tok == "LKQ": counts["lkq"] += 1
         elif tok.startswith("RECOND") or tok.startswith("REMAN"): counts["recon"] += 1
@@ -334,72 +369,59 @@ def _is_exterior_by_edges(img: Image.Image) -> bool:
     evar = ImageStat.Stat(edges).var[0]
     return (var > 140 and evar > 400)
 
+# UPDATED: scan *all* images for VIN; upscale small labels; multi-psm OCR
 def extract_vin_from_photos(image_blobs: List[Tuple[str, bytes]]) -> Optional[str]:
     VIN_NEAR_LABEL = re.compile(r'(?i)\bV[\W_]*I[\W_]*N\b')
     VIN_17 = re.compile(r'\b([A-HJ-NPR-Z0-9]{17})\b')
     VIN_SEP_SEQ = re.compile(r'(?i)((?:[A-HJ-NPR-Z0-9][\s\.\-–—:_]){16}[A-HJ-NPR-Z0-9])')
 
-    candidates: List[Tuple[str, bytes]] = []
-    for name, blob in image_blobs:
-        try:
-            im = Image.open(io.BytesIO(blob)).convert("L")
-            im.thumbnail((1100, 1100))
-            txt = pytesseract.image_to_string(im, lang="eng", config="--psm 6 --oem 1")
-            up = (txt or "").upper()
-            if "VIN" in up or VIN_17.search(up) or VIN_SEP_SEQ.search(up):
-                candidates.append((name, blob))
-        except Exception:
-            continue
-    candidates = candidates[:6]
-
-    def _variants(im: Image.Image) -> List[Image.Image]:
-        im = im.copy()
-        max_w = 2200
-        if im.width < max_w:
-            h = int(im.height * (max_w / im.width))
-            im = im.resize((max_w, h), Image.LANCZOS)
-        g = im.convert("L")
+    def variants(im: Image.Image) -> List[Image.Image]:
+        base = im.convert("L")
+        if base.width < 2400:
+            h = int(base.height * (2400 / max(base.width, 1)))
+            base = base.resize((2400, h), Image.LANCZOS)
         return [
-            ImageEnhance.Contrast(g).enhance(2.0),
-            ImageEnhance.Sharpness(g).enhance(2.0),
-            g.point(lambda p: 255 if p > 180 else 0, mode="1").convert("L"),
-            ImageOps.autocontrast(g.filter(ImageFilter.MedianFilter(3))),
+            base,
+            ImageEnhance.Contrast(base).enhance(2.2),
+            ImageEnhance.Sharpness(base).enhance(2.0),
+            ImageOps.autocontrast(base.filter(ImageFilter.MedianFilter(3))),
+            base.point(lambda p: 255 if p > 185 else 0, mode="1").convert("L"),
         ]
 
-    def _ocr_all(im: Image.Image) -> str:
+    def ocr_all(im: Image.Image) -> str:
         out = []
-        for psm in (7, 6, 11):
-            try:
-                out.append(pytesseract.image_to_string(im, lang="eng", config=f"--psm {psm} --oem 1"))
-            except Exception:
-                pass
-        return "\n".join([t for t in out if t])
+        for v in variants(im):
+            for psm in (7, 6, 11, 12, 13):
+                try:
+                    t = pytesseract.image_to_string(v, lang="eng", config=f"--psm {psm} --oem 1")
+                    if t: out.append(t)
+                except Exception:
+                    pass
+        return "\n".join(out)
 
-    for name, blob in candidates:
+    for name, blob in image_blobs:
         try:
             im = Image.open(io.BytesIO(blob))
-            up_all = ""
-            for var in _variants(im):
-                up_all += "\n" + _ocr_all(var)
-            up_all = up_all.upper()
+        except Exception:
+            continue
+        up = ocr_all(im).upper()
 
-            for m in VIN_NEAR_LABEL.finditer(up_all):
-                window = up_all[m.end(): m.end() + 220]
-                for mm in VIN_SEP_SEQ.finditer(window):
-                    vin = normalize_vin(mm.group(1))
-                    if vin and vin_checksum_ok(vin):
-                        return vin
-                vin = best_vin_candidate(re.findall(r'\b([A-HJ-NPR-Z0-9]{17})\b', window))
-                if vin: return vin
-
-            for mm in VIN_SEP_SEQ.finditer(up_all):
+        for m in VIN_NEAR_LABEL.finditer(up):
+            window = up[m.end(): m.end() + 260]
+            for mm in VIN_SEP_SEQ.finditer(window):
                 vin = normalize_vin(mm.group(1))
-                if vin and vin_checksum_ok(vin): return vin
-
-            vin = best_vin_candidate(re.findall(r'\b([A-HJ-NPR-Z0-9]{17})\b', up_all))
+                if vin and vin_checksum_ok(vin):
+                    return vin
+            vin = best_vin_candidate(re.findall(r'\b([A-HJ-NPR-Z0-9]{17})\b', window))
             if vin: return vin
-        except Exception as e:
-            logger.warning(f"VIN photo OCR error ({name}): {e}")
+
+        for mm in VIN_SEP_SEQ.finditer(up):
+            vin = normalize_vin(mm.group(1))
+            if vin and vin_checksum_ok(vin):
+                return vin
+        vin = best_vin_candidate(re.findall(r'\b([A-HJ-NPR-Z0-9]{17})\b', up))
+        if vin: return vin
+
     return None
 
 def extract_odometer_from_photos(image_blobs: List[Tuple[str, bytes]]) -> Optional[str]:
@@ -416,7 +438,6 @@ def extract_odometer_from_photos(image_blobs: List[Tuple[str, bytes]]) -> Option
             logger.warning(f"Odometer photo OCR error ({name}): {e}")
     return None
 
-# ---- License plate OCR: scan ALL images robustly
 PLATE_RX = re.compile(r'\b([A-Z0-9]{1,3}[-\s]?[A-Z0-9]{3,4}|[A-Z0-9]{5,8})\b')
 def _plate_ocr_variants(img: Image.Image) -> str:
     def variants(im: Image.Image) -> List[Image.Image]:
@@ -455,7 +476,6 @@ def check_required_photos(image_blobs: List[Tuple[str, bytes]], ocr_text: str) -
     if odo_text or odo_photo:
         present.add("odometer")
 
-    # License plate: scan ALL images (robust OCR)
     for name, blob in image_blobs:
         try:
             img = Image.open(io.BytesIO(blob))
@@ -466,7 +486,6 @@ def check_required_photos(image_blobs: List[Tuple[str, bytes]], ocr_text: str) -
         except Exception:
             pass
 
-    # Four corners heuristic (first 40 to bound cost)
     exterior_hits = 0
     for name, blob in image_blobs[:40]:
         try:
@@ -484,7 +503,7 @@ def check_required_photos(image_blobs: List[Tuple[str, bytes]], ocr_text: str) -
     return missing
 
 # =========================================
-# Estimate: simple, BRIEF summary (no complex parsing)
+# Estimate: simple, BRIEF summary
 # =========================================
 POI_RX = re.compile(r'Point\s+of\s+Impact\s*:\s*([^\n]+)', re.I)
 SUBTOTAL_RX = re.compile(r'\bSubtotal\b[^\n]*\s(\d{1,3}(?:,\d{3})*(?:\.\d{2})?)', re.I)
@@ -500,7 +519,6 @@ def build_estimate_brief(text: str) -> List[str]:
     if m:
         bullets.append(f"- Point of Impact: {m.group(1).strip()}")
 
-    # Operation counts (very light)
     counts = {
         "Replace": len(re.findall(r'\bRepl(?:ace)?\b', text, re.I)),
         "Repair": len(re.findall(r'\b(Rpr|Repair)\b', text, re.I)),
@@ -511,18 +529,15 @@ def build_estimate_brief(text: str) -> List[str]:
     ops_summary = ", ".join([f"{k} {v}" for k, v in counts.items() if v > 0]) or "No operations detected"
     bullets.append(f"- Operations: {ops_summary}")
 
-    # Parts mix
     mix = estimate_parts_mix(text)
     mix_line = (f"OEM {mix.get('oem',0)}, Aftermarket {mix.get('aftermarket',0)}, "
                 f"CAPA {mix.get('capa',0)}, LKQ {mix.get('lkq',0)}, Recon/Reman {mix.get('recon',0)}, "
                 f"NSF {mix.get('nsf',0)}, ALT-OE {mix.get('alt_oe',0)}")
     bullets.append(f"- Parts mix: {mix_line}")
 
-    # Labor/tax
     bullets.append("- Labor rates: present" if LABOR_RATE_RX.search(text) else "- Labor rates: not clearly listed")
     bullets.append("- Sales tax: present" if taxes_present(text) else "- Sales tax: not found")
 
-    # Totals
     t = TOTAL_RX.search(text)
     s = SUBTOTAL_RX.search(text)
     if t:
@@ -537,15 +552,6 @@ def build_estimate_brief(text: str) -> List[str]:
 # =========================================
 def compare_estimate_with_photos_brief(estimate_text: str,
                                        images_for_vision: List[Dict[str, Any]]) -> Dict[str, Any]:
-    """
-    Ask GPT to do a concise, *direct* comparison between the estimate and photos.
-    Returns JSON:
-    {
-      "per_item": [{"item":"RR combo lamp", "photo_evidence":true, "confidence":0.9, "note":"..."} ... up to 8],
-      "not_in_photos": ["..."], "extra_damage_in_photos": ["..."],
-      "overall": "3–4 sentence summary"
-    }
-    """
     schema = {"type":"object","properties":{
         "per_item":{"type":"array","items":{"type":"object","properties":{
             "item":{"type":"string"},
@@ -591,7 +597,7 @@ def compare_estimate_with_photos_brief(estimate_text: str,
         return {"per_item": [],"not_in_photos": [],"extra_damage_in_photos": [],"overall": "Comparison unavailable."}
 
 # =========================================
-# Client-guideline parsing & adherence (unchanged)
+# Client-guideline parsing & adherence
 # =========================================
 PHOTO_KEYWORDS = {
     "four corners": ["four corners", "4 corners", "four-corners"],
@@ -701,14 +707,14 @@ def build_client_adherence_lines(
             lines.append("- Unable to verify: total loss declaration not found.")
 
     prefer_aftermarket = bool(guidelines.get("prefer_aftermarket"))
+    recent = ((year is not None and (datetime.datetime.now().year - year) <= 2) or
+              (miles is not None and miles <= 24000))
     if prefer_aftermarket:
         if non_oem_flag:
             lines.append("- Compliant: aftermarket/LKQ/recon parts used per client preference.")
         else:
             lines.append("- Non-compliant: OEM used; document why alternative parts were not utilized per client preference.")
     else:
-        recent = ((year is not None and (datetime.datetime.now().year - year) <= 2) or
-                  (miles is not None and miles <= 24000))
         if guidelines.get("oem_required_if_recent") and recent:
             if non_oem_flag:
                 lines.append("- Non-compliant: non-OEM parts used on a ≤2 years or ≤24k miles vehicle.")
@@ -733,7 +739,7 @@ def build_summary_markdown(
     if not missing_photos:
         photos_lines = ["- All required photo types present (four corners, VIN, odometer, plate)."]
     else:
-        # >>> FIXED the f-string here (single-item case) <<<
+        # fixed single-item message
         photos_lines = [f"- Missing: {missing_photos[0]}."] if len(missing_photos) == 1 else [f"- Missing: {', '.join(missing_photos)}."]
 
     labor_lines = ["- Labor rates listed on estimate."] if labor_rates_present_any(text) else ["- Labor rates missing or not clearly listed."]
@@ -842,7 +848,7 @@ async def vision_review(
 
     combined_text = "\n".join(texts)
 
-    # Contact sheets for vision
+    # Build contact sheets for GPT vision
     def shrink_to_width(img: Image.Image, max_w: int) -> Image.Image:
         if img.width <= max_w:
             return img.convert("RGB")
@@ -916,10 +922,10 @@ async def vision_review(
         b64 = base64.b64encode(blob).decode("utf-8")
         images_for_vision.append({"type": "image_url","image_url": {"url": f"data:image/jpeg;base64,{b64}"}})
 
-    # Required photos
+    # Required photos assessment
     missing_photos = check_required_photos(image_blobs, combined_text)
 
-    # VIN / Claim (estimate first, then photo)
+    # VIN / Claim
     vin_est = extract_vin_from_text(combined_text) or (extract_vin_from_pdf_first_pages(first_pdf_bytes, 4, 170) if first_pdf_bytes else None)
     claim_number = extract_claim_from_text(combined_text) or (extract_claim_from_pdf_first_pages(first_pdf_bytes, 4, 170) if first_pdf_bytes else None)
     claim_number = claim_number or "N/A"
@@ -935,22 +941,44 @@ async def vision_review(
         vin_verification = "VIN unavailable"
     vin_final = vin_est or "N/A"
 
-    # Vehicle descriptor and parts mix
+    # Vehicle + parts mix
     vehicle_desc = extract_vehicle_from_text(combined_text) or "N/A"
     odo_photos = extract_odometer_from_photos(image_blobs)
     parts_mix = estimate_parts_mix(combined_text)
     non_oem_flag = (parts_mix.get("aftermarket",0)+parts_mix.get("lkq",0)+parts_mix.get("recon",0)+parts_mix.get("capa",0)+parts_mix.get("nsf",0)+parts_mix.get("alt_oe",0) > 0)
 
-    # GPT comparison (brief)
+    # GPT comparison
     consistency = compare_estimate_with_photos_brief(combined_text, images_for_vision)
 
-    # Scoring
+    # Scoring (SCRUTINIZED)
     year, miles = parse_year_miles(combined_text)
     now_year = datetime.datetime.now().year
-    age_years = (now_year - year) if year else None
-    require_oem = (age_years is not None and age_years <= 2) or (miles is not None and miles <= 24000)
+    recent_vehicle = ((year is not None and (now_year - year) <= 2) or (miles is not None and miles <= 24000))
 
     guidelines = parse_client_rules(client_rules)
+    prefer_aftermarket = bool(guidelines.get("prefer_aftermarket"))
+    require_oem_due_to_rules = bool(guidelines.get("oem_required_if_recent")) and recent_vehicle
+
+    # Determine parts non-compliance & reason
+    parts_noncompliant = False
+    parts_reason = ""
+    if prefer_aftermarket and not non_oem_flag:
+        parts_noncompliant = True
+        parts_reason = "Client prefers aftermarket/LKQ; OEM used without justification."
+    elif require_oem_due_to_rules and non_oem_flag:
+        parts_noncompliant = True
+        parts_reason = "Non-OEM parts used on a ≤2 years or ≤24k miles vehicle."
+
+    # Deductions
+    labor_tax_adj = check_labor_and_tax_score(combined_text, client_rules)
+    photo_adj = -25 * len(missing_photos)
+    parts_adj = -25 if parts_noncompliant else 0
+
+    # Final score bounded [0,100]
+    computed_score = 100 + labor_tax_adj + photo_adj + parts_adj
+    authoritative_score = max(0, min(100, computed_score))
+
+    # Build client adherence lines (uses same logic -> consistent wording)
     client_lines = build_client_adherence_lines(
         guidelines=guidelines,
         missing_photos=missing_photos,
@@ -960,28 +988,15 @@ async def vision_review(
         non_oem_flag=non_oem_flag,
     )
 
+    # Summary (narrative) mirrors the same compliance logic
     summary_md = build_summary_markdown(
         missing_photos=missing_photos,
         text=combined_text,
         client_rules=client_rules,
-        require_oem=require_oem,
+        require_oem=require_oem_due_to_rules,
         non_oem_flag=non_oem_flag,
         client_lines_override=client_lines,
     )
-
-    labor_tax_adj = check_labor_and_tax_score(combined_text, client_rules)
-    photo_adj = -25 * len(missing_photos)
-
-    parts_adj = 0
-    prefer_aftermarket = bool(guidelines.get("prefer_aftermarket"))
-    recent = ((year is not None and (now_year - year) <= 2) or (miles is not None and miles <= 24000))
-    if prefer_aftermarket and not non_oem_flag:
-        parts_adj -= 25
-    elif guidelines.get("oem_required_if_recent") and recent and non_oem_flag:
-        parts_adj -= 25
-
-    computed = max(0, 100 + labor_tax_adj + photo_adj + parts_adj)
-    authoritative_score = computed
 
     # ============== PDF ==============
     pdf = FPDF(); pdf.add_page()
@@ -1005,20 +1020,27 @@ async def vision_review(
 
     pdf.ln(4); pdf_add_section_title(pdf, "AI-4-IA Review Summary")
     pdf.multi_cell(0, 6, f"**Audit Results: {authoritative_score}%**")
+    if parts_noncompliant and parts_reason:
+        pdf.multi_cell(0, 6, f"Deduction applied: -25% (Parts) – {parts_reason}")
+    if missing_photos:
+        pdf.multi_cell(0, 6, f"Deduction applied: -{25*len(missing_photos)}% (Missing photos)")
+    if labor_tax_adj != 0:
+        pdf.multi_cell(0, 6, f"Deduction applied: {labor_tax_adj}% (Labor/Tax rules)")
+
     pdf.ln(1); pdf.multi_cell(0, 6, summary_md)
 
-    # === Estimate Details (Brief) ===
+    # === Estimate Details (Brief)
     pdf.ln(4); pdf_add_section_title(pdf, "Estimate Details (Brief)")
     for line in build_estimate_brief(combined_text):
         pdf.multi_cell(0, 6, line)
 
-    # Parts Mix (1 line)
+    # Parts Mix line
     pm = parts_mix
     mix_line = (f"OEM: {pm.get('oem',0)} | Aftermarket: {pm.get('aftermarket',0)} | CAPA: {pm.get('capa',0)} | "
                 f"LKQ: {pm.get('lkq',0)} | Recon/Reman: {pm.get('recon',0)} | NSF: {pm.get('nsf',0)} | ALT-OE: {pm.get('alt_oe',0)}")
     pdf.multi_cell(0, 6, f"Parts Mix: {mix_line}")
 
-    # === Estimate ↔ Photos Consistency Review (concise & direct) ===
+    # === Estimate ↔ Photos Consistency Review
     pdf.ln(4); pdf_add_section_title(pdf, "Estimate ↔ Photos Consistency Review")
     if consistency.get("per_item"):
         for it in consistency["per_item"][:12]:
@@ -1051,7 +1073,7 @@ async def vision_review(
     except Exception as e:
         logger.error(f"PDF write error: {e}")
 
-    # Email (unchanged; no attachment per your last working behavior)
+    # Email (unchanged; plain text – no attachment per your last working setup)
     try:
         msg = EmailMessage()
         msg["Subject"] = f"AI-4-IA Review: {claim_number}"
@@ -1069,10 +1091,7 @@ VIN: {vin_final}
 VIN Photo Verification: {vin_verification}
 Vehicle: {vehicle_desc}
 
-Compliance Score: {authoritative_score}%
-
-AI Review Summary:
-Audit Results: {authoritative_score}%
+Compliance Score / Audit Results: {authoritative_score}%
 
 {summary_md}
 """
@@ -1120,6 +1139,7 @@ async def get_client_rules(client_name: str):
     else:
         logger.error(f"Rules not found for client: {client_name}")
         return JSONResponse(status_code=404, content={"error": "Rules not found for this client."})
+
 
 
 
