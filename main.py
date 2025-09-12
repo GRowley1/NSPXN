@@ -733,7 +733,8 @@ def build_summary_markdown(
     if not missing_photos:
         photos_lines = ["- All required photo types present (four corners, VIN, odometer, plate)."]
     else:
-        photos_lines = [f"- Missing: {, '.join(missing_photos)}."] if len(missing_photos)==1 else [f"- Missing: {', '.join(missing_photos)}."]
+        # >>> FIXED the f-string here (single-item case) <<<
+        photos_lines = [f"- Missing: {missing_photos[0]}."] if len(missing_photos) == 1 else [f"- Missing: {', '.join(missing_photos)}."]
 
     labor_lines = ["- Labor rates listed on estimate."] if labor_rates_present_any(text) else ["- Labor rates missing or not clearly listed."]
     taxes_lines = ["- Tax rate present on estimate."] if taxes_present(text) else ["- Tax rate not found per client rules."]
@@ -1119,6 +1120,7 @@ async def get_client_rules(client_name: str):
     else:
         logger.error(f"Rules not found for client: {client_name}")
         return JSONResponse(status_code=404, content={"error": "Rules not found for this client."})
+
 
 
 
