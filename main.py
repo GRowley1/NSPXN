@@ -52,11 +52,17 @@ FAST_MODE = os.getenv("FAST_MODE", "1") == "1"   # set FAST_MODE=0 to disable
 OCR_MAX_PAGES = int(os.getenv("OCR_MAX_PAGES", "4" if FAST_MODE else "8"))
 OCR_DPI = int(os.getenv("OCR_DPI", "120" if FAST_MODE else "140"))
 
-# Contact sheet controls
+# Contact sheet controls (this is the biggest latency lever)
 CONTACT_MAX_SHEETS = int(os.getenv("CONTACT_MAX_SHEETS", "2" if FAST_MODE else "3"))
 CONTACT_COLS = int(os.getenv("CONTACT_COLS", "7" if FAST_MODE else "6"))
 CONTACT_THUMB_W = int(os.getenv("CONTACT_THUMB_W", "260" if FAST_MODE else "320"))
 CONTACT_JPEG_QUALITY = int(os.getenv("CONTACT_JPEG_QUALITY", "55" if FAST_MODE else "68"))
+
+# Make the contact sheets even lighter by default in FAST_MODE
+if FAST_MODE:
+    CONTACT_MAX_SHEETS = int(os.getenv("CONTACT_MAX_SHEETS", "1"))
+    CONTACT_THUMB_W = int(os.getenv("CONTACT_THUMB_W", "220"))
+    CONTACT_JPEG_QUALITY = int(os.getenv("CONTACT_JPEG_QUALITY", "50"))
 
 # VIN scan controls
 VIN_UPSCALE_WIDTH = int(os.getenv("VIN_UPSCALE_WIDTH", "2000" if FAST_MODE else "2400"))
@@ -64,6 +70,10 @@ VIN_MAX_PHOTOS_SCAN = int(os.getenv("VIN_MAX_PHOTOS_SCAN", "20" if FAST_MODE els
 
 # Vision model (faster but still good enough)
 VISION_MODEL = os.getenv("VISION_MODEL", "gpt-4o-mini" if FAST_MODE else "gpt-4o")
+
+# Time budget and OpenAI timeout
+REQUEST_BUDGET_SECONDS = int(os.getenv("REQUEST_BUDGET_SECONDS", "65"))  # stay under proxy limits
+OPENAI_REQUEST_TIMEOUT = float(os.getenv("OPENAI_REQUEST_TIMEOUT", "30"))
 
 # =========================================
 # FastAPI app + CORS
@@ -475,30 +485,30 @@ def _plate_ocr_variants(img: Image.Image) -> str:
                 pass
     return "\n".join(out)
 
+# =========================================
+# Required photos: PHOTOS-ONLY presence
+# =========================================
 def check_required_photos(image_blobs: List[Tuple[str, bytes]], ocr_text: str) -> List[str]:
     """
     Photo presence must be proven by photos only (no text fallback).
-    This prevents contradictions like 'VIN photo not found' while claiming
-    the VIN required photo is provided.
+    Prevents contradictions like 'VIN photo not found' while claiming the VIN photo is present.
     """
-    # Optional cap: still allows plenty of images to satisfy presence checks
+    # Optional cap for presence checks (does NOT limit uploads)
     if FAST_MODE and len(image_blobs) > 60:
         image_blobs = image_blobs[:60]
 
     required = ["four corners", "odometer", "vin", "license plate"]
     present = set()
 
-    # --- VIN (PHOTOS ONLY) ---
-    vin_photo_found = (extract_vin_from_photos(image_blobs) is not None)
-    if vin_photo_found:
+    # VIN by photo only
+    if extract_vin_from_photos(image_blobs) is not None:
         present.add("vin")
 
-    # --- ODOMETER (PHOTOS ONLY) ---
-    odo_photo_val = extract_odometer_from_photos(image_blobs)
-    if odo_photo_val is not None:
+    # Odometer by photo only
+    if extract_odometer_from_photos(image_blobs) is not None:
         present.add("odometer")
 
-    # --- LICENSE PLATE (PHOTOS ONLY) ---
+    # License plate by photo OCR
     for name, blob in image_blobs:
         try:
             img = Image.open(io.BytesIO(blob))
@@ -509,7 +519,7 @@ def check_required_photos(image_blobs: List[Tuple[str, bytes]], ocr_text: str) -
         except Exception:
             pass
 
-    # --- FOUR CORNERS heuristic (PHOTOS ONLY) ---
+    # Four corners heuristic by exterior-photo count
     exterior_hits = 0
     for name, blob in image_blobs[:40]:
         try:
@@ -603,7 +613,7 @@ def compare_estimate_with_photos_brief(estimate_text: str,
     user_parts.extend(images_for_vision)
 
     try:
-        rsp = client.chat.completions.create(
+        rsp = client.with_options(timeout=OPENAI_REQUEST_TIMEOUT).chat.completions.create(
             model=VISION_MODEL,   # faster model for vision
             messages=[{"role": "system", "content": system},
                       {"role": "user", "content": user_parts}],
@@ -618,7 +628,8 @@ def compare_estimate_with_photos_brief(estimate_text: str,
         return data
     except Exception as e:
         logger.error(f"Vision compare BRIEF JSON error: {type(e).__name__}: {e}")
-        return {"per_item": [],"not_in_photos": [],"extra_damage_in_photos": [],"overall": "Comparison unavailable."}
+        # FAST fallback: return an empty structured result so the PDF still completes quickly
+        return {"per_item": [], "not_in_photos": [], "extra_damage_in_photos": [], "overall": "Comparison unavailable (timeout or error)."}
 
 # =========================================
 # Client-guideline parsing & adherence
@@ -891,6 +902,12 @@ def make_contact_sheets_compact(
     return sheets
 
 # =========================================
+# Utility: time budget
+# =========================================
+def time_budget_exceeded(start_ts: datetime.datetime, budget_s: int) -> bool:
+    return (datetime.datetime.now() - start_ts).total_seconds() > budget_s
+
+# =========================================
 # Routes
 # =========================================
 @app.get("/")
@@ -917,6 +934,7 @@ async def vision_review(
     image_blobs: List[Tuple[str, bytes]] = []
     first_pdf_bytes: Optional[bytes] = None
 
+    # -------- Ingest uploads --------
     for f in files:
         raw = await f.read()
         name = (f.filename or "upload").lower()
@@ -945,7 +963,7 @@ async def vision_review(
     stage("uploads received / OCR done")
     combined_text = "\n".join(texts)
 
-    # Build contact sheets for GPT vision
+    # -------- Contact sheets for GPT vision --------
     contact_sheets = make_contact_sheets_compact(
         image_blobs,
         max_sheets=CONTACT_MAX_SHEETS,
@@ -959,10 +977,10 @@ async def vision_review(
         images_for_vision.append({"type": "image_url","image_url": {"url": f"data:image/jpeg;base64,{b64}"}})
     stage("contact sheets built")
 
-    # Required photos assessment
+    # -------- Required photos (PHOTOS ONLY) --------
     missing_photos = check_required_photos(image_blobs, combined_text)
 
-    # VIN / Claim
+    # -------- VIN / Claim from estimate & photos --------
     vin_est = extract_vin_from_text(combined_text) or (extract_vin_from_pdf_first_pages(first_pdf_bytes, 4, 170) if first_pdf_bytes else None)
     claim_number = extract_claim_from_text(combined_text) or (extract_claim_from_pdf_first_pages(first_pdf_bytes, 4, 170) if first_pdf_bytes else None)
     claim_number = claim_number or "N/A"
@@ -980,17 +998,21 @@ async def vision_review(
 
     stage("VIN/claim extracted")
 
-    # Vehicle + parts mix
+    # -------- Vehicle + parts mix --------
     vehicle_desc = extract_vehicle_from_text(combined_text) or "N/A"
     odo_photos = extract_odometer_from_photos(image_blobs)
     parts_mix = estimate_parts_mix(combined_text)
     non_oem_flag = (parts_mix.get("aftermarket",0)+parts_mix.get("lkq",0)+parts_mix.get("recon",0)+parts_mix.get("capa",0)+parts_mix.get("nsf",0)+parts_mix.get("alt_oe",0) > 0)
 
-    # GPT comparison
-    consistency = compare_estimate_with_photos_brief(combined_text, images_for_vision)
-    stage("GPT vision compare done")
+    # -------- GPT comparison with time budget --------
+    if time_budget_exceeded(start_ts, REQUEST_BUDGET_SECONDS - 10):
+        logger.warning("Skipping GPT vision compare due to time budget.")
+        consistency = {"per_item": [], "not_in_photos": [], "extra_damage_in_photos": [], "overall": "Comparison skipped due to time budget."}
+    else:
+        consistency = compare_estimate_with_photos_brief(combined_text, images_for_vision)
+    stage("GPT vision compare done (or skipped)")
 
-    # Scoring
+    # -------- Scoring --------
     year, miles = parse_year_miles(combined_text)
     now_year = datetime.datetime.now().year
     recent_vehicle = ((year is not None and (now_year - year) <= 2) or (miles is not None and miles <= 24000))
@@ -1103,7 +1125,7 @@ async def vision_review(
         logger.error(f"PDF write error: {e}")
     stage("PDF written")
 
-    # Email (unchanged; plain text – no attachment per your last working setup)
+    # -------- Email (unchanged: plain text body, no attachment) --------
     try:
         msg = EmailMessage()
         msg["Subject"] = f"AI-4-IA Review: {claim_number}"
@@ -1170,6 +1192,7 @@ async def get_client_rules(client_name: str):
     else:
         logger.error(f"Rules not found for client: {client_name}")
         return JSONResponse(status_code=404, content={"error": "Rules not found for this client."})
+
 
 
 
