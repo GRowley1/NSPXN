@@ -363,7 +363,7 @@ def extract_keys_from_pdf_first_pages(pdf_bytes: bytes, pages_to_scan: int = 4, 
                 temperature=0.0,
                 max_tokens=300,
                 messages=[
-                    {"role": "system", "content": 'Extract key fields from this estimate page as JSON: {"vin": "17-char VIN or null", "claim_number": "claim # or null", "vehicle_description": "year make model or null", "mileage": "odometer reading or null", "labor_rate": "rate like $60.00 /hr or null", "tax_rate": "rate like 8.7500% or null"}.'},
+                    {"role": "system", "content": 'Extract key fields from this estimate page as JSON: {"vin": "17-char VIN or null", "claim_number": "claim # or null", "vehicle_description": "the full description of the vehicle including year, make, model, trim, engine, color or null if not found", "mileage": "the odometer reading as string without commas or null", "labor_rate": "rate like $60.00 /hr or null", "tax_rate": "rate like 8.7500% or null"}.'},
                     {"role": "user", "content": [
                         {"type": "text", "text": "Extract the fields."},
                         {"type": "image_url", "image_url": {"url": f"data:image/jpeg;base64,{b64}"}}
@@ -414,7 +414,7 @@ def normalize_vehicle_str(s: str) -> str:
     return s2.strip()
 
 def extract_vehicle_from_text(text: str) -> Optional[str]:
-    match = re.search(r'(?is)\b(\d{4})\s+(chevrolet|chev|ford|toyota|nissan|etc)\s+([a-z0-9\s]+?)(?=vin|license|odometer|\Z)', text, re.I)
+    match = re.search(r'(?is)\b(\d{4})\s+([a-z0-9]+)\s+([a-z0-9\s]+?)(?=vin|license|odometer|\Z)', text)
     if match:
         year = match.group(1)
         make = match.group(2)
@@ -428,7 +428,7 @@ def parse_year_miles(text: str) -> Tuple[Optional[int], Optional[int]]:
     year_match = re.search(r'(?is)(vehicle|production date|year)[\s:]*(\d{4})', text)
     year = int(year_match.group(2)) if year_match else None
     if not year:
-        year_match = re.search(r'\b(19|20)\d{2}\b', text)  # Fallback
+        year_match = re.search(r'\b(19|20)\d{2}\b', text)
         year = int(year_match.group(0)) if year_match and 1900 < int(year_match.group(0)) < 2100 else None
     miles_match = re.search(r'(?is)odometer[\s:]*([\d,]+)', text)
     miles_str = miles_match.group(1) if miles_match else None
@@ -550,7 +550,7 @@ def extract_estimate_items(text: str) -> List[Dict]:
     response = client.chat.completions.create(
         model=MODEL,
         messages=[
-            {"role": "system", "content": "Extract the repair items from this estimate text as JSON list of objects with keys: side, part, op, note."},
+            {"role": "system", "content": "Extract the repair items from this auto repair estimate text as JSON list of objects with keys: side ('front', 'rear', 'left', 'right', 'unspecified'), part (the part name), op ('repl', 'repair', 'other'), note (additional details like 'used', 'a/m', 'recond' or empty). Be accurate to the estimate content."},
             {"role": "user", "content": text}
         ]
     )
@@ -561,6 +561,8 @@ def extract_estimate_items(text: str) -> List[Dict]:
         return []
 
 def compare_estimate_with_photos(est_items: List[Dict], images_for_vision: List[Dict]) -> Dict:
+    if not est_items:
+        return {"overall": "No items extracted from estimate."}
     prompt = "Compare this estimate items to the photos. For each item, check if damage is evident in photos. Also list extra damages in photos not in estimate, and items not evident.\nItems: " + json.dumps(est_items)
     messages = [
         {"role": "system", "content": "Output JSON: {'per_item': list of {item_idx, photo_evidence: bool, confidence: float 0-1, note: str}, 'not_in_photos': list str, 'extra_damage_in_photos': list str, 'overall': str}"},
@@ -664,6 +666,24 @@ async def vision_review(
 
     keys = extract_keys_from_pdf_first_pages(first_pdf_bytes) if first_pdf_bytes else {}
 
+    # Fallback extractions if GPT failed
+    if not keys.get('vehicle_description'):
+        match = re.search(r'(?is)\b(\d{4})\s+([a-z0-9]+)\s+([a-z0-9\s]+?)(?=vin|license|odometer|\Z)', combined_text)
+        if match:
+            keys['vehicle_description'] = f"{match.group(1)} {match.group(2)} {match.group(3)}"
+    if not keys.get('mileage'):
+        match = re.search(r'(?is)odometer[\s:]*([\d,]+)', combined_text)
+        if match:
+            keys['mileage'] = re.sub(r'[,\.]', '', match.group(1))
+    if not keys.get('labor_rate'):
+        match = re.search(r'(?i)@\s*\$\s*(\d+\.?\d*)\s*/hr', combined_text)
+        if match:
+            keys['labor_rate'] = f"${match.group(1)} /hr"
+    if not keys.get('tax_rate'):
+        match = re.search(r'(?i)@\s*(\d+\.?\d*)%', combined_text)
+        if match:
+            keys['tax_rate'] = f"{match.group(1)}%"
+
     missing_photos = check_required_photos(image_blobs, combined_text)
 
     vin_est = keys.get("vin") or extract_vin_from_text(combined_text) or (extract_vin_from_pdf_first_pages(first_pdf_bytes, 4, 300) if first_pdf_bytes else None)
@@ -701,13 +721,29 @@ async def vision_review(
     require_oem = (age_years is not None and age_years <= 2) or (miles is not None and miles <= 24000)
     non_oem_flag = non_oem_used(combined_text)
 
+    # Verify non-OEM with client rules if applicable
+    allow_non_oem = True
+    if not require_oem and non_oem_flag and client_rules:
+        try:
+            response = client.chat.completions.create(
+                model=MODEL,
+                temperature=0.0,
+                messages=[
+                    {"role": "system", "content": f"Based on the client rules, are non-OEM parts allowed for a vehicle that is {age_years} years old with {miles} miles? Answer with 'yes' or 'no' only."},
+                    {"role": "user", "content": client_rules}
+                ]
+            )
+            allow_non_oem = response.choices[0].message.content.strip().lower() == 'yes'
+        except Exception as e:
+            logger.warning(f"Client rules verification error: {e}")
+
     summary_md = build_summary_markdown(missing_photos, combined_text, client_rules, require_oem, non_oem_flag)
 
     labor_present = bool(keys.get("labor_rate")) or labor_rates_present_any(combined_text)
     tax_present = bool(keys.get("tax_rate")) or taxes_present(combined_text)
     labor_tax_adj = check_labor_and_tax_score(combined_text, client_rules)
     photo_adj = -25 * len(missing_photos)
-    parts_adj = -25 if (require_oem and non_oem_flag) else 0
+    parts_adj = -25 if (require_oem and non_oem_flag) or (not require_oem and non_oem_flag and not allow_non_oem) else 0
     computed = max(0, 100 + labor_tax_adj + photo_adj + parts_adj)
     authoritative_score = computed
 
