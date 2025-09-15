@@ -38,42 +38,37 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 # =========================================
-# OpenAI client (gpt-4o default; vision uses VISION_MODEL below)
+# OpenAI client
 # =========================================
 if "OPENAI_API_KEY" not in os.environ:
     raise RuntimeError("❌ OPENAI_API_KEY environment variable is NOT set.")
 client = OpenAI(api_key=os.environ["OPENAI_API_KEY"])
-MODEL = "gpt-4o"
+MODEL = "gpt-4o"  # text-only analysis
+VISION_MODEL = os.getenv("VISION_MODEL", "gpt-4o-mini")  # fast vision
 
-# ------- Speed knobs (override with ENV to tune without redeploy) -------
-FAST_MODE = os.getenv("FAST_MODE", "1") == "1"   # set FAST_MODE=0 to disable
+# ------- Speed knobs (hard fast path) -------
+FAST_MODE = True  # hard-enable fast mode
 
-# OCR/page controls
-OCR_MAX_PAGES = int(os.getenv("OCR_MAX_PAGES", "4" if FAST_MODE else "8"))
-OCR_DPI = int(os.getenv("OCR_DPI", "120" if FAST_MODE else "140"))
+# OCR/page controls  ⟵ biggest win
+OCR_MAX_PAGES = int(os.getenv("OCR_MAX_PAGES", "2"))     # was 4–8
+OCR_DPI = int(os.getenv("OCR_DPI", "110"))               # was 120–140
 
-# Contact sheet controls (this is the biggest latency lever)
-CONTACT_MAX_SHEETS = int(os.getenv("CONTACT_MAX_SHEETS", "2" if FAST_MODE else "3"))
-CONTACT_COLS = int(os.getenv("CONTACT_COLS", "7" if FAST_MODE else "6"))
-CONTACT_THUMB_W = int(os.getenv("CONTACT_THUMB_W", "260" if FAST_MODE else "320"))
-CONTACT_JPEG_QUALITY = int(os.getenv("CONTACT_JPEG_QUALITY", "55" if FAST_MODE else "68"))
+# Contact sheet controls (2nd biggest win)
+CONTACT_MAX_SHEETS = int(os.getenv("CONTACT_MAX_SHEETS", "1"))   # single sheet
+CONTACT_COLS = int(os.getenv("CONTACT_COLS", "8"))
+CONTACT_THUMB_W = int(os.getenv("CONTACT_THUMB_W", "200"))
+CONTACT_JPEG_QUALITY = int(os.getenv("CONTACT_JPEG_QUALITY", "45"))
 
-# Make the contact sheets even lighter by default in FAST_MODE
-if FAST_MODE:
-    CONTACT_MAX_SHEETS = int(os.getenv("CONTACT_MAX_SHEETS", "1"))
-    CONTACT_THUMB_W = int(os.getenv("CONTACT_THUMB_W", "220"))
-    CONTACT_JPEG_QUALITY = int(os.getenv("CONTACT_JPEG_QUALITY", "50"))
-
-# VIN scan controls (PATCH: stronger upscale to handle tiny VIN photos)
+# VIN scan controls (handle tiny photos)
 VIN_UPSCALE_WIDTH = int(os.getenv("VIN_UPSCALE_WIDTH", "2600"))
-VIN_MAX_PHOTOS_SCAN = int(os.getenv("VIN_MAX_PHOTOS_SCAN", "20" if FAST_MODE else "9999"))
+VIN_MAX_PHOTOS_SCAN = int(os.getenv("VIN_MAX_PHOTOS_SCAN", "25"))
 
-# Vision model (faster but still good enough)
-VISION_MODEL = os.getenv("VISION_MODEL", "gpt-4o-mini" if FAST_MODE else "gpt-4o")
+# Vision timeout & overall budget
+REQUEST_BUDGET_SECONDS = int(os.getenv("REQUEST_BUDGET_SECONDS", "55"))
+OPENAI_REQUEST_TIMEOUT = float(os.getenv("OPENAI_REQUEST_TIMEOUT", "10"))
 
-# Time budget and OpenAI timeout
-REQUEST_BUDGET_SECONDS = int(os.getenv("REQUEST_BUDGET_SECONDS", "65"))  # stay under proxy limits
-OPENAI_REQUEST_TIMEOUT = float(os.getenv("OPENAI_REQUEST_TIMEOUT", "30"))
+# Disable slow photo harvesting from large PDFs by default
+HARVEST_FROM_PDF_PHOTOS = os.getenv("HARVEST_FROM_PDF_PHOTOS", "0") == "1"
 
 # =========================================
 # FastAPI app + CORS
@@ -112,7 +107,6 @@ def ocr_text_fast(img: Image.Image, psm: int = 6) -> str:
         return ""
 
 def extract_text_from_pdf(file_like: io.BytesIO, max_ocr_pages: int = None, dpi: int = None) -> str:
-    """Faster OCR: fewer pages, lower DPI, single-PSM retry if needed."""
     max_ocr_pages = max_ocr_pages or OCR_MAX_PAGES
     dpi = dpi or OCR_DPI
     try:
@@ -254,7 +248,7 @@ def extract_vin_from_pdf_first_pages(pdf_bytes: bytes, pages_to_scan: int = 4, d
     return None
 
 # =========================================
-# Claim extraction (robust; requires digits)
+# Claim extraction
 # =========================================
 CLAIM_AFTER_LABEL = re.compile(
     r'(?is)\bclaim\b\W{0,6}(?:#:?|no\.?|number)?\W{0,6}([A-Z0-9][A-Z0-9\-/\. ]{2,60})'
@@ -302,7 +296,7 @@ def extract_claim_from_pdf_first_pages(pdf_bytes: bytes, pages_to_scan: int = 4,
     return None
 
 # =========================================
-# Vehicle & tax/parts helpers (robust vehicle parsing)
+# Vehicle & parts/tax helpers
 # =========================================
 MAKE_ALIASES = {
     "CHEV": "Chevrolet", "CHEVROLET": "Chevrolet", "CHEVY": "Chevrolet",
@@ -342,7 +336,7 @@ def extract_vehicle_from_text(text: str) -> Optional[str]:
             line_end = m.end() + 60
         chunk = text[m.end():line_end]
         model = re.sub(r"[,/].*$", "", chunk).strip()
-        # PATCH: keep drivetrain words like Turbocharged/Diesel/etc; only strip obvious junk words
+        # preserve drivetrain terms such as Turbocharged/Diesel/etc
         model = re.sub(
             r"\b(vehicles?|contain|minor|search/seek)\b.*",
             "",
@@ -375,7 +369,6 @@ def parse_year_miles(text: str) -> Tuple[Optional[int], Optional[int]]:
 def taxes_present(text: str) -> bool:
     return re.search(r'tax[^\n]{0,50}(\d{1,3}\s*%|\$\s*\d+(\.\d{2})?)', text or "", re.IGNORECASE) is not None
 
-# Parts token counting
 PART_TOKEN_RX = re.compile(r'\b(A/M|AFTERMARKET|LKQ|RECOND(?:ITIONED)?|REMAN(?:UFACTURED)?|CAPA|NSF|ALT[-\s]*OE|OEM)\b', re.I)
 def estimate_parts_mix(text: str) -> Dict[str, int]:
     counts = {"oem":0,"aftermarket":0,"lkq":0,"recon":0,"capa":0,"nsf":0,"alt_oe":0}
@@ -418,7 +411,7 @@ def extract_vin_from_photos(image_blobs: List[Tuple[str, bytes]]) -> Optional[st
     def ocr_all(im: Image.Image) -> str:
         out = []
         for v in variants(im):
-            for psm in (7, 6):  # fewer PSMs = faster
+            for psm in (7, 6):
                 try:
                     t = pytesseract.image_to_string(v, lang="eng", config=f"--psm {psm} --oem 1")
                     if t: out.append(t)
@@ -455,7 +448,6 @@ def extract_vin_from_photos(image_blobs: List[Tuple[str, bytes]]) -> Optional[st
 
     return None
 
-# PATCH: stronger odometer OCR on tiny photos
 def extract_odometer_from_photos(image_blobs: List[Tuple[str, bytes]]) -> Optional[str]:
     def odometer_like(txt: str) -> Optional[str]:
         m = re.search(r"\b(\d{1,3}(?:,\d{3})+|\d{5,7})\b(?:\s*(?:mi|miles|km))?", txt, re.IGNORECASE)
@@ -509,28 +501,18 @@ def _plate_ocr_variants(img: Image.Image) -> str:
     return "\n".join(out)
 
 # =========================================
-# Required photos: PHOTOS-ONLY presence
+# Required photos (photos-only presence)
 # =========================================
 def check_required_photos(image_blobs: List[Tuple[str, bytes]], ocr_text: str) -> List[str]:
-    """
-    Photo presence must be proven by photos only (no text fallback).
-    Prevents contradictions like 'VIN photo not found' while claiming the VIN photo is present.
-    """
-    if FAST_MODE and len(image_blobs) > 60:
-        image_blobs = image_blobs[:60]
-
     required = ["four corners", "odometer", "vin", "license plate"]
     present = set()
 
-    # VIN by photo only
     if extract_vin_from_photos(image_blobs) is not None:
         present.add("vin")
 
-    # Odometer by photo only
     if extract_odometer_from_photos(image_blobs) is not None:
         present.add("odometer")
 
-    # License plate by photo OCR
     for name, blob in image_blobs:
         try:
             img = Image.open(io.BytesIO(blob))
@@ -541,7 +523,6 @@ def check_required_photos(image_blobs: List[Tuple[str, bytes]], ocr_text: str) -
         except Exception:
             pass
 
-    # Four corners heuristic
     exterior_hits = 0
     for name, blob in image_blobs[:40]:
         try:
@@ -559,7 +540,7 @@ def check_required_photos(image_blobs: List[Tuple[str, bytes]], ocr_text: str) -
     return missing
 
 # =========================================
-# Estimate: simple, BRIEF summary
+# Estimate brief
 # =========================================
 POI_RX = re.compile(r'Point\s+of\s+Impact\s*:\s*([^\n]+)', re.I)
 SUBTOTAL_RX = re.compile(r'\bSubtotal\b[^\n]*\s(\d{1,3}(?:,\d{3})*(?:\.\d{2})?)', re.I)
@@ -636,10 +617,10 @@ def compare_estimate_with_photos_brief(estimate_text: str,
 
     try:
         rsp = client.with_options(timeout=OPENAI_REQUEST_TIMEOUT).chat.completions.create(
-            model=VISION_MODEL,   # faster model for vision
+            model=VISION_MODEL,
             messages=[{"role": "system", "content": system},
                       {"role": "user", "content": user_parts}],
-            max_tokens=400 if FAST_MODE else 500,
+            max_tokens=220,      # short, fast
             temperature=0
         )
         txt = (rsp.choices[0].message.content or "").strip()
@@ -762,7 +743,6 @@ def build_client_adherence_lines(
         else:
             lines.append("- Unable to verify: total loss declaration not found.")
 
-    # PATCH: parts compliance wording consistent with scoring
     prefer_aftermarket = bool(guidelines.get("prefer_aftermarket"))
     recent = ((year is not None and (datetime.datetime.now().year - year) <= 2) or
               (miles is not None and miles <= 24000))
@@ -809,8 +789,7 @@ def build_summary_markdown(
             parts_lines.append("- Non-compliant: non-OEM parts on ≤ 2 years or ≤ 24k miles." if non_oem_flag
                                else "- Compliant: OEM parts only for ≤ 2 years or ≤ 24k miles.")
         else:
-            parts_lines.append("- Compliant: non-OEM/used/recon parts acceptable for vehicle age/mileage." if non_oem_flag or True
-                               else "- Parts appear OEM or not flagged as non-OEM.")
+            parts_lines.append("- Compliant: non-OEM/used/recon parts acceptable for vehicle age/mileage.")
 
     client_lines = client_lines_override if client_lines_override else ["- Apply client-required documentation (labor rates, photos, taxes) where applicable."]
     notes_lines = ["- Ensure estimate notes clearly explain damage appraisal per client requirements."]
@@ -959,8 +938,8 @@ async def vision_review(
                 first_pdf_bytes = raw
             looks_like_estimate = bool(re.search(r'\bclaim\b', embedded_txt or "", re.IGNORECASE) and
                                        re.search(r'\bvin\b', embedded_txt or "", re.IGNORECASE))
-            if not looks_like_estimate:
-                harvested = harvest_photos_from_pdf(raw, max_pages=16, dpi=130)
+            if HARVEST_FROM_PDF_PHOTOS and not looks_like_estimate:
+                harvested = harvest_photos_from_pdf(raw, max_pages=6, dpi=110)
                 for hname, hbytes in harvested:
                     image_blobs.append((hname, hbytes))
         elif name.endswith(".docx"):
@@ -973,25 +952,27 @@ async def vision_review(
     stage("uploads received / OCR done")
     combined_text = "\n".join(texts)
 
-    # PATCH: Prefer VIN from the “Estimate of Record” block, if present
+    # Prefer VIN near the “Estimate of Record” block
     estimate_priority_text = ""
     m_est = re.search(r"Estimate of Record.*?VEHICLE(.*?)(?:\n\n|\Z)", combined_text, re.IGNORECASE | re.DOTALL)
     if m_est:
         estimate_priority_text = m_est.group(0)
 
-    # -------- Contact sheets for GPT vision --------
+    # -------- Build ONE contact sheet (constant-time) --------
+    limited_images = image_blobs[:56]  # 8 cols x 7 rows max
     contact_sheets = make_contact_sheets_compact(
-        image_blobs,
-        max_sheets=CONTACT_MAX_SHEETS,
+        limited_images,
+        max_sheets=1,
         cols=CONTACT_COLS,
         base_thumb_w=CONTACT_THUMB_W,
         jpeg_quality=CONTACT_JPEG_QUALITY
     )
     images_for_vision: List[Dict[str, Any]] = []
-    for name, blob in contact_sheets:
+    if contact_sheets:
+        name, blob = contact_sheets[0]
         b64 = base64.b64encode(blob).decode("utf-8")
         images_for_vision.append({"type": "image_url","image_url": {"url": f"data:image/jpeg;base64,{b64}"}})
-    stage("contact sheets built")
+    stage("contact sheet built")
 
     # -------- Required photos (PHOTOS ONLY) --------
     missing_photos = check_required_photos(image_blobs, combined_text)
@@ -1022,9 +1003,8 @@ async def vision_review(
     parts_mix = estimate_parts_mix(combined_text)
     non_oem_flag = (parts_mix.get("aftermarket",0)+parts_mix.get("lkq",0)+parts_mix.get("recon",0)+parts_mix.get("capa",0)+parts_mix.get("nsf",0)+parts_mix.get("alt_oe",0) > 0)
 
-    # -------- GPT comparison with time budget --------
-    if time_budget_exceeded(start_ts, REQUEST_BUDGET_SECONDS - 10):
-        logger.warning("Skipping GPT vision compare due to time budget.")
+    # -------- GPT comparison (fast/fail-fast) --------
+    if time_budget_exceeded(start_ts, REQUEST_BUDGET_SECONDS - 12) or not images_for_vision:
         consistency = {"per_item": [], "not_in_photos": [], "extra_damage_in_photos": [], "overall": "Comparison skipped due to time budget."}
     else:
         consistency = compare_estimate_with_photos_brief(combined_text, images_for_vision)
@@ -1039,7 +1019,7 @@ async def vision_review(
     prefer_aftermarket = bool(guidelines.get("prefer_aftermarket"))
     require_oem_due_to_rules = bool(guidelines.get("oem_required_if_recent")) and recent_vehicle
 
-    # PATCH: parts compliance scoring aligned with client preferences and age/miles
+    # parts compliance scoring aligned with client preferences and age/miles
     parts_noncompliant = False
     parts_reason = ""
     if prefer_aftermarket:
@@ -1149,7 +1129,7 @@ async def vision_review(
         logger.error(f"PDF write error: {e}")
     stage("PDF written")
 
-    # -------- Email (original: plain text body, no attachment) --------
+    # -------- Email (plain text, no attachment) --------
     try:
         msg = EmailMessage()
         msg["Subject"] = f"AI-4-IA Review: {claim_number}"
@@ -1173,11 +1153,11 @@ Compliance Score / Audit Results: {authoritative_score}%
 """
         msg.set_content(email_body)
 
-        with smtplib.SMTP_SSL("mail.tierra.net", 465, timeout=20) as smtp:
+        with smtplib.SMTP_SSL("mail.tierra.net", 465, timeout=5) as smtp:
             smtp.login("info@nspxn.com", "grr2025GRR")
             smtp.send_message(msg)
 
-        logger.info("Email sent successfully (original settings, no attachment).")
+        logger.info("Email sent successfully (no attachment).")
     except Exception as e:
         logger.error(f"Email error: {e}")
     stage("email attempted")
