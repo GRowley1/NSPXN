@@ -64,8 +64,8 @@ if FAST_MODE:
     CONTACT_THUMB_W = int(os.getenv("CONTACT_THUMB_W", "220"))
     CONTACT_JPEG_QUALITY = int(os.getenv("CONTACT_JPEG_QUALITY", "50"))
 
-# VIN scan controls
-VIN_UPSCALE_WIDTH = int(os.getenv("VIN_UPSCALE_WIDTH", "2000" if FAST_MODE else "2400"))
+# VIN scan controls (PATCH: stronger upscale to handle tiny VIN photos)
+VIN_UPSCALE_WIDTH = int(os.getenv("VIN_UPSCALE_WIDTH", "2600"))
 VIN_MAX_PHOTOS_SCAN = int(os.getenv("VIN_MAX_PHOTOS_SCAN", "20" if FAST_MODE else "9999"))
 
 # Vision model (faster but still good enough)
@@ -342,7 +342,13 @@ def extract_vehicle_from_text(text: str) -> Optional[str]:
             line_end = m.end() + 60
         chunk = text[m.end():line_end]
         model = re.sub(r"[,/].*$", "", chunk).strip()
-        model = re.sub(r"\b(vehicles?|contain|minor|turbocharged|diesel|indirect|fi|4dr?|4d|p/u)\b.*", "", model, flags=re.I)
+        # PATCH: keep drivetrain words like Turbocharged/Diesel/etc; only strip obvious junk words
+        model = re.sub(
+            r"\b(vehicles?|contain|minor|search/seek)\b.*",
+            "",
+            model,
+            flags=re.I
+        )
         model = re.sub(r"\s{2,}", " ", model).strip(" -·")
         if not model:
             model = "Model"
@@ -449,16 +455,33 @@ def extract_vin_from_photos(image_blobs: List[Tuple[str, bytes]]) -> Optional[st
 
     return None
 
+# PATCH: stronger odometer OCR on tiny photos
 def extract_odometer_from_photos(image_blobs: List[Tuple[str, bytes]]) -> Optional[str]:
+    def odometer_like(txt: str) -> Optional[str]:
+        m = re.search(r"\b(\d{1,3}(?:,\d{3})+|\d{5,7})\b(?:\s*(?:mi|miles|km))?", txt, re.IGNORECASE)
+        return m.group(1) if m else None
+
     for name, blob in image_blobs:
         try:
-            img = Image.open(io.BytesIO(blob))
-            img = img.copy()
-            img.thumbnail((1400, 1400))
-            txt = ocr_text_fast(img, psm=7)
-            m = re.search(r"\b(\d{1,3}(?:,\d{3})+|\d{2,6})\b\s*(?:mi|miles|km)\b", txt, re.IGNORECASE)
-            if m:
-                return m.group(1)
+            img = Image.open(io.BytesIO(blob)).convert("RGB")
+            if img.width < 2200:
+                scale = 2200 / img.width
+                img = img.resize((2200, int(img.height * scale)), Image.LANCZOS)
+
+            variants = [
+                ImageEnhance.Contrast(img.convert("L")).enhance(1.8),
+                ImageOps.autocontrast(img.convert("L").filter(ImageFilter.MedianFilter(3))),
+                ImageEnhance.Sharpness(img.convert("L")).enhance(2.0),
+            ]
+            for v in variants:
+                for psm in (7, 6, 3, 11):
+                    try:
+                        txt = pytesseract.image_to_string(v, lang="eng", config=f"--psm {psm} --oem 1")
+                        found = odometer_like(txt)
+                        if found:
+                            return found
+                    except Exception:
+                        continue
         except Exception as e:
             logger.warning(f"Odometer photo OCR error ({name}): {e}")
     return None
@@ -493,7 +516,6 @@ def check_required_photos(image_blobs: List[Tuple[str, bytes]], ocr_text: str) -
     Photo presence must be proven by photos only (no text fallback).
     Prevents contradictions like 'VIN photo not found' while claiming the VIN photo is present.
     """
-    # Optional cap for presence checks (does NOT limit uploads)
     if FAST_MODE and len(image_blobs) > 60:
         image_blobs = image_blobs[:60]
 
@@ -519,7 +541,7 @@ def check_required_photos(image_blobs: List[Tuple[str, bytes]], ocr_text: str) -
         except Exception:
             pass
 
-    # Four corners heuristic by exterior-photo count
+    # Four corners heuristic
     exterior_hits = 0
     for name, blob in image_blobs[:40]:
         try:
@@ -628,7 +650,6 @@ def compare_estimate_with_photos_brief(estimate_text: str,
         return data
     except Exception as e:
         logger.error(f"Vision compare BRIEF JSON error: {type(e).__name__}: {e}")
-        # FAST fallback: return an empty structured result so the PDF still completes quickly
         return {"per_item": [], "not_in_photos": [], "extra_damage_in_photos": [], "overall": "Comparison unavailable (timeout or error)."}
 
 # =========================================
@@ -741,25 +762,20 @@ def build_client_adherence_lines(
         else:
             lines.append("- Unable to verify: total loss declaration not found.")
 
+    # PATCH: parts compliance wording consistent with scoring
     prefer_aftermarket = bool(guidelines.get("prefer_aftermarket"))
     recent = ((year is not None and (datetime.datetime.now().year - year) <= 2) or
               (miles is not None and miles <= 24000))
+
     if prefer_aftermarket:
-        if non_oem_flag:
-            lines.append("- Compliant: aftermarket/LKQ/recon parts used per client preference.")
-        else:
-            lines.append("- Non-compliant: OEM used; document why alternative parts were not utilized per client preference.")
+        lines.append("- Compliant: aftermarket/LKQ/recon parts used per client preference." if non_oem_flag
+                     else "- Non-compliant: OEM used; document why alternative parts were not utilized per client preference.")
     else:
         if guidelines.get("oem_required_if_recent") and recent:
-            if non_oem_flag:
-                lines.append("- Non-compliant: non-OEM parts used on a ≤2 years or ≤24k miles vehicle.")
-            else:
-                lines.append("- Compliant: OEM parts used per ≤ 2 years/≤ 24k miles rule.")
+            lines.append("- Non-compliant: non-OEM parts used on a ≤ 2 years or ≤ 24k miles vehicle." if non_oem_flag
+                         else "- Compliant: OEM parts used per ≤ 2 years/≤ 24k miles rule.")
         else:
-            if non_oem_flag:
-                lines.append("- Non-OEM parts noted; verify usage aligns with remaining client rules.")
-            else:
-                lines.append("- Parts appear OEM or not flagged as non-OEM.")
+            lines.append("- Compliant: non-OEM/used/recon parts acceptable for vehicle age/mileage.")
 
     return lines
 
@@ -786,21 +802,15 @@ def build_summary_markdown(
 
     parts_lines: List[str] = []
     if prefer_aftermarket:
-        if non_oem_flag:
-            parts_lines.append("- Compliant: aftermarket/LKQ/recon parts used per client preference.")
-        else:
-            parts_lines.append("- Non-compliant: OEM used; document why alternatives were not used per client preference.")
+        parts_lines.append("- Compliant: aftermarket/LKQ/recon parts used per client preference." if non_oem_flag
+                           else "- Non-compliant: OEM used; document why alternatives were not used per client preference.")
     else:
         if require_oem:
-            parts_lines.append(
-                "- Non-compliant: non-OEM parts on ≤ 2 years or ≤ 24k miles." if non_oem_flag
-                else "- Compliant: OEM parts only for ≤ 2 years or ≤ 24k miles."
-            )
+            parts_lines.append("- Non-compliant: non-OEM parts on ≤ 2 years or ≤ 24k miles." if non_oem_flag
+                               else "- Compliant: OEM parts only for ≤ 2 years or ≤ 24k miles.")
         else:
-            parts_lines.append(
-                "- Non-OEM parts noted; verify client rules allow on this vehicle." if non_oem_flag
-                else "- Parts appear OEM or not flagged as non-OEM."
-            )
+            parts_lines.append("- Compliant: non-OEM/used/recon parts acceptable for vehicle age/mileage." if non_oem_flag or True
+                               else "- Parts appear OEM or not flagged as non-OEM.")
 
     client_lines = client_lines_override if client_lines_override else ["- Apply client-required documentation (labor rates, photos, taxes) where applicable."]
     notes_lines = ["- Ensure estimate notes clearly explain damage appraisal per client requirements."]
@@ -963,6 +973,12 @@ async def vision_review(
     stage("uploads received / OCR done")
     combined_text = "\n".join(texts)
 
+    # PATCH: Prefer VIN from the “Estimate of Record” block, if present
+    estimate_priority_text = ""
+    m_est = re.search(r"Estimate of Record.*?VEHICLE(.*?)(?:\n\n|\Z)", combined_text, re.IGNORECASE | re.DOTALL)
+    if m_est:
+        estimate_priority_text = m_est.group(0)
+
     # -------- Contact sheets for GPT vision --------
     contact_sheets = make_contact_sheets_compact(
         image_blobs,
@@ -981,7 +997,9 @@ async def vision_review(
     missing_photos = check_required_photos(image_blobs, combined_text)
 
     # -------- VIN / Claim from estimate & photos --------
-    vin_est = extract_vin_from_text(combined_text) or (extract_vin_from_pdf_first_pages(first_pdf_bytes, 4, 170) if first_pdf_bytes else None)
+    vin_est = (extract_vin_from_text(estimate_priority_text) or
+               extract_vin_from_text(combined_text) or
+               (extract_vin_from_pdf_first_pages(first_pdf_bytes, 4, 170) if first_pdf_bytes else None))
     claim_number = extract_claim_from_text(combined_text) or (extract_claim_from_pdf_first_pages(first_pdf_bytes, 4, 170) if first_pdf_bytes else None)
     claim_number = claim_number or "N/A"
 
@@ -1021,14 +1039,20 @@ async def vision_review(
     prefer_aftermarket = bool(guidelines.get("prefer_aftermarket"))
     require_oem_due_to_rules = bool(guidelines.get("oem_required_if_recent")) and recent_vehicle
 
+    # PATCH: parts compliance scoring aligned with client preferences and age/miles
     parts_noncompliant = False
     parts_reason = ""
-    if prefer_aftermarket and not non_oem_flag:
-        parts_noncompliant = True
-        parts_reason = "Client prefers aftermarket/LKQ; OEM used without justification."
-    elif require_oem_due_to_rules and non_oem_flag:
-        parts_noncompliant = True
-        parts_reason = "Non-OEM parts used on a ≤2 years or ≤24k miles vehicle."
+    if prefer_aftermarket:
+        if not non_oem_flag:
+            parts_noncompliant = True
+            parts_reason = "Client prefers aftermarket/LKQ; OEM used without justification."
+    else:
+        if require_oem_due_to_rules and non_oem_flag:
+            parts_noncompliant = True
+            parts_reason = "Non-OEM parts used on a ≤2 years or ≤24k miles vehicle."
+        else:
+            parts_noncompliant = False
+            parts_reason = "Non-OEM/used/recon parts acceptable for vehicle age/mileage."
 
     labor_tax_adj = check_labor_and_tax_score(combined_text, client_rules)
     photo_adj = -25 * len(missing_photos)
@@ -1125,7 +1149,7 @@ async def vision_review(
         logger.error(f"PDF write error: {e}")
     stage("PDF written")
 
-    # -------- Email (unchanged: plain text body, no attachment) --------
+    # -------- Email (original: plain text body, no attachment) --------
     try:
         msg = EmailMessage()
         msg["Subject"] = f"AI-4-IA Review: {claim_number}"
@@ -1192,6 +1216,7 @@ async def get_client_rules(client_name: str):
     else:
         logger.error(f"Rules not found for client: {client_name}")
         return JSONResponse(status_code=404, content={"error": "Rules not found for this client."})
+
 
 
 
