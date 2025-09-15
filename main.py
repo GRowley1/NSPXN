@@ -20,6 +20,13 @@ import pytesseract
 from PIL import Image, ImageEnhance, ImageOps, ImageFilter, ImageStat
 from openai import OpenAI
 
+# --- NEW: fast PDF text via PyMuPDF ---
+try:
+    import fitz  # PyMuPDF
+    HAVE_FITZ = True
+except Exception:
+    HAVE_FITZ = False
+
 # =========================================
 # PDF storage
 # =========================================
@@ -49,17 +56,17 @@ VISION_MODEL = os.getenv("VISION_MODEL", "gpt-4o-mini")  # fast vision
 # ------- Speed knobs (hard fast path) -------
 FAST_MODE = True  # hard-enable fast mode
 
-# OCR/page controls  ⟵ biggest win
-OCR_MAX_PAGES = int(os.getenv("OCR_MAX_PAGES", "2"))     # was 4–8
-OCR_DPI = int(os.getenv("OCR_DPI", "110"))               # was 120–140
+# OCR/page controls
+OCR_MAX_PAGES = int(os.getenv("OCR_MAX_PAGES", "2"))     # keep small
+OCR_DPI = int(os.getenv("OCR_DPI", "110"))
 
-# Contact sheet controls (2nd biggest win)
-CONTACT_MAX_SHEETS = int(os.getenv("CONTACT_MAX_SHEETS", "1"))   # single sheet
+# Contact sheet controls
+CONTACT_MAX_SHEETS = int(os.getenv("CONTACT_MAX_SHEETS", "1"))
 CONTACT_COLS = int(os.getenv("CONTACT_COLS", "8"))
 CONTACT_THUMB_W = int(os.getenv("CONTACT_THUMB_W", "200"))
 CONTACT_JPEG_QUALITY = int(os.getenv("CONTACT_JPEG_QUALITY", "45"))
 
-# VIN scan controls (handle tiny photos)
+# VIN scan controls
 VIN_UPSCALE_WIDTH = int(os.getenv("VIN_UPSCALE_WIDTH", "2600"))
 VIN_MAX_PHOTOS_SCAN = int(os.getenv("VIN_MAX_PHOTOS_SCAN", "25"))
 
@@ -106,12 +113,53 @@ def ocr_text_fast(img: Image.Image, psm: int = 6) -> str:
         logger.warning(f"OCR fast error: {e}")
         return ""
 
-def extract_text_from_pdf(file_like: io.BytesIO, max_ocr_pages: int = None, dpi: int = None) -> str:
+# --------- NEW: Fast PDF text extraction via PyMuPDF ----------
+def extract_text_from_pdf_fast(pdf_bytes: bytes, max_pages: int = None) -> str:
+    """
+    Use PyMuPDF to pull TEXT quickly. If PyMuPDF is unavailable, fall back to PyPDF2.
+    Returns concatenated text for up to max_pages (if provided), else all pages.
+    """
+    max_pages = max_pages or 0  # 0 = all
+    text_parts: List[str] = []
+    try:
+        if HAVE_FITZ:
+            doc = fitz.open(stream=pdf_bytes, filetype="pdf")
+            end = doc.page_count if max_pages == 0 else min(doc.page_count, max_pages)
+            for i in range(end):
+                page = doc.load_page(i)
+                # "text" gives layout-aware text, faster than OCR by orders of magnitude
+                txt = page.get_text("text") or ""
+                if txt.strip():
+                    text_parts.append(f"\n[Page {i+1}]\n{txt}")
+            doc.close()
+            return "".join(text_parts)
+        else:
+            # Fallback to PyPDF2 embedded text
+            try:
+                from PyPDF2 import PdfReader
+                reader = PdfReader(io.BytesIO(pdf_bytes))
+                last = len(reader.pages) if max_pages == 0 else min(len(reader.pages), max_pages)
+                for i in range(last):
+                    pg = reader.pages[i]
+                    t = pg.extract_text() or ""
+                    if t:
+                        text_parts.append(f"\n[Page {i+1}]\n{t}")
+                return "".join(text_parts)
+            except Exception as e:
+                logger.debug(f"PyPDF2 fallback failed: {e}")
+                return ""
+    except Exception as e:
+        logger.debug(f"extract_text_from_pdf_fast error: {e}")
+        return ""
+
+def extract_text_from_pdf_ocr(pdf_bytes: bytes, max_ocr_pages: int = None, dpi: int = None) -> str:
+    """
+    Rasterize and OCR only when we don't have embedded text.
+    """
     max_ocr_pages = max_ocr_pages or OCR_MAX_PAGES
     dpi = dpi or OCR_DPI
     try:
-        file_like.seek(0)
-        pages = convert_from_bytes(file_like.read(), dpi=dpi)
+        pages = convert_from_bytes(pdf_bytes, dpi=dpi)
         text_output = []
         for i, img in enumerate(pages, 1):
             if i > max_ocr_pages:
@@ -134,21 +182,37 @@ def extract_text_from_docx(file_like: io.BytesIO) -> str:
         logger.error(f"DOCX read error: {e}")
         return ""
 
-def extract_text_from_pdf_embedded(pdf_bytes: bytes) -> str:
+# ========= NEW: First-page text (VIN priority) via PyMuPDF, fallback OCR =========
+def extract_first_page_text_fast(pdf_bytes: bytes) -> str:
     try:
-        from PyPDF2 import PdfReader
-        reader = PdfReader(io.BytesIO(pdf_bytes))
-        parts = []
-        for p in reader.pages:
-            t = p.extract_text() or ""
-            parts.append(t)
-        return "\n".join(parts)
+        if HAVE_FITZ:
+            doc = fitz.open(stream=pdf_bytes, filetype="pdf")
+            if doc.page_count >= 1:
+                page = doc.load_page(0)
+                txt = page.get_text("text") or ""
+                doc.close()
+                return txt
+        else:
+            from PyPDF2 import PdfReader
+            reader = PdfReader(io.BytesIO(pdf_bytes))
+            if len(reader.pages) >= 1:
+                return reader.pages[0].extract_text() or ""
     except Exception as e:
-        logger.debug(f"Embedded text extraction failed: {e}")
-        return ""
+        logger.debug(f"first-page fast text error: {e}")
+    # fallback to OCR page 1 only
+    try:
+        imgs = convert_from_bytes(pdf_bytes, dpi=max(110, OCR_DPI))[:1]
+        if imgs:
+            t = ocr_text_fast(imgs[0], psm=6) or ""
+            if len(t.strip()) < 20:
+                t = ocr_text_fast(imgs[0], psm=3) or ""
+            return t
+    except Exception as e:
+        logger.debug(f"first-page OCR fallback error: {e}")
+    return ""
 
 # =========================================
-# Photo harvesting (skip for obvious estimates)
+# Photo harvesting (keep disabled by default)
 # =========================================
 def _page_var(img: Image.Image) -> float:
     g = img.convert("L")
@@ -236,16 +300,10 @@ def extract_vin_from_text(text: str) -> Optional[str]:
     cands = re.findall(r'\b([A-HJ-NPR-Z0-9]{17})\b', text)
     return best_vin_candidate(cands)
 
-def extract_vin_from_pdf_first_pages(pdf_bytes: bytes, pages_to_scan: int = 4, dpi: int = 170) -> Optional[str]:
-    try:
-        pages = convert_from_bytes(pdf_bytes, dpi=dpi)[:max(1, pages_to_scan)]
-        for img in pages:
-            txt = ocr_text_fast(img, psm=6)
-            v = extract_vin_from_text(txt)
-            if v: return v
-    except Exception as e:
-        logger.warning(f"VIN first-pages OCR error: {e}")
-    return None
+# --- NEW: VIN from page 1 via fast text (then fallback handled upstream) ---
+def extract_vin_from_pdf_first_page_fast(pdf_bytes: bytes) -> Optional[str]:
+    txt = extract_first_page_text_fast(pdf_bytes)
+    return extract_vin_from_text(txt)
 
 # =========================================
 # Claim extraction
@@ -284,16 +342,9 @@ def extract_claim_from_text(text: str) -> Optional[str]:
             if _valid_claim_candidate(cand): return cand
     return None
 
-def extract_claim_from_pdf_first_pages(pdf_bytes: bytes, pages_to_scan: int = 4, dpi: int = 170) -> Optional[str]:
-    try:
-        pages = convert_from_bytes(pdf_bytes, dpi=dpi)[:max(1, pages_to_scan)]
-        for img in pages:
-            txt = ocr_text_fast(img, psm=6)
-            c = extract_claim_from_text(txt)
-            if c: return c
-    except Exception as e:
-        logger.warning(f"Claim first-pages OCR error: {e}")
-    return None
+def extract_claim_from_pdf_first_page_fast(pdf_bytes: bytes) -> Optional[str]:
+    txt = extract_first_page_text_fast(pdf_bytes)
+    return extract_claim_from_text(txt)
 
 # =========================================
 # Vehicle & parts/tax helpers
@@ -336,7 +387,6 @@ def extract_vehicle_from_text(text: str) -> Optional[str]:
             line_end = m.end() + 60
         chunk = text[m.end():line_end]
         model = re.sub(r"[,/].*$", "", chunk).strip()
-        # preserve drivetrain terms such as Turbocharged/Diesel/etc
         model = re.sub(
             r"\b(vehicles?|contain|minor|search/seek)\b.*",
             "",
@@ -620,7 +670,7 @@ def compare_estimate_with_photos_brief(estimate_text: str,
             model=VISION_MODEL,
             messages=[{"role": "system", "content": system},
                       {"role": "user", "content": user_parts}],
-            max_tokens=220,      # short, fast
+            max_tokens=220,
             temperature=0
         )
         txt = (rsp.choices[0].message.content or "").strip()
@@ -922,6 +972,7 @@ async def vision_review(
     texts: List[str] = []
     image_blobs: List[Tuple[str, bytes]] = []
     first_pdf_bytes: Optional[bytes] = None
+    first_pdf_page_text: str = ""  # NEW: hold fast text of page 1 for VIN/claim
 
     # -------- Ingest uploads --------
     for f in files:
@@ -930,14 +981,23 @@ async def vision_review(
         if name.endswith((".jpg", ".jpeg", ".png", ".webp")):
             image_blobs.append((name, raw))
         elif name.endswith(".pdf"):
-            embedded_txt = extract_text_from_pdf_embedded(raw)
-            if embedded_txt:
-                texts.append(embedded_txt)
-            texts.append(extract_text_from_pdf(io.BytesIO(raw), max_ocr_pages=OCR_MAX_PAGES, dpi=OCR_DPI))
+            # NEW: Fast embedded text (all pages or first N) — no OCR if we get text
+            fast_txt = extract_text_from_pdf_fast(raw, max_pages=0)  # 0 = all pages
+            if fast_txt.strip():
+                texts.append(fast_txt)
+            else:
+                # Fallback to OCR only if no embedded/fast text
+                texts.append(extract_text_from_pdf_ocr(raw, max_ocr_pages=OCR_MAX_PAGES, dpi=OCR_DPI))
+
+            # Always capture page-1 fast text (best for VIN/Claim)
+            first_txt = extract_first_page_text_fast(raw)
+            first_pdf_page_text = first_pdf_page_text or first_txt
+
             if first_pdf_bytes is None:
                 first_pdf_bytes = raw
-            looks_like_estimate = bool(re.search(r'\bclaim\b', embedded_txt or "", re.IGNORECASE) and
-                                       re.search(r'\bvin\b', embedded_txt or "", re.IGNORECASE))
+
+            looks_like_estimate = bool(re.search(r'\bclaim\b', fast_txt or "", re.IGNORECASE) and
+                                       re.search(r'\bvin\b', fast_txt or "", re.IGNORECASE))
             if HARVEST_FROM_PDF_PHOTOS and not looks_like_estimate:
                 harvested = harvest_photos_from_pdf(raw, max_pages=6, dpi=110)
                 for hname, hbytes in harvested:
@@ -949,10 +1009,10 @@ async def vision_review(
         else:
             texts.append(f"⚠️ Skipped unsupported file: {f.filename}")
 
-    stage("uploads received / OCR done")
+    stage("uploads received / fast-text (and OCR if needed) done")
     combined_text = "\n".join(texts)
 
-    # Prefer VIN near the “Estimate of Record” block
+    # Prefer VIN near the “Estimate of Record” block (from combined text)
     estimate_priority_text = ""
     m_est = re.search(r"Estimate of Record.*?VEHICLE(.*?)(?:\n\n|\Z)", combined_text, re.IGNORECASE | re.DOTALL)
     if m_est:
@@ -977,13 +1037,23 @@ async def vision_review(
     # -------- Required photos (PHOTOS ONLY) --------
     missing_photos = check_required_photos(image_blobs, combined_text)
 
-    # -------- VIN / Claim from estimate & photos --------
-    vin_est = (extract_vin_from_text(estimate_priority_text) or
-               extract_vin_from_text(combined_text) or
-               (extract_vin_from_pdf_first_pages(first_pdf_bytes, 4, 170) if first_pdf_bytes else None))
-    claim_number = extract_claim_from_text(combined_text) or (extract_claim_from_pdf_first_pages(first_pdf_bytes, 4, 170) if first_pdf_bytes else None)
+    # -------- VIN / Claim from estimate (page 1 first) & photos --------
+    # 1) VIN from page 1 fast text
+    vin_est = extract_vin_from_text(first_pdf_page_text) if first_pdf_page_text else None
+    # 2) Fallback to estimate-priority block, then whole text
+    if not vin_est:
+        vin_est = extract_vin_from_text(estimate_priority_text) or extract_vin_from_text(combined_text)
+    # 3) Last-resort: OCR page 1 only if still missing
+    if not vin_est and first_pdf_bytes:
+        vin_est = extract_vin_from_pdf_first_page_fast(first_pdf_bytes)
+
+    # Claim #
+    claim_number = extract_claim_from_text(first_pdf_page_text) or \
+                   extract_claim_from_text(combined_text) or \
+                   (extract_claim_from_pdf_first_page_fast(first_pdf_bytes) if first_pdf_bytes else None)
     claim_number = claim_number or "N/A"
 
+    # VIN from photos + verification
     vin_photo = extract_vin_from_photos(image_blobs)
     if vin_est and vin_photo:
         vin_verification = "Match" if vin_est == vin_photo else f"No Match (photo shows {vin_photo})"
@@ -995,7 +1065,7 @@ async def vision_review(
         vin_verification = "VIN unavailable"
     vin_final = vin_est or "N/A"
 
-    stage("VIN/claim extracted")
+    stage("VIN/claim extracted (page1-first logic)")
 
     # -------- Vehicle + parts mix --------
     vehicle_desc = extract_vehicle_from_text(combined_text) or "N/A"
@@ -1101,6 +1171,7 @@ async def vision_review(
 
     # Estimate ↔ Photos Consistency Review
     pdf.ln(4); pdf.set_font_size(12); pdf.cell(0, 8, txt="Estimate ↔ Photos Consistency Review", ln=True); pdf.set_font_size(10)
+    consistency = consistency or {}
     if consistency.get("per_item"):
         for it in consistency["per_item"][:12]:
             ev = bool(it.get("photo_evidence"))
@@ -1196,6 +1267,7 @@ async def get_client_rules(client_name: str):
     else:
         logger.error(f"Rules not found for client: {client_name}")
         return JSONResponse(status_code=404, content={"error": "Rules not found for this client."})
+
 
 
 
