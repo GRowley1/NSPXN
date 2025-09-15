@@ -78,7 +78,7 @@ def extract_text_from_pdf_embedded(pdf_bytes: bytes) -> str:
         logger.debug(f"Embedded text failed: {e}")
         return ""
 
-def extract_from_estimate_first_page(pdf_bytes: bytes, dpi: int = 300) -> Dict[str, Any]:
+def extract_from_estimate(pdf_bytes: bytes, dpi: int = 300) -> Dict[str, Any]:
     extracted = {
         "claim_number": None,
         "vin": None,
@@ -93,32 +93,26 @@ def extract_from_estimate_first_page(pdf_bytes: bytes, dpi: int = 300) -> Dict[s
     }
     try:
         embedded = extract_text_from_pdf_embedded(pdf_bytes)
-        extracted["estimate_text"] = embedded
-        pages = convert_from_bytes(pdf_bytes, dpi=dpi, first_page=1, last_page=1)
-        if pages:
-            img = pages[0]
-            buf = io.BytesIO()
-            img.convert("RGB").save(buf, format="JPEG")
-            b64 = base64.b64encode(buf.getvalue()).decode()
-            response = client.chat.completions.create(
-                model=MODEL,
-                temperature=0.0,
-                max_tokens=800,
-                messages=[
-                    {"role": "system", "content": 'Extract from this estimate first page as JSON: {"claim_number": str or null, "vin": 17-char str or null, "year": int or null, "make": str or null, "model": str or null, "labor_rate": "$XX.XX /hr" or null, "tax_rate": "X.XXXX%" or null, "mileage": int or null, "estimate_items": list of {"line": str, "description": str, "part_number": str or null, "qty": int or null, "price": float or null, "labor": float or null, "paint": float or null, "type": "OEM" or "A/M" or "USED" or "RECOND" or "OTHER"}}. Be accurate, null if not found. Look for vehicle line like "2002 CHEV Silverado 2500 HD LS Extended Cab" to extract year, make, model.'},
-                    {"role": "user", "content": [
-                        {"type": "text", "text": "Extract fields and items."},
-                        {"type": "image_url", "image_url": {"url": f"data:image/jpeg;base64,{b64}"}}
-                    ]}
-                ]
-            )
-            try:
-                data = json.loads(response.choices[0].message.content)
-                extracted.update(data)
-            except Exception as e:
-                logger.warning(f"JSON parse error: {e}")
-            if not extracted["estimate_text"]:
-                extracted["estimate_text"] = ocr_text(img, psm=4)
+        if embedded.strip():
+            text = embedded
+        else:
+            pages = convert_from_bytes(pdf_bytes, dpi=dpi)
+            text = '\n'.join(ocr_text(p, psm=4) for p in pages)
+        extracted["estimate_text"] = text
+        response = client.chat.completions.create(
+            model=MODEL,
+            temperature=0.0,
+            max_tokens=800,
+            messages=[
+                {"role": "system", "content": 'Extract from this estimate text as JSON: {"claim_number": str or null, "vin": 17-char str or null, "year": int or null, "make": str or null, "model": str or null, "labor_rate": "$XX.XX /hr" or null, "tax_rate": "X.XXXX%" or null, "mileage": int or null, "estimate_items": list of {"line": str, "oper": str, "description": str, "part_number": str or null, "qty": int or null, "price": float or null, "labor": float or null, "paint": float or null, "type": "OEM" or "A/M" or "USED" or "RECOND" or "OTHER"}}. Be accurate, null if not found. For vehicle, look for the line describing the vehicle to extract year, make, model (include trim and other details in model). Parse the table for items, including indicators like ** for A/M or USED.'},
+                {"role": "user", "content": text}
+            ]
+        )
+        try:
+            data = json.loads(response.choices[0].message.content)
+            extracted.update(data)
+        except Exception as e:
+            logger.warning(f"JSON parse error: {e}")
     except Exception as e:
         logger.error(f"Estimate extraction error: {e}")
     return extracted
@@ -132,7 +126,7 @@ def extract_vin_from_photo(photo_bytes: bytes) -> Optional[str]:
             model=MODEL,
             temperature=0.0,
             messages=[
-                {"role": "system", "content": "Extract the 17-character VIN from this VIN plate photo. Output only the VIN or null if not a VIN plate or unclear."},
+                {"role": "system", "content": "Extract the 17-character VIN from this image if it is a VIN plate or label photo. Output only the VIN or null if not a VIN plate or unclear."},
                 {"role": "user", "content": [
                     {"type": "text", "text": "Extract VIN."},
                     {"type": "image_url", "image_url": {"url": f"data:image/jpeg;base64,{b64}"}}
@@ -198,7 +192,7 @@ async def vision_review(
     appraiser_id: str = Form(...)
 ):
     estimate_bytes = await estimate.read()
-    estimate_data = extract_from_estimate_first_page(estimate_bytes)
+    estimate_data = extract_from_estimate(estimate_bytes)
 
     photo_bytes_list = []
     vin_photo = None
