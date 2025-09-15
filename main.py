@@ -1,7 +1,7 @@
 from fastapi import FastAPI, File, UploadFile, Form
 from fastapi.responses import JSONResponse, FileResponse
 from fastapi.middleware.cors import CORSMiddleware
-from typing import List, Tuple, Optional, Dict, Any
+from typing import List, Optional, Dict, Any
 import os
 import io
 import base64
@@ -105,7 +105,7 @@ def extract_from_estimate_first_page(pdf_bytes: bytes, dpi: int = 300) -> Dict[s
                 temperature=0.0,
                 max_tokens=800,
                 messages=[
-                    {"role": "system", "content": 'Extract from this estimate first page as JSON: {"claim_number": str or null, "vin": 17-char str or null, "year": int or null, "make": str or null, "model": str or null, "labor_rate": "$XX.XX /hr" or null, "tax_rate": "X.XXXX%" or null, "mileage": int or null, "estimate_items": list of {"line": str, "description": str, "part_number": str or null, "qty": int or null, "price": float or null, "labor": float or null, "paint": float or null, "type": "OEM" or "A/M" or "USED" or "RECOND" or "OTHER"}}. Be accurate, null if not found.'},
+                    {"role": "system", "content": 'Extract from this estimate first page as JSON: {"claim_number": str or null, "vin": 17-char str or null, "year": int or null, "make": str or null, "model": str or null, "labor_rate": "$XX.XX /hr" or null, "tax_rate": "X.XXXX%" or null, "mileage": int or null, "estimate_items": list of {"line": str, "description": str, "part_number": str or null, "qty": int or null, "price": float or null, "labor": float or null, "paint": float or null, "type": "OEM" or "A/M" or "USED" or "RECOND" or "OTHER"}}. Be accurate, null if not found. Look for vehicle line like "2002 CHEV Silverado 2500 HD LS Extended Cab" to extract year, make, model.'},
                     {"role": "user", "content": [
                         {"type": "text", "text": "Extract fields and items."},
                         {"type": "image_url", "image_url": {"url": f"data:image/jpeg;base64,{b64}"}}
@@ -132,7 +132,7 @@ def extract_vin_from_photo(photo_bytes: bytes) -> Optional[str]:
             model=MODEL,
             temperature=0.0,
             messages=[
-                {"role": "system", "content": "Extract the 17-character VIN from this VIN plate photo. Output only the VIN or null if not found or unclear."},
+                {"role": "system", "content": "Extract the 17-character VIN from this VIN plate photo. Output only the VIN or null if not a VIN plate or unclear."},
                 {"role": "user", "content": [
                     {"type": "text", "text": "Extract VIN."},
                     {"type": "image_url", "image_url": {"url": f"data:image/jpeg;base64,{b64}"}}
@@ -159,9 +159,9 @@ def compare_estimate_to_photos(estimate_items: List[Dict], photos: List[bytes]) 
             pass
     if not images_for_vision:
         return {"overall": "No photos provided.", "per_item": [], "missing_in_estimate": [], "not_in_photos": []}
-    prompt = f"Compare these estimate items to the damage photos. For each item, check if damage is visible. List extra damages in photos not in estimate, and items not visible in photos.\nItems: {json.dumps(estimate_items)}"
+    prompt = f"Review the estimate items against the damage photos for consistency. For each item, determine if the described damage is visible in the photos. Provide confidence level. List any additional damages in photos not covered in the estimate, and any items in estimate not visible in photos.\nEstimate Items: {json.dumps(estimate_items)}"
     messages = [
-        {"role": "system", "content": "Output JSON: {'per_item': list of {'description': str, 'visible': bool, 'confidence': float 0-1, 'note': str}, 'not_in_photos': list str, 'missing_in_estimate': list str, 'overall': str}"},
+        {"role": "system", "content": "Output JSON: {'per_item': list of {'description': str, 'visible': bool, 'confidence': float 0-1, 'note': str}, 'not_in_photos': list str, 'missing_in_estimate': list str, 'overall': str summary of the review}"},
         {"role": "user", "content": [{"type": "text", "text": prompt}] + images_for_vision}
     ]
     response = client.chat.completions.create(model=MODEL, messages=messages)
@@ -171,15 +171,16 @@ def compare_estimate_to_photos(estimate_items: List[Dict], photos: List[bytes]) 
         logger.warning(f"Comparison error: {e}")
         return {"overall": "Review failed."}
 
-def compare_to_guidelines(estimate_text: str, guidelines_text: str) -> str:
+def compare_to_guidelines(estimate_text: str, estimate_items: List[Dict], guidelines_text: str) -> str:
     if not guidelines_text:
         return "No client guidelines provided."
+    prompt = f"Review the estimate against these client guidelines. Check for compliance in parts, labor, taxes, documentation, etc. Provide a detailed markdown summary, highlighting any non-compliance.\nGuidelines: {guidelines_text}\n\nEstimate Text: {estimate_text}\nItems: {json.dumps(estimate_items)}"
     response = client.chat.completions.create(
         model=MODEL,
         temperature=0.0,
         messages=[
-            {"role": "system", "content": "Review the estimate against these client guidelines. Output a detailed review summary in markdown."},
-            {"role": "user", "content": f"Guidelines: {guidelines_text}\n\nEstimate: {estimate_text}"}
+            {"role": "system", "content": "Output a detailed review in markdown format."},
+            {"role": "user", "content": prompt}
         ]
     )
     return response.choices[0].message.content
@@ -206,7 +207,9 @@ async def vision_review(
             pb = await p.read()
             photo_bytes_list.append(pb)
             if not vin_photo:
-                vin_photo = extract_vin_from_photo(pb)
+                possible_vin = extract_vin_from_photo(pb)
+                if possible_vin:
+                    vin_photo = possible_vin
 
     guidelines_text = ""
     if guidelines:
@@ -232,7 +235,7 @@ async def vision_review(
 
     consistency = compare_estimate_to_photos(estimate_data.get("estimate_items", []), photo_bytes_list)
 
-    guidelines_review = compare_to_guidelines(estimate_data["estimate_text"], guidelines_text)
+    guidelines_review = compare_to_guidelines(estimate_data["estimate_text"], estimate_data.get("estimate_items", []), guidelines_text)
 
     # Generate PDF
     pdf = FPDF()
@@ -247,8 +250,8 @@ async def vision_review(
     pdf.multi_cell(0, 10, f"VIN: {vin_est or 'N/A'}")
     pdf.multi_cell(0, 10, f"VIN Verification: {vin_verification}")
     pdf.multi_cell(0, 10, f"Vehicle: {estimate_data.get('year', 'N/A')} {estimate_data.get('make', 'N/A')} {estimate_data.get('model', 'N/A')}, Mileage: {estimate_data.get('mileage', 'N/A')}")
-    pdf.multi_cell(0, 10, f"Labor Rates Present: {'Yes' if labor_present else 'No'} ({estimate_data.get('labor_rate', 'N/A')})")
-    pdf.multi_cell(0, 10, f"Tax Rate Present: {'Yes' if tax_present else 'No'} ({estimate_data.get('tax_rate', 'N/A')})")
+    pdf.multi_cell(0, 10, f"Labor Rates: {'Present' if labor_present else 'Missing'} ({estimate_data.get('labor_rate', 'N/A')})")
+    pdf.multi_cell(0, 10, f"Tax Rate: {'Present' if tax_present else 'Missing'} ({estimate_data.get('tax_rate', 'N/A')})")
     pdf.ln(10)
     pdf.multi_cell(0, 10, "Estimate vs Photos Review:")
     pdf.multi_cell(0, 10, json.dumps(consistency, indent=2))
@@ -259,13 +262,13 @@ async def vision_review(
     pdf_path = os.path.join(PDF_DIR, f"{file_number}.pdf")
     pdf.output(pdf_path)
 
-    # Email (optional, as per original)
+    # Email
     try:
         msg = EmailMessage()
         msg["Subject"] = f"AI Review: {estimate_data.get('claim_number', 'N/A')}"
         msg["From"] = "noreply@nspxn.com"
         msg["To"] = "info@nspxn.com"
-        msg.set_content(f"Report attached for file {file_number}.")
+        msg.set_content(f"Report for file {file_number}.")
         with open(pdf_path, "rb") as f:
             msg.add_attachment(f.read(), maintype="application", subtype="pdf", filename=f"{file_number}.pdf")
         with smtplib.SMTP_SSL("mail.tierra.net", 465) as smtp:
@@ -282,7 +285,6 @@ async def download_pdf(file_number: str):
     if os.path.exists(pdf_path):
         return FileResponse(pdf_path, media_type="application/pdf", filename=f"{file_number}.pdf")
     return JSONResponse(status_code=404, content={"detail": "Not Found"})
-
 
 
 
