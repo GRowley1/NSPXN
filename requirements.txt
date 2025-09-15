@@ -8,3 +8,4 @@ pytesseract
 Pillow
 openai>=1.30.0
 PyPDF2
+PyMuPDF
