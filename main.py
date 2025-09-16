@@ -8,6 +8,7 @@ from typing import List, Optional, Dict, Any, Tuple
 from fastapi import FastAPI, File, UploadFile, Form
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse, FileResponse, PlainTextResponse
+from fastapi import Depends
 
 from PIL import Image, ImageOps, ImageFilter, ImageEnhance
 from pdf2image import convert_from_bytes
@@ -402,6 +403,15 @@ def score_compliance(fields: Dict[str, Any]) -> Tuple[int, List[str]]:
 def root():
     return "NSPXN AI Audit API is running."
 
+@app.post("/vision-review")
+async def vision_review(
+    estimate: UploadFile = File(..., description="Estimate PDF (first page contains Claim/VIN/Vehicle)"),
+    photos: List[UploadFile] = File([], description="Damage/VIN/odometer/plate photos"),
+    guidelines: List[UploadFile] = File([], description="Client guidelines DOCX/PDF"),
+):
+    # Reuse the /analyze path logic for backward compatibility
+    return await analyze(estimate=estimate, photos=photos, guidelines=guidelines)
+    
 @app.post("/analyze")
 async def analyze(
     estimate: UploadFile = File(..., description="Estimate PDF (first page contains Claim/VIN/Vehicle)"),
