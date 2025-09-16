@@ -1,6 +1,7 @@
 from fastapi import FastAPI, File, UploadFile, Form
 from fastapi.responses import JSONResponse, FileResponse
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi import Request
 from typing import List, Tuple, Optional, Dict, Any
 import os
 import re
@@ -407,28 +408,94 @@ async def root():
     return {"status": "ok"}
 
 @app.post("/vision-review")
-async def vision_review(
-    files: Optional[List[UploadFile]] = File(None),
-    files_alt: Optional[List[UploadFile]] = File(None, alias="files[]"),
-    client_rules: str = Form(""),
-    file_number: str = Form(""),
-    ia_company: str = Form(""),
-    appraiser_id: str = Form(""),
-    fast: str = Form(None)  # allow forcing thorough mode with fast=0
-):
+async def vision_review(request: Request):
+    """
+    Robust handler that accepts both:
+      - multipart/form-data  (preferred)
+      - application/json     (fallback: files as base64 or URLs)
+    Keeps the rest of the pipeline identical.
+    """
+    # ---------- Gather inputs (supports multipart or JSON) ----------
+    ctype = request.headers.get("content-type", "").lower()
+    files_all: List[Tuple[str, bytes]] = []
+    client_rules = ""
+    file_number = ""
+    ia_company = ""
+    appraiser_id = ""
+    fast = None
+
+    try:
+        if "multipart/form-data" in ctype:
+            form = await request.form()
+
+            # Text fields
+            client_rules = (form.get("client_rules") or "").strip()
+            file_number  = (form.get("file_number")  or "").strip()
+            ia_company   = (form.get("ia_company")   or "").strip()
+            appraiser_id = (form.get("appraiser_id") or "").strip()
+            fast         = form.get("fast")
+
+            # Files – accept multiple keys commonly used by UIs
+            for key in ("files", "files[]", "estimate", "photos", "guidelines"):
+                for f in form.getlist(key):
+                    if hasattr(f, "filename"):
+                        raw = await f.read()
+                        files_all.append(((f.filename or "upload").lower(), raw))
+
+        elif "application/json" in ctype:
+            payload = await request.json()
+
+            # Text fields
+            client_rules = (payload.get("client_rules") or "").strip()
+            file_number  = (payload.get("file_number")  or "").strip()
+            ia_company   = (payload.get("ia_company")   or "").strip()
+            appraiser_id = (payload.get("appraiser_id") or "").strip()
+            fast         = payload.get("fast")
+
+            # Files: base64 or URL
+            for item in (payload.get("files") or []):
+                # b64 form: {"filename":"Est.pdf","b64":"..."}
+                if "b64" in item:
+                    try:
+                        b = base64.b64decode(item["b64"])
+                        fname = (item.get("filename") or "upload").lower()
+                        files_all.append((fname, b))
+                    except Exception as e:
+                        logger.warning(f"Bad base64 file: {e}")
+
+                # URL form: {"url":"https://.../file.pdf","filename":"Est.pdf"}
+                elif "url" in item:
+                    try:
+                        import httpx
+                        r = httpx.get(item["url"], timeout=15)
+                        r.raise_for_status()
+                        fname = (item.get("filename")
+                                 or os.path.basename(item["url"]) or "download").lower()
+                        files_all.append((fname, r.content))
+                    except Exception as e:
+                        logger.warning(f"Fetch failed: {item.get('url')}: {e}")
+
+        else:
+            return JSONResponse(
+                status_code=415,
+                content={
+                    "error": "Unsupported Content-Type. Use multipart/form-data (recommended) or application/json."
+                },
+            )
+    except Exception as e:
+        return JSONResponse(status_code=400, content={"error": f"Bad request body: {type(e).__name__}: {e}"})
+
+    # ---------- Minimal validation (we keep your behavior) ----------
     if not appraiser_id.strip():
         return JSONResponse(status_code=400, content={"error": "Appraiser ID is required."})
-
-    files_all: List[UploadFile] = (files or []) + (files_alt or [])
     if not files_all:
-        return JSONResponse(status_code=400, content={"error": "No files uploaded. Send at least one estimate/photo/guideline file."})
+        return JSONResponse(
+            status_code=400,
+            content={"error": "No files uploaded. Send at least one estimate/photo/guideline file."},
+        )
 
-    raw_files: List[Tuple[str, bytes]] = []
-    for f in files_all:
-        raw = await f.read()
-        raw_files.append(((f.filename or "upload").lower(), raw))
-
-    is_fast = FAST_MODE_DEFAULT if fast is None else (fast != "0")
+    # ---------- Existing pipeline below (unchanged) ----------
+    is_fast = FAST_MODE_DEFAULT if fast is None else (str(fast) != "0")
 
     loop = asyncio.get_running_loop()
     with ThreadPoolExecutor(max_workers=THREADS) as pool:
@@ -437,16 +504,18 @@ async def vision_review(
         pdf_photo_candidates: List[Tuple[str, bytes, float]] = []
 
         async def handle_file(name: str, raw: bytes):
-            if name.endswith((".jpg",".jpeg",".png",".webp")):
+            if name.endswith((".jpg", ".jpeg", ".png", ".webp")):
                 image_blobs.append((name, raw))
             elif name.endswith(".pdf"):
                 first_txt = await loop.run_in_executor(pool, ocr_pdf_first_page, raw)
-                if first_txt: text_chunks.append(first_txt)
-                extra_pages = max(0, MAX_TEXT_PAGES-1)
+                if first_txt:
+                    text_chunks.append(first_txt)
+                extra_pages = max(0, MAX_TEXT_PAGES - 1)
                 if extra_pages > 0:
                     more_txt = await loop.run_in_executor(pool, ocr_pdf_text_caps, raw, extra_pages)
-                    if more_txt: text_chunks.append(more_txt)
-                caps = MAX_PHOTO_PAGES if is_fast else MAX_PHOTO_PAGES*2
+                    if more_txt:
+                        text_chunks.append(more_txt)
+                caps = MAX_PHOTO_PAGES if is_fast else MAX_PHOTO_PAGES * 2
                 cand = await loop.run_in_executor(pool, harvest_photos_from_pdf, raw, caps)
                 pdf_photo_candidates.extend(cand)
             elif name.endswith(".docx"):
@@ -461,11 +530,11 @@ async def vision_review(
                 except Exception:
                     pass
 
-        await asyncio.gather(*(handle_file(n, b) for n, b in raw_files))
+        await asyncio.gather(*(handle_file(n, b) for n, b in files_all))
 
     if pdf_photo_candidates:
         pdf_photo_candidates.sort(key=lambda t: t[2], reverse=True)
-        keep = pdf_photo_candidates[:(MAX_PHOTO_PAGES if is_fast else MAX_PHOTO_PAGES*2)]
+        keep = pdf_photo_candidates[: (MAX_PHOTO_PAGES if is_fast else MAX_PHOTO_PAGES * 2)]
         for n, data, _ in keep:
             image_blobs.append((n, data))
 
@@ -493,11 +562,17 @@ async def vision_review(
         est_items = extract_estimate_items_llm(combined_text)
 
     chosen_images = select_images_for_vision(image_blobs)
-    images_for_vision = [{"type":"image_url","image_url":{"url":"data:image/jpeg;base64,"+base64.b64encode(b).decode("utf-8")}} for _, b in chosen_images]
+    images_for_vision = [
+        {
+            "type": "image_url",
+            "image_url": {"url": "data:image/jpeg;base64," + base64.b64encode(b).decode("utf-8")},
+        }
+        for _, b in chosen_images
+    ]
 
     consistency = compare_estimate_with_photos(est_items, images_for_vision)
 
-    # ===== AI narrative (same field used in PDF/email) =====
+    # ===== AI narrative & scoring (unchanged) =====
     photo_line = "None" if not missing_photos else ", ".join(missing_photos)
     system_prompt = f'''
 You are an AI auto damage auditor. Evaluate STRICTLY by these rules:
@@ -513,35 +588,45 @@ Rules to follow from client:
 '''.strip()
 
     user_parts: List[Dict[str, Any]] = []
-    if combined_text: user_parts.append({"type":"text","text":combined_text})
+    if combined_text:
+        user_parts.append({"type": "text", "text": combined_text})
 
     try:
         rsp = client_fast.chat.completions.create(
             model=OAI_MODEL,
-            messages=[{"role":"system","content":system_prompt},{"role":"user","content":user_parts[:1]}],
-            max_tokens=600, temperature=0
+            messages=[{"role": "system", "content": system_prompt}, {"role": "user", "content": user_parts[:1]}],
+            max_tokens=600,
+            temperature=0,
         )
         gpt_output = rsp.choices[0].message.content or "⚠️ GPT returned no output."
     except Exception as e:
         gpt_output = f"⚠️ AI review failed: {type(e).__name__}: {e}"
 
     score_ai = None
-    for pat in [r"Total\s*Evaluation\s*[:\-]?\s*(\d{1,3})\s*%?",
-                r"Final\s*Score\s*[:\-]?\s*(\d{1,3})\s*%?",
-                r"Compliance\s*Score\s*[:\-]?\s*(\d{1,3})\s*%?"]:
+    for pat in [
+        r"Total\s*Evaluation\s*[:\-]?\s*(\d{1,3})\s*%?",
+        r"Final\s*Score\s*[:\-]?\s*(\d{1,3})\s*%?",
+        r"Compliance\s*Score\s*[:\-]?\s*(\d{1,3})\s*%?",
+    ]:
         m = re.search(pat, gpt_output, re.IGNORECASE)
-        if m: score_ai = int(m.group(1)); break
+        if m:
+            score_ai = int(m.group(1))
+            break
 
     labor_tax_adj = check_labor_and_tax_score(combined_text, client_rules)
     photo_adj = -25 * len(missing_photos)
     computed = max(0, 100 + labor_tax_adj + photo_adj)
     authoritative_score = max(0, min(100, score_ai if score_ai is not None else computed))
 
-    gpt_output_clean = re.sub(r'(?im)^(?:Final\s*Score|Compliance\s*Score|Total\s*Evaluation)\s*[:\-]?\s*\d{1,3}\s*%.*$', '', gpt_output).strip()
+    gpt_output_clean = re.sub(
+        r"(?im)^(?:Final\s*Score|Compliance\s*Score|Total\s*Evaluation)\s*[:\-]?\s*\d{1,3}\s*%.*$",
+        "",
+        gpt_output,
+    ).strip()
     gpt_output_clean += f"\n\nVIN verification (estimate vs photo): {vin_match_status}"
     gpt_output_clean += f"\nRequired photo verification (vision): {photo_line}"
 
-    # ======================= PDF (UNCHANGED LAYOUT) =======================
+    # ===== PDF & Email (unchanged structure) =====
     pdf = FPDF()
     pdf.add_page()
     try:
@@ -560,7 +645,8 @@ Rules to follow from client:
     pdf.multi_cell(0, 6, f"Claim #: {claim_number}")
     pdf.multi_cell(0, 6, f"VIN: {vin_final}")
     pdf.multi_cell(0, 6, f"Vehicle: {vehicle_desc}")
-    if odo_photos: pdf.multi_cell(0, 6, f"Odometer (from photos): {odo_photos}")
+    if odo_photos:
+        pdf.multi_cell(0, 6, f"Odometer (from photos): {odo_photos}")
     pdf.multi_cell(0, 6, f"Compliance Score: {authoritative_score}%")
 
     pdf.ln(4)
@@ -572,32 +658,40 @@ Rules to follow from client:
     if consistency.get("per_item"):
         for it in consistency["per_item"][:40]:
             ev = "YES" if it.get("photo_evidence") else "NO"
-            try: conf = float(it.get("confidence", 0))
-            except Exception: conf = 0.0
-            conf_txt = f"{round(conf*100)}%"
+            try:
+                conf = float(it.get("confidence", 0))
+            except Exception:
+                conf = 0.0
+            conf_txt = f"{round(conf * 100)}%"
             line = f"- {it.get('side','unspecified').title()} {it.get('part','component')} · {it.get('op','op')} → Photo: {ev} ({conf_txt}); {it.get('note','')}"
             pdf.multi_cell(0, 6, line)
     else:
         pdf.multi_cell(0, 6, "Per-item comparison unavailable.")
 
     if consistency.get("not_in_photos"):
-        pdf.ln(2); pdf_add_section_title(pdf, "Items Estimated but Not Evident in Photos")
-        for raw in consistency["not_in_photos"][:20]: pdf.multi_cell(0, 6, f"- {raw}")
+        pdf.ln(2)
+        pdf_add_section_title(pdf, "Items Estimated but Not Evident in Photos")
+        for raw in consistency["not_in_photos"][:20]:
+            pdf.multi_cell(0, 6, f"- {raw}")
 
     if consistency.get("extra_damage_in_photos"):
-        pdf.ln(2); pdf_add_section_title(pdf, "Damage Visible in Photos but Missing on Estimate")
-        for d in consistency["extra_damage_in_photos"][:20]: pdf.multi_cell(0, 6, f"- {d}")
+        pdf.ln(2)
+        pdf_add_section_title(pdf, "Damage Visible in Photos but Missing on Estimate")
+        for d in consistency["extra_damage_in_photos"][:20]:
+            pdf.multi_cell(0, 6, f"- {d}")
 
-    pdf.ln(2); pdf_kv(pdf, "Consistency Overall", consistency.get("overall", ""))
+    pdf.ln(2)
+    pdf_kv(pdf, "Consistency Overall", consistency.get("overall", ""))
 
     pdf_path = os.path.join(PDF_DIR, f"{file_number}.pdf")
     try:
         pdf_bytes = pdf.output(dest="S").encode("latin-1")
-        with open(pdf_path, "wb") as f: f.write(pdf_bytes)
+        with open(pdf_path, "wb") as f:
+            f.write(pdf_bytes)
     except Exception as e:
         logger.error(f"PDF write error: {e}")
 
-    # ======================= EMAIL (UNCHANGED STRUCTURE) =======================
+    # EMAIL (unchanged)
     try:
         msg = EmailMessage()
         msg["Subject"] = f"AI-4-IA Review: {claim_number}"
@@ -632,7 +726,7 @@ AI Review Summary:
         "vehicle": vehicle_desc,
         "vin": vin_final,
         "score": f"{authoritative_score}%",
-        "consistency_review": consistency
+        "consistency_review": consistency,
     }
 
 @app.get("/download-pdf")
