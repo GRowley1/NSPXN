@@ -33,7 +33,6 @@ OAI_MODEL       = os.getenv("OAI_MODEL", "gpt-4o-mini")
 OAI_TIMEOUT_S   = float(os.getenv("OAI_TIMEOUT_S", "25"))
 FAST_MODE_DEFAULT   = os.getenv("FAST_MODE_DEFAULT", "1") == "1"
 MAX_SCAN_PAGES      = int(os.getenv("MAX_SCAN_PAGES", "25")) # scan to find tax/labor page
-STRICT_ESTIMATE_ONLY= os.getenv("STRICT_ESTIMATE_ONLY", "1") == "1"  # == version -4 behavior
 
 # ======================= PDF storage =======================
 PDF_DIR = os.getenv("PDF_DIR", "/tmp")
@@ -93,13 +92,13 @@ def ocr_pdf_text_caps(pdf_bytes: bytes, max_pages: int) -> str:
     return "\n".join(buf)
 
 def _page_has_tax(text: str) -> bool:
-    return re.search(r"(sales\s*tax|tax)[^\n]{0,120}?(?:\d{1,3}\.\d+%|\d{1,3}%|\$\s*\d+(?:\.\d{2})?)",
+    return re.search(r"(sales\s*tax|tax)[^\n]{0,160}?(?:\d{1,3}\.\d+%|\d{1,3}%|\$\s*\d+(?:\.\d{2})?)",
                      text, re.IGNORECASE) is not None
 
 def _page_has_any_labor_rate(text: str) -> bool:
     labels = ["Body Labor", "Paint Labor", "Mechanical Labor", "Structural Labor"]
     for lbl in labels:
-        pat = rf"{lbl}[^\n]{{0,160}}?\$\s*\d{{2,3}}(?:\.\d+)?\s*(?:/hr|/hour|per\s*hour|hr)"
+        pat = rf"{lbl}[^\n]{{0,200}}?\$\s*\d{{2,3}}(?:\.\d+)?\s*(?:/hr|/hour|per\s*hour|hr)"
         if re.search(pat, text, re.IGNORECASE):
             return True
     return False
@@ -188,7 +187,6 @@ def best_vin_candidate(cands: List[str]) -> Optional[str]:
     return None
 
 # ======================= Field extraction (version -4 anchoring) =======================
-# Prefer first page for Claim / VIN / Vehicle YMM (per your spec that it's always on page 1)
 MAKES = r"(?:Acura|Alfa(?:\s*Romeo)?|Audi|BMW|Buick|Cadillac|Chevrolet|Chevy|Chrysler|Dodge|Ferrari|Fiat|Ford|GMC|Genesis|Honda|Hyundai|Infiniti|Jaguar|Jeep|Kia|Lamborghini|Land\s*Rover|Lexus|Lincoln|Maserati|Mazda|Mercedes(?:-|\s*)Benz|Mini|Mitsubishi|Nissan|Porsche|Ram|Scion|Subaru|Suzuki|Tesla|Toyota|Volkswagen|VW|Volvo)"
 
 def extract_claim_from_text(text: str) -> Optional[str]:
@@ -210,26 +208,48 @@ def extract_vin_from_text(text: str) -> Optional[str]:
     candidates = re.findall(r"\b([A-HJ-NPR-Z0-9]{17})\b", text, re.IGNORECASE)
     return best_vin_candidate(candidates)
 
-def extract_vehicle_from_first_page(text: str) -> Optional[str]:
-    # Example: 2002 Chevrolet Silverado 2500HD
-    m = re.search(rf"\b(19\d{{2}}|20\d{{2}})\s+({MAKES})\s+([A-Za-z0-9][A-Za-z0-9\- ]{{1,30}})", text, re.IGNORECASE)
-    if m:
-        year, make, model = m.groups()
-        make = make.replace("  ", " ").strip()
-        model = re.sub(r"\s{2,}", " ", model).strip()
-        # trim trailing junk like "VIN", "Claim", etc. if picked up
-        model = re.split(r"\b(?:vin|claim|insured|owner|stock|color)\b", model, flags=re.IGNORECASE)[0].strip()
-        return f"{year} {make} {model}"
+def extract_vehicle_line_from_first_page(first_page_text: str) -> Optional[str]:
+    """
+    Return the EXACT vehicle line from page 1 (trimmed), rather than a normalized YMM.
+    """
+    if not first_page_text:
+        return None
+    lines = [ln.strip() for ln in first_page_text.splitlines() if ln.strip()]
+    for ln in lines:
+        if re.search(rf"\b(19\d{{2}}|20\d{{2}})\b", ln) and re.search(rf"\b{MAKES}\b", ln, re.IGNORECASE):
+            cleaned = re.sub(r"\s{2,}", " ", ln).strip()
+            return cleaned
     return None
 
-def extract_vehicle_from_text(text: str) -> Optional[str]:
-    # broader fallback if first page didn't catch
-    m = re.search(rf"\b(19\d{{2}}|20\d{{2}})\s+({MAKES})\s+([A-Za-z0-9][A-Za-z0-9\- ]{{1,30}})", text, re.IGNORECASE)
-    if m:
-        year, make, model = m.groups()
-        model = re.split(r"\b(?:vin|claim|insured|owner|stock|color)\b", model, flags=re.IGNORECASE)[0].strip()
-        return f"{year} {make} {model}"
+def _normalize_percent_str(pct_str: str) -> str:
+    s = pct_str.strip().replace(" ", "").replace("%", "")
+    try:
+        v = float(s); return f"{v:g}%"
+    except Exception:
+        return pct_str.strip().rstrip("%") + "%"
+
+def parse_tax_rate(text: str) -> Optional[str]:
+    if not text: return None
+    m = re.search(r"(?i)(?:sales\s*tax|tax)[^\n]{0,160}?(\d{1,3}(?:\.\d+)?\s*%)", text)
+    if m: return _normalize_percent_str(m.group(1))
+    m2 = re.search(r"(?i)(?:sales\s*tax|tax)[^\n]{0,160}?\$\s*\d+(?:\.\d{2})?", text)
+    if m2: return m2.group(0).strip()
     return None
+
+def parse_labor_rates(text: str) -> Dict[str, str]:
+    if not text: return {}
+    labels = {
+        "Body": r"Body\s*Labor",
+        "Paint": r"Paint\s*Labor",
+        "Mechanical": r"Mechanical\s*Labor",
+        "Structural": r"Structural\s*Labor",
+    }
+    out: Dict[str, str] = {}
+    for key, lbl_pat in labels.items():
+        pat = rf"(?i){lbl_pat}[^\n]{{0,200}}?\$\s*(\d{{2,3}}(?:\.\d+)?)\s*(?:/hr|/hour|per\s*hour|hr)"
+        m = re.search(pat, text)
+        if m: out[key] = f"${m.group(1)}/hr"
+    return out
 
 # ======================= Photo parsing & required-photos presence =======================
 def _image_is_exterior_wide(img: Image.Image) -> bool:
@@ -289,14 +309,15 @@ def check_required_photos(image_blobs: List[Tuple[str, bytes]], _ignored_text: s
             img = Image.open(io.BytesIO(blob))
             proc = preprocess_image(img)
             ocr = pytesseract.image_to_string(proc, lang="eng", config="--psm 6")
-            ocr_up = ocr.upper()
+            up = ocr.upper()
 
-            if re.search(r"\b[A-HJ-NPR-Z0-9]{17}\b", ocr_up) or "VIN" in ocr_up or _looks_like_door_label(ocr):
+            if re.search(r"\b[A-HJ-NPR-Z0-9]{17}\b", up) or "VIN" in up or _looks_like_door_label(ocr):
                 vin_present_flag = True
-            if (re.search(r"\bMPH\b", ocr_up) or re.search(r"\bRPM\b", ocr_up) or
-                any(w in ocr_up for w in ("ODOMETER","TRIP","FUEL","TEMP","VOLTS"))):
+            if (re.search(r"\bMPH\b", up) or re.search(r"\bRPM\b", up) or
+                any(w in up for w in ("ODOMETER","TRIP","FUEL","TEMP","VOLTS")) or
+                (re.search(r"\b\d{5,7}\b", up) and (re.search(r"\bMPH\b", up) or "RPM" in up))):
                 odo_present_flag = True
-            if "CALIFORNIA" in ocr_up or re.search(r"\b[A-Z0-9]{5,8}\b", ocr_up):
+            if "CALIFORNIA" in up or re.search(r"\b[A-Z0-9]{5,8}\b", up):
                 plate_present_flag = True
 
             if _image_is_exterior_wide(img):
@@ -353,7 +374,6 @@ def extract_estimate_items(text: str) -> List[Dict[str, str]]:
     return uniq
 
 def extract_estimate_items_llm(text: str) -> List[Dict[str, str]]:
-    # only used if STRICT_ESTIMATE_ONLY=False
     schema = {"type":"array","items":{"type":"object","properties":{
         "op":{"type":"string"},"part":{"type":"string"},"side":{"type":"string"},"raw":{"type":"string"}},
         "required":["op","part","side","raw"]}}
@@ -435,7 +455,7 @@ def pdf_add_section_title(pdf: FPDF, title: str):
 def pdf_kv(pdf: FPDF, key: str, val: str):
     pdf.set_font_size(10); pdf.multi_cell(0, 6, f"{key}: {val}")
 
-# ======================= Route (multipart or JSON) =======================
+# ======================= Routes =======================
 @app.get("/")
 async def root():
     return {"status": "ok"}
@@ -518,12 +538,11 @@ async def vision_review(request: Request):
                 first_txt = await loop.run_in_executor(pool, ocr_pdf_first_page, raw)
                 if first_txt:
                     first_page_texts.append(first_txt)
-                    text_chunks.append(first_txt)   # keep prior behavior too
+                    text_chunks.append(first_txt)
                 extra_pages = max(0, MAX_TEXT_PAGES-1)
                 if extra_pages > 0:
                     more_txt = await loop.run_in_executor(pool, ocr_pdf_text_caps, raw, extra_pages)
                     if more_txt: text_chunks.append(more_txt)
-                # scan to find the page that actually contains Tax/Labor Rates
                 tax_labor_page = await loop.run_in_executor(pool, ocr_pdf_scan_tax_labor_page, raw, MAX_SCAN_PAGES)
                 if tax_labor_page:
                     text_chunks.append(tax_labor_page)
@@ -557,30 +576,43 @@ async def vision_review(request: Request):
     # ===== Required photos presence =====
     missing_photos = check_required_photos(image_blobs, combined_text)
 
-    # ===== VIN/Claim/Vehicle from FIRST PAGE (version -4 anchor) =====
-    vin_est = extract_vin_from_text(first_page_text or combined_text)
-    claim_number = extract_claim_from_text(first_page_text or combined_text) or "N/A"
-    vehicle_desc = (extract_vehicle_from_first_page(first_page_text) or
-                    extract_vehicle_from_text(first_page_text) or
-                    extract_vehicle_from_text(combined_text) or "N/A")
+    # ===== FIRST-PAGE ANCHORING for Claim/VIN/Vehicle =====
+    first_text_for_id = (first_page_text or "").strip() or (combined_text or "")
+    claim_number = extract_claim_from_text(first_text_for_id) or "N/A"
+    vin_est      = extract_vin_from_text(first_text_for_id)   # source of truth
+    vehicle_line = extract_vehicle_line_from_first_page(first_text_for_id)
+    vehicle_desc = vehicle_line or "N/A"
 
-    # Photo VIN for verification only
+    # Photo VIN for VERIFICATION ONLY
     vin_photos = extract_vin_from_photos(image_blobs)
-    vin_final = vin_est or "N/A"
+    vin_final  = vin_est or "N/A"
     vin_match_status = "UNVERIFIED"
     if vin_est and vin_photos:
         vin_match_status = "MATCH" if normalize_vin(vin_est) == normalize_vin(vin_photos) else "MISMATCH"
 
     odo_photos = extract_odometer_from_photos(image_blobs)
 
-    # ===== Estimate items (strict by default; LLM fallback optional) =====
+    # ===== Estimate items (regex first; LLM fallback only if none found) =====
     est_items = extract_estimate_items(combined_text)
-    if not est_items and not STRICT_ESTIMATE_ONLY:
+    if not est_items:
         est_items = extract_estimate_items_llm(combined_text)
 
     chosen_images = select_images_for_vision(image_blobs)
     images_for_vision = [{"type":"image_url","image_url":{"url":"data:image/jpeg;base64,"+base64.b64encode(b).decode("utf-8")}} for _, b in chosen_images]
     consistency = compare_estimate_with_photos(est_items, images_for_vision)
+
+    # ===== Labor rates & tax rate (verified values to print) =====
+    labor_rates = parse_labor_rates(combined_text)
+    tax_rate    = parse_tax_rate(combined_text)
+    labor_line = "None detected"
+    if labor_rates:
+        parts = []
+        for key in ("Body","Paint","Mechanical","Structural"):
+            if key in labor_rates:
+                parts.append(f"{key} {labor_rates[key]}")
+        if parts:
+            labor_line = "; ".join(parts)
+    tax_line = tax_rate or "Not found"
 
     # ===== Narrative & score (unchanged) =====
     photo_line = "None" if not missing_photos else ", ".join(missing_photos)
@@ -622,11 +654,20 @@ Rules to follow from client:
     computed = max(0, 100 + labor_tax_adj + photo_adj)
     authoritative_score = max(0, min(100, score_ai if score_ai is not None else computed))
 
-    gpt_output_clean = re.sub(r'(?im)^(?:Final\s*Score|Compliance\s*Score|Total\s*Evaluation)\s*[:\-]?\s*\d{1,3}\s*%.*$', '', gpt_output).strip()
+    # Single authoritative score: strip any score text emitted by the LLM
+    gpt_output_clean = re.sub(
+        r'(?im)^(?:Final\s*Score|Compliance\s*Score|Total\s*Evaluation)\s*[:\-]?\s*\d{1,3}\s*%.*$',
+        '',
+        gpt_output
+    ).strip()
+
+    # Append verification lines (content only; PDF/email structure unchanged)
     gpt_output_clean += f"\n\nVIN verification (estimate vs photo): {vin_match_status}"
     gpt_output_clean += f"\nRequired photo verification (vision): {photo_line}"
+    gpt_output_clean += f"\nLabor rates detected: {labor_line}"
+    gpt_output_clean += f"\nTax Rate detected: {tax_line}"
 
-    # ======================= PDF (UNCHANGED) =======================
+    # ======================= PDF (UNCHANGED LAYOUT) =======================
     pdf = FPDF()
     pdf.add_page()
     try:
@@ -726,6 +767,7 @@ async def download_pdf(file_number: str):
     if os.path.exists(pdf_path):
         return FileResponse(path=pdf_path, media_type="application/pdf", filename=f"{file_number}.pdf")
     return JSONResponse(status_code=404, content={"detail": "Not Found"})
+
 
 
 
