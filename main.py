@@ -654,15 +654,15 @@ async def vision_review(request: Request):
     # ===== Estimate items (regex first; wide-scan; then LLM fallback) =====
     est_items = extract_estimate_items(combined_text)
     if not est_items and pdf_raws:
-    # Wide OCR sweep over more pages to find items
-    for raw_pdf in pdf_raws:
-        # Use the default event loop thread pool; the earlier pool context is already closed.
-        extra_txt = await asyncio.to_thread(ocr_pdf_items_wide_scan, raw_pdf)
-        if extra_txt:
-            combined_text += "\n" + extra_txt
-    est_items = extract_estimate_items(combined_text)
+        # Wide OCR sweep over more pages to find items
+        for raw_pdf in pdf_raws:
+            # Use the default event loop thread pool; the earlier pool context is already closed.
+            extra_txt = await asyncio.to_thread(ocr_pdf_items_wide_scan, raw_pdf)
+            if extra_txt:
+                combined_text += "\n" + extra_txt
+        est_items = extract_estimate_items(combined_text)
     if not est_items:
-    est_items = extract_estimate_items_llm(combined_text)
+        est_items = extract_estimate_items_llm(combined_text)
 
     # ===== Vision compare (guarantee a real review) =====
     chosen_images = select_images_for_vision(image_blobs)
