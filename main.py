@@ -443,8 +443,8 @@ def pdf_add_section_title(pdf, title):
 def pdf_kv(pdf, key, value):
     pdf.multi_cell(0, 6, f"{key}: {value}")
 
-# ===== Main endpoint =====
-@app.post("/process")
+# ===== Main endpoint (renamed to /vision-review) =====
+@app.post("/vision-review")
 async def process(request: Request):
     t0 = t0_start()
     data = await request.json()
@@ -691,7 +691,6 @@ async def download_pdf(file_number: str):
     if os.path.exists(pdf_path):
         return FileResponse(path=pdf_path, media_type="application/pdf", filename=f"{file_number}.pdf")
     return JSONResponse(status_code=404, content={"detail": "Not Found"})
-
 
 
 
