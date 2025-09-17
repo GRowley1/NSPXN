@@ -150,6 +150,22 @@ def harvest_photos_from_pdf(pdf_bytes: bytes, max_pages: int) -> List[Tuple[str,
         logger.warning(f"harvest_photos_from_pdf error: {e}")
     return out
 
+def ocr_pdf_items_wide_scan(pdf_bytes: bytes, limit_pages: int = 30, dpi: int = 120) -> str:
+    """
+    Fallback OCR for estimate line items across more pages at a lower DPI (fast).
+    Used only if initial extraction found no items.
+    """
+    out = []
+    try:
+        pages = convert_from_bytes(pdf_bytes, dpi=dpi)
+        for i, p in enumerate(pages[:limit_pages], 1):
+            txt = ocr_image_quick(p)  # quick OCR
+            if len(txt.strip()) >= 20:
+                out.append(f"[WideScan Page {i}]\n{txt}")
+    except Exception as e:
+        logger.warning(f"ocr_pdf_items_wide_scan error: {e}")
+    return "\n".join(out)
+
 # ======================= VIN utilities =======================
 VIN_ALLOWED = set("0123456789ABCDEFGHJKLMNPRSTUVWXYZ")
 _translit = {**{str(i): i for i in range(10)},
@@ -210,7 +226,7 @@ def extract_vin_from_text(text: str) -> Optional[str]:
 
 def extract_vehicle_line_from_first_page(first_page_text: str) -> Optional[str]:
     """
-    Return the EXACT vehicle line from page 1 (trimmed), rather than a normalized YMM.
+    Return the EXACT vehicle line from page 1 (trimmed), but strip any URLs accidentally OCR'ed.
     """
     if not first_page_text:
         return None
@@ -218,6 +234,8 @@ def extract_vehicle_line_from_first_page(first_page_text: str) -> Optional[str]:
     for ln in lines:
         if re.search(rf"\b(19\d{{2}}|20\d{{2}})\b", ln) and re.search(rf"\b{MAKES}\b", ln, re.IGNORECASE):
             cleaned = re.sub(r"\s{2,}", " ", ln).strip()
+            cleaned = re.sub(r"https?://\S+", "", cleaned).strip()  # strip any URLs (e.g., JD Power)
+            cleaned = re.sub(r"\s{2,}", " ", cleaned).strip()
             return cleaned
     return None
 
@@ -266,18 +284,57 @@ def _looks_like_door_label(text: str) -> bool:
     return hits >= 2
 
 def extract_vin_from_photos(image_blobs: List[Tuple[str, bytes]]) -> Optional[str]:
-    # Used ONLY for verification (never to source VIN value).
-    found: List[str] = []
-    for name, blob in image_blobs[:12]:
+    """
+    Used ONLY for verification (never to source VIN value).
+    Enhanced: multi-rotation, thresholds/whitelist, and cropping near 'VIN' label.
+    """
+    def ocr_variants(pil_img: Image.Image) -> List[str]:
+        texts = []
+        texts.append(pytesseract.image_to_string(preprocess_image(pil_img), lang="eng", config="--psm 7"))
+        texts.append(pytesseract.image_to_string(preprocess_image(pil_img), lang="eng",
+                                                 config="--psm 7 --oem 1 -c tessedit_char_whitelist=ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789"))
+        for thr in (180, 200, 220):
+            g = pil_img.convert("L").point(lambda x: 255 if x > thr else 0, mode="1").convert("L")
+            texts.append(pytesseract.image_to_string(g, lang="eng",
+                         config="--psm 7 --oem 1 -c tessedit_char_whitelist=ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789"))
+        return texts
+
+    def crop_near_vin_label(pil_img: Image.Image) -> List[Image.Image]:
+        outs = []
         try:
-            base = Image.open(io.BytesIO(blob))
+            data = pytesseract.image_to_data(preprocess_image(pil_img), lang="eng", config="--psm 6", output_type=pytesseract.Output.DICT)
+            n = len(data.get("text", []))
+            for i in range(n):
+                if (data["text"][i] or "").strip().upper() == "VIN":
+                    x, y, w, h = data["left"][i], data["top"][i], data["width"][i], data["height"][i]
+                    x1 = max(0, x + int(w * 0.9))
+                    y1 = max(0, y - h)
+                    x2 = min(pil_img.width, x1 + w * 15)
+                    y2 = min(pil_img.height, y + int(h * 2.5))
+                    outs.append(pil_img.crop((x1, y1, x2, y2)))
+        except Exception:
+            pass
+        return outs
+
+    found: List[str] = []
+    for name, blob in image_blobs[:24]:
+        try:
+            base = Image.open(io.BytesIO(blob)).convert("RGB")
             for r in (0, 90, 180, 270):
                 img = base.rotate(r, expand=True)
-                ocr = pytesseract.image_to_string(preprocess_image(img), lang="eng", config="--psm 7")
-                cands = re.findall(r"\b([A-HJ-NPR-Z0-9]{17})\b", ocr.upper())
-                if cands: found.extend(cands)
+
+                for txt in ocr_variants(img):
+                    cands = re.findall(r"\b([A-HJ-NPR-Z0-9]{17})\b", txt.upper())
+                    if cands: found.extend(cands)
+
+                for crop in crop_near_vin_label(img):
+                    for txt in ocr_variants(crop):
+                        cands = re.findall(r"\b([A-HJ-NPR-Z0-9]{17})\b", txt.upper())
+                        if cands: found.extend(cands)
+
         except Exception as e:
             logger.warning(f"VIN photo OCR error ({name}): {e}")
+
     return best_vin_candidate(found)
 
 def extract_odometer_from_photos(image_blobs: List[Tuple[str, bytes]]) -> Optional[str]:
@@ -530,11 +587,13 @@ async def vision_review(request: Request):
         text_chunks: List[str] = []
         image_blobs: List[Tuple[str, bytes]] = []
         pdf_photo_candidates: List[Tuple[str, bytes, float]] = []
+        pdf_raws: List[bytes] = []  # keep raw PDFs for wide-scan fallback
 
         async def handle_file(name: str, raw: bytes):
             if name.endswith((".jpg",".jpeg",".png",".webp")):
                 image_blobs.append((name, raw))
             elif name.endswith(".pdf"):
+                pdf_raws.append(raw)  # for wide scan later
                 first_txt = await loop.run_in_executor(pool, ocr_pdf_first_page, raw)
                 if first_txt:
                     first_page_texts.append(first_txt)
@@ -592,11 +651,19 @@ async def vision_review(request: Request):
 
     odo_photos = extract_odometer_from_photos(image_blobs)
 
-    # ===== Estimate items (regex first; LLM fallback only if none found) =====
+    # ===== Estimate items (regex first; wide-scan; then LLM fallback) =====
     est_items = extract_estimate_items(combined_text)
+    if not est_items and pdf_raws:
+        # Wide OCR sweep over more pages to find items
+        for raw_pdf in pdf_raws:
+            extra_txt = await loop.run_in_executor(pool, ocr_pdf_items_wide_scan, raw_pdf)
+            if extra_txt:
+                combined_text += "\n" + extra_txt
+        est_items = extract_estimate_items(combined_text)
     if not est_items:
         est_items = extract_estimate_items_llm(combined_text)
 
+    # ===== Vision compare (guarantee a real review) =====
     chosen_images = select_images_for_vision(image_blobs)
     images_for_vision = [{"type":"image_url","image_url":{"url":"data:image/jpeg;base64,"+base64.b64encode(b).decode("utf-8")}} for _, b in chosen_images]
     consistency = compare_estimate_with_photos(est_items, images_for_vision)
@@ -614,8 +681,21 @@ async def vision_review(request: Request):
             labor_line = "; ".join(parts)
     tax_line = tax_rate or "Not found"
 
-    # ===== Narrative & score (unchanged) =====
+    # ===== Narrative & score =====
     photo_line = "None" if not missing_photos else ", ".join(missing_photos)
+
+    facts_text = f"""FACTS to ground your evaluation (do not contradict):
+- Required photo types missing: {photo_line if photo_line != "None" else "None (all required photo types present)"}
+- Number of photos analyzed: {len(image_blobs)}
+- VIN verification status (estimate vs photo): {vin_match_status}
+- Labor rates found: {labor_line}
+- Tax rate found: {tax_line}
+POLICY:
+- Do NOT assume any photo is missing; use the presence results above. If 'None', state that all required types are present.
+- Use only the uploaded estimate and photos; do NOT cite or rely on external websites.
+- Be concise and deterministic; no speculation.
+"""
+
     system_prompt = f'''
 You are an AI auto damage auditor. Evaluate STRICTLY by these rules:
 
@@ -624,18 +704,21 @@ You are an AI auto damage auditor. Evaluate STRICTLY by these rules:
 - "Four corners" is satisfied if at least two exterior corner views are present OR multiple Image Report pages/corner labels are present.
 - Do NOT assume total loss unless explicitly stated.
 - If any labor rate is present (body OR paint OR mechanical OR structural), do NOT apply the -50% deduction.
+- Never assume missing photos; rely on the FACTS block.
 
 Rules to follow from client:
 {client_rules}
 '''.strip()
 
     user_parts: List[Dict[str, Any]] = []
-    if combined_text: user_parts.append({"type":"text","text":combined_text})
+    user_parts.append({"type":"text","text":facts_text})
+    if combined_text:
+        user_parts.append({"type":"text","text":combined_text})
 
     try:
         rsp = client_fast.chat.completions.create(
             model=OAI_MODEL,
-            messages=[{"role":"system","content":system_prompt},{"role":"user","content":user_parts[:1]}],
+            messages=[{"role":"system","content":system_prompt},{"role":"user","content":user_parts}],
             max_tokens=600, temperature=0
         )
         gpt_output = rsp.choices[0].message.content or "⚠️ GPT returned no output."
@@ -767,6 +850,7 @@ async def download_pdf(file_number: str):
     if os.path.exists(pdf_path):
         return FileResponse(path=pdf_path, media_type="application/pdf", filename=f"{file_number}.pdf")
     return JSONResponse(status_code=404, content={"detail": "Not Found"})
+
 
 
 
