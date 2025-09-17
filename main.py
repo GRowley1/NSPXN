@@ -1,4 +1,4 @@
-from fastapi import FastAPI, Request
+from fastapi import FastAPI, Request, HTTPException
 from fastapi.responses import JSONResponse, FileResponse
 from fastapi.middleware.cors import CORSMiddleware
 from typing import List, Tuple, Optional, Dict, Any
@@ -446,11 +446,36 @@ def pdf_kv(pdf, key, value):
 # ===== Main endpoint (renamed to /vision-review) =====
 @app.post("/vision-review")
 async def process(request: Request):
+    body = await request.body()
+    try:
+        data_str = body.decode('utf-8')
+    except UnicodeDecodeError:
+        logger.error("Invalid UTF-8 in request body")
+        raise HTTPException(status_code=400, detail="Invalid UTF-8 encoding in request body")
+    try:
+        data = json.loads(data_str)
+    except json.JSONDecodeError:
+        logger.error("Invalid JSON in request body")
+        raise HTTPException(status_code=400, detail="Invalid JSON format")
+
     t0 = t0_start()
-    data = await request.json()
-    # Assume data has 'pdfs' (base64 list for estimate PDFs), 'images' (base64 list for photos), 'file_number', etc.
-    pdf_raws = [base64.b64decode(p) for p in data.get("pdfs", [])]  # Estimate PDFs
-    image_blobs = [(f"img{i}", base64.b64decode(img)) for i, img in enumerate(data.get("images", []))]  # Photos
+    # Decode base64 with error handling
+    pdf_raws = []
+    for p in data.get("pdfs", []):
+        try:
+            pdf_raws.append(base64.b64decode(p, validate=True))
+        except Exception as e:
+            logger.error(f"Invalid base64 in pdfs: {str(e)}")
+            raise HTTPException(status_code=400, detail="Invalid base64 in pdfs field")
+
+    image_blobs = []
+    for i, img in enumerate(data.get("images", [])):
+        try:
+            image_blobs.append((f"img{i}", base64.b64decode(img, validate=True)))
+        except Exception as e:
+            logger.error(f"Invalid base64 in images: {str(e)}")
+            raise HTTPException(status_code=400, detail="Invalid base64 in images field")
+
     file_number = data.get("file_number", "8154702-0917-7")
     ia_company = data.get("ia_company", "SCA")
     appraiser_id = data.get("appraiser_id", "GRR")
@@ -691,7 +716,6 @@ async def download_pdf(file_number: str):
     if os.path.exists(pdf_path):
         return FileResponse(path=pdf_path, media_type="application/pdf", filename=f"{file_number}.pdf")
     return JSONResponse(status_code=404, content={"detail": "Not Found"})
-
 
 
 
