@@ -114,6 +114,19 @@ def ocr_pdf_scan_tax_labor_page(pdf_bytes: bytes, max_pages: int = MAX_SCAN_PAGE
         logger.warning(f"scan_tax_labor_page error: {e}")
     return ""
 
+# ===== Corner label helpers (used by photo harvest and selection) =====
+CORNER_LABEL_PAT = re.compile(r'\b(?:left\s*front|right\s*front|left\s*rear|right\s*rear|lf|rf|lr|rr)\b', re.IGNORECASE)
+
+def count_corner_labels(text: str) -> int:
+    found = set()
+    for m in re.finditer(CORNER_LABEL_PAT, text or ""):
+        token = m.group(0).lower().replace(" ", "")
+        if token in ("lf", "leftfront"): found.add("lf")
+        elif token in ("rf", "rightfront"): found.add("rf")
+        elif token in ("lr", "leftrear"): found.add("lr")
+        elif token in ("rr", "rightrear"): found.add("rr")
+    return len(found)
+
 # ====== pdftotext (fast text) ======
 def pdftotext_extract(pdf_bytes: bytes, first_page: int, last_page: int) -> str:
     try:
@@ -294,18 +307,6 @@ def parse_labor_rates(text: str) -> Dict[str, str]:
     return out
 
 # ======================= Photo parsing & required-photos presence =======================
-CORNER_LABEL_PAT = re.compile(r'\b(?:left\s*front|right\s*front|left\s*rear|right\s*rear|lf|rf|lr|rr)\b', re.IGNORECASE)
-
-def count_corner_labels(text: str) -> int:
-    found = set()
-    for m in re.finditer(CORNER_LABEL_PAT, text or ""):
-        token = m.group(0).lower().replace(" ", "")
-        if token in ("lf", "leftfront"): found.add("lf")
-        elif token in ("rf", "rightfront"): found.add("rf")
-        elif token in ("lr", "leftrear"): found.add("lr")
-        elif token in ("rr", "rightrear"): found.add("rr")
-    return len(found)
-
 def _image_is_exterior_wide(img: Image.Image) -> bool:
     processed = preprocess_image(img)
     text = pytesseract.image_to_string(processed, lang="eng")
@@ -555,7 +556,7 @@ async def vision_review(request: Request):
     """
     Accepts multipart/form-data or application/json.
     Anchors Claim/VIN/Vehicle to estimate first page (version -4 behavior).
-    VIN is sourced ONLY from estimate, then verified by photo (no 'UNVERIFIED'; report explicit status).
+    VIN is sourced ONLY from estimate, then verified by photo (report explicit status).
     """
     t0 = t0_start()
     ctype = request.headers.get("content-type", "").lower()
@@ -633,7 +634,8 @@ async def vision_review(request: Request):
                 # FAST TEXT: try pdftotext (first MAX_TEXT_PAGES)
                 txt_fast = await loop.run_in_executor(pool, pdftotext_extract, raw, 1, MAX_TEXT_PAGES)
                 if txt_fast.strip():
-                    first_page_texts.append(txt_fast.splitlines()[0] if txt_fast else "")
+                    # first page line is in txt_fast as well
+                    first_page_texts.append(txt_fast.split("\n", 1)[0] if txt_fast else "")
                     text_chunks.append(txt_fast)
                 else:
                     # OCR first page + caps
@@ -907,6 +909,7 @@ async def download_pdf(file_number: str):
     if os.path.exists(pdf_path):
         return FileResponse(path=pdf_path, media_type="application/pdf", filename=f"{file_number}.pdf")
     return JSONResponse(status_code=404, content={"detail": "Not Found"})
+
 
 
 
