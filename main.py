@@ -22,8 +22,8 @@ PDF_OCR_DPI_EST = int(os.getenv("PDF_OCR_DPI_EST", "160"))
 PDF_OCR_DPI_TXT = int(os.getenv("PDF_OCR_DPI_TXT", "140"))
 PDF_OCR_DPI_PH  = int(os.getenv("PDF_OCR_DPI_PH",  "130"))
 MAX_TEXT_PAGES  = int(os.getenv("MAX_TEXT_PAGES",  "3"))    # quick skim
-MAX_PHOTO_PAGES = int(os.getenv("MAX_PHOTO_PAGES", "8"))
-MAX_VISION_IMGS = int(os.getenv("MAX_VISION_IMGS", "8"))
+MAX_PHOTO_PAGES = int(os.getenv("MAX_PHOTO_PAGES", "24"))   # expanded to improve presence detection
+MAX_VISION_IMGS = int(os.getenv("MAX_VISION_IMGS", "10"))   # images passed to vision compare
 THREADS         = int(os.getenv("OCR_THREADS",     "4"))
 OAI_MODEL       = os.getenv("OAI_MODEL", "gpt-4o-mini")
 OAI_TIMEOUT_S   = float(os.getenv("OAI_TIMEOUT_S", "15"))
@@ -603,7 +603,6 @@ def _chunk_text(txt: str, size: int = 6000, overlap: int = 400) -> List[str]:
         out.append(txt[i:j])
         if j >= n: break
         i = i + size - overlap
-        if i <= 0: i = j  # safety
     return out
 
 def llm_extract_items_chunked(full_text: str, time_guard: Callable[[], bool]) -> List[Dict[str, str]]:
@@ -1101,6 +1100,7 @@ async def download_pdf(file_number: str):
     if os.path.exists(pdf_path):
         return FileResponse(path=pdf_path, media_type="application/pdf", filename=f"{file_number}.pdf")
     return JSONResponse(status_code=404, content={"detail": "Not Found"})
+
 
 
 
