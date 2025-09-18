@@ -19,16 +19,16 @@ ImageFile.LOAD_TRUNCATED_IMAGES = True
 
 # ======================= SPEED / BEHAVIOR TUNABLES =======================
 PDF_OCR_DPI_EST = int(os.getenv("PDF_OCR_DPI_EST", "160"))
-PDF_OCR_DPI_TXT = int(os.getenv("PDF_OCR_DPI_TXT", "140"))
-PDF_OCR_DPI_PH  = int(os.getenv("PDF_OCR_DPI_PH",  "130"))
-MAX_TEXT_PAGES  = int(os.getenv("MAX_TEXT_PAGES",  "3"))    # quick skim
-MAX_PHOTO_PAGES = int(os.getenv("MAX_PHOTO_PAGES", "24"))   # expanded to improve presence detection
-MAX_VISION_IMGS = int(os.getenv("MAX_VISION_IMGS", "10"))   # images passed to vision compare
+PDF_OCR_DPI_TXT = int(os.getenv("PDF_OCR_DPI_TXT", "150"))
+PDF_OCR_DPI_PH  = int(os.getenv("PDF_OCR_DPI_PH",  "140"))
+MAX_TEXT_PAGES  = int(os.getenv("MAX_TEXT_PAGES",  "3"))     # quick skim
+MAX_PHOTO_PAGES = int(os.getenv("MAX_PHOTO_PAGES", "36"))    # expanded to improve presence detection
+MAX_VISION_IMGS = int(os.getenv("MAX_VISION_IMGS", "10"))    # images passed to vision compare
 THREADS         = int(os.getenv("OCR_THREADS",     "4"))
 OAI_MODEL       = os.getenv("OAI_MODEL", "gpt-4o-mini")
 OAI_TIMEOUT_S   = float(os.getenv("OAI_TIMEOUT_S", "15"))
-TIME_BUDGET_S   = float(os.getenv("TIME_BUDGET_S", "55"))   # sub-minute target
-VISION_BATCH    = int(os.getenv("VISION_BATCH", "12"))       # items per batch for vision compare
+TIME_BUDGET_S   = float(os.getenv("TIME_BUDGET_S", "55"))    # sub-minute target
+VISION_BATCH    = int(os.getenv("VISION_BATCH", "12"))        # items per batch for vision compare
 
 # ======================= PDF storage =======================
 PDF_DIR = os.getenv("PDF_DIR", "/tmp")
@@ -103,10 +103,10 @@ def _page_has_any_labor_rate(text: str) -> bool:
             return True
     return False
 
-def ocr_pdf_scan_tax_labor_page(pdf_bytes: bytes, max_pages: int = 30) -> str:
+def ocr_pdf_scan_tax_labor_page(pdf_bytes: bytes, max_pages: int = 60) -> str:
     try:
         pages = convert_from_bytes(pdf_bytes, dpi=PDF_OCR_DPI_TXT)
-        for i, p in enumerate(pages, 1):
+        for i, p in enumerate(pages[:max_pages], 1):
             txt = ocr_image_quick(p)
             if _page_has_tax(txt) or _page_has_any_labor_rate(txt):
                 return f"[Page {i}]\n{txt}"
@@ -143,7 +143,6 @@ def pdftotext_extract(pdf_bytes: bytes, first_page: int, last_page: int) -> str:
     return ""
 
 def pdftotext_extract_all(pdf_bytes: bytes) -> str:
-    """Fast full-document text using pdftotext; empty string if unavailable/fails."""
     try:
         with tempfile.TemporaryDirectory() as td:
             in_pdf = os.path.join(td, "in.pdf")
@@ -349,7 +348,8 @@ def _image_is_exterior_wide(img: Image.Image) -> bool:
 def _looks_like_door_label(text: str) -> bool:
     t = (text or "").upper()
     hits = 0
-    for kw in ("MFD BY", "GENERAL MOTORS", "GM", "GVWR", "GAWR", "THIS VEHICLE CONFORMS", "DATE", "TIRE", "RIM"):
+    for kw in ("MFD BY", "GENERAL MOTORS", "FORD MOTOR", "TOYOTA MOTOR", "GVWR", "GAWR",
+               "THIS VEHICLE CONFORMS", "DATE", "TIRE", "RIM", "VIN"):
         if kw in t: hits += 1
     return hits >= 2
 
@@ -357,7 +357,8 @@ def detect_required_photo_presence(image_blobs: List[Tuple[str, bytes]]) -> Dict
     flags = {"four corners": False, "odometer": False, "vin": False, "license plate": False}
     ext_like = 0
     corner_hits = 0
-    for name, blob in image_blobs[:24]:
+    limit = min(len(image_blobs), 64)  # scan more to avoid false "missing"
+    for name, blob in image_blobs[:limit]:
         try:
             img = Image.open(io.BytesIO(blob))
             # pass 1
@@ -366,15 +367,18 @@ def detect_required_photo_presence(image_blobs: List[Tuple[str, bytes]]) -> Dict
             up1 = ocr1.upper()
 
             def mark_odo(up: str) -> bool:
-                return (re.search(r"\bMPH\b", up) or re.search(r"\bRPM\b", up) or
-                        any(w in up for w in ("ODOMETER","ODO ","MILEAGE","TRIP","FUEL","TEMP","VOLTS")) or
-                        (re.search(r"\b\d{5,7}\b", up) and ("MPH" in up or "RPM" in up)))
+                odo_words = ("ODOMETER","ODO ","MILEAGE","MPH","RPM","TRIP")
+                return (any(w in up for w in odo_words) or
+                        re.search(r"\b\d{5,7}\b", up) and ("MPH" in up or "RPM" in up))
 
+            # VIN detection = explicit "VIN" or 17 char sequence or door-jamb label cues
             if re.search(r"\b[A-HJ-NPR-Z0-9]{17}\b", up1) or "VIN" in up1 or _looks_like_door_label(ocr1):
                 flags["vin"] = True
             if mark_odo(up1):
                 flags["odometer"] = True
-            if "CALIFORNIA" in up1 or re.search(r"\b[A-Z0-9]{5,8}\b", up1):
+
+            # license plate heuristic (avoid false positives by requiring short token near top/bottom)
+            if re.search(r"\b[A-Z0-9]{5,8}\b", up1) or "CALIFORNIA" in up1 or "ARIZONA" in up1 or "NEVADA" in up1:
                 flags["license plate"] = True
 
             if _image_is_exterior_wide(img):
@@ -428,7 +432,8 @@ def extract_vin_from_photos(image_blobs: List[Tuple[str, bytes]]) -> Optional[st
         return outs
 
     found: List[str] = []
-    for name, blob in image_blobs[:24]:
+    limit = min(len(image_blobs), 64)
+    for name, blob in image_blobs[:limit]:
         try:
             base = Image.open(io.BytesIO(blob)).convert("RGB")
             for r in (0, 90, 180, 270):
@@ -446,11 +451,13 @@ def extract_vin_from_photos(image_blobs: List[Tuple[str, bytes]]) -> Optional[st
     return best_vin_candidate(found)
 
 def extract_odometer_from_photos(image_blobs: List[Tuple[str, bytes]]) -> Optional[str]:
-    for name, blob in image_blobs[:12]:
+    limit = min(len(image_blobs), 24)
+    for name, blob in image_blobs[:limit]:
         try:
             img = Image.open(io.BytesIO(blob))
             ocr = pytesseract.image_to_string(preprocess_image(img), lang="eng", config="--psm 6")
-            m = re.search(r"\b(\d{1,3}(?:,\d{3})+|\d{2,6})\b\s*(?:mi|miles|km)\b", ocr, re.IGNORECASE)
+            # Accept raw numeric cluster likely mileage
+            m = re.search(r"\b(\d{1,3}(?:,\d{3})+|\d{4,7})\b\s*(?:mi|miles|km)?\b", ocr, re.IGNORECASE)
             if m: return m.group(1)
         except Exception as e:
             logger.warning(f"Odometer OCR ({name}): {e}")
@@ -512,15 +519,20 @@ def _find_part(segment: str) -> Optional[str]:
     if m: return m.group(0)
     return None
 
+# NEW: broader patterns (bulleted, reversed order, commas)
+BULLET_PAT = re.compile(
+    r"^[\-\*\u2022]\s*(replace|repair|refinish|align|blend|calibrate|r\s*&\s*i|r\s*&\s*r|remove\s*&\s*install|remove\s*&\s*replace|remove\s*and\s*install|remove\s*and\s*replace)\b[^\n]{0,80}$",
+    re.IGNORECASE
+)
+REV_PAT = re.compile(
+    r"(?:^|\s)(front|rear|left|right|lf|rf|lr|rr)?[^\n]{0,40}?"
+    r"(bumper(?:\s*cover)?|fender|door|hood|grille|headlamp|headlight|taillamp|tail\s*lamp|quarter\s*panel|rocker|mirror)"
+    r"[^\n]{0,40}?(?:—|-|–|,)?\s*"
+    r"(replace|repair|refinish|align|blend|calibrate|r\s*&\s*i|r\s*&\s*r|remove\s*&\s*install|remove\s*&\s*replace|remove\s*and\s*install|remove\s*and\s*replace)\b",
+    re.IGNORECASE
+)
+
 def extract_estimate_items(text: str) -> List[Dict[str, str]]:
-    """
-    Robustly parse CCC/Mitchell/Audatex-like lines.
-    Examples accepted:
-      "1   REPL  FRONT BUMPER COVER   ..."
-      "R&I LH FENDER"
-      "Repair Right Door Outer Panel"
-      "Front Bumper Cover — Replace"
-    """
     items: List[Dict[str, str]] = []
     for raw in text.splitlines():
         line = raw.strip()
@@ -565,6 +577,26 @@ def extract_estimate_items(text: str) -> List[Dict[str, str]]:
                     items.append({"op": op, "part": part, "side": side, "raw": line})
                     continue
 
+        # Pattern D: bullet lines
+        if BULLET_PAT.search(line):
+            op = _norm_op(BULLET_PAT.search(line).group(1))
+            if op:
+                # try to get part/side from previous text on same line (rare); skip if none
+                continue
+
+        # Pattern E: reversed order (part/side first, then op), e.g., "LF Fender — Replace"
+        m2 = REV_PAT.search(line)
+        if m2:
+            side_txt = m2.group(1) or ""
+            part_txt = m2.group(2) or ""
+            op = _norm_op(m2.group(3) or "")
+            if op:
+                part = _find_part(part_txt)
+                side = _norm_side_from_text(side_txt)
+                if part:
+                    items.append({"op": op, "part": part, "side": side, "raw": line})
+                    continue
+
     # Deduplicate
     uniq, seen = [], set()
     for it in items:
@@ -589,7 +621,7 @@ def extract_estimate_items_llm(text: str) -> List[Dict[str, str]]:
         data = json.loads(raw)
         if isinstance(data, list):
             cleaned = []
-            for it in data[:120]:
+            for it in data[:160]:
                 cleaned.append({
                     "op": (it.get("op") or "").lower(),
                     "part": (it.get("part") or "").lower(),
@@ -614,8 +646,7 @@ def _chunk_text(txt: str, size: int = 6000, overlap: int = 400) -> List[str]:
     return out
 
 def llm_extract_items_chunked(full_text: str, time_guard: Callable[[], bool]) -> List[Dict[str, str]]:
-    """Split the estimate into chunks and run the JSON extractor on each; merge unique results."""
-    chunks = _chunk_text(full_text, size=6000, overlap=400)[:8]  # hard cap
+    chunks = _chunk_text(full_text, size=6000, overlap=400)[:8]
     merged: List[Dict[str, str]] = []
     seen = set()
     for ch in chunks:
@@ -706,7 +737,6 @@ def compare_estimate_with_photos(items: List[Dict[str, str]],
 def compare_batched(items: List[Dict[str, str]],
                     images_for_vision: List[Dict[str, Any]],
                     batch_size: int) -> Dict[str, Any]:
-    """Batch items to ensure comprehensive coverage without blowing time limits."""
     all_per, not_in, extra = [], [], []
     overalls = []
     if not items:
@@ -723,7 +753,6 @@ def compare_batched(items: List[Dict[str, str]],
         extra.extend(res.get("extra_damage_in_photos", []))
         if res.get("overall"): overalls.append(res["overall"])
     overall = "; ".join(overalls[:3]) if overalls else "Batched comparison completed."
-    # unique lists
     uniq_not_in = list(dict.fromkeys(not_in))
     uniq_extra  = list(dict.fromkeys(extra))
     return {"per_item": all_per, "not_in_photos": uniq_not_in, "extra_damage_in_photos": uniq_extra, "overall": overall}
@@ -859,13 +888,12 @@ async def vision_review(request: Request):
                     if full_txt.strip():
                         full_text_chunks.append(full_txt)
                     elif not nearly_out_of_time(t0, 8):
-                        # fallback OCR wide scan (bounded)
                         full_ocr = await loop.run_in_executor(pool, ocr_pdf_items_wide_scan, raw, 40, 180)
                         if full_ocr: full_text_chunks.append(full_ocr)
 
                 # Page that has tax/labor (cheap)
                 if not nearly_out_of_time(t0, 12):
-                    tax_labor_page = await loop.run_in_executor(pool, ocr_pdf_scan_tax_labor_page, raw, 30)
+                    tax_labor_page = await loop.run_in_executor(pool, ocr_pdf_scan_tax_labor_page, raw, 60)
                     if tax_labor_page:
                         quick_text_chunks.append(tax_labor_page)
 
@@ -900,7 +928,7 @@ async def vision_review(request: Request):
     # ====== ID fields strictly from FIRST PAGE ======
     first_page_text = "\n".join(first_page_texts)
     quick_text = "\n".join(quick_text_chunks)
-    full_text  = "\n".join(full_text_chunks) or quick_text  # ensure we always have something
+    full_text  = "\n".join(full_text_chunks) or quick_text
 
     # Presence flags (vision-verified, no assumptions)
     presence = detect_required_photo_presence(image_blobs)
@@ -939,6 +967,7 @@ async def vision_review(request: Request):
     if not est_items and not nearly_out_of_time(t0, 8):
         try:
             strong_ocr = ""
+            # If we kept a raw estimate PDF, try a stronger OCR pass
             if 'pdf_raws' in locals() and pdf_raws:
                 strong_ocr = ocr_pdf_items_wide_scan(pdf_raws[0], limit_pages=30, dpi=180)
             if not strong_ocr:
@@ -1012,7 +1041,7 @@ Rules to follow from client:
 
     user_parts: List[Dict[str, Any]] = [{"type":"text","text":facts_text}]
     if full_text:
-        user_parts.append({"type":"text","text":full_text[:18000]})  # cap tokens
+        user_parts.append({"type":"text","text":full_text[:18000]})
 
     max_tokens_summary = 450 if nearly_out_of_time(t0, 10) else 650
     try:
@@ -1083,7 +1112,7 @@ Rules to follow from client:
     pdf.multi_cell(0, 6, f"Brief Summary: {brief}")
 
     if consistency.get("per_item"):
-        for it in consistency["per_item"][:60]:
+        for it in consistency["per_item"][:80]:
             ev = "YES" if it.get("photo_evidence") else "NO"
             try: conf = float(it.get("confidence", 0))
             except Exception: conf = 0.0
@@ -1095,11 +1124,11 @@ Rules to follow from client:
 
     if consistency.get("not_in_photos"):
         pdf.ln(2); pdf_add_section_title(pdf, "Items Estimated but Not Evident in Photos")
-        for raw in consistency["not_in_photos"][:30]: pdf.multi_cell(0, 6, f"- {raw}")
+        for raw in consistency["not_in_photos"][:40]: pdf.multi_cell(0, 6, f"- {raw}")
 
     if consistency.get("extra_damage_in_photos"):
         pdf.ln(2); pdf_add_section_title(pdf, "Damage Visible in Photos but Missing on Estimate")
-        for d in consistency["extra_damage_in_photos"][:30]: pdf.multi_cell(0, 6, f"- {d}")
+        for d in consistency["extra_damage_in_photos"][:40]: pdf.multi_cell(0, 6, f"- {d}")
 
     pdf.ln(2); pdf_kv(pdf, "Consistency Overall", consistency.get("overall", ""))
 
