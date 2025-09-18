@@ -196,7 +196,7 @@ def pdfimages_harvest(pdf_bytes: bytes, max_images: int = MAX_PHOTO_PAGES) -> Li
         logger.info(f"pdfimages not available or failed: {e}")
     return out
 
-# ===== Photo-like page harvest (render fallback) =====
+# ===== Photo-like page harvest (render fallback) — UPDATED to keep VIN/ODO pages =====
 def harvest_photos_from_pdf(pdf_bytes: bytes, max_pages: int) -> List[Tuple[str, bytes, float]]:
     out: List[Tuple[str, bytes, float]] = []
     try:
@@ -205,13 +205,21 @@ def harvest_photos_from_pdf(pdf_bytes: bytes, max_pages: int) -> List[Tuple[str,
         for i, page in enumerate(pages, 1):
             proc = preprocess_image(page)
             ocr = pytesseract.image_to_string(proc, lang="eng")
+            up = (ocr or "").upper()
+
+            # VIN/ODO cues
+            has_vin_cue = bool(re.search(r"\bVIN\b", up) or re.search(r"\b[A-HJ-NPR-Z0-9]{17}\b", up))
+            has_odo_cue = ("ODOMETER" in up or "ODO " in up or "MILEAGE" in up or "MPH" in up or "RPM" in up)
+
             corner_hits = count_corner_labels(ocr)
             var = ImageStat.Stat(proc).var[0] if proc.mode == "L" else sum(ImageStat.Stat(proc).var)/3
-            looks_like_photos = var > 120 or corner_hits >= 2 or "image report" in (ocr or "").lower()
-            if looks_like_photos:
+            looks_like_photos = var > 120 or corner_hits >= 2 or "IMAGE REPORT" in up
+
+            # Keep if photo-like OR contains VIN/ODO cues
+            if looks_like_photos or has_vin_cue or has_odo_cue:
                 buf = io.BytesIO()
                 page.save(buf, format="PNG")  # normalize to PNG
-                score = corner_hits * 10 + var
+                score = (corner_hits * 10 + var) + (50 if has_vin_cue else 0) + (40 if has_odo_cue else 0)
                 out.append((f"pdf-p{i}.png", buf.getvalue(), score))
                 used += 1
                 if used >= max_pages:
@@ -220,7 +228,7 @@ def harvest_photos_from_pdf(pdf_bytes: bytes, max_pages: int) -> List[Tuple[str,
         logger.warning(f"harvest_photos_from_pdf error: {e}")
     return out
 
-def ocr_pdf_items_wide_scan(pdf_bytes: bytes, limit_pages: int = 40, dpi: int = 130) -> str:
+def ocr_pdf_items_wide_scan(pdf_bytes: bytes, limit_pages: int = 40, dpi: int = 180) -> str:
     out = []
     try:
         pages = convert_from_bytes(pdf_bytes, dpi=dpi)
@@ -620,6 +628,31 @@ def llm_extract_items_chunked(full_text: str, time_guard: Callable[[], bool]) ->
                 merged.append(it); seen.add(key)
     return merged
 
+# ===== Last-chance regex for stubborn layouts =====
+LAST_CHANCE_OP = re.compile(
+    r"\b(REPL|R&R|R&I|REPAIR|REFINISH|BLEND|ALIGN|CALIBRATE)\b[^\n]{0,80}?\b("
+    r"BUMPER(?:\s*COVER)?|FENDER|DOOR|HOOD|GRILLE|HEADLAMP|HEADLIGHT|TAILLAMP|TAIL\s*LAMP|"
+    r"QUARTER\s*PANEL|ROCKER|MIRROR|DECKLID|TRUNK|VALANCE|BRACKET|REINFORCEMENT|CORE\s*SUPPORT"
+    r")\b[^\n]{0,50}?(LH|RH|LF|RF|LR|RR|LEFT|RIGHT|FRONT|REAR)?",
+    re.IGNORECASE
+)
+
+def extract_estimate_items_last_chance(text: str) -> List[Dict[str, str]]:
+    items: List[Dict[str, str]] = []
+    for m in LAST_CHANCE_OP.finditer(text or ""):
+        op_raw, part_raw, side_raw = m.group(1) or "", m.group(2) or "", (m.group(3) or "unspecified")
+        op = _norm_op(op_raw)
+        part = _find_part(part_raw)
+        side = _norm_side_from_text(side_raw)
+        if op and part:
+            items.append({"op": op, "part": part, "side": side, "raw": m.group(0).strip()})
+    uniq, seen = [], set()
+    for it in items:
+        key = (it["op"], it["part"], it["side"])
+        if key not in seen:
+            uniq.append(it); seen.add(key)
+    return uniq
+
 # ======================= Vision compare =======================
 def select_images_for_vision(image_blobs: List[Tuple[str, bytes]], max_imgs: int) -> List[Tuple[str, bytes]]:
     scored = []
@@ -629,7 +662,10 @@ def select_images_for_vision(image_blobs: List[Tuple[str, bytes]], max_imgs: int
             proc = preprocess_image(img)
             var = ImageStat.Stat(proc).var[0] if proc.mode == "L" else sum(ImageStat.Stat(proc).var)/3
             text = pytesseract.image_to_string(proc, lang="eng")
-            score = var + (15 if re.search(r"\b[A-HJ-NPR-Z0-9]{17}\b", text) else 0) + (8 if count_corner_labels(text) else 0)
+            up = (text or "").upper()
+            vin_hit = bool(re.search(r"\b[A-HJ-NPR-Z0-9]{17}\b", up) or " VIN" in up)
+            odo_hit = ("ODOMETER" in up or "ODO " in up or "MILEAGE" in up or "MPH" in up or "RPM" in up)
+            score = var + (8 * count_corner_labels(text)) + (50 if vin_hit else 0) + (40 if odo_hit else 0)
             scored.append((score, name, blob))
         except Exception:
             continue
@@ -824,7 +860,7 @@ async def vision_review(request: Request):
                         full_text_chunks.append(full_txt)
                     elif not nearly_out_of_time(t0, 8):
                         # fallback OCR wide scan (bounded)
-                        full_ocr = await loop.run_in_executor(pool, ocr_pdf_items_wide_scan, raw, 40, 130)
+                        full_ocr = await loop.run_in_executor(pool, ocr_pdf_items_wide_scan, raw, 40, 180)
                         if full_ocr: full_text_chunks.append(full_ocr)
 
                 # Page that has tax/labor (cheap)
@@ -833,7 +869,7 @@ async def vision_review(request: Request):
                     if tax_labor_page:
                         quick_text_chunks.append(tax_labor_page)
 
-                # PHOTOS: pdfimages then render fallback
+                # PHOTOS: pdfimages then render fallback (VIN/ODO pages retained)
                 if not nearly_out_of_time(t0, 10):
                     cand_fast = await loop.run_in_executor(pool, pdfimages_harvest, raw, MAX_PHOTO_PAGES)
                     pdf_photo_candidates.extend(cand_fast or [])
@@ -891,12 +927,35 @@ async def vision_review(request: Request):
     vin_final_for_report = vin_est or "N/A"
     odo_photos_value = extract_odometer_from_photos(image_blobs)
 
-    # ===== Estimate items from FULL TEXT (robust + chunked LLM fallback) =====
+    # ===== Estimate items from FULL TEXT (robust + chunked LLM fallback + last chance) =====
     est_items = extract_estimate_items(full_text)
+
     if not est_items and not nearly_out_of_time(t0, 12):
         est_items = llm_extract_items_chunked(full_text, time_guard=lambda: nearly_out_of_time(t0, 8))
-    if not est_items and quick_text and not nearly_out_of_time(t0, 6):
-        est_items = llm_extract_items_chunked(quick_text, time_guard=lambda: nearly_out_of_time(t0, 4))
+
+    if not est_items and quick_text and not nearly_out_of_time(t0, 10):
+        est_items = llm_extract_items_chunked(quick_text, time_guard=lambda: nearly_out_of_time(t0, 7))
+
+    if not est_items and not nearly_out_of_time(t0, 8):
+        try:
+            # try a stronger wide OCR on the first estimate PDF we saw (if available)
+            strong_ocr = ""
+            # We didn't save pdf_raws past the worker context; but if full_text is weak, use wide scan on the first bytes we still have (quick_text already set)
+            # As we can't access pdf_raws outside, fallback to another wide scan via quick_text (noop) or just last-chance on full_text:
+            # If you want to scan a specific PDF, ensure pdf_raws is captured outside the pool (already is); we'll use the first one if present:
+            if 'pdf_raws' in locals() and pdf_raws:
+                strong_ocr = ocr_pdf_items_wide_scan(pdf_raws[0], limit_pages=30, dpi=180)
+            if not strong_ocr:
+                strong_ocr = full_text or quick_text
+            # try regex parser first, then chunked LLM, then last-chance
+            tmp_items = extract_estimate_items(strong_ocr)
+            if not tmp_items and not nearly_out_of_time(t0, 5):
+                tmp_items = llm_extract_items_chunked(strong_ocr, time_guard=lambda: nearly_out_of_time(t0, 3))
+            if not tmp_items:
+                tmp_items = extract_estimate_items_last_chance(strong_ocr)
+            est_items = tmp_items or est_items
+        except Exception as e:
+            logger.warning(f"strong wide OCR fallback failed: {e}")
 
     # ===== Vision compare (always PNG; batched for comprehensive coverage) =====
     max_imgs = 4 if nearly_out_of_time(t0, 12) else MAX_VISION_IMGS
@@ -1100,6 +1159,7 @@ async def download_pdf(file_number: str):
     if os.path.exists(pdf_path):
         return FileResponse(path=pdf_path, media_type="application/pdf", filename=f"{file_number}.pdf")
     return JSONResponse(status_code=404, content={"detail": "Not Found"})
+
 
 
 
