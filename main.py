@@ -938,16 +938,11 @@ async def vision_review(request: Request):
 
     if not est_items and not nearly_out_of_time(t0, 8):
         try:
-            # try a stronger wide OCR on the first estimate PDF we saw (if available)
             strong_ocr = ""
-            # We didn't save pdf_raws past the worker context; but if full_text is weak, use wide scan on the first bytes we still have (quick_text already set)
-            # As we can't access pdf_raws outside, fallback to another wide scan via quick_text (noop) or just last-chance on full_text:
-            # If you want to scan a specific PDF, ensure pdf_raws is captured outside the pool (already is); we'll use the first one if present:
             if 'pdf_raws' in locals() and pdf_raws:
                 strong_ocr = ocr_pdf_items_wide_scan(pdf_raws[0], limit_pages=30, dpi=180)
             if not strong_ocr:
                 strong_ocr = full_text or quick_text
-            # try regex parser first, then chunked LLM, then last-chance
             tmp_items = extract_estimate_items(strong_ocr)
             if not tmp_items and not nearly_out_of_time(t0, 5):
                 tmp_items = llm_extract_items_chunked(strong_ocr, time_guard=lambda: nearly_out_of_time(t0, 3))
@@ -1159,6 +1154,7 @@ async def download_pdf(file_number: str):
     if os.path.exists(pdf_path):
         return FileResponse(path=pdf_path, media_type="application/pdf", filename=f"{file_number}.pdf")
     return JSONResponse(status_code=404, content={"detail": "Not Found"})
+
 
 
 
