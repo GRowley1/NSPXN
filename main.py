@@ -12,7 +12,7 @@ from fpdf import FPDF
 from docx import Document
 from pdf2image import convert_from_bytes
 import pytesseract
-from PIL import Image, ImageEnhance, ImageOps, ImageFilter, ImageStat, ImageFile
+from PIL import Image, ImageEnhance, ImageOps, ImageFilter, ImageStat, ImageFile, Image
 from openai import OpenAI
 
 ImageFile.LOAD_TRUNCATED_IMAGES = True
@@ -64,7 +64,7 @@ def t_elapsed(t0: float) -> float: return time.monotonic() - t0
 def time_left(t0: float) -> float: return max(0.0, TIME_BUDGET_S - t_elapsed(t0))
 def nearly_out_of_time(t0: float, margin: float = 6.0) -> bool: return time_left(t0) <= margin
 
-# ======================= OCR helpers =======================
+# ======================= OCR & text helpers =======================
 def preprocess_image(img: Image.Image) -> Image.Image:
     img = img.convert("L")
     img = ImageEnhance.Contrast(img).enhance(1.6)
@@ -339,10 +339,8 @@ def parse_labor_rates(text: str) -> Dict[str, str]:
 # Mileage (from estimate text only)
 def parse_mileage_from_text(text: str) -> Optional[str]:
     if not text: return None
-    # Try labeled mileage
     m = re.search(r"(?i)(?:odometer|mileage|mi\.)\s*[:\-]?\s*(\d{1,3}(?:,\d{3})+|\d{4,7})", text)
     if m: return m.group(1)
-    # Secondary pattern (odometer in/out formats)
     m2 = re.search(r"(?i)odometer\s*(?:in|out)?\s*[:\-]?\s*(\d{1,3}(?:,\d{3})+|\d{4,7})", text)
     if m2: return m2.group(1)
     return None
@@ -383,11 +381,11 @@ def detect_required_photo_presence(image_blobs: List[Tuple[str, bytes]]) -> Dict
                 text = pytesseract.image_to_string(proc, lang="eng", config="--psm 6")
                 up = (text or "").upper()
 
-                # VIN present (do not use this text as VIN value; only presence)
+                # VIN present (presence only)
                 if re.search(r"\b[A-HJ-NPR-Z0-9]{17}\b", up) or "VIN" in up or _looks_like_door_label(text):
                     flags["vin"] = True
 
-                # Odometer cluster presence (do not read mileage)
+                # Odometer cluster presence (presence only)
                 if ("ODOMETER" in up or "ODO " in up or "MILEAGE" in up or "MPH" in up or "RPM" in up):
                     flags["odometer"] = True
 
@@ -407,7 +405,7 @@ def detect_required_photo_presence(image_blobs: List[Tuple[str, bytes]]) -> Dict
         flags["four corners"] = True
     return flags
 
-# ======================= Client guideline ingestion (uploaded or pasted) =======================
+# ======================= Client guideline ingestion (older logic endpoint added) =======================
 GUIDE_HINTS = ("guide", "guideline", "rules", "policy", "client", "requirements", "instruction")
 
 def looks_like_guideline_name(filename: str) -> bool:
@@ -699,7 +697,7 @@ def compare_estimate_with_photos(items: List[Dict[str, str]],
     user_parts: List[Dict[str, Any]] = [{"type":"text","text":"Estimate items:\n"+json.dumps(items, ensure_ascii=False)}]
     user_parts.extend(images_for_vision)
     try:
-        rsp = client_fast.chat_completions.create(  # compat for some OpenAI libs; fallback below
+        rsp = client_fast.chat.completions.create(
             model=OAI_MODEL,
             messages=[{"role":"system","content":system},{"role":"user","content":user_parts}],
             max_tokens=700, temperature=0
@@ -774,6 +772,25 @@ def build_brief_consistency_summary(cons: Dict[str, Any], items: List[Dict[str, 
 @app.get("/")
 async def root():
     return {"status": "ok"}
+
+# ---- Older logic to fetch client rules (copied, unchanged) ----
+@app.get("/client-rules/{client_name}")
+async def get_client_rules(client_name: str):
+    rules_dir = "client_rules"
+    file_name = f"{client_name}.docx"
+    file_path = os.path.join(rules_dir, file_name)
+    if os.path.exists(file_path):
+        try:
+            doc = Document(file_path)
+            text = "\n".join([p.text for p in doc.paragraphs if p.text.strip()])
+            logger.info(f"Loaded client rules for {client_name} ({len(text)} chars).")
+            return {"text": text}
+        except Exception as e:
+            logger.error(f"Client rules read error: {e}")
+            return JSONResponse(status_code=500, content={"error": str(e)})
+    else:
+        logger.error(f"Rules not found for client: {client_name}")
+        return JSONResponse(status_code=404, content={"error": "Rules not found for this client."})
 
 @app.post("/vision-review")
 async def vision_review(request: Request):
@@ -923,7 +940,7 @@ async def vision_review(request: Request):
         keep = pdf_photo_candidates[:MAX_PHOTO_PAGES]
         for n, data, _ in keep: image_blobs.append((n, data))
 
-    # Merge pasted rules and extracted guideline text
+    # Merge pasted rules and extracted guideline text (fallback string if still empty)
     merged_rules = []
     if client_rules.strip():
         merged_rules.append(client_rules.strip())
@@ -946,10 +963,8 @@ async def vision_review(request: Request):
     mileage_est  = parse_mileage_from_text(id_source_text) or parse_mileage_from_text(full_text or "")
 
     # VIN verification (estimate-only source; verify via photos)
-    vin_photos_text = None  # we'll try to read VIN text ONLY to help presence (not used as VIN source)
+    vin_photos_text = None
     try:
-        # reuse OCR to see if VIN-like text present; presence["vin"] already covers door-jamb/label
-        # but if OCR yields a 17-char sequence, that's only for MATCH/MISMATCH comparison
         found = []
         limit = min(len(image_blobs), 40)
         for _, blob in image_blobs[:limit]:
@@ -1082,7 +1097,7 @@ Rules to follow from client:
         m = re.search(pat, gpt_output, re.IGNORECASE)
         if m: score_ai = int(m.group(1)); break
 
-    def check_labor_and_tax_score(text: str, client_rules: str) -> int:
+    def check_labor_and_tax_score(text: str, client_rules_text: str) -> int:
         adj = 0
         def has_rate(label: str) -> bool:
             pat = rf"{label}[^\n]{{0,120}}?\$\s*\d{{2,3}}(?:\.\d+)?\s*(?:/hr|/hour|per\s*hour|hr)"
@@ -1090,7 +1105,7 @@ Rules to follow from client:
         labels = ["Body Labor", "Paint Labor", "Mechanical Labor", "Structural Labor"]
         if not any(has_rate(lbl) for lbl in labels):
             adj -= 50
-        if re.search(r"tax\s*(required|must|utilize|apply)", client_rules, re.IGNORECASE):
+        if re.search(r"tax\s*(required|must|utilize|apply)", client_rules_text, re.IGNORECASE):
             if not re.search(r"(sales\s*tax|tax)[^\n]{0,80}?(\d{1,3}\.\d+%|\d{1,3}%|\$\s*\d+(\.\d{2})?)", text, re.IGNORECASE):
                 adj -= 25
         return adj
@@ -1110,6 +1125,8 @@ Rules to follow from client:
     gpt_output_clean += f"\nRequired photo verification (vision): {photo_line}"
     gpt_output_clean += f"\nLabor rates detected: {labor_line}"
     gpt_output_clean += f"\nTax Rate detected: {tax_line}"
+    if mileage_est:
+        gpt_output_clean += f"\nOdometer (from estimate): {mileage_est}"
 
     # ======================= PDF (layout unchanged; brief summary added) =======================
     pdf = FPDF()
@@ -1216,6 +1233,7 @@ async def download_pdf(file_number: str):
     if os.path.exists(pdf_path):
         return FileResponse(path=pdf_path, media_type="application/pdf", filename=f"{file_number}.pdf")
     return JSONResponse(status_code=404, content={"detail": "Not Found"})
+
 
 
 
