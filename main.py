@@ -21,7 +21,7 @@ ImageFile.LOAD_TRUNCATED_IMAGES = True
 PDF_OCR_DPI_EST = int(os.getenv("PDF_OCR_DPI_EST", "160"))
 PDF_OCR_DPI_TXT = int(os.getenv("PDF_OCR_DPI_TXT", "150"))
 PDF_OCR_DPI_PH  = int(os.getenv("PDF_OCR_DPI_PH",  "140"))
-MAX_TEXT_PAGES  = int(os.getenv("MAX_TEXT_PAGES",  "3"))     # quick skim
+MAX_TEXT_PAGES  = int(os.getenv("MAX_TEXT_PAGES",  "3"))     # quick skim (kept for sub-minute)
 MAX_PHOTO_PAGES = int(os.getenv("MAX_PHOTO_PAGES", "36"))    # to improve presence detection
 MAX_VISION_IMGS = int(os.getenv("MAX_VISION_IMGS", "10"))    # images passed to vision compare
 THREADS         = int(os.getenv("OCR_THREADS",     "4"))
@@ -345,7 +345,7 @@ def parse_mileage_from_text(text: str) -> Optional[str]:
     if m2: return m2.group(1)
     return None
 
-# ======================= Photo presence (VIN & ODO verification by vision only) =======================
+# ======================= Photo presence (VIN & ODO presence only) =======================
 def _image_is_exterior_wide(img: Image.Image) -> bool:
     processed = preprocess_image(img)
     text = pytesseract.image_to_string(processed, lang="eng")
@@ -362,50 +362,64 @@ def _looks_like_door_label(text: str) -> bool:
 
 def detect_required_photo_presence(image_blobs: List[Tuple[str, bytes]]) -> Dict[str, bool]:
     """
-    Vision verification of required photos (no reading digits):
+    Vision verification of required photos (presence only):
       - 'vin': door-jamb label cues or VIN pattern presence
-      - 'odometer': cluster presence via text cues (ODOMETER/ODO/MILEAGE/MPH/RPM)
+      - 'odometer': digital cluster "##### mi/miles" or common cluster cues (RPM/MPH/PRND)
       - 'license plate': plate-like text
-      - 'four corners': exterior wide/labels
+      - 'four corners': exterior-wide heuristics
     """
     flags = {"four corners": False, "odometer": False, "vin": False, "license plate": False}
     ext_like = 0
     corner_hits = 0
+
+    VIN_DOOR_LABEL_CUES = (
+        "MFD BY", "GENERAL MOTORS", "THIS VEHICLE CONFORMS", "GVWR", "GAWR", "VIN"
+    )
+    ODO_PAT = re.compile(r"\b\d{3,7}\s*(?:mi|miles)\b", re.IGNORECASE)
+
     limit = min(len(image_blobs), 64)
     for name, blob in image_blobs[:limit]:
         try:
             base = Image.open(io.BytesIO(blob))
-            for r in (0, 90, 180, 270):
+        except Exception:
+            continue
+
+        for r in (0, 90, 180, 270):
+            try:
                 img = base.rotate(r, expand=True)
                 proc = preprocess_image(img)
                 text = pytesseract.image_to_string(proc, lang="eng", config="--psm 6")
                 up = (text or "").upper()
 
-                # VIN present (presence only)
-                if re.search(r"\b[A-HJ-NPR-Z0-9]{17}\b", up) or "VIN" in up or _looks_like_door_label(text):
+                # VIN presence
+                if (re.search(r"\b[A-HJ-NPR-Z0-9]{17}\b", up) or any(cue in up for cue in VIN_DOOR_LABEL_CUES)):
                     flags["vin"] = True
 
-                # Odometer cluster presence (presence only)
-                if ("ODOMETER" in up or "ODO " in up or "MILEAGE" in up or "MPH" in up or "RPM" in up):
+                # Odometer presence (no reading)
+                if (ODO_PAT.search(text or "") or
+                    "ODOMETER" in up or "ODO " in up or "MILEAGE" in up or
+                    "PRND" in up or "RPM" in up or "MPH" in up or "KM/H" in up):
                     flags["odometer"] = True
 
                 # License plate presence (heuristic)
-                if re.search(r"\b[A-Z0-9]{5,8}\b", up) or "CALIFORNIA" in up or "ARIZONA" in up or "NEVADA" in up:
+                if ("CALIFORNIA" in up or "ARIZONA" in up or "NEVADA" in up or
+                    re.search(r"\b[A-Z0-9]{5,8}\b", up)):
                     flags["license plate"] = True
 
+                # Exterior wide for four corners
                 if _image_is_exterior_wide(img):
                     ext_like += 1
                 corner_hits += count_corner_labels(text)
 
-                if flags["vin"] and flags["odometer"] and flags["license plate"]:
-                    break
-        except Exception as e:
-            logger.warning(f"presence image error: {e}")
+            except Exception:
+                continue
+
     if ext_like >= 2 or corner_hits >= 3:
         flags["four corners"] = True
+
     return flags
 
-# ======================= Client guideline ingestion (older logic endpoint added) =======================
+# ======================= Client guideline ingestion (older logic endpoint kept) =======================
 GUIDE_HINTS = ("guide", "guideline", "rules", "policy", "client", "requirements", "instruction")
 
 def looks_like_guideline_name(filename: str) -> bool:
@@ -442,17 +456,22 @@ PANELS = [
     "fender","door","hood","grille","headlamp","headlight","taillamp","tail lamp",
     "quarter panel","rocker","roof","trunk","decklid","mirror","apron","radiator support",
     "radiator","support","wheel","tire","pillar","garnish","molding","fog lamp",
-    "reinforcement","valance","bracket","impact bar","condenser","condensor","core support"
+    "reinforcement","valance","bracket","impact bar","condenser","condensor","core support",
+    # added
+    "fuel tank","battery","fuel system"
 ]
 OPS = [
     "replace","repair","refinish","align","blend","calibrate",
-    "r&i","r & i","remove & install","remove and install","r&r","r & r","remove & replace","remove and replace"
+    "r&i","r & i","remove & install","remove and install","r&r","r & r","remove & replace","remove and replace",
+    "disconnect & reconnect","disconnect and reconnect","repl","d&r"
 ]
 OP_ALIASES = {
     "repl":"replace","rep":"repair","rpr":"repair","r&i":"r&i","r & i":"r&i",
     "r&r":"replace","r & r":"replace","remove & replace":"replace","remove and replace":"replace",
     "remove & install":"r&i","remove and install":"r&i","blend":"blend","refinish":"refinish",
-    "align":"align","calibrate":"calibrate","replace":"replace","repair":"repair"
+    "align":"align","calibrate":"calibrate","replace":"replace","repair":"repair",
+    # added
+    "disconnect & reconnect":"r&i","disconnect and reconnect":"r&i","d&r":"r&i"
 }
 SIDE_TOKENS = {
     "lh":"left","rh":"right","lf":"left front","rf":"right front","lr":"left rear","rr":"right rear",
@@ -474,19 +493,26 @@ def _find_part(segment: str) -> Optional[str]:
     for p in sorted(PANELS, key=len, reverse=True):
         if p in seg:
             return p
-    m = re.search(r"\bbumper(?:\s*cover)?\b|\bfender\b|\bdoor\b|\bhood\b|\bgrille\b|\b(head|tail)lamp\b|\bquarter\s*panel\b", seg)
+    m = re.search(r"\bbumper(?:\s*cover)?\b|\bfender\b|\bdoor\b|\bhood\b|\bgrille\b|\b(head|tail)lamp\b|\bquarter\s*panel\b|\bbattery\b|\bfuel\s*tank\b|\bradiator\s*support\b|\bradiator\b", seg)
     if m: return m.group(0)
     return None
 
 BULLET_PAT = re.compile(
-    r"^[\-\*\u2022]\s*(replace|repair|refinish|align|blend|calibrate|r\s*&\s*i|r\s*&\s*r|remove\s*&\s*install|remove\s*&\s*replace|remove\s*and\s*install|remove\s*and\s*replace)\b[^\n]{0,120}$",
+    r"^[\-\*\u2022]\s*(replace|repair|refinish|align|blend|calibrate|r\s*&\s*i|r\s*&\s*r|"
+    r"remove\s*&\s*install|remove\s*&\s*replace|remove\s*and\s*install|remove\s*and\s*replace|"
+    r"disconnect\s*&\s*reconnect|disconnect\s*and\s*reconnect|repl|r&i|r&r|d&r)\b[^\n]{0,160}$",
     re.IGNORECASE
 )
+
 REV_PAT = re.compile(
-    r"(?:^|\s)(front|rear|left|right|lh|rh|lf|rf|lr|rr)?[^\n]{0,60}?"
-    r"(bumper(?:\s*cover)?|fender|door|hood|grille|headlamp|headlight|taillamp|tail\s*lamp|quarter\s*panel|rocker|mirror|decklid|trunk|valance|bracket|reinforcement|core\s*support)"
-    r"[^\n]{0,60}?(?:—|-|–|,)?\s*"
-    r"(replace|repair|refinish|align|blend|calibrate|r\s*&\s*i|r\s*&\s*r|remove\s*&\s*install|remove\s*&\s*replace|remove\s*and\s*install|remove\s*and\s*replace)\b",
+    r"(?:^|\s)(front|rear|left|right|lh|rh|lf|rf|lr|rr)?[^\n]{0,80}?"
+    r"(fuel\s*tank|battery|bumper(?:\s*cover)?|fender|door|hood|grille|headlamp|headlight|"
+    r"taillamp|tail\s*lamp|quarter\s*panel|rocker|mirror|decklid|trunk|valance|bracket|"
+    r"reinforcement|core\s*support|radiator\s*support|radiator)"
+    r"[^\n]{0,100}?(?:—|-|–|,)?\s*"
+    r"(replace|repair|refinish|align|blend|calibrate|r\s*&\s*i|r\s*&\s*r|"
+    r"remove\s*&\s*install|remove\s*&\s*replace|remove\s*and\s*install|remove\s*and\s*replace|"
+    r"disconnect\s*&\s*reconnect|disconnect\s*and\s*reconnect|repl|r&i|r&r|d&r)\b",
     re.IGNORECASE
 )
 
@@ -494,12 +520,12 @@ def extract_estimate_items(text: str) -> List[Dict[str, str]]:
     items: List[Dict[str, str]] = []
     for raw in text.splitlines():
         line = raw.strip()
-        if len(line) < 5: 
+        if len(line) < 5:
             continue
         l = line.lower()
 
         # Column style (line number + op + rest)
-        m_col = re.search(r"^\s*(?:\d{1,4}[A-Z]?\s+)?([A-Za-z& ]{2,14})\s+(.+)$", line)
+        m_col = re.search(r"^\s*(?:\d{1,4}[A-Z]?\s+)?([A-Za-z& ]{2,20})\s+(.+)$", line)
         if m_col:
             op_raw = m_col.group(1).strip()
             tail   = m_col.group(2).strip()
@@ -512,7 +538,7 @@ def extract_estimate_items(text: str) -> List[Dict[str, str]]:
                     continue
 
         # Natural phrase
-        m_phrase = re.search(r"^(replace|repair|refinish|align|blend|calibrate|r\s*&\s*i|r\s*&\s*r|remove\s*&\s*install|remove\s*&\s*replace|remove\s*and\s*install|remove\s*and\s*replace)\s+(.+)$", l, flags=re.I)
+        m_phrase = re.search(r"^(replace|repair|refinish|align|blend|calibrate|r\s*&\s*i|r\s*&\s*r|remove\s*&\s*install|remove\s*&\s*replace|remove\s*and\s*install|remove\s*and\s*replace|disconnect\s*&\s*reconnect|disconnect\s*and\s*reconnect|repl|r&i|r&r|d&r)\s+(.+)$", l, flags=re.I)
         if m_phrase:
             op = _norm_op(m_phrase.group(1))
             tail = m_phrase.group(2)
@@ -524,7 +550,7 @@ def extract_estimate_items(text: str) -> List[Dict[str, str]]:
                     continue
 
         # "Part — Replace"
-        m_rev = re.search(rf"(.*?)(?:[—\-–]|  +)\s*(replace|repair|refinish|align|blend|calibrate|r\s*&\s*i|r\s*&\s*r|remove\s*&\s*install|remove\s*&\s*replace|remove\s*and\s*install|remove\s*and\s*replace)\b", l, flags=re.I)
+        m_rev = re.search(rf"(.*?)(?:[—\-–]|  +)\s*(replace|repair|refinish|align|blend|calibrate|r\s*&\s*i|r\s*&\s*r|remove\s*&\s*install|remove\s*&\s*replace|remove\s*and\s*install|remove\s*and\s*replace|disconnect\s*&\s*reconnect|disconnect\s*and\s*reconnect|repl|r&i|r&r|d&r)\b", l, flags=re.I)
         if m_rev:
             head = m_rev.group(1)
             op   = _norm_op(m_rev.group(2))
@@ -615,9 +641,10 @@ def llm_extract_items_chunked(full_text: str, time_guard: Callable[[], bool]) ->
     return merged
 
 LAST_CHANCE_OP = re.compile(
-    r"\b(REPL|R&R|R&I|REPAIR|REFINISH|BLEND|ALIGN|CALIBRATE)\b[^\n]{0,100}?\b("
+    r"\b(REPL|R&R|R&I|REPAIR|REFINISH|BLEND|ALIGN|CALIBRATE|D&R|DISCONNECT\s*&\s*RECONNECT|DISCONNECT\s*AND\s*RECONNECT)\b[^\n]{0,100}?\b("
     r"BUMPER(?:\s*COVER)?|FENDER|DOOR|HOOD|GRILLE|HEADLAMP|HEADLIGHT|TAILLAMP|TAIL\s*LAMP|"
-    r"QUARTER\s*PANEL|ROCKER|MIRROR|DECKLID|TRUNK|VALANCE|BRACKET|REINFORCEMENT|CORE\s*SUPPORT"
+    r"QUARTER\s*PANEL|ROCKER|MIRROR|DECKLID|TRUNK|VALANCE|BRACKET|REINFORCEMENT|CORE\s*SUPPORT|"
+    r"FUEL\s*TANK|BATTERY|RADIATOR\s*SUPPORT|RADIATOR"
     r")\b[^\n]{0,60}?(LH|RH|LF|RF|LR|RR|LEFT|RIGHT|FRONT|REAR)?",
     re.IGNORECASE
 )
@@ -673,7 +700,8 @@ def select_images_for_vision(image_blobs: List[Tuple[str, bytes]], max_imgs: int
             text = pytesseract.image_to_string(proc, lang="eng")
             up = (text or "").upper()
             vin_hit = bool(re.search(r"\b[A-HJ-NPR-Z0-9]{17}\b", up) or " VIN" in up)
-            odo_hit = ("ODOMETER" in up or "ODO " in up or "MILEAGE" in up or "MPH" in up or "RPM" in up)
+            odo_hit = ("ODOMETER" in up or "ODO " in up or "MILEAGE" in up or
+                       "MPH" in up or "RPM" in up or re.search(r"\b\d{3,7}\s*(?:mi|miles)\b", up, re.I))
             score = var + (8 * count_corner_labels(text)) + (50 if vin_hit else 0) + (40 if odo_hit else 0)
             scored.append((score, name, blob))
         except Exception:
@@ -704,7 +732,7 @@ def compare_estimate_with_photos(items: List[Dict[str, str]],
         )
         txt = (rsp.choices[0].message.content or "").strip()
     except Exception:
-        rsp = client_fast.chat.completions.create(
+        rsp = client_fast.chat_completions.create(  # compatibility fallback
             model=OAI_MODEL,
             messages=[{"role":"system","content":system},{"role":"user","content":user_parts}],
             max_tokens=700, temperature=0
@@ -773,7 +801,7 @@ def build_brief_consistency_summary(cons: Dict[str, Any], items: List[Dict[str, 
 async def root():
     return {"status": "ok"}
 
-# ---- Older logic to fetch client rules (copied, unchanged) ----
+# ---- Legacy endpoint to fetch client rules .docx (kept) ----
 @app.get("/client-rules/{client_name}")
 async def get_client_rules(client_name: str):
     rules_dir = "client_rules"
@@ -796,7 +824,7 @@ async def get_client_rules(client_name: str):
 async def vision_review(request: Request):
     """
     VIN is sourced ONLY from estimate (first page anchor), then verified by photo (presence only).
-    Odometer photo presence is required (verified by vision cues), but mileage is extracted from the estimate text only.
+    Odometer photo presence is required (vision-only); mileage is extracted from the estimate text only.
     Sub-minute run with strict time budget and fast paths.
     """
     t0 = t0_start()
@@ -1233,6 +1261,7 @@ async def download_pdf(file_number: str):
     if os.path.exists(pdf_path):
         return FileResponse(path=pdf_path, media_type="application/pdf", filename=f"{file_number}.pdf")
     return JSONResponse(status_code=404, content={"detail": "Not Found"})
+
 
 
 
