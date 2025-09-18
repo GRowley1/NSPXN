@@ -22,7 +22,7 @@ PDF_OCR_DPI_EST = int(os.getenv("PDF_OCR_DPI_EST", "160"))
 PDF_OCR_DPI_TXT = int(os.getenv("PDF_OCR_DPI_TXT", "150"))
 PDF_OCR_DPI_PH  = int(os.getenv("PDF_OCR_DPI_PH",  "140"))
 MAX_TEXT_PAGES  = int(os.getenv("MAX_TEXT_PAGES",  "3"))     # quick skim
-MAX_PHOTO_PAGES = int(os.getenv("MAX_PHOTO_PAGES", "36"))    # expanded to improve presence detection
+MAX_PHOTO_PAGES = int(os.getenv("MAX_PHOTO_PAGES", "36"))    # to improve presence detection
 MAX_VISION_IMGS = int(os.getenv("MAX_VISION_IMGS", "10"))    # images passed to vision compare
 THREADS         = int(os.getenv("OCR_THREADS",     "4"))
 OAI_MODEL       = os.getenv("OAI_MODEL", "gpt-4o-mini")
@@ -336,7 +336,18 @@ def parse_labor_rates(text: str) -> Dict[str, str]:
         if m: out[key] = f"${m.group(1)}/hr"
     return out
 
-# ======================= Photo presence (vision-verified, no assumptions) =======================
+# Mileage (from estimate text only)
+def parse_mileage_from_text(text: str) -> Optional[str]:
+    if not text: return None
+    # Try labeled mileage
+    m = re.search(r"(?i)(?:odometer|mileage|mi\.)\s*[:\-]?\s*(\d{1,3}(?:,\d{3})+|\d{4,7})", text)
+    if m: return m.group(1)
+    # Secondary pattern (odometer in/out formats)
+    m2 = re.search(r"(?i)odometer\s*(?:in|out)?\s*[:\-]?\s*(\d{1,3}(?:,\d{3})+|\d{4,7})", text)
+    if m2: return m2.group(1)
+    return None
+
+# ======================= Photo presence (VIN & ODO verification by vision only) =======================
 def _image_is_exterior_wide(img: Image.Image) -> bool:
     processed = preprocess_image(img)
     text = pytesseract.image_to_string(processed, lang="eng")
@@ -353,7 +364,11 @@ def _looks_like_door_label(text: str) -> bool:
 
 def detect_required_photo_presence(image_blobs: List[Tuple[str, bytes]]) -> Dict[str, bool]:
     """
-    Two-pass OCR + rotation to avoid false 'missing' on VIN/ODO.
+    Vision verification of required photos (no reading digits):
+      - 'vin': door-jamb label cues or VIN pattern presence
+      - 'odometer': cluster presence via text cues (ODOMETER/ODO/MILEAGE/MPH/RPM)
+      - 'license plate': plate-like text
+      - 'four corners': exterior wide/labels
     """
     flags = {"four corners": False, "odometer": False, "vin": False, "license plate": False}
     ext_like = 0
@@ -368,15 +383,15 @@ def detect_required_photo_presence(image_blobs: List[Tuple[str, bytes]]) -> Dict
                 text = pytesseract.image_to_string(proc, lang="eng", config="--psm 6")
                 up = (text or "").upper()
 
-                def mark_odo(u: str) -> bool:
-                    return (re.search(r"\bODOMETER\b", u) or "ODO " in u or "MILEAGE" in u or
-                            "MPH" in u or "RPM" in u or re.search(r"\b\d{4,7}\b", u))
-
+                # VIN present (do not use this text as VIN value; only presence)
                 if re.search(r"\b[A-HJ-NPR-Z0-9]{17}\b", up) or "VIN" in up or _looks_like_door_label(text):
                     flags["vin"] = True
-                if mark_odo(up):
+
+                # Odometer cluster presence (do not read mileage)
+                if ("ODOMETER" in up or "ODO " in up or "MILEAGE" in up or "MPH" in up or "RPM" in up):
                     flags["odometer"] = True
 
+                # License plate presence (heuristic)
                 if re.search(r"\b[A-Z0-9]{5,8}\b", up) or "CALIFORNIA" in up or "ARIZONA" in up or "NEVADA" in up:
                     flags["license plate"] = True
 
@@ -385,88 +400,43 @@ def detect_required_photo_presence(image_blobs: List[Tuple[str, bytes]]) -> Dict
                 corner_hits += count_corner_labels(text)
 
                 if flags["vin"] and flags["odometer"] and flags["license plate"]:
-                    break  # early exit for this image
+                    break
         except Exception as e:
             logger.warning(f"presence image error: {e}")
     if ext_like >= 2 or corner_hits >= 3:
         flags["four corners"] = True
     return flags
 
-def extract_vin_from_photos(image_blobs: List[Tuple[str, bytes]]) -> Optional[str]:
-    def ocr_variants(pil_img: Image.Image) -> List[str]:
-        texts = []
-        texts.append(pytesseract.image_to_string(preprocess_image(pil_img), lang="eng", config="--psm 7"))
-        texts.append(pytesseract.image_to_string(preprocess_image(pil_img), lang="eng",
-                                                 config="--psm 7 --oem 1 -c tessedit_char_whitelist=ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789"))
-        for thr in (180, 200, 220):
-            g = pil_img.convert("L").point(lambda x: 255 if x > thr else 0, mode="1").convert("L")
-            texts.append(pytesseract.image_to_string(g, lang="eng",
-                         config="--psm 7 --oem 1 -c tessedit_char_whitelist=ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789"))
-        return texts
+# ======================= Client guideline ingestion (uploaded or pasted) =======================
+GUIDE_HINTS = ("guide", "guideline", "rules", "policy", "client", "requirements", "instruction")
 
-    def crop_near_vin_label(pil_img: Image.Image) -> List[Image.Image]:
-        outs = []
-        try:
-            data = pytesseract.image_to_data(preprocess_image(pil_img), lang="eng", config="--psm 6", output_type=pytesseract.Output.DICT)
-            n = len(data.get("text", []))
-            for i in range(n):
-                if (data["text"][i] or "").strip().upper() == "VIN":
-                    x, y, w, h = data["left"][i], data["top"][i], data["width"][i], data["height"][i]
-                    x1 = max(0, x + int(w * 0.9))
-                    y1 = max(0, y - h)
-                    x2 = min(pil_img.width, x1 + w * 15)
-                    y2 = min(pil_img.height, y + int(h * 2.5))
-                    outs.append(pil_img.crop((x1, y1, x2, y2)))
-        except Exception:
-            pass
-        return outs
+def looks_like_guideline_name(filename: str) -> bool:
+    fn = (filename or "").lower()
+    return any(h in fn for h in GUIDE_HINTS)
 
-    found: List[str] = []
-    limit = min(len(image_blobs), 64)
-    for name, blob in image_blobs[:limit]:
-        try:
-            base = Image.open(io.BytesIO(blob)).convert("RGB")
-            for r in (0, 90, 180, 270):
-                img = base.rotate(r, expand=True)
-                for txt in ocr_variants(img):
-                    cands = re.findall(r"\b([A-HJ-NPR-Z0-9]{17})\b", txt.upper())
-                    if cands: found.extend(cands)
-                for crop in crop_near_vin_label(img):
-                    for txt in ocr_variants(crop):
-                        cands = re.findall(r"\b([A-HJ-NPR-Z0-9]{17})\b", txt.upper())
-                        if cands: found.extend(cands)
-        except Exception as e:
-            logger.warning(f"VIN photo OCR error ({name}): {e}")
+def extract_text_from_pdf_bytes_all(pdf_bytes: bytes) -> str:
+    txt = pdftotext_extract_all(pdf_bytes)
+    if txt and txt.strip():
+        return txt
+    return ocr_pdf_items_wide_scan(pdf_bytes, limit_pages=50, dpi=170)
 
-    return best_vin_candidate(found)
-
-def extract_odometer_from_photos(image_blobs: List[Tuple[str, bytes]]) -> Optional[str]:
-    limit = min(len(image_blobs), 24)
-    for name, blob in image_blobs[:limit]:
-        try:
-            img = Image.open(io.BytesIO(blob))
-            for r in (0, 90, 180, 270):
-                rot = img.rotate(r, expand=True)
-                ocr = pytesseract.image_to_string(preprocess_image(rot), lang="eng", config="--psm 6")
-                m = re.search(r"\b(\d{1,3}(?:,\d{3})+|\d{4,7})\b\s*(?:mi|miles|km)?\b", ocr, re.IGNORECASE)
-                if m: return m.group(1)
-        except Exception as e:
-            logger.warning(f"Odometer OCR ({name}): {e}")
-    return None
-
-# ======================= Labor/tax score =======================
-def check_labor_and_tax_score(text: str, client_rules: str) -> int:
-    adj = 0
-    def has_rate(label: str) -> bool:
-        pat = rf"{label}[^\n]{{0,120}}?\$\s*\d{{2,3}}(?:\.\d+)?\s*(?:/hr|/hour|per\s*hour|hr)"
-        return re.search(pat, text, re.IGNORECASE) is not None
-    labels = ["Body Labor", "Paint Labor", "Mechanical Labor", "Structural Labor"]
-    if not any(has_rate(lbl) for lbl in labels):
-        adj -= 50
-    if re.search(r"tax\s*(required|must|utilize|apply)", client_rules, re.IGNORECASE):
-        if not re.search(r"(sales\s*tax|tax)[^\n]{0,80}?(\d{1,3}\.\d+%|\d{1,3}%|\$\s*\d+(\.\d{2})?)", text, re.IGNORECASE):
-            adj -= 25
-    return adj
+def append_client_rules_from_blob(name: str, raw: bytes, rules_parts: List[str]):
+    try:
+        if name.endswith(".pdf"):
+            t = extract_text_from_pdf_bytes_all(raw)
+            if t.strip():
+                rules_parts.append(t)
+        elif name.endswith(".docx"):
+            d = Document(io.BytesIO(raw))
+            t = "\n".join(p.text for p in d.paragraphs if p.text.strip())
+            if t.strip():
+                rules_parts.append(t)
+        elif name.endswith(".txt"):
+            t = raw.decode("utf-8", errors="ignore")
+            if t.strip():
+                rules_parts.append(t)
+    except Exception as e:
+        logger.warning(f"guideline extract error ({name}): {e}")
 
 # ======================= Estimate items (robust parser + LLM fallback) =======================
 PANELS = [
@@ -567,7 +537,7 @@ def extract_estimate_items(text: str) -> List[Dict[str, str]]:
                     items.append({"op": op, "part": part, "side": side, "raw": line})
                     continue
 
-        # Bulleted line (op only) — skip unless part detectable (rare)
+        # Bulleted line (op only) — skip unless part detectable
         if BULLET_PAT.search(line):
             continue
 
@@ -670,7 +640,7 @@ def extract_estimate_items_last_chance(text: str) -> List[Dict[str, str]]:
             uniq.append(it); seen.add(key)
     return uniq
 
-# ===== Target the most likely estimate pages if initial parse fails (still fast) =====
+# ===== Target the most likely estimate pages if initial parse fails =====
 def find_estimate_like_pages(full_text: str) -> List[int]:
     pages = []
     for m in re.finditer(r"\[Page\s+(\d+)\]", full_text):
@@ -680,7 +650,7 @@ def find_estimate_like_pages(full_text: str) -> List[int]:
             pages.append(pg)
     return list(dict.fromkeys(pages))[:10]
 
-def ocr_specific_pages(pdf_bytes: bytes, pages: List[int], dpi: int = 180) -> str:
+def ocr_specific_pages(pdf_bytes: bytes, pages: List[int], dpi: int = 190) -> str:
     if not pages: return ""
     out = []
     try:
@@ -729,12 +699,21 @@ def compare_estimate_with_photos(items: List[Dict[str, str]],
     user_parts: List[Dict[str, Any]] = [{"type":"text","text":"Estimate items:\n"+json.dumps(items, ensure_ascii=False)}]
     user_parts.extend(images_for_vision)
     try:
+        rsp = client_fast.chat_completions.create(  # compat for some OpenAI libs; fallback below
+            model=OAI_MODEL,
+            messages=[{"role":"system","content":system},{"role":"user","content":user_parts}],
+            max_tokens=700, temperature=0
+        )
+        txt = (rsp.choices[0].message.content or "").strip()
+    except Exception:
         rsp = client_fast.chat.completions.create(
             model=OAI_MODEL,
             messages=[{"role":"system","content":system},{"role":"user","content":user_parts}],
             max_tokens=700, temperature=0
         )
         txt = (rsp.choices[0].message.content or "").strip()
+
+    try:
         txt = txt.removeprefix("```json").removesuffix("```").strip()
         data = json.loads(txt)
         if not isinstance(data, dict) or "per_item" not in data:
@@ -742,7 +721,7 @@ def compare_estimate_with_photos(items: List[Dict[str, str]],
         return data
     except Exception as e:
         logger.error(f"Vision compare JSON error: {type(e).__name__}: {e}")
-        return {"per_item":[],"not_in_photos":[],"extra_damage_in_photos":[],"overall":f"Comparison unavailable ({type(e).__name__})."}
+        return {"per_item":[], "not_in_photos":[], "extra_damage_in_photos":[], "overall":f"Comparison unavailable ({type(e).__name__})."}
 
 def compare_batched(items: List[Dict[str, str]],
                     images_for_vision: List[Dict[str, Any]],
@@ -799,8 +778,8 @@ async def root():
 @app.post("/vision-review")
 async def vision_review(request: Request):
     """
-    Comprehensive: FULL estimate text → item extraction → batched vision review.
-    VIN is sourced ONLY from estimate (first page anchor), then verified by photo.
+    VIN is sourced ONLY from estimate (first page anchor), then verified by photo (presence only).
+    Odometer photo presence is required (verified by vision cues), but mileage is extracted from the estimate text only.
     Sub-minute run with strict time budget and fast paths.
     """
     t0 = t0_start()
@@ -811,7 +790,6 @@ async def vision_review(request: Request):
     ia_company = ""
     appraiser_id = ""
 
-    # ---------- Accept multipart or JSON ----------
     try:
         if "multipart/form-data" in ctype:
             form = await request.form()
@@ -865,6 +843,7 @@ async def vision_review(request: Request):
         image_blobs: List[Tuple[str, bytes]] = []
         pdf_photo_candidates: List[Tuple[str, bytes, float]] = []
         pdf_raws: List[bytes] = []
+        client_rules_parts: List[str] = []
 
         async def handle_file(name: str, raw: bytes):
             if name.endswith((".jpg",".jpeg",".png",".webp",".gif")):
@@ -874,6 +853,10 @@ async def vision_review(request: Request):
                 return
             if name.endswith(".pdf"):
                 pdf_raws.append(raw)
+
+                # If this PDF looks like client guidelines, extract its text
+                if looks_like_guideline_name(name):
+                    append_client_rules_from_blob(name, raw, client_rules_parts)
 
                 # First page ONLY (anchor fields)
                 txt_p1 = await loop.run_in_executor(pool, pdftotext_extract, raw, 1, 1)
@@ -920,11 +903,16 @@ async def vision_review(request: Request):
                 try:
                     doc = await loop.run_in_executor(pool, Document, io.BytesIO(raw))
                     quick_text_chunks.append("\n".join(p.text for p in doc.paragraphs if p.text.strip()))
+                    if looks_like_guideline_name(name):
+                        append_client_rules_from_blob(name, raw, client_rules_parts)
                 except Exception:
                     pass
             elif name.endswith(".txt"):
                 try:
-                    quick_text_chunks.append(raw.decode("utf-8", errors="ignore"))
+                    txt = raw.decode("utf-8", errors="ignore")
+                    quick_text_chunks.append(txt)
+                    if looks_like_guideline_name(name):
+                        append_client_rules_from_blob(name, raw, client_rules_parts)
                 except Exception:
                     pass
 
@@ -935,6 +923,14 @@ async def vision_review(request: Request):
         keep = pdf_photo_candidates[:MAX_PHOTO_PAGES]
         for n, data, _ in keep: image_blobs.append((n, data))
 
+    # Merge pasted rules and extracted guideline text
+    merged_rules = []
+    if client_rules.strip():
+        merged_rules.append(client_rules.strip())
+    if client_rules_parts:
+        merged_rules.append("\n\n".join(client_rules_parts))
+    client_rules = "\n\n".join(merged_rules).strip() or "No additional client rules provided."
+
     # ====== ID fields strictly from FIRST PAGE ======
     first_page_text = "\n".join(first_page_texts)
     quick_text = "\n".join(quick_text_chunks)
@@ -942,15 +938,36 @@ async def vision_review(request: Request):
 
     # Presence flags (vision-verified)
     presence = detect_required_photo_presence(image_blobs)
-    missing_photos = [k for k, v in presence.items() if not v]
 
     id_source_text = (first_page_text or "").strip() or (quick_text or "")
     claim_number = extract_claim_from_text(id_source_text) or "N/A"
     vin_est      = extract_vin_from_text(id_source_text)
     vehicle_desc = extract_vehicle_line_from_first_page(id_source_text) or "N/A"
+    mileage_est  = parse_mileage_from_text(id_source_text) or parse_mileage_from_text(full_text or "")
 
-    # VIN verify (estimate-only source; photo verification result)
-    vin_photos_text = extract_vin_from_photos(image_blobs)
+    # VIN verification (estimate-only source; verify via photos)
+    vin_photos_text = None  # we'll try to read VIN text ONLY to help presence (not used as VIN source)
+    try:
+        # reuse OCR to see if VIN-like text present; presence["vin"] already covers door-jamb/label
+        # but if OCR yields a 17-char sequence, that's only for MATCH/MISMATCH comparison
+        found = []
+        limit = min(len(image_blobs), 40)
+        for _, blob in image_blobs[:limit]:
+            try:
+                img = Image.open(io.BytesIO(blob))
+                for r in (0, 90, 180, 270):
+                    rot = img.rotate(r, expand=True)
+                    txt = pytesseract.image_to_string(preprocess_image(rot), lang="eng", config="--psm 7")
+                    cands = re.findall(r"\b([A-HJ-NPR-Z0-9]{17})\b", (txt or "").upper())
+                    if cands:
+                        found.extend(cands)
+            except Exception:
+                continue
+        if found:
+            vin_photos_text = best_vin_candidate(found)
+    except Exception:
+        pass
+
     if vin_est:
         if presence.get("vin"):
             if vin_photos_text:
@@ -963,9 +980,8 @@ async def vision_review(request: Request):
         vin_verify_status = "VIN NOT FOUND IN ESTIMATE"
 
     vin_final_for_report = vin_est or "N/A"
-    odo_photos_value = extract_odometer_from_photos(image_blobs)
 
-    # ===== Estimate items (full text → robust, then chunked LLM, then OCR target pages, then last-chance) =====
+    # ===== Estimate items from FULL TEXT =====
     est_items = extract_estimate_items(full_text)
 
     if not est_items and not nearly_out_of_time(t0, 12):
@@ -973,9 +989,7 @@ async def vision_review(request: Request):
 
     # targeted OCR on likely estimate pages if still empty
     if not est_items and ('pdf_raws' in locals() and pdf_raws) and not nearly_out_of_time(t0, 9):
-        # find likely pages from whatever text we have
         page_hints = find_estimate_like_pages(full_text or quick_text)
-        # if we have no hints, try first 6 pages as common estimate region
         if not page_hints:
             page_hints = list(range(1, 7))
         targeted_ocr = ocr_specific_pages(pdf_raws[0], page_hints[:10], dpi=190)
@@ -1017,7 +1031,8 @@ async def vision_review(request: Request):
         if parts: labor_line = "; ".join(parts)
     tax_line = tax_rate or "Not found"
 
-    # ===== Narrative & score =====
+    # ===== Scoring & narrative =====
+    missing_photos = [k for k, v in presence.items() if not v]
     photo_line = "None" if not missing_photos else ", ".join(missing_photos)
 
     facts_text = f"""FACTS to ground your evaluation (do not contradict):
@@ -1067,6 +1082,19 @@ Rules to follow from client:
         m = re.search(pat, gpt_output, re.IGNORECASE)
         if m: score_ai = int(m.group(1)); break
 
+    def check_labor_and_tax_score(text: str, client_rules: str) -> int:
+        adj = 0
+        def has_rate(label: str) -> bool:
+            pat = rf"{label}[^\n]{{0,120}}?\$\s*\d{{2,3}}(?:\.\d+)?\s*(?:/hr|/hour|per\s*hour|hr)"
+            return re.search(pat, text, re.IGNORECASE) is not None
+        labels = ["Body Labor", "Paint Labor", "Mechanical Labor", "Structural Labor"]
+        if not any(has_rate(lbl) for lbl in labels):
+            adj -= 50
+        if re.search(r"tax\s*(required|must|utilize|apply)", client_rules, re.IGNORECASE):
+            if not re.search(r"(sales\s*tax|tax)[^\n]{0,80}?(\d{1,3}\.\d+%|\d{1,3}%|\$\s*\d+(\.\d{2})?)", text, re.IGNORECASE):
+                adj -= 25
+        return adj
+
     labor_tax_adj = check_labor_and_tax_score(full_text or quick_text, client_rules)
     photo_adj = -25 * len(missing_photos)
     computed = max(0, 100 + labor_tax_adj + photo_adj)
@@ -1102,10 +1130,8 @@ Rules to follow from client:
     pdf.multi_cell(0, 6, f"Claim #: {claim_number}")
     pdf.multi_cell(0, 6, f"VIN: {vin_final_for_report}")
     pdf.multi_cell(0, 6, f"Vehicle: {vehicle_desc}")
-    if odo_photos_value:
-        pdf.multi_cell(0, 6, f"Odometer (from photos): {odo_photos_value}")
-    elif presence.get("odometer"):
-        pdf.multi_cell(0, 6, "Odometer (photo present): unreadable")
+    if mileage_est:
+        pdf.multi_cell(0, 6, f"Odometer (from estimate): {mileage_est}")
     pdf.multi_cell(0, 6, f"Compliance Score: {authoritative_score}%")
 
     pdf.ln(4)
@@ -1179,6 +1205,7 @@ AI Review Summary:
         "claim_number": claim_number,
         "vehicle": vehicle_desc,
         "vin": vin_final_for_report,
+        "mileage_estimate": mileage_est or "",
         "score": f"{authoritative_score}%",
         "consistency_review": consistency
     }
@@ -1189,6 +1216,7 @@ async def download_pdf(file_number: str):
     if os.path.exists(pdf_path):
         return FileResponse(path=pdf_path, media_type="application/pdf", filename=f"{file_number}.pdf")
     return JSONResponse(status_code=404, content={"detail": "Not Found"})
+
 
 
 
