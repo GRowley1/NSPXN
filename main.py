@@ -2,7 +2,7 @@ from fastapi import FastAPI, File, UploadFile, Form
 from fastapi.responses import JSONResponse, FileResponse
 from fastapi.middleware.cors import CORSMiddleware
 from typing import List, Tuple, Optional, Dict, Any, Callable
-import os, re, io, base64, json, logging, asyncio, time, tempfile, subprocess, glob, math
+import os, re, io, base64, json, logging, asyncio, time, tempfile, subprocess, glob
 from concurrent.futures import ThreadPoolExecutor
 
 import smtplib
@@ -21,9 +21,9 @@ ImageFile.LOAD_TRUNCATED_IMAGES = True
 PDF_OCR_DPI_EST = int(os.getenv("PDF_OCR_DPI_EST", "160"))
 PDF_OCR_DPI_TXT = int(os.getenv("PDF_OCR_DPI_TXT", "150"))
 PDF_OCR_DPI_PH  = int(os.getenv("PDF_OCR_DPI_PH",  "140"))
-MAX_TEXT_PAGES  = int(os.getenv("MAX_TEXT_PAGES",  "3"))     # quick skim (sub-minute)
-MAX_PHOTO_PAGES = int(os.getenv("MAX_PHOTO_PAGES", "36"))    # presence detection
-MAX_VISION_IMGS = int(os.getenv("MAX_VISION_IMGS", "8"))     # tighter cap for latency
+MAX_TEXT_PAGES  = int(os.getenv("MAX_TEXT_PAGES",  "3"))     # quick skim
+MAX_PHOTO_PAGES = int(os.getenv("MAX_PHOTO_PAGES", "24"))    # image harvest safety cap
+MAX_VISION_IMGS = int(os.getenv("MAX_VISION_IMGS", "8"))     # vision payload cap
 THREADS         = int(os.getenv("OCR_THREADS",     "4"))
 OAI_MODEL       = os.getenv("OAI_MODEL", "gpt-4o-mini")
 OAI_TIMEOUT_S   = float(os.getenv("OAI_TIMEOUT_S", "15"))
@@ -68,6 +68,27 @@ def t_elapsed(t0: float) -> float: return time.monotonic() - t0
 def time_left(t0: float) -> float: return max(0.0, TIME_BUDGET_S - t_elapsed(t0))
 def nearly_out_of_time(t0: float, margin: float = 6.0) -> bool: return time_left(t0) <= margin
 
+# ======================= Output sanitizers =======================
+_NO_GPT_PAT = re.compile(r"no\s*gpt\s*output", re.I)
+
+def scrub_text(s: str) -> str:
+    if not isinstance(s, str):
+        return s
+    s2 = _NO_GPT_PAT.sub("Comparison unavailable (fallback used).", s)
+    return s2
+
+def sanitize_overall(text: str) -> str:
+    return scrub_text(text or "")
+
+def sanitize_consistency(cons: Any) -> Dict[str, Any]:
+    if not isinstance(cons, dict):
+        return {"per_item": [], "not_in_photos": [], "extra_damage_in_photos": [], "overall": "Comparison unavailable (fallback used)."}
+    cons.setdefault("per_item", [])
+    cons.setdefault("not_in_photos", [])
+    cons.setdefault("extra_damage_in_photos", [])
+    cons["overall"] = sanitize_overall(cons.get("overall",""))
+    return cons
+
 # ======================= OCR & text helpers =======================
 def preprocess_image(img: Image.Image) -> Image.Image:
     img = img.convert("L")
@@ -83,16 +104,18 @@ def ocr_pdf_first_page(pdf_bytes: bytes) -> str:
     pages = convert_from_bytes(pdf_bytes, first_page=1, last_page=1, dpi=PDF_OCR_DPI_EST)
     return ocr_image_quick(pages[0]) if pages else ""
 
-def ocr_pdf_text_caps(pdf_bytes: bytes, max_pages: int) -> str:
+def ocr_pdf_text_caps(pdf_bytes: bytes, max_pages: int, t0: float) -> str:
+    if nearly_out_of_time(t0, 10.0):  # guard early
+        return ""
     pages = convert_from_bytes(pdf_bytes, dpi=PDF_OCR_DPI_TXT)
     buf, used = [], 0
     for i, p in enumerate(pages, 1):
+        if used >= max_pages or nearly_out_of_time(t0, 8.0):
+            break
         txt = ocr_image_quick(p)
         if len(txt.strip()) >= 25:
             buf.append(f"[Page {i}]\n{txt}")
             used += 1
-        if used >= max_pages:
-            break
     return "\n".join(buf)
 
 def _page_has_tax(text: str) -> bool:
@@ -107,10 +130,14 @@ def _page_has_any_labor_rate(text: str) -> bool:
             return True
     return False
 
-def ocr_pdf_scan_tax_labor_page(pdf_bytes: bytes, max_pages: int = 60) -> str:
+def ocr_pdf_scan_tax_labor_page(pdf_bytes: bytes, max_pages: int, t0: float) -> str:
     try:
+        if nearly_out_of_time(t0, 12.0):
+            return ""
         pages = convert_from_bytes(pdf_bytes, dpi=PDF_OCR_DPI_TXT)
         for i, p in enumerate(pages[:max_pages], 1):
+            if nearly_out_of_time(t0, 10.0):
+                break
             txt = ocr_image_quick(p)
             if _page_has_tax(txt) or _page_has_any_labor_rate(txt):
                 return f"[Page {i}]\n{txt}"
@@ -131,21 +158,6 @@ def count_corner_labels(text: str) -> int:
     return len(found)
 
 # ===== pdftotext helpers =====
-def pdftotext_extract(pdf_bytes: bytes, first_page: int, last_page: int) -> str:
-    try:
-        with tempfile.TemporaryDirectory() as td:
-            in_pdf = os.path.join(td, "in.pdf")
-            with open(in_pdf, "wb") as f: f.write(pdf_bytes)
-            out_txt = os.path.join(td, "out.txt")
-            args = ["pdftotext", "-layout", "-f", str(first_page), "-l", str(last_page), in_pdf, out_txt]
-            subprocess.run(args, check=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-            if os.path.exists(out_txt):
-                with open(out_txt, "r", encoding="utf-8", errors="ignore") as f:
-                    return f.read()
-    except Exception as e:
-        logger.info(f"pdftotext not available or failed (range): {e}")
-    return ""
-
 def pdftotext_extract_all(pdf_bytes: bytes) -> str:
     try:
         with tempfile.TemporaryDirectory() as td:
@@ -177,10 +189,6 @@ def sniff_image_mime(blob: bytes) -> Optional[str]:
         return None
 
 def ensure_openai_image(blob: bytes) -> Tuple[bytes, str]:
-    """
-    Return (bytes, mime). Pass-through for JPEG/PNG/WEBP/GIF.
-    If not a supported/valid image, re-encode to JPEG.
-    """
     mime = sniff_image_mime(blob)
     if mime in ACCEPTED_MIMES:
         return blob, mime
@@ -192,14 +200,12 @@ def ensure_openai_image(blob: bytes) -> Tuple[bytes, str]:
         im.save(buf, format="JPEG", quality=85)
         return buf.getvalue(), "image/jpeg"
     except Exception:
-        # last resort tiny JPEG
         im = Image.new("RGB", (8, 8), (0, 0, 0))
         buf = io.BytesIO()
         im.save(buf, format="JPEG", quality=80)
         return buf.getvalue(), "image/jpeg"
 
 def downscale_jpeg_to_max_bytes(blob: bytes, max_bytes: int) -> bytes:
-    """Downscale JPEG by reducing quality and size until under max_bytes."""
     try:
         im = Image.open(io.BytesIO(blob)).convert("RGB")
     except Exception:
@@ -228,13 +234,11 @@ def make_data_url(blob: bytes, mime: str) -> str:
     return f"data:{mime};base64,{base64.b64encode(blob).decode('utf-8')}"
 
 # ===== Extract embedded images via pdfimages; respect original format =====
-def pdfimages_harvest(pdf_bytes: bytes, max_images: int = MAX_PHOTO_PAGES) -> List[Tuple[str, bytes, float, str]]:
-    """
-    Returns list of (name, bytes, size_bytes, mime). Keeps original format when possible.
-    For pdfimages outputs like .ppm/.pbm, convert to JPEG only.
-    """
+def pdfimages_harvest(pdf_bytes: bytes, max_images: int, t0: float) -> List[Tuple[str, bytes, float, str]]:
     out: List[Tuple[str, bytes, float, str]] = []
     try:
+        if nearly_out_of_time(t0, 15.0):
+            return out
         with tempfile.TemporaryDirectory() as td:
             in_pdf = os.path.join(td, "in.pdf")
             with open(in_pdf, "wb") as f: f.write(pdf_bytes)
@@ -243,7 +247,9 @@ def pdfimages_harvest(pdf_bytes: bytes, max_images: int = MAX_PHOTO_PAGES) -> Li
                            check=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
             files = sorted(glob.glob(prefix + "*"))
             files.sort(key=lambda p: os.path.getsize(p), reverse=True)
-            for i, fp in enumerate(files[:max_images], 1):
+            for i, fp in enumerate(files, 1):
+                if i > max_images or nearly_out_of_time(t0, 12.0):
+                    break
                 try:
                     with open(fp, "rb") as fh:
                         raw = fh.read()
@@ -264,12 +270,16 @@ def pdfimages_harvest(pdf_bytes: bytes, max_images: int = MAX_PHOTO_PAGES) -> Li
     return out
 
 # ===== Photo-like page harvest (render fallback) — saved as JPEG =====
-def harvest_photos_from_pdf(pdf_bytes: bytes, max_pages: int) -> List[Tuple[str, bytes, float, str]]:
+def harvest_photos_from_pdf(pdf_bytes: bytes, max_pages: int, t0: float) -> List[Tuple[str, bytes, float, str]]:
     out: List[Tuple[str, bytes, float, str]] = []
     try:
+        if nearly_out_of_time(t0, 15.0):
+            return out
         pages = convert_from_bytes(pdf_bytes, dpi=PDF_OCR_DPI_PH)
         used = 0
         for i, page in enumerate(pages, 1):
+            if used >= max_pages or nearly_out_of_time(t0, 12.0):
+                break
             proc = preprocess_image(page)
             ocr = pytesseract.image_to_string(proc, lang="eng")
             up = (ocr or "").upper()
@@ -287,17 +297,19 @@ def harvest_photos_from_pdf(pdf_bytes: bytes, max_pages: int) -> List[Tuple[str,
                 score = (corner_hits * 10 + var) + (50 if has_vin_cue else 0) + (40 if has_odo_cue else 0)
                 out.append((f"pdf-p{i}.jpg", buf.getvalue(), score, "image/jpeg"))
                 used += 1
-                if used >= max_pages:
-                    break
     except Exception as e:
         logger.warning(f"harvest_photos_from_pdf error: {e}")
     return out
 
-def ocr_pdf_items_wide_scan(pdf_bytes: bytes, limit_pages: int = 40, dpi: int = 180) -> str:
+def ocr_pdf_items_wide_scan(pdf_bytes: bytes, limit_pages: int, dpi: int, t0: float) -> str:
     out = []
     try:
+        if nearly_out_of_time(t0, 12.0):
+            return ""
         pages = convert_from_bytes(pdf_bytes, dpi=dpi)
         for i, p in enumerate(pages[:limit_pages], 1):
+            if nearly_out_of_time(t0, 10.0):
+                break
             txt = ocr_image_quick(p)
             if len(txt.strip()) >= 20:
                 out.append(f"[WideScan Page {i}]\n{txt}")
@@ -344,6 +356,22 @@ def best_vin_candidate(cands: List[str]) -> Optional[str]:
 # ======================= Field extraction =======================
 MAKES = r"(?:Acura|Alfa(?:\s*Romeo)?|Audi|BMW|Buick|Cadillac|Chevrolet|Chevy|Chrysler|Dodge|Ferrari|Fiat|Ford|GMC|Genesis|Honda|Hyundai|Infiniti|Jaguar|Jeep|Kia|Lamborghini|Land\s*Rover|Lexus|Lincoln|Maserati|Mazda|Mercedes(?:-|\s*)Benz|Mini|Mitsubishi|Nissan|Porsche|Ram|Scion|Subaru|Suzuki|Tesla|Toyota|Volkswagen|VW|Volvo)"
 
+def _strip_urlish_tail(s: str) -> str:
+    if not s:
+        return s
+    orig = s
+    low = s.lower()
+    markers = ["http", "www", ".com", ".net", ".org", ".io", ".co/", ".co ", "://", "jdpower"]
+    cut = len(s)
+    for m in markers:
+        i = low.find(m)
+        if i != -1:
+            cut = min(cut, i)
+    s = s[:cut]
+    s = re.sub(r"[•|,;:/\-]+$", "", s).strip()
+    s = re.sub(r"\s{2,}", " ", s).strip()
+    return s or orig.strip()
+
 def extract_claim_from_text(text: str) -> Optional[str]:
     for pat in [
         r"(?:^|\s)(?:Claim\s*(?:#|No\.?|Number)[:\s]*)\s*([A-Za-z0-9\-_/]+)",
@@ -375,6 +403,7 @@ def extract_vehicle_line_from_first_page(first_page_text: str) -> Optional[str]:
             continue
         tail = re.sub(r"\s{2,}", " ", tail)
         tail = re.sub(r"https?://\S+", "", tail).strip()
+        tail = _strip_urlish_tail(tail)
         return tail
     return None
 
@@ -423,7 +452,7 @@ def _image_is_exterior_wide(img: Image.Image) -> bool:
     var = ImageStat.Stat(processed).var[0] if processed.mode == "L" else sum(ImageStat.Stat(processed).var)/3
     return len(text.strip()) < 10 and var > 150
 
-def detect_required_photo_presence(image_blobs: List[Tuple[str, bytes]]) -> Dict[str, bool]:
+def detect_required_photo_presence(image_blobs: List[Tuple[str, bytes]], t0: float) -> Dict[str, bool]:
     flags = {"four corners": False, "odometer": False, "vin": False, "license plate": False}
     ext_like = 0
     corner_hits = 0
@@ -431,13 +460,19 @@ def detect_required_photo_presence(image_blobs: List[Tuple[str, bytes]]) -> Dict
     VIN_DOOR_LABEL_CUES = ("MFD BY", "GENERAL MOTORS", "THIS VEHICLE CONFORMS", "GVWR", "GAWR", "VIN")
     ODO_PAT = re.compile(r"\b\d{3,7}\s*(?:mi|miles)\b", re.IGNORECASE)
 
-    limit = min(len(image_blobs), 64)
-    for name, blob in image_blobs[:limit]:
+    limit = min(len(image_blobs), 40)
+    for idx, (name, blob) in enumerate(image_blobs[:limit], 1):
+        if nearly_out_of_time(t0, 10.0):
+            break
         try:
             base = Image.open(io.BytesIO(blob))
         except Exception:
             continue
-        for r in (0, 90, 180, 270):
+        # Try minimal rotations first; expand only if time allows
+        rotations = (0, 90) if nearly_out_of_time(t0, 12.0) else (0, 90, 180, 270)
+        for r in rotations:
+            if nearly_out_of_time(t0, 10.0):
+                break
             try:
                 img = base.rotate(r, expand=True)
                 proc = preprocess_image(img)
@@ -469,16 +504,16 @@ def looks_like_guideline_name(filename: str) -> bool:
     fn = (filename or "").lower()
     return any(h in fn for h in GUIDE_HINTS)
 
-def extract_text_from_pdf_bytes_all(pdf_bytes: bytes) -> str:
+def extract_text_from_pdf_bytes_all(pdf_bytes: bytes, t0: float) -> str:
     txt = pdftotext_extract_all(pdf_bytes)
     if txt and txt.strip():
         return txt
-    return ocr_pdf_items_wide_scan(pdf_bytes, limit_pages=50, dpi=170)
+    return ocr_pdf_items_wide_scan(pdf_bytes, limit_pages=30, dpi=170, t0=t0)
 
-def append_client_rules_from_blob(name: str, raw: bytes, rules_parts: List[str]):
+def append_client_rules_from_blob(name: str, raw: bytes, rules_parts: List[str], t0: float):
     try:
         if name.endswith(".pdf"):
-            t = extract_text_from_pdf_bytes_all(raw)
+            t = extract_text_from_pdf_bytes_all(raw, t0)
             if t.strip(): rules_parts.append(t)
         elif name.endswith(".docx"):
             d = Document(io.BytesIO(raw))
@@ -626,7 +661,7 @@ def _chunk_text(txt: str, size: int = 6000, overlap: int = 400) -> List[str]:
     return out
 
 def llm_extract_items_chunked(full_text: str, time_guard: Callable[[], bool]) -> List[Dict[str, str]]:
-    chunks = _chunk_text(full_text, size=6000, overlap=400)[:6]
+    chunks = _chunk_text(full_text, size=6000, overlap=400)[:4]
     merged: List[Dict[str, str]] = []
     seen = set()
     for ch in chunks:
@@ -641,10 +676,6 @@ def llm_extract_items_chunked(full_text: str, time_guard: Callable[[], bool]) ->
 
 # ======================= Vision helpers (capped, with fallback) =======================
 def build_vision_payload_capped(images: List[Tuple[str, bytes, str]]) -> List[Dict[str, Any]]:
-    """
-    Apply per-image and total payload caps; downscale JPEGs if needed.
-    Returns OpenAI image_url parts ready for the chat call.
-    """
     parts: List[Dict[str, Any]] = []
     total = 0
     for name, blob, mime in images[:MAX_VISION_IMGS]:
@@ -658,7 +689,6 @@ def build_vision_payload_capped(images: List[Tuple[str, bytes, str]]) -> List[Di
     return parts
 
 def call_openai_json_sure(messages: List[Dict[str, Any]], max_tokens: int, t0: float, label: str) -> Dict[str, Any]:
-    """Robust wrapper: retries and guarantees dict output (never empty/None)."""
     if nearly_out_of_time(t0, 7.0):
         return {"per_item": [], "not_in_photos": [], "extra_damage_in_photos": [], "overall": "Skipped due to time budget."}
     for attempt in range(2):
@@ -722,28 +752,12 @@ def compare_estimate_with_photos(items: List[Dict[str, str]],
         max_tokens=900, t0=t0, label="vision"
     )
 
-# ======================= Output sanitizers (lock out 'No GPT output') =======================
-def sanitize_overall(text: str) -> str:
-    if not text: return ""
-    if re.search(r"no\s*gpt\s*output", text, re.I):
-        return "Comparison unavailable (fallback used)."
-    return text
-
-def sanitize_consistency(cons: Any) -> Dict[str, Any]:
-    if not isinstance(cons, dict):
-        return {"per_item": [], "not_in_photos": [], "extra_damage_in_photos": [], "overall": "Comparison unavailable (fallback used)."}
-    cons.setdefault("per_item", [])
-    cons.setdefault("not_in_photos", [])
-    cons.setdefault("extra_damage_in_photos", [])
-    cons["overall"] = sanitize_overall(cons.get("overall",""))
-    return cons
-
 # ======================= PDF helpers =======================
 def pdf_add_section_title(pdf: FPDF, title: str):
     pdf.set_font_size(12); pdf.cell(0, 8, txt=title, ln=True); pdf.set_font_size(10)
 
 def pdf_kv(pdf: FPDF, key: str, val: str):
-    pdf.set_font_size(10); pdf.multi_cell(0, 6, f"{key}: {val}")
+    pdf.set_font_size(10); pdf.multi_cell(0, 6, f"{key}: {scrub_text(val)}")
 
 # ======================= Routes =======================
 @app.get("/")
@@ -776,23 +790,23 @@ async def vision_review(
         name = (f.filename or "upload").lower()
 
         if name.endswith((".pdf",)):
+            # text
             texts.append(ocr_pdf_first_page(raw))
-            texts.append(ocr_pdf_text_caps(raw, MAX_TEXT_PAGES))
-            tl = ocr_pdf_scan_tax_labor_page(raw, 60)
+            texts.append(ocr_pdf_text_caps(raw, MAX_TEXT_PAGES, t0))
+            tl = ocr_pdf_scan_tax_labor_page(raw, 40, t0)
             if tl: texts.append(tl)
-
-            emb = pdfimages_harvest(raw, MAX_PHOTO_PAGES)
+            # images
+            emb = pdfimages_harvest(raw, MAX_PHOTO_PAGES, t0)
             for hname, hbytes, _sz, hmime in emb:
                 photos_for_presence.append((hname, hbytes))
                 images_for_openai.append((hname, hbytes, hmime))
-
-            rendered = harvest_photos_from_pdf(raw, max_pages=12)
+            rendered = harvest_photos_from_pdf(raw, max_pages=8, t0=t0)
             for rname, rbytes, _score, rmime in rendered:
                 photos_for_presence.append((rname, rbytes))
                 images_for_openai.append((rname, rbytes, rmime))
-
+            # rules from PDFs that look like guidelines
             if looks_like_guideline_name(name):
-                rules_parts.append(extract_text_from_pdf_bytes_all(raw))
+                rules_parts.append(extract_text_from_pdf_bytes_all(raw, t0))
 
         elif name.endswith((".docx", ".txt")):
             if name.endswith(".docx"):
@@ -804,7 +818,7 @@ async def vision_review(
             else:
                 texts.append(raw.decode("utf-8", errors="ignore"))
             if looks_like_guideline_name(name):
-                append_client_rules_from_blob(name, raw, rules_parts)
+                append_client_rules_from_blob(name, raw, rules_parts, t0)
 
         elif name.endswith((".jpg", ".jpeg", ".png", ".webp", ".gif")):
             mime = sniff_image_mime(raw) or "image/jpeg"
@@ -825,7 +839,7 @@ async def vision_review(
         effective_rules = (effective_rules + "\n\n" + "\n\n".join(rules_parts)).strip()
 
     # ----- Required photo presence -----
-    presence_flags = await loop.run_in_executor(pool, detect_required_photo_presence, photos_for_presence)
+    presence_flags = await loop.run_in_executor(pool, detect_required_photo_presence, photos_for_presence, t0)
     missing_photos = [k for k, v in presence_flags.items() if not v]
 
     # ----- VIN + vehicle fields (VIN from estimate only; verify via photo presence)
@@ -839,6 +853,7 @@ async def vision_review(
     claim_number = extract_claim_from_text(combined_text) or "N/A"
     first_page_text = combined_text.split("[Page 1]")[-1] if "[Page 1]" in combined_text else combined_text
     vehicle_line = extract_vehicle_line_from_first_page(first_page_text) or "N/A"
+    vehicle_line = _strip_urlish_tail(vehicle_line)
     labor_rates_page = parse_labor_rates(combined_text)
     tax_rate = parse_tax_rate(combined_text) or "Not detected"
     mileage_est = parse_mileage_from_text(combined_text) or "Not listed"
@@ -881,31 +896,29 @@ async def vision_review(
     pdf.cell(200, 10, txt="NSPXN.com AI Review Report", ln=True, align="C")
     pdf.ln(5)
     pdf.set_font_size(10)
-    pdf.multi_cell(0, 6, f"File Number: {file_number}")
-    pdf.multi_cell(0, 6, f"IA Company: {ia_company}")
-    pdf.multi_cell(0, 6, f"Appraiser ID #: {appraiser_id}")
+    pdf.multi_cell(0, 6, scrub_text(f"File Number: {file_number}"))
+    pdf.multi_cell(0, 6, scrub_text(f"IA Company: {ia_company}"))
+    pdf.multi_cell(0, 6, scrub_text(f"Appraiser ID #: {appraiser_id}"))
     pdf.ln(4)
-    pdf.multi_cell(0, 6, f"Claim #: {claim_number}")
-    pdf.multi_cell(0, 6, f"VIN (from estimate): {vin_est}")
-    pdf.multi_cell(0, 6, f"VIN verification (estimate vs photo): {vin_verify_note}")
-    pdf.multi_cell(0, 6, f"Vehicle: {vehicle_line}")
-    pdf.multi_cell(0, 6, f"Odometer (estimate): {mileage_est}")
+    pdf.multi_cell(0, 6, scrub_text(f"Claim #: {claim_number}"))
+    pdf.multi_cell(0, 6, scrub_text(f"VIN (from estimate): {vin_est}"))
+    pdf.multi_cell(0, 6, scrub_text(f"VIN verification (estimate vs photo): {vin_verify_note}"))
+    pdf.multi_cell(0, 6, scrub_text(f"Vehicle: {vehicle_line}"))
+    pdf.multi_cell(0, 6, scrub_text(f"Odometer (estimate): {mileage_est}"))
     if labor_rates_page:
-        pdf.multi_cell(0, 6, "Labor rates detected: " + ", ".join(f"{k} {v}" for k,v in labor_rates_page.items()))
+        pdf.multi_cell(0, 6, scrub_text("Labor rates detected: " + ", ".join(f"{k} {v}" for k,v in labor_rates_page.items())))
     else:
         pdf.multi_cell(0, 6, "Labor rates detected: NONE")
-    pdf.multi_cell(0, 6, f"Tax Rate detected: {tax_rate}")
+    pdf.multi_cell(0, 6, scrub_text(f"Tax Rate detected: {tax_rate}"))
     pdf.multi_cell(0, 6, f"Compliance Score: {authoritative_score}%")
 
-    # Photos presence
     pdf.ln(4)
     pdf_add_section_title(pdf, "Required Photos Presence (vision-verified)")
     if missing_photos:
-        pdf.multi_cell(0, 6, "Missing: " + ", ".join(missing_photos))
+        pdf.multi_cell(0, 6, scrub_text("Missing: " + ", ".join(missing_photos)))
     else:
         pdf.multi_cell(0, 6, "All required photos present.")
 
-    # ======== Estimate ↔ Photos Consistency Review ========
     pdf.ln(4)
     pdf_add_section_title(pdf, "Estimate ↔ Photos Consistency Review")
     if consistency.get("per_item"):
@@ -917,24 +930,19 @@ async def vision_review(
                 conf = 0.0
             conf_txt = f"{round(conf*100)}%"
             line = f"- {it.get('side','unspecified').title()} {it.get('part','component')} · {it.get('op','op')} → Photo: {ev} ({conf_txt}); {it.get('note','')}"
-            pdf.multi_cell(0, 6, line)
+            pdf.multi_cell(0, 6, scrub_text(line))
     else:
         pdf.multi_cell(0, 6, "Per-item comparison unavailable.")
 
     if consistency.get("not_in_photos"):
-        pdf.ln(2)
-        pdf_add_section_title(pdf, "Items Estimated but Not Evident in Photos")
-        for raw in consistency["not_in_photos"][:20]:
-            pdf.multi_cell(0, 6, f"- {raw}")
+        pdf.ln(2); pdf_add_section_title(pdf, "Items Estimated but Not Evident in Photos")
+        for raw in consistency["not_in_photos"][:20]: pdf.multi_cell(0, 6, scrub_text(f"- {raw}"))
 
     if consistency.get("extra_damage_in_photos"):
-        pdf.ln(2)
-        pdf_add_section_title(pdf, "Damage Visible in Photos but Missing on Estimate")
-        for d in consistency["extra_damage_in_photos"][:20]:
-            pdf.multi_cell(0, 6, f"- {d}")
+        pdf.ln(2); pdf_add_section_title(pdf, "Damage Visible in Photos but Missing on Estimate")
+        for d in consistency["extra_damage_in_photos"][:20]: pdf.multi_cell(0, 6, scrub_text(f"- {d}"))
 
-    pdf.ln(2)
-    pdf_kv(pdf, "Consistency Overall", consistency.get("overall", ""))
+    pdf.ln(2); pdf_kv(pdf, "Consistency Overall", consistency.get("overall", ""))
 
     # Save PDF
     pdf_path = os.path.join(PDF_DIR, f"{file_number}.pdf")
@@ -946,7 +954,7 @@ async def vision_review(
     except Exception as e:
         logger.error(f"PDF write error: {e}")
 
-    # EMAIL (unchanged)
+    # EMAIL (unchanged structure; sanitized content)
     try:
         msg = EmailMessage()
         msg["Subject"] = f"AI-4-IA Review: {claim_number}"
@@ -965,7 +973,7 @@ Vehicle: {vehicle_line}
 
 Compliance Score: {authoritative_score}%
 """
-        msg.set_content(email_body)
+        msg.set_content(scrub_text(email_body))
         with smtplib.SMTP_SSL("mail.tierra.net", 465) as smtp:
             smtp.login("info@nspxn.com", "grr2025GRR")
             smtp.send_message(msg)
@@ -1007,6 +1015,7 @@ async def get_client_rules(client_name: str):
     else:
         logger.error(f"Rules not found for client: {client_name}")
         return JSONResponse(status_code=404, content={"error": "Rules not found for this client."})
+
 
 
 
