@@ -22,7 +22,7 @@ PDF_OCR_DPI_EST = int(os.getenv("PDF_OCR_DPI_EST", "160"))
 PDF_OCR_DPI_TXT = int(os.getenv("PDF_OCR_DPI_TXT", "150"))
 PDF_OCR_DPI_PH  = int(os.getenv("PDF_OCR_DPI_PH",  "140"))
 MAX_TEXT_PAGES  = int(os.getenv("MAX_TEXT_PAGES",  "3"))     # quick skim (sub-minute)
-MAX_PHOTO_PAGES = int(os.getenv("MAX_PHOTO_PAGES", "36"))    # better presence detection
+MAX_PHOTO_PAGES = int(os.getenv("MAX_PHOTO_PAGES", "36"))    # presence detection
 MAX_VISION_IMGS = int(os.getenv("MAX_VISION_IMGS", "8"))     # tighter cap for latency
 THREADS         = int(os.getenv("OCR_THREADS",     "4"))
 OAI_MODEL       = os.getenv("OAI_MODEL", "gpt-4o-mini")
@@ -30,9 +30,9 @@ OAI_TIMEOUT_S   = float(os.getenv("OAI_TIMEOUT_S", "15"))
 TIME_BUDGET_S   = float(os.getenv("TIME_BUDGET_S", "55"))    # sub-minute target
 VISION_BATCH    = int(os.getenv("VISION_BATCH", "10"))
 
-# New: vision payload size caps
-MAX_TOTAL_IMAGE_BYTES = int(os.getenv("MAX_TOTAL_IMAGE_BYTES", str(3_000_000)))  # ~3 MB payload
-MAX_PER_IMAGE_BYTES   = int(os.getenv("MAX_PER_IMAGE_BYTES",   str(350_000)))    # ~350 KB per image
+# Vision payload size caps
+MAX_TOTAL_IMAGE_BYTES = int(os.getenv("MAX_TOTAL_IMAGE_BYTES", str(3_000_000)))  # ~3 MB
+MAX_PER_IMAGE_BYTES   = int(os.getenv("MAX_PER_IMAGE_BYTES",   str(350_000)))    # ~350 KB
 
 # ======================= PDF storage =======================
 PDF_DIR = os.getenv("PDF_DIR", "/tmp")
@@ -204,15 +204,16 @@ def downscale_jpeg_to_max_bytes(blob: bytes, max_bytes: int) -> bytes:
         im = Image.open(io.BytesIO(blob)).convert("RGB")
     except Exception:
         return blob
-    # quick quality ladder then optional resize
+    # quality ladder
     for q in (85, 80, 75, 70, 65, 60, 55):
         out = io.BytesIO()
         im.save(out, format="JPEG", quality=q, optimize=True)
         b = out.getvalue()
         if len(b) <= max_bytes:
             return b
-    # resize by 0.8 steps until under cap or min size
+    # resize loop
     w, h = im.size
+    b = out.getvalue()
     while len(b) > max_bytes and min(w, h) > 800:
         w = int(w * 0.85); h = int(h * 0.85)
         im2 = im.resize((w, h), Image.LANCZOS)
@@ -638,7 +639,7 @@ def llm_extract_items_chunked(full_text: str, time_guard: Callable[[], bool]) ->
                 merged.append(it); seen.add(key)
     return merged
 
-# ======================= Vision helpers =======================
+# ======================= Vision helpers (capped, with fallback) =======================
 def build_vision_payload_capped(images: List[Tuple[str, bytes, str]]) -> List[Dict[str, Any]]:
     """
     Apply per-image and total payload caps; downscale JPEGs if needed.
@@ -648,10 +649,8 @@ def build_vision_payload_capped(images: List[Tuple[str, bytes, str]]) -> List[Di
     total = 0
     for name, blob, mime in images[:MAX_VISION_IMGS]:
         safe_bytes, safe_mime = ensure_openai_image(blob)
-        # downscale JPEGs if over per-image cap
         if safe_mime == "image/jpeg" and len(safe_bytes) > MAX_PER_IMAGE_BYTES:
             safe_bytes = downscale_jpeg_to_max_bytes(safe_bytes, MAX_PER_IMAGE_BYTES)
-        # respect total cap
         if total + len(safe_bytes) > MAX_TOTAL_IMAGE_BYTES:
             break
         parts.append({"type": "image_url", "image_url": {"url": make_data_url(safe_bytes, safe_mime)}})
@@ -659,9 +658,9 @@ def build_vision_payload_capped(images: List[Tuple[str, bytes, str]]) -> List[Di
     return parts
 
 def call_openai_json_sure(messages: List[Dict[str, Any]], max_tokens: int, t0: float, label: str) -> Dict[str, Any]:
-    """Robust wrapper: retries with smaller payload if needed, guarantees dict output."""
+    """Robust wrapper: retries and guarantees dict output (never empty/None)."""
     if nearly_out_of_time(t0, 7.0):
-        return {"error": "time_budget", "per_item": [], "not_in_photos": [], "extra_damage_in_photos": [], "overall": "Skipped due to time budget."}
+        return {"per_item": [], "not_in_photos": [], "extra_damage_in_photos": [], "overall": "Skipped due to time budget."}
     for attempt in range(2):
         try:
             rsp = client_fast.chat.completions.create(
@@ -677,16 +676,13 @@ def call_openai_json_sure(messages: List[Dict[str, Any]], max_tokens: int, t0: f
             data = json.loads(txt)
             if isinstance(data, dict):
                 return data
-            # if it returns a list, wrap minimally
             if isinstance(data, list):
                 return {"per_item": data, "not_in_photos": [], "extra_damage_in_photos": [], "overall": "Parsed list."}
             raise ValueError("shape_mismatch")
         except Exception as e:
             logger.error(f"OpenAI {label} attempt {attempt+1} failed: {type(e).__name__}: {e}")
-            # shrink max_tokens on retry
             max_tokens = max(350, int(max_tokens * 0.7))
-    # Guaranteed non-empty fallback
-    return {"per_item": [], "not_in_photos": [], "extra_damage_in_photos": [], "overall": "Comparison unavailable (no LLM output)."}
+    return {"per_item": [], "not_in_photos": [], "extra_damage_in_photos": [], "overall": "Comparison unavailable (fallback used)."}
 
 def compare_estimate_with_photos(items: List[Dict[str, str]],
                                  images_for_vision: List[Dict[str, Any]],
@@ -712,7 +708,6 @@ def compare_estimate_with_photos(items: List[Dict[str, str]],
         },
         "required":["per_item","not_in_photos","extra_damage_in_photos","overall"]
     }
-
     system = (
         "You are an auto-damage visual auditor. "
         "Given estimate line items and vehicle photos, decide for EACH item whether visible photo evidence exists. "
@@ -720,21 +715,28 @@ def compare_estimate_with_photos(items: List[Dict[str, str]],
         "Also list obvious damages seen in photos that are NOT listed in the estimate. "
         "Return STRICT JSON ONLY per this schema:\n" + json.dumps(schema)
     )
-
-    user_parts: List[Dict[str, Any]] = [
-        {"type": "text", "text": "Estimate items:\n" + json.dumps(items, ensure_ascii=False)}
-    ]
+    user_parts: List[Dict[str, Any]] = [{"type":"text","text":"Estimate items:\n"+json.dumps(items, ensure_ascii=False)}]
     user_parts.extend(images_for_vision)
-
     return call_openai_json_sure(
-        messages=[
-            {"role": "system", "content": system},
-            {"role": "user",   "content": user_parts}
-        ],
-        max_tokens=900,
-        t0=t0,
-        label="vision"
+        messages=[{"role": "system","content": system},{"role": "user","content": user_parts}],
+        max_tokens=900, t0=t0, label="vision"
     )
+
+# ======================= Output sanitizers (lock out 'No GPT output') =======================
+def sanitize_overall(text: str) -> str:
+    if not text: return ""
+    if re.search(r"no\s*gpt\s*output", text, re.I):
+        return "Comparison unavailable (fallback used)."
+    return text
+
+def sanitize_consistency(cons: Any) -> Dict[str, Any]:
+    if not isinstance(cons, dict):
+        return {"per_item": [], "not_in_photos": [], "extra_damage_in_photos": [], "overall": "Comparison unavailable (fallback used)."}
+    cons.setdefault("per_item", [])
+    cons.setdefault("not_in_photos", [])
+    cons.setdefault("extra_damage_in_photos", [])
+    cons["overall"] = sanitize_overall(cons.get("overall",""))
+    return cons
 
 # ======================= PDF helpers =======================
 def pdf_add_section_title(pdf: FPDF, title: str):
@@ -774,21 +776,21 @@ async def vision_review(
         name = (f.filename or "upload").lower()
 
         if name.endswith((".pdf",)):
-            # text
             texts.append(ocr_pdf_first_page(raw))
             texts.append(ocr_pdf_text_caps(raw, MAX_TEXT_PAGES))
             tl = ocr_pdf_scan_tax_labor_page(raw, 60)
             if tl: texts.append(tl)
-            # images
+
             emb = pdfimages_harvest(raw, MAX_PHOTO_PAGES)
             for hname, hbytes, _sz, hmime in emb:
                 photos_for_presence.append((hname, hbytes))
                 images_for_openai.append((hname, hbytes, hmime))
+
             rendered = harvest_photos_from_pdf(raw, max_pages=12)
             for rname, rbytes, _score, rmime in rendered:
                 photos_for_presence.append((rname, rbytes))
                 images_for_openai.append((rname, rbytes, rmime))
-            # rules from PDFs that look like guidelines
+
             if looks_like_guideline_name(name):
                 rules_parts.append(extract_text_from_pdf_bytes_all(raw))
 
@@ -846,14 +848,17 @@ async def vision_review(
     if not est_items and not nearly_out_of_time(t0, 8.0):
         est_items = llm_extract_items_chunked(combined_text, lambda: nearly_out_of_time(t0, 6.0))
 
-    # ----- Vision payload (cap by count & bytes, with per-image downscale)
-    vision_images = build_vision_payload_capped(images_for_openai)
+    # ----- Vision payload (cap by count & bytes)
+    vision_images = build_vision_payload_capped([(n,b,m) for (n,b,m) in images_for_openai])
 
     # ----- Compare estimate ↔ photos (skip if out of time)
-    if nearly_out_of_time(t0, 7.0):
+    if nearly_out_of_time(t0, 7.0) or not vision_images:
         consistency = {"per_item": [], "not_in_photos": [], "extra_damage_in_photos": [], "overall": "Skipped due to time budget."}
     else:
         consistency = compare_estimate_with_photos(est_items, vision_images, t0)
+
+    # Sanitize any legacy “No GPT output” strings
+    consistency = sanitize_consistency(consistency)
 
     # ----- Scoring (unchanged)
     photo_adj = -25 * len(missing_photos)
@@ -892,6 +897,7 @@ async def vision_review(
     pdf.multi_cell(0, 6, f"Tax Rate detected: {tax_rate}")
     pdf.multi_cell(0, 6, f"Compliance Score: {authoritative_score}%")
 
+    # Photos presence
     pdf.ln(4)
     pdf_add_section_title(pdf, "Required Photos Presence (vision-verified)")
     if missing_photos:
@@ -899,13 +905,16 @@ async def vision_review(
     else:
         pdf.multi_cell(0, 6, "All required photos present.")
 
+    # ======== Estimate ↔ Photos Consistency Review ========
     pdf.ln(4)
     pdf_add_section_title(pdf, "Estimate ↔ Photos Consistency Review")
     if consistency.get("per_item"):
         for it in consistency["per_item"][:40]:
             ev = "YES" if it.get("photo_evidence") else "NO"
-            try: conf = float(it.get("confidence", 0))
-            except Exception: conf = 0.0
+            try:
+                conf = float(it.get("confidence", 0))
+            except Exception:
+                conf = 0.0
             conf_txt = f"{round(conf*100)}%"
             line = f"- {it.get('side','unspecified').title()} {it.get('part','component')} · {it.get('op','op')} → Photo: {ev} ({conf_txt}); {it.get('note','')}"
             pdf.multi_cell(0, 6, line)
@@ -913,14 +922,19 @@ async def vision_review(
         pdf.multi_cell(0, 6, "Per-item comparison unavailable.")
 
     if consistency.get("not_in_photos"):
-        pdf.ln(2); pdf_add_section_title(pdf, "Items Estimated but Not Evident in Photos")
-        for raw in consistency["not_in_photos"][:20]: pdf.multi_cell(0, 6, f"- {raw}")
+        pdf.ln(2)
+        pdf_add_section_title(pdf, "Items Estimated but Not Evident in Photos")
+        for raw in consistency["not_in_photos"][:20]:
+            pdf.multi_cell(0, 6, f"- {raw}")
 
     if consistency.get("extra_damage_in_photos"):
-        pdf.ln(2); pdf_add_section_title(pdf, "Damage Visible in Photos but Missing on Estimate")
-        for d in consistency["extra_damage_in_photos"][:20]: pdf.multi_cell(0, 6, f"- {d}")
+        pdf.ln(2)
+        pdf_add_section_title(pdf, "Damage Visible in Photos but Missing on Estimate")
+        for d in consistency["extra_damage_in_photos"][:20]:
+            pdf.multi_cell(0, 6, f"- {d}")
 
-    pdf.ln(2); pdf_kv(pdf, "Consistency Overall", consistency.get("overall", ""))
+    pdf.ln(2)
+    pdf_kv(pdf, "Consistency Overall", consistency.get("overall", ""))
 
     # Save PDF
     pdf_path = os.path.join(PDF_DIR, f"{file_number}.pdf")
@@ -958,10 +972,11 @@ Compliance Score: {authoritative_score}%
     except Exception as e:
         logger.error(f"Email error (continuing): {e}")
 
+    # JSON response (sanitized)
     return {
         "file_number": file_number,
         "claim_number": claim_number,
-        "vehicle": { "line": vehicle_line },
+        "vehicle": {"line": vehicle_line},
         "vin_estimate": vin_est,
         "vin_verification": vin_verify_note,
         "score": f"{authoritative_score}%",
@@ -992,6 +1007,7 @@ async def get_client_rules(client_name: str):
     else:
         logger.error(f"Rules not found for client: {client_name}")
         return JSONResponse(status_code=404, content={"error": "Rules not found for this client."})
+
 
 
 
