@@ -2,7 +2,7 @@ from fastapi import FastAPI, File, UploadFile, Form
 from fastapi.responses import JSONResponse, FileResponse
 from fastapi.middleware.cors import CORSMiddleware
 from typing import List, Tuple, Optional, Dict, Any, Callable
-import os, re, io, base64, json, logging, asyncio, time, tempfile, subprocess, glob
+import os, re, io, base64, json, logging, asyncio, time, tempfile, subprocess, glob, math
 from concurrent.futures import ThreadPoolExecutor
 
 import smtplib
@@ -23,12 +23,16 @@ PDF_OCR_DPI_TXT = int(os.getenv("PDF_OCR_DPI_TXT", "150"))
 PDF_OCR_DPI_PH  = int(os.getenv("PDF_OCR_DPI_PH",  "140"))
 MAX_TEXT_PAGES  = int(os.getenv("MAX_TEXT_PAGES",  "3"))     # quick skim (sub-minute)
 MAX_PHOTO_PAGES = int(os.getenv("MAX_PHOTO_PAGES", "36"))    # better presence detection
-MAX_VISION_IMGS = int(os.getenv("MAX_VISION_IMGS", "10"))    # vision comparison
+MAX_VISION_IMGS = int(os.getenv("MAX_VISION_IMGS", "8"))     # tighter cap for latency
 THREADS         = int(os.getenv("OCR_THREADS",     "4"))
 OAI_MODEL       = os.getenv("OAI_MODEL", "gpt-4o-mini")
 OAI_TIMEOUT_S   = float(os.getenv("OAI_TIMEOUT_S", "15"))
 TIME_BUDGET_S   = float(os.getenv("TIME_BUDGET_S", "55"))    # sub-minute target
-VISION_BATCH    = int(os.getenv("VISION_BATCH", "12"))
+VISION_BATCH    = int(os.getenv("VISION_BATCH", "10"))
+
+# New: vision payload size caps
+MAX_TOTAL_IMAGE_BYTES = int(os.getenv("MAX_TOTAL_IMAGE_BYTES", str(3_000_000)))  # ~3 MB payload
+MAX_PER_IMAGE_BYTES   = int(os.getenv("MAX_PER_IMAGE_BYTES",   str(350_000)))    # ~350 KB per image
 
 # ======================= PDF storage =======================
 PDF_DIR = os.getenv("PDF_DIR", "/tmp")
@@ -180,23 +184,44 @@ def ensure_openai_image(blob: bytes) -> Tuple[bytes, str]:
     mime = sniff_image_mime(blob)
     if mime in ACCEPTED_MIMES:
         return blob, mime
-    # try to decode and re-encode to JPEG
     try:
         im = Image.open(io.BytesIO(blob))
         if im.mode not in ("RGB", "L"):
             im = im.convert("RGB")
         buf = io.BytesIO()
-        im.save(buf, format="JPEG", quality=90)
+        im.save(buf, format="JPEG", quality=85)
         return buf.getvalue(), "image/jpeg"
     except Exception:
-        # last resort, return original with a safe default (JPEG conversion)
-        try:
-            im = Image.new("RGB", (8, 8), (0, 0, 0))
-            buf = io.BytesIO()
-            im.save(buf, format="JPEG", quality=85)
-            return buf.getvalue(), "image/jpeg"
-        except Exception:
-            return blob, "image/jpeg"
+        # last resort tiny JPEG
+        im = Image.new("RGB", (8, 8), (0, 0, 0))
+        buf = io.BytesIO()
+        im.save(buf, format="JPEG", quality=80)
+        return buf.getvalue(), "image/jpeg"
+
+def downscale_jpeg_to_max_bytes(blob: bytes, max_bytes: int) -> bytes:
+    """Downscale JPEG by reducing quality and size until under max_bytes."""
+    try:
+        im = Image.open(io.BytesIO(blob)).convert("RGB")
+    except Exception:
+        return blob
+    # quick quality ladder then optional resize
+    for q in (85, 80, 75, 70, 65, 60, 55):
+        out = io.BytesIO()
+        im.save(out, format="JPEG", quality=q, optimize=True)
+        b = out.getvalue()
+        if len(b) <= max_bytes:
+            return b
+    # resize by 0.8 steps until under cap or min size
+    w, h = im.size
+    while len(b) > max_bytes and min(w, h) > 800:
+        w = int(w * 0.85); h = int(h * 0.85)
+        im2 = im.resize((w, h), Image.LANCZOS)
+        out = io.BytesIO()
+        im2.save(out, format="JPEG", quality=65, optimize=True)
+        b = out.getvalue()
+        if len(b) <= max_bytes:
+            return b
+    return b
 
 def make_data_url(blob: bytes, mime: str) -> str:
     return f"data:{mime};base64,{base64.b64encode(blob).decode('utf-8')}"
@@ -205,7 +230,7 @@ def make_data_url(blob: bytes, mime: str) -> str:
 def pdfimages_harvest(pdf_bytes: bytes, max_images: int = MAX_PHOTO_PAGES) -> List[Tuple[str, bytes, float, str]]:
     """
     Returns list of (name, bytes, size_bytes, mime). Keeps original format when possible.
-    For pdfimages outputs like .jpg/.ppm/.pbm, we convert PPM/PBM to JPEG only.
+    For pdfimages outputs like .ppm/.pbm, convert to JPEG only.
     """
     out: List[Tuple[str, bytes, float, str]] = []
     try:
@@ -223,7 +248,6 @@ def pdfimages_harvest(pdf_bytes: bytes, max_images: int = MAX_PHOTO_PAGES) -> Li
                         raw = fh.read()
                     mime = sniff_image_mime(raw)
                     if mime not in ACCEPTED_MIMES:
-                        # convert only if needed
                         raw, mime = ensure_openai_image(raw)
                     name_ext = {
                         "image/jpeg": f"pdfimg-{i}.jpg",
@@ -238,7 +262,7 @@ def pdfimages_harvest(pdf_bytes: bytes, max_images: int = MAX_PHOTO_PAGES) -> Li
         logger.info(f"pdfimages not available or failed: {e}")
     return out
 
-# ===== Photo-like page harvest (render fallback) — not forced to PNG anymore =====
+# ===== Photo-like page harvest (render fallback) — saved as JPEG =====
 def harvest_photos_from_pdf(pdf_bytes: bytes, max_pages: int) -> List[Tuple[str, bytes, float, str]]:
     out: List[Tuple[str, bytes, float, str]] = []
     try:
@@ -258,7 +282,6 @@ def harvest_photos_from_pdf(pdf_bytes: bytes, max_pages: int) -> List[Tuple[str,
 
             if looks_like_photos or has_vin_cue or has_odo_cue:
                 buf = io.BytesIO()
-                # Save rendered page as JPEG (new image; no original to preserve)
                 page.convert("RGB").save(buf, format="JPEG", quality=85)
                 score = (corner_hits * 10 + var) + (50 if has_vin_cue else 0) + (40 if has_odo_cue else 0)
                 out.append((f"pdf-p{i}.jpg", buf.getvalue(), score, "image/jpeg"))
@@ -466,7 +489,7 @@ def append_client_rules_from_blob(name: str, raw: bytes, rules_parts: List[str])
     except Exception as e:
         logger.warning(f"guideline extract error ({name}): {e}")
 
-# ======================= Estimate items (robust parser + LLM fallback) =======================
+# ======================= Estimate items (regex + LLM fallback) =======================
 PANELS = [
     "front bumper cover","rear bumper cover","bumper cover","bumper",
     "fender","door","hood","grille","headlamp","headlight","taillamp","tail lamp",
@@ -570,14 +593,14 @@ def extract_estimate_items_llm(text: str) -> List[Dict[str, str]]:
         rsp = client_fast.chat.completions.create(
             model=os.getenv("OAI_MODEL","gpt-4o-mini"),
             messages=[{"role":"system","content":sys},{"role":"user","content":text[:18000]}],
-            temperature=0, max_tokens=550,
+            temperature=0, max_tokens=500,
         )
         raw = (rsp.choices[0].message.content or "").strip()
         raw = raw.removeprefix("```json").removesuffix("```").strip()
         data = json.loads(raw)
         if isinstance(data, list):
             cleaned = []
-            for it in data[:160]:
+            for it in data[:140]:
                 cleaned.append({
                     "op": (it.get("op") or "").lower(),
                     "part": (it.get("part") or "").lower(),
@@ -602,7 +625,7 @@ def _chunk_text(txt: str, size: int = 6000, overlap: int = 400) -> List[str]:
     return out
 
 def llm_extract_items_chunked(full_text: str, time_guard: Callable[[], bool]) -> List[Dict[str, str]]:
-    chunks = _chunk_text(full_text, size=6000, overlap=400)[:8]
+    chunks = _chunk_text(full_text, size=6000, overlap=400)[:6]
     merged: List[Dict[str, str]] = []
     seen = set()
     for ch in chunks:
@@ -615,19 +638,59 @@ def llm_extract_items_chunked(full_text: str, time_guard: Callable[[], bool]) ->
                 merged.append(it); seen.add(key)
     return merged
 
-# ======================= Vision compare (uses proper per-image MIME) =======================
-def build_vision_payload(images: List[Tuple[str, bytes, str]]) -> List[Dict[str, Any]]:
+# ======================= Vision helpers =======================
+def build_vision_payload_capped(images: List[Tuple[str, bytes, str]]) -> List[Dict[str, Any]]:
     """
-    images: list of (name, bytes, mime)
+    Apply per-image and total payload caps; downscale JPEGs if needed.
+    Returns OpenAI image_url parts ready for the chat call.
     """
     parts: List[Dict[str, Any]] = []
+    total = 0
     for name, blob, mime in images[:MAX_VISION_IMGS]:
         safe_bytes, safe_mime = ensure_openai_image(blob)
+        # downscale JPEGs if over per-image cap
+        if safe_mime == "image/jpeg" and len(safe_bytes) > MAX_PER_IMAGE_BYTES:
+            safe_bytes = downscale_jpeg_to_max_bytes(safe_bytes, MAX_PER_IMAGE_BYTES)
+        # respect total cap
+        if total + len(safe_bytes) > MAX_TOTAL_IMAGE_BYTES:
+            break
         parts.append({"type": "image_url", "image_url": {"url": make_data_url(safe_bytes, safe_mime)}})
+        total += len(safe_bytes)
     return parts
 
+def call_openai_json_sure(messages: List[Dict[str, Any]], max_tokens: int, t0: float, label: str) -> Dict[str, Any]:
+    """Robust wrapper: retries with smaller payload if needed, guarantees dict output."""
+    if nearly_out_of_time(t0, 7.0):
+        return {"error": "time_budget", "per_item": [], "not_in_photos": [], "extra_damage_in_photos": [], "overall": "Skipped due to time budget."}
+    for attempt in range(2):
+        try:
+            rsp = client_fast.chat.completions.create(
+                model=OAI_MODEL,
+                messages=messages,
+                max_tokens=max_tokens,
+                temperature=0
+            )
+            txt = (rsp.choices[0].message.content or "").strip()
+            if not txt:
+                raise ValueError("empty_content")
+            txt = txt.removeprefix("```json").removesuffix("```").strip()
+            data = json.loads(txt)
+            if isinstance(data, dict):
+                return data
+            # if it returns a list, wrap minimally
+            if isinstance(data, list):
+                return {"per_item": data, "not_in_photos": [], "extra_damage_in_photos": [], "overall": "Parsed list."}
+            raise ValueError("shape_mismatch")
+        except Exception as e:
+            logger.error(f"OpenAI {label} attempt {attempt+1} failed: {type(e).__name__}: {e}")
+            # shrink max_tokens on retry
+            max_tokens = max(350, int(max_tokens * 0.7))
+    # Guaranteed non-empty fallback
+    return {"per_item": [], "not_in_photos": [], "extra_damage_in_photos": [], "overall": "Comparison unavailable (no LLM output)."}
+
 def compare_estimate_with_photos(items: List[Dict[str, str]],
-                                 images_for_vision: List[Dict[str, Any]]) -> Dict[str, Any]:
+                                 images_for_vision: List[Dict[str, Any]],
+                                 t0: float) -> Dict[str, Any]:
     schema = {
         "type": "object",
         "properties": {
@@ -663,40 +726,22 @@ def compare_estimate_with_photos(items: List[Dict[str, str]],
     ]
     user_parts.extend(images_for_vision)
 
-    try:
-        rsp = client.chat.completions.create(
-            model=OAI_MODEL,
-            messages=[
-                {"role": "system", "content": system},
-                {"role": "user",   "content": user_parts}
-            ],
-            max_tokens=1200,
-            temperature=0
-        )
-        txt = (rsp.choices[0].message.content or "").strip()
-        txt = txt.removeprefix("```json").removesuffix("```").strip()
-        data = json.loads(txt)
-        if not isinstance(data, dict) or "per_item" not in data:
-            raise ValueError("JSON shape mismatch")
-        return data
-    except Exception as e:
-        logger.error(f"Vision compare JSON error: {type(e).__name__}: {e}")
-        return {
-            "per_item": [],
-            "not_in_photos": [],
-            "extra_damage_in_photos": [],
-            "overall": f"Comparison unavailable ({type(e).__name__})."
-        }
+    return call_openai_json_sure(
+        messages=[
+            {"role": "system", "content": system},
+            {"role": "user",   "content": user_parts}
+        ],
+        max_tokens=900,
+        t0=t0,
+        label="vision"
+    )
 
 # ======================= PDF helpers =======================
 def pdf_add_section_title(pdf: FPDF, title: str):
-    pdf.set_font_size(12)
-    pdf.cell(0, 8, txt=title, ln=True)
-    pdf.set_font_size(10)
+    pdf.set_font_size(12); pdf.cell(0, 8, txt=title, ln=True); pdf.set_font_size(10)
 
 def pdf_kv(pdf: FPDF, key: str, val: str):
-    pdf.set_font_size(10)
-    pdf.multi_cell(0, 6, f"{key}: {val}")
+    pdf.set_font_size(10); pdf.multi_cell(0, 6, f"{key}: {val}")
 
 # ======================= Routes =======================
 @app.get("/")
@@ -718,7 +763,7 @@ async def vision_review(
     loop = asyncio.get_running_loop()
     pool = ThreadPoolExecutor(max_workers=THREADS)
 
-    # ----- Ingest everything (no filename allowlist; accept any form keys) -----
+    # ----- Ingest everything -----
     texts: List[str] = []
     photos_for_presence: List[Tuple[str, bytes]] = []
     images_for_openai: List[Tuple[str, bytes, str]] = []  # (name, bytes, mime)
@@ -729,25 +774,21 @@ async def vision_review(
         name = (f.filename or "upload").lower()
 
         if name.endswith((".pdf",)):
+            # text
             texts.append(ocr_pdf_first_page(raw))
             texts.append(ocr_pdf_text_caps(raw, MAX_TEXT_PAGES))
-            tax_or_labor = ocr_pdf_scan_tax_labor_page(raw, 60)
-            if tax_or_labor:
-                texts.append(tax_or_labor)
-
-            # harvest embedded images (respect original format)
+            tl = ocr_pdf_scan_tax_labor_page(raw, 60)
+            if tl: texts.append(tl)
+            # images
             emb = pdfimages_harvest(raw, MAX_PHOTO_PAGES)
             for hname, hbytes, _sz, hmime in emb:
                 photos_for_presence.append((hname, hbytes))
                 images_for_openai.append((hname, hbytes, hmime))
-
-            # photo-like rendered pages fallback
             rendered = harvest_photos_from_pdf(raw, max_pages=12)
             for rname, rbytes, _score, rmime in rendered:
                 photos_for_presence.append((rname, rbytes))
                 images_for_openai.append((rname, rbytes, rmime))
-
-            # Also treat PDFs named like guidelines as rules
+            # rules from PDFs that look like guidelines
             if looks_like_guideline_name(name):
                 rules_parts.append(extract_text_from_pdf_bytes_all(raw))
 
@@ -760,18 +801,15 @@ async def vision_review(
                     logger.warning(f"DOCX error: {e}")
             else:
                 texts.append(raw.decode("utf-8", errors="ignore"))
-
             if looks_like_guideline_name(name):
                 append_client_rules_from_blob(name, raw, rules_parts)
 
         elif name.endswith((".jpg", ".jpeg", ".png", ".webp", ".gif")):
-            # pass-through; no force-PNG. Prepare mime later.
             mime = sniff_image_mime(raw) or "image/jpeg"
             photos_for_presence.append((name, raw))
             images_for_openai.append((name, raw, mime))
 
         else:
-            # Unknown file types: attempt to treat as text
             try:
                 texts.append(raw.decode("utf-8", errors="ignore"))
             except Exception:
@@ -779,16 +817,16 @@ async def vision_review(
 
     combined_text = "\n".join(t for t in texts if t)
 
-    # Merge client_rules form text with any attached rules docs
+    # Merge client_rules with any attached rules docs
     effective_rules = (client_rules or "").strip()
     if rules_parts:
         effective_rules = (effective_rules + "\n\n" + "\n\n".join(rules_parts)).strip()
 
-    # ----- Required photo presence (vision verified presence only)
+    # ----- Required photo presence -----
     presence_flags = await loop.run_in_executor(pool, detect_required_photo_presence, photos_for_presence)
     missing_photos = [k for k, v in presence_flags.items() if not v]
 
-    # ----- VIN + vehicle fields (VIN from estimate text only; verify via photo presence)
+    # ----- VIN + vehicle fields (VIN from estimate only; verify via photo presence)
     vin_est = extract_vin_from_text(combined_text) or "N/A"
     vin_photo_present = presence_flags.get("vin", False)
     vin_verify_note = (
@@ -803,21 +841,21 @@ async def vision_review(
     tax_rate = parse_tax_rate(combined_text) or "Not detected"
     mileage_est = parse_mileage_from_text(combined_text) or "Not listed"
 
-    # ----- Estimate items; fallback to LLM if regex misses and time allows
+    # ----- Estimate items
     est_items = extract_estimate_items(combined_text)
-    if not est_items and not nearly_out_of_time(t0):
-        est_items = llm_extract_items_chunked(combined_text, lambda: nearly_out_of_time(t0))
+    if not est_items and not nearly_out_of_time(t0, 8.0):
+        est_items = llm_extract_items_chunked(combined_text, lambda: nearly_out_of_time(t0, 6.0))
 
-    # ----- Vision payload (per-image MIME, no PNG forcing)
-    vision_payload = build_vision_payload(images_for_openai)
+    # ----- Vision payload (cap by count & bytes, with per-image downscale)
+    vision_images = build_vision_payload_capped(images_for_openai)
 
     # ----- Compare estimate ↔ photos (skip if out of time)
-    if nearly_out_of_time(t0):
+    if nearly_out_of_time(t0, 7.0):
         consistency = {"per_item": [], "not_in_photos": [], "extra_damage_in_photos": [], "overall": "Skipped due to time budget."}
     else:
-        consistency = compare_estimate_with_photos(est_items, vision_payload)
+        consistency = compare_estimate_with_photos(est_items, vision_images, t0)
 
-    # ----- Scoring (kept same logic)
+    # ----- Scoring (unchanged)
     photo_adj = -25 * len(missing_photos)
     labor_penalty = 0 if labor_rates_page else -50
     tax_penalty = 0
@@ -854,7 +892,6 @@ async def vision_review(
     pdf.multi_cell(0, 6, f"Tax Rate detected: {tax_rate}")
     pdf.multi_cell(0, 6, f"Compliance Score: {authoritative_score}%")
 
-    # Photos presence
     pdf.ln(4)
     pdf_add_section_title(pdf, "Required Photos Presence (vision-verified)")
     if missing_photos:
@@ -862,16 +899,13 @@ async def vision_review(
     else:
         pdf.multi_cell(0, 6, "All required photos present.")
 
-    # ======== Estimate ↔ Photos Consistency Review ========
     pdf.ln(4)
     pdf_add_section_title(pdf, "Estimate ↔ Photos Consistency Review")
     if consistency.get("per_item"):
         for it in consistency["per_item"][:40]:
             ev = "YES" if it.get("photo_evidence") else "NO"
-            try:
-                conf = float(it.get("confidence", 0))
-            except Exception:
-                conf = 0.0
+            try: conf = float(it.get("confidence", 0))
+            except Exception: conf = 0.0
             conf_txt = f"{round(conf*100)}%"
             line = f"- {it.get('side','unspecified').title()} {it.get('part','component')} · {it.get('op','op')} → Photo: {ev} ({conf_txt}); {it.get('note','')}"
             pdf.multi_cell(0, 6, line)
@@ -879,19 +913,14 @@ async def vision_review(
         pdf.multi_cell(0, 6, "Per-item comparison unavailable.")
 
     if consistency.get("not_in_photos"):
-        pdf.ln(2)
-        pdf_add_section_title(pdf, "Items Estimated but Not Evident in Photos")
-        for raw in consistency["not_in_photos"][:20]:
-            pdf.multi_cell(0, 6, f"- {raw}")
+        pdf.ln(2); pdf_add_section_title(pdf, "Items Estimated but Not Evident in Photos")
+        for raw in consistency["not_in_photos"][:20]: pdf.multi_cell(0, 6, f"- {raw}")
 
     if consistency.get("extra_damage_in_photos"):
-        pdf.ln(2)
-        pdf_add_section_title(pdf, "Damage Visible in Photos but Missing on Estimate")
-        for d in consistency["extra_damage_in_photos"][:20]:
-            pdf.multi_cell(0, 6, f"- {d}")
+        pdf.ln(2); pdf_add_section_title(pdf, "Damage Visible in Photos but Missing on Estimate")
+        for d in consistency["extra_damage_in_photos"][:20]: pdf.multi_cell(0, 6, f"- {d}")
 
-    pdf.ln(2)
-    pdf_kv(pdf, "Consistency Overall", consistency.get("overall", ""))
+    pdf.ln(2); pdf_kv(pdf, "Consistency Overall", consistency.get("overall", ""))
 
     # Save PDF
     pdf_path = os.path.join(PDF_DIR, f"{file_number}.pdf")
@@ -903,7 +932,7 @@ async def vision_review(
     except Exception as e:
         logger.error(f"PDF write error: {e}")
 
-    # OPTIONAL email (unchanged)
+    # EMAIL (unchanged)
     try:
         msg = EmailMessage()
         msg["Subject"] = f"AI-4-IA Review: {claim_number}"
@@ -932,7 +961,7 @@ Compliance Score: {authoritative_score}%
     return {
         "file_number": file_number,
         "claim_number": claim_number,
-        "vehicle": vehicle_line,
+        "vehicle": { "line": vehicle_line },
         "vin_estimate": vin_est,
         "vin_verification": vin_verify_note,
         "score": f"{authoritative_score}%",
@@ -956,7 +985,6 @@ async def get_client_rules(client_name: str):
         try:
             doc = Document(file_path)
             text = "\n".join([p.text for p in doc.paragraphs if p.text.strip()])
-            logger.debug(f"Client rules for {client_name}: {text[:500]}...")
             return {"text": text}
         except Exception as e:
             logger.error(f"Client rules error: {str(e)}")
