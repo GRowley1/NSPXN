@@ -28,7 +28,6 @@ THREADS         = int(os.getenv("OCR_THREADS",     "4"))
 OAI_MODEL       = os.getenv("OAI_MODEL", "gpt-4o-mini")
 OAI_TIMEOUT_S   = float(os.getenv("OAI_TIMEOUT_S", "15"))
 TIME_BUDGET_S   = float(os.getenv("TIME_BUDGET_S", "55"))    # sub-minute target
-VISION_BATCH    = int(os.getenv("VISION_BATCH", "10"))
 
 # Vision payload size caps
 MAX_TOTAL_IMAGE_BYTES = int(os.getenv("MAX_TOTAL_IMAGE_BYTES", str(3_000_000)))  # ~3 MB
@@ -69,7 +68,6 @@ def time_left(t0: float) -> float: return max(0.0, TIME_BUDGET_S - t_elapsed(t0)
 def nearly_out_of_time(t0: float, margin: float = 6.0) -> bool: return time_left(t0) <= margin
 
 # ======================= Output sanitizers =======================
-# Catch all variants (emoji, HTML-entity, punctuation/spacing)
 _NO_GPT_PAT = re.compile(
     r"(?is)"
     r"(?:\u26a0\ufe0f?\s*|&#9888;&#65039;\s*)?"   # optional ⚠️ or HTML entity
@@ -105,6 +103,33 @@ def sanitize_json(obj: Any) -> Any:
         return [sanitize_json(v) for v in obj]
     return scrub_text(obj)
 
+# Pre-sanitize any “No GPT output” text *before* JSON parsing
+def _pre_sanitize_json_str(txt: str) -> str:
+    return _NO_GPT_PAT.sub("Comparison unavailable (fallback used).", txt or "")
+
+# Extract JSON object/array from mixed text
+def _extract_json_fragment(txt: str) -> Optional[str]:
+    txt = txt.strip()
+    # Try a direct load first
+    try:
+        json.loads(txt)
+        return txt
+    except Exception:
+        pass
+    # Find the largest balanced {...} or [...] region
+    first_obj = txt.find("{")
+    last_obj = txt.rfind("}")
+    first_arr = txt.find("[")
+    last_arr = txt.rfind("]")
+    cand = None
+    if first_obj != -1 and last_obj != -1 and last_obj > first_obj:
+        cand = txt[first_obj:last_obj+1]
+    elif first_arr != -1 and last_arr != -1 and last_arr > first_arr:
+        cand = txt[first_arr:last_arr+1]
+    if cand:
+        return cand
+    return None
+
 # ======================= OCR & text helpers =======================
 def preprocess_image(img: Image.Image) -> Image.Image:
     img = img.convert("L")
@@ -121,7 +146,7 @@ def ocr_pdf_first_page(pdf_bytes: bytes) -> str:
     return ocr_image_quick(pages[0]) if pages else ""
 
 def ocr_pdf_text_caps(pdf_bytes: bytes, max_pages: int, t0: float) -> str:
-    if nearly_out_of_time(t0, 10.0):  # guard early
+    if nearly_out_of_time(t0, 10.0):
         return ""
     pages = convert_from_bytes(pdf_bytes, dpi=PDF_OCR_DPI_TXT)
     buf, used = [], 0
@@ -685,7 +710,7 @@ def llm_extract_items_chunked(full_text: str, time_guard: Callable[[], bool]) ->
                 merged.append(it); seen.add(key)
     return merged
 
-# ======================= Vision helpers (capped, with fallback) =======================
+# ======================= Vision helpers (capped, with robust JSON parse) =======================
 def build_vision_payload_capped(images: List[Tuple[str, bytes, str]]) -> List[Dict[str, Any]]:
     parts: List[Dict[str, Any]] = []
     total = 0
@@ -706,24 +731,42 @@ def call_openai_json_sure(messages: List[Dict[str, Any]], max_tokens: int, t0: f
         try:
             rsp = client_fast.chat.completions.create(
                 model=OAI_MODEL,
-                messages=messages,
+                messages=messages + [{
+                    "role":"system",
+                    "content":"Always respond with STRICT JSON only. Never include phrases like 'No GPT output'."
+                }],
                 max_tokens=max_tokens,
                 temperature=0
             )
             txt = (rsp.choices[0].message.content or "").strip()
             if not txt:
                 raise ValueError("empty_content")
-            txt = txt.removeprefix("```json").removesuffix("```").strip()
-            data = json.loads(txt)
-            if isinstance(data, dict):
-                return data
-            if isinstance(data, list):
-                return {"per_item": data, "not_in_photos": [], "extra_damage_in_photos": [], "overall": "Parsed list."}
-            raise ValueError("shape_mismatch")
+            # Pre-sanitize any stray phrases
+            txt = _pre_sanitize_json_str(txt)
+            # Remove markdown fences if present
+            if txt.startswith("```"):
+                txt = txt.strip("`")
+                # after strip, try to find json again
+            # Try a direct load
+            try:
+                return json.loads(txt)
+            except Exception:
+                # Try extracting the JSON fragment
+                frag = _extract_json_fragment(txt)
+                if frag:
+                    frag = _pre_sanitize_json_str(frag)
+                    return json.loads(frag)
+                raise
         except Exception as e:
             logger.error(f"OpenAI {label} attempt {attempt+1} failed: {type(e).__name__}: {e}")
             max_tokens = max(350, int(max_tokens * 0.7))
-    return {"per_item": [], "not_in_photos": [], "extra_damage_in_photos": [], "overall": "Comparison unavailable (fallback used)."}
+    # Safe fallback—never say "No GPT output"
+    return {
+        "per_item": [],
+        "not_in_photos": [],
+        "extra_damage_in_photos": [],
+        "overall": "Comparison unavailable (fallback used)."
+    }
 
 def compare_estimate_with_photos(items: List[Dict[str, str]],
                                  images_for_vision: List[Dict[str, Any]],
@@ -1169,6 +1212,7 @@ async def get_client_rules(client_name: str):
     else:
         logger.error(f"Rules not found for client: {client_name}")
         return JSONResponse(status_code=404, content={"error": "Rules not found for this client."})
+
 
 
 
