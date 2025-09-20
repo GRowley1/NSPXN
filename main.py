@@ -103,20 +103,16 @@ def sanitize_json(obj: Any) -> Any:
         return [sanitize_json(v) for v in obj]
     return scrub_text(obj)
 
-# Pre-sanitize any “No GPT output” text *before* JSON parsing
 def _pre_sanitize_json_str(txt: str) -> str:
     return _NO_GPT_PAT.sub("Comparison unavailable (fallback used).", txt or "")
 
-# Extract JSON object/array from mixed text
 def _extract_json_fragment(txt: str) -> Optional[str]:
     txt = txt.strip()
-    # Try a direct load first
     try:
         json.loads(txt)
         return txt
     except Exception:
         pass
-    # Find the largest balanced {...} or [...] region
     first_obj = txt.find("{")
     last_obj = txt.rfind("}")
     first_arr = txt.find("[")
@@ -741,17 +737,12 @@ def call_openai_json_sure(messages: List[Dict[str, Any]], max_tokens: int, t0: f
             txt = (rsp.choices[0].message.content or "").strip()
             if not txt:
                 raise ValueError("empty_content")
-            # Pre-sanitize any stray phrases
             txt = _pre_sanitize_json_str(txt)
-            # Remove markdown fences if present
             if txt.startswith("```"):
                 txt = txt.strip("`")
-                # after strip, try to find json again
-            # Try a direct load
             try:
                 return json.loads(txt)
             except Exception:
-                # Try extracting the JSON fragment
                 frag = _extract_json_fragment(txt)
                 if frag:
                     frag = _pre_sanitize_json_str(frag)
@@ -760,7 +751,6 @@ def call_openai_json_sure(messages: List[Dict[str, Any]], max_tokens: int, t0: f
         except Exception as e:
             logger.error(f"OpenAI {label} attempt {attempt+1} failed: {type(e).__name__}: {e}")
             max_tokens = max(350, int(max_tokens * 0.7))
-    # Safe fallback—never say "No GPT output"
     return {
         "per_item": [],
         "not_in_photos": [],
@@ -1175,6 +1165,22 @@ Compliance vs Client Guidelines
     except Exception as e:
         logger.error(f"Email error (continuing): {e}")
 
+    # ===== Build a single combined text block for the UI ("gpt_output") =====
+    # This mirrors the email/PDF content so the front end never falls back to "No GPT Output".
+    if consistency.get("per_item"):
+        yes_cnt = sum(1 for it in consistency["per_item"] if it.get("photo_evidence"))
+        no_cnt  = sum(1 for it in consistency["per_item"] if not it.get("photo_evidence"))
+        cons_head = f"Estimate ↔ Photos Summary: {yes_cnt} items with photo evidence, {no_cnt} without."
+    else:
+        cons_head = "Estimate ↔ Photos Summary: Per-item comparison unavailable."
+
+    gpt_output = scrub_text(
+f"""{guideline_block}
+
+{cons_head}
+Overall: {consistency.get('overall','')}
+""").strip()
+
     # JSON response — final recursive sanitize
     response_payload = {
         "file_number": file_number,
@@ -1185,7 +1191,9 @@ Compliance vs Client Guidelines
         "score": f"{authoritative_score}%",
         "missing_photos": missing_photos,
         "consistency_review": consistency,
-        "guideline_comparison": guideline_block
+        "guideline_comparison": guideline_block,
+        # >>>>>>>>>>>>>>>>>> NEW: feed the UI the combined human-readable block <<<<<<<<<<<<<<<<<<
+        "gpt_output": gpt_output
     }
     return sanitize_json(response_payload)
 
