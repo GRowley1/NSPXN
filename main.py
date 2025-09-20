@@ -69,25 +69,41 @@ def time_left(t0: float) -> float: return max(0.0, TIME_BUDGET_S - t_elapsed(t0)
 def nearly_out_of_time(t0: float, margin: float = 6.0) -> bool: return time_left(t0) <= margin
 
 # ======================= Output sanitizers =======================
-_NO_GPT_PAT = re.compile(r"no\s*gpt\s*output", re.I)
+# Catch all variants (emoji, HTML-entity, punctuation/spacing)
+_NO_GPT_PAT = re.compile(
+    r"(?is)"
+    r"(?:\u26a0\ufe0f?\s*|&#9888;&#65039;\s*)?"   # optional ⚠️ or HTML entity
+    r"(?:"
+    r"no\W*gp?t\W*output"
+    r"|gpt\W*returned\W*no\W*output"
+    r"|no\W*output\W*from\W*gpt"
+    r"|no\W*model\W*output"
+    r"|no\W*ai\W*output"
+    r")"
+)
 
-def scrub_text(s: str) -> str:
-    if not isinstance(s, str):
-        return s
-    s2 = _NO_GPT_PAT.sub("Comparison unavailable (fallback used).", s)
-    return s2
-
-def sanitize_overall(text: str) -> str:
-    return scrub_text(text or "")
+def scrub_text(s: Any) -> Any:
+    if isinstance(s, str):
+        return _NO_GPT_PAT.sub("Comparison unavailable (fallback used).", s)
+    return s
 
 def sanitize_consistency(cons: Any) -> Dict[str, Any]:
     if not isinstance(cons, dict):
         return {"per_item": [], "not_in_photos": [], "extra_damage_in_photos": [], "overall": "Comparison unavailable (fallback used)."}
-    cons.setdefault("per_item", [])
-    cons.setdefault("not_in_photos", [])
-    cons.setdefault("extra_damage_in_photos", [])
-    cons["overall"] = sanitize_overall(cons.get("overall",""))
-    return cons
+    out = {
+        "per_item": cons.get("per_item", []) or [],
+        "not_in_photos": cons.get("not_in_photos", []) or [],
+        "extra_damage_in_photos": cons.get("extra_damage_in_photos", []) or [],
+        "overall": scrub_text(cons.get("overall", "") or "")
+    }
+    return out
+
+def sanitize_json(obj: Any) -> Any:
+    if isinstance(obj, dict):
+        return {k: sanitize_json(v) for k, v in obj.items()}
+    if isinstance(obj, list):
+        return [sanitize_json(v) for v in obj]
+    return scrub_text(obj)
 
 # ======================= OCR & text helpers =======================
 def preprocess_image(img: Image.Image) -> Image.Image:
@@ -210,14 +226,12 @@ def downscale_jpeg_to_max_bytes(blob: bytes, max_bytes: int) -> bytes:
         im = Image.open(io.BytesIO(blob)).convert("RGB")
     except Exception:
         return blob
-    # quality ladder
     for q in (85, 80, 75, 70, 65, 60, 55):
         out = io.BytesIO()
         im.save(out, format="JPEG", quality=q, optimize=True)
         b = out.getvalue()
         if len(b) <= max_bytes:
             return b
-    # resize loop
     w, h = im.size
     b = out.getvalue()
     while len(b) > max_bytes and min(w, h) > 800:
@@ -226,8 +240,6 @@ def downscale_jpeg_to_max_bytes(blob: bytes, max_bytes: int) -> bytes:
         out = io.BytesIO()
         im2.save(out, format="JPEG", quality=65, optimize=True)
         b = out.getvalue()
-        if len(b) <= max_bytes:
-            return b
     return b
 
 def make_data_url(blob: bytes, mime: str) -> str:
@@ -767,37 +779,21 @@ def build_guideline_comparison(
     tax_rate: str,
     uploaded_names: List[str]
 ) -> str:
-    # helpers
     chk = lambda b: "✔️" if b else "❌"
-    # Signals
     rules_low = (effective_rules or "").lower()
     text_low = (combined_text or "").lower()
     names_low = [n.lower() for n in uploaded_names]
 
-    # NADA / valuation doc present?
     nada_present = any(("nada" in n or "valuation" in n or "ccc" in n or "acv" in n) for n in names_low)
-
-    # Total loss cues
     total_loss = any(k in text_low for k in ["total loss", "salvage", "ccc", "valuation", "acv"])
-
-    # Parts usage cues
-    parts_tokens = ("lkq", "recycled", "used", "aftermarket", "am ")
+    parts_tokens = ("lkq", "recycled", "used", "aftermarket", " am ")
     parts_non_oem_used = any(tok in text_low for tok in parts_tokens)
-
-    # Tow/Storage cues
     tow_storage_present = any(k in text_low for k in ["tow", "towing", "storage"])
-
-    # Betterment/Depreciation cues
     betterment_present = any(k in text_low for k in ["betterment", "depreciation"])
-
-    # Release policy cue: if rules forbid releases and estimate mentions "release"
     release_forbidden = ("no release" in rules_low) or ("do not release" in rules_low)
     release_mentioned = "release" in text_low
-
-    # Photo requirements cue
     photos_req = any(k in rules_low for k in ["photo", "vin", "odometer", "license", "four corners"])
 
-    # Vehicle age calc
     year = parse_year_from_vehicle_line(vehicle_line or "")
     age_desc = ""
     if year:
@@ -808,18 +804,16 @@ def build_guideline_comparison(
         except Exception:
             pass
 
-    # Build lines
     lines: List[str] = []
     lines.append("✅ Compliance vs Client Guidelines")
 
-    # Release
     if release_forbidden:
         lines.append("")
         lines.append("Release Paperwork:")
         ok = (not release_mentioned)
         lines.append(f"{chk(True)} Guidelines: NO release of estimate to owner/repair facility.")
         lines.append(f"{chk(ok)} Estimate includes no release indication.")
-    # Total loss handling
+
     lines.append("")
     lines.append("Total Loss Handling:")
     if total_loss:
@@ -827,7 +821,6 @@ def build_guideline_comparison(
     else:
         lines.append(f"{chk(True)} Not a total loss. No CCC valuation or salvage bids required.")
 
-    # Parts usage
     lines.append("")
     lines.append("Parts Usage:")
     if age_desc or mileage_est:
@@ -837,12 +830,8 @@ def build_guideline_comparison(
         else:
             lines.append(f"{chk(True)} {age_miles} → No non-OEM parts flagged in estimate.")
     else:
-        if parts_non_oem_used:
-            lines.append(f"{chk(True)} Non-OEM parts present.")
-        else:
-            lines.append(f"{chk(True)} No non-OEM parts flagged in estimate.")
+        lines.append(f"{chk(not parts_non_oem_used)} Non-OEM parts present." if parts_non_oem_used else f"{chk(True)} No non-OEM parts flagged in estimate.")
 
-    # NADA requirement
     lines.append("")
     lines.append("NADA Requirement:")
     if "nada" in rules_low:
@@ -852,11 +841,9 @@ def build_guideline_comparison(
     else:
         lines.append(f"{chk(True)} No specific NADA requirement stated in provided rules.")
 
-    # Photo rules
     lines.append("")
     lines.append("Photo Rules:")
     if photos_req:
-        # presence_flags are vision-verified
         all_present = all(presence_flags.get(k, False) for k in ["four corners", "vin", "odometer", "license plate"])
         lines.append(f"{chk(all_present)} Required photos include: four corners, VIN, odometer, plate.")
         miss = [k for k,v in presence_flags.items() if not v]
@@ -867,26 +854,19 @@ def build_guideline_comparison(
     else:
         lines.append(f"{chk(True)} No explicit photo package requirement found in provided rules.")
 
-    # Labor & Tax
     lines.append("")
     lines.append("Labor & Tax Rates:")
     lines.append(f"{chk(bool(labor_rates))} Labor rates detected: " + (", ".join(f"{k} {v}" for k,v in labor_rates.items()) if labor_rates else "NONE"))
     lines.append(f"{chk('Not detected' not in tax_rate)} Sales tax detected: {tax_rate}")
 
-    # Tow/Storage
     lines.append("")
     lines.append("Tow/Storage:")
     lines.append(f"{chk(not tow_storage_present)} No tow/storage charges included." if not tow_storage_present else "❌ Tow/storage charges present; verify per rules.")
 
-    # Betterment/Depreciation
     lines.append("")
     lines.append("Betterment/Depreciation:")
-    if betterment_present:
-        lines.append("❌ Betterment/Depreciation applied—verify justification vs rules.")
-    else:
-        lines.append("✔️ None applied or not indicated in estimate text.")
+    lines.append("❌ Betterment/Depreciation applied—verify justification vs rules." if betterment_present else "✔️ None applied or not indicated in estimate text.")
 
-    # Documentation
     lines.append("")
     lines.append("Documentation Requirements:")
     doc_req = any(k in rules_low for k in ["appraisal report", "report notes", "supplement notes"])
@@ -1020,11 +1000,10 @@ async def vision_review(
     if nearly_out_of_time(t0, 7.0) or not vision_images:
         consistency = {"per_item": [], "not_in_photos": [], "extra_damage_in_photos": [], "overall": "Skipped due to time budget."}
     else:
-        # Convert to chat image_url parts
         image_parts = [{"type":"image_url","image_url":{"url":make_data_url(b,m)}} for (_,b,m) in images_for_openai[:MAX_VISION_IMGS]]
         consistency = compare_estimate_with_photos(est_items, image_parts, t0)
 
-    # Sanitize any legacy “No GPT output” strings
+    # Sanitize any legacy strings
     consistency = sanitize_consistency(consistency)
 
     # ----- Guidelines comparison text
@@ -1049,7 +1028,7 @@ async def vision_review(
             tax_penalty = -25
     authoritative_score = max(0, min(100, 100 + photo_adj + labor_penalty + tax_penalty))
 
-    # ======================= PDF build (layout unchanged except new section) =======================
+    # ======================= PDF build =======================
     pdf = FPDF()
     pdf.add_page()
     try:
@@ -1085,7 +1064,7 @@ async def vision_review(
     else:
         pdf.multi_cell(0, 6, "All required photos present.")
 
-    # ======== Estimate ↔ Photos Consistency Review ========
+    # Estimate ↔ Photos
     pdf.ln(4)
     pdf_add_section_title(pdf, "Estimate ↔ Photos Consistency Review")
     if consistency.get("per_item"):
@@ -1108,7 +1087,7 @@ async def vision_review(
         for d in consistency["extra_damage_in_photos"][:20]: pdf.multi_cell(0, 6, scrub_text(f"- {d}"))
     pdf.ln(2); pdf_kv(pdf, "Consistency Overall", consistency.get("overall", ""))
 
-    # ======== NEW: Compliance vs Client Guidelines ========
+    # Compliance vs Client Guidelines
     pdf.ln(4)
     pdf_add_section_title(pdf, "Compliance vs Client Guidelines")
     for line in (guideline_block or "").splitlines():
@@ -1124,7 +1103,7 @@ async def vision_review(
     except Exception as e:
         logger.error(f"PDF write error: {e}")
 
-    # EMAIL (unchanged structure; sanitized content)
+    # EMAIL
     try:
         msg = EmailMessage()
         msg["Subject"] = f"AI-4-IA Review: {claim_number}"
@@ -1153,8 +1132,8 @@ Compliance vs Client Guidelines
     except Exception as e:
         logger.error(f"Email error (continuing): {e}")
 
-    # JSON response (sanitized)
-    return {
+    # JSON response — final recursive sanitize
+    response_payload = {
         "file_number": file_number,
         "claim_number": claim_number,
         "vehicle": {"line": vehicle_line},
@@ -1165,6 +1144,7 @@ Compliance vs Client Guidelines
         "consistency_review": consistency,
         "guideline_comparison": guideline_block
     }
+    return sanitize_json(response_payload)
 
 @app.get("/download-pdf")
 async def download_pdf(file_number: str):
@@ -1189,6 +1169,7 @@ async def get_client_rules(client_name: str):
     else:
         logger.error(f"Rules not found for client: {client_name}")
         return JSONResponse(status_code=404, content={"error": "Rules not found for this client."})
+
 
 
 
