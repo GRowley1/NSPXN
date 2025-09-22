@@ -349,12 +349,16 @@ def vin_checksum_ok(v: str) -> bool:
         return False
 
 def best_vin_candidate(cands: List[str]) -> Optional[str]:
+    # First, prefer any candidate with a valid check digit
     for c in cands:
         vin = normalize_vin(c)
-        if vin and vin_checksum_ok(v): return vin
+        if vin and vin_checksum_ok(vin):   # <-- fixed: use 'vin' not 'v'
+            return vin
+    # Fallback: return the first syntactically valid 17-char VIN
     for c in cands:
         vin = normalize_vin(c)
-        if vin: return vin
+        if vin:
+            return vin
     return None
 
 # ======================= Field extraction =======================
