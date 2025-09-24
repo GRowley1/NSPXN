@@ -17,6 +17,8 @@ from openai import OpenAI
 
 ImageFile.LOAD_TRUNCATED_IMAGES = True
 
+VERSION = "2025-09-24.hotfix-vin"
+
 # ======================= SPEED / BEHAVIOR TUNABLES =======================
 PDF_OCR_DPI_EST = int(os.getenv("PDF_OCR_DPI_EST", "160"))
 PDF_OCR_DPI_TXT = int(os.getenv("PDF_OCR_DPI_TXT", "150"))
@@ -340,7 +342,7 @@ def vin_checksum_ok(v: str) -> bool:
 def best_vin_candidate(cands: List[str]) -> Optional[str]:
     for c in cands:
         vin = normalize_vin(c)
-        if vin and vin_checksum_ok(v):
+        if vin and vin_checksum_ok(vin):
             return vin
     for c in cands:
         vin = normalize_vin(c)
@@ -733,59 +735,6 @@ def call_openai_json_sure(messages: List[Dict[str, Any]], max_tokens: int, t0: f
             max_tokens = max(250, int(max_tokens * 0.7))
     return {"per_item": [], "not_in_photos": [], "extra_damage_in_photos": [], "overall": "Comparison unavailable (fallback used)."}
 
-
-# ---- Canonicalize estimate lines -> matchable targets
-CCC_CANON = [
-    (r'\bfront\b.*\bbumper\b',           'front bumper'),
-    (r'\brear\b.*\bbumper\b',            'rear bumper'),
-    (r'\bgrille\b',                        'grille'),
-    (r'\brt\b.*\b(headlamp|head light)\b','right headlamp'),
-    (r'\brt\b.*\b(park|turn)\b',         'right park/turn lamp'),
-    (r'\btrailer\b.*\bhitch\b',          'trailer hitch'),
-]
-
-def parse_ccc_targets_from_text(text: str) -> list[str]:
-    targets, seen = [], set()
-    if not text:
-        return targets
-    txt = ' '.join(line.strip() for line in text.splitlines())
-    for rx, label in CCC_CANON:
-        if re.search(rx, txt, re.IGNORECASE):
-            if label not in seen:
-                seen.add(label); targets.append(label)
-    return targets
-
-def vision_tag_photo_with_targets(photo_bytes: bytes, targets: list[str], t0: float) -> list[str]:
-    if not targets:
-        return []
-    parts = [
-        {"type":"text", "text": "Return ONLY a JSON array of labels from this list that are clearly visible. Labels: " + json.dumps(targets)}
-    ]
-    b, m = ensure_openai_image(photo_bytes)
-    parts.append({"type":"image_url","image_url":{"url": make_data_url(b, m)}})
-    out = call_openai_json_sure(
-        messages=[
-            {"role":"system","content":"You identify car parts present in a photo. Respond STRICT JSON only."},
-            {"role":"user","content": parts}
-        ],
-        max_tokens=150,
-        t0=t0,
-        label="est-photo-tag"
-    )
-    if isinstance(out, list):
-        return [str(x) for x in out if isinstance(x, str)]
-    if isinstance(out, dict) and "labels" in out and isinstance(out["labels"], list):
-        return [str(x) for x in out["labels"] if isinstance(x, str)]
-    if isinstance(out, dict):
-        vals = []
-        for v in out.values():
-            if isinstance(v, str): vals.append(v)
-            elif isinstance(v, list): vals.extend([str(x) for x in v if isinstance(x, str)])
-        return [x for x in vals if x in targets]
-    return []
-
-
-
 def compare_estimate_with_photos(items: List[Dict[str, str]], images_for_vision: List[Dict[str, Any]]) -> Dict[str, Any]:
     schema = {
         "type": "object",
@@ -945,7 +894,7 @@ def select_estimate_pdf(all_uploads: List[Tuple[str, bytes]]) -> Optional[Tuple[
 # ======================= Routes =======================
 @app.get("/")
 async def root():
-    return {"status": "ok"}
+    return {"status": "ok", "version": VERSION}
 
 @app.post("/vision-review")
 async def vision_review(
@@ -1128,43 +1077,7 @@ async def vision_review(
         elif not images_for_openai:
             consistency["overall"] = "No photos supplied for visual confirmation."
 
-    
-    # Second attempt: if still empty, run conservative targets-based compare
-    if not consistency.get("per_item"):
-        try:
-            _targets = parse_ccc_targets_from_text(estimate_text or full_est_text_pdftotext or combined_text)
-            if _targets and images_for_openai:
-                _found = {t: [] for t in _targets}
-                # reuse image bytes from image_parts or raw blobs
-                for idxp, p in enumerate(images_for_openai[:12]):
-                    try:
-                        if isinstance(p, dict) and "image_url" in p:
-                            # existing assembled payload; recover bytes via base64 if possible
-                            # (best-effort: we won't decode data URL here; we still can classify via the same image part)
-                            hits = call_openai_json_sure(
-                                messages=[
-                                    {"role":"system","content":"You identify car parts present in a photo. Respond STRICT JSON only."},
-                                    {"role":"user","content":[{"type":"text","text":"Return JSON array of any labels from: "+json.dumps(_targets)}, p]}
-                                ],
-                                max_tokens=150, t0=t0, label="est-photo-tag2"
-                            )
-                            if isinstance(hits, list):
-                                for h in hits:
-                                    if h in _found: _found[h].append(f"photo_{idxp+1}")
-                            elif isinstance(hits, dict):
-                                arr = hits.get("labels") if isinstance(hits.get("labels"), list) else []
-                                for h in arr:
-                                    if h in _found: _found[h].append(f"photo_{idxp+1}")
-                    except Exception as _e:
-                        logger.warning(f"targets compare error: {_e}")
-                per_items = []
-                for t in _targets:
-                    per_items.append({"estimate_item": t, "status": "present" if _found[t] else "not found", "photos": _found[t][:4]})
-                consistency["per_item"] = per_items
-                consistency["overall"] = f"Matched {sum(1 for x in per_items if x['status']=='present')} of {len(per_items)} items."
-        except Exception as _e:
-            logger.warning(f"targets-based compare failed: {_e}")
-# Guidelines comparison (enhanced narrative)
+    # Guidelines comparison (enhanced narrative)
     guideline_block = build_guideline_comparison(
         effective_rules=effective_rules,
         combined_text=combined_text,
