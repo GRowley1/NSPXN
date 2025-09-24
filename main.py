@@ -340,7 +340,7 @@ def vin_checksum_ok(v: str) -> bool:
 def best_vin_candidate(cands: List[str]) -> Optional[str]:
     for c in cands:
         vin = normalize_vin(c)
-        if vin and vin_checksum_ok(v):
+        if vin and vin_checksum_ok(vin):
             return vin
     for c in cands:
         vin = normalize_vin(c)
@@ -733,57 +733,6 @@ def call_openai_json_sure(messages: List[Dict[str, Any]], max_tokens: int, t0: f
             max_tokens = max(250, int(max_tokens * 0.7))
     return {"per_item": [], "not_in_photos": [], "extra_damage_in_photos": [], "overall": "Comparison unavailable (fallback used)."}
 
-
-# ---- Canonicalize estimate text -> a few matchable targets
-CCC_CANON = [
-    (r'\bfront\b.*\bbumper\b',            'front bumper'),
-    (r'\brear\b.*\bbumper\b',             'rear bumper'),
-    (r'\bgrille\b',                       'grille'),
-    (r'\brt\b.*\b(headlamp|head light)\b','right headlamp'),
-    (r'\brt\b.*\b(park|turn)\b',          'right park/turn lamp'),
-    (r'\btrailer\b.*\bhitch\b',           'trailer hitch'),
-]
-
-def parse_ccc_targets_from_text(text: str) -> list[str]:
-    targets, seen = [], set()
-    if not text:
-        return targets
-    txt = ' '.join(line.strip() for line in text.splitlines())
-    for rx, label in CCC_CANON:
-        if re.search(rx, txt, re.IGNORECASE):
-            if label not in seen:
-                seen.add(label); targets.append(label)
-    return targets
-
-def vision_tag_photo_with_targets(photo_part: dict, targets: list[str], *, t0: float) -> list[str]:
-    """photo_part is the dict you already pass to OpenAI (with type=image_url)."""
-    if not targets:
-        return []
-    out = call_openai_json_sure(
-        messages=[
-            {"role": "system", "content": "You identify car parts present in a photo. Respond STRICT JSON only."},
-            {"role": "user", "content": [
-                {"type": "text", "text": "Return JSON array of labels that are clearly visible from: " + json.dumps(targets)},
-                photo_part
-            ]}
-        ],
-        max_tokens=150, t0=t0, label="est-photo-tag"
-    )
-    # normalize to a list of strings
-    if isinstance(out, list):
-        return [str(x) for x in out if isinstance(x, str)]
-    if isinstance(out, dict) and isinstance(out.get("labels"), list):
-        return [str(x) for x in out["labels"] if isinstance(x, str)]
-    if isinstance(out, dict):  # tolerant: collect string values
-        vals = []
-        for v in out.values():
-            if isinstance(v, str): vals.append(v)
-            elif isinstance(v, list): vals.extend([str(x) for x in v if isinstance(x, str)])
-        return [x for x in vals if x in targets]
-    return []
-
-
-
 def compare_estimate_with_photos(items: List[Dict[str, str]], images_for_vision: List[Dict[str, Any]]) -> Dict[str, Any]:
     schema = {
         "type": "object",
@@ -1126,45 +1075,42 @@ async def vision_review(
         elif not images_for_openai:
             consistency["overall"] = "No photos supplied for visual confirmation."
 
-    
-
-# Second pass: if still empty, do conservative targets-based compare
-if not consistency.get("per_item"):
-    try:
-        _targets = parse_ccc_targets_from_text((full_est_text_pdftotext or "") + "\n" + (combined_text or ""))
-        if _targets and images_for_openai:
-            # reuse the vision parts we already built, if available
-            parts_iter = []
-            try:
-                parts_iter = image_parts  # built above when images_for_openai is truthy
-            except NameError:
+        # Second pass: if still empty, do conservative targets-based compare
+    if not consistency.get("per_item"):
+        try:
+            _targets = parse_ccc_targets_from_text((full_est_text_pdftotext or "") + "\n" + (combined_text or ""))
+            if _targets and images_for_openai:
                 parts_iter = []
-            found = {t: [] for t in _targets}
-            for idxp, part in enumerate(parts_iter[:12]):
                 try:
-                    hits = vision_tag_photo_with_targets(part, _targets, t0=t0)
-                    for h in hits:
-                        if h in found:
-                            found[h].append(f"photo_{idxp+1}")
-                except Exception as _e:
-                    logger.warning(f"targets compare error: {_e}")
-            per_items = []
-            for t in _targets:
-                present = bool(found[t])
-                per_items.append({
-                    "op": "present (visual)",
-                    "part": t,
-                    "side": "unspecified",
-                    "photo_evidence": present,
-                    "confidence": 0.8 if present else 0.2,
-                    "note": ("found in " + ", ".join(found[t][:4])) if present else "not clearly visible"
-                })
-            if per_items:
-                consistency["per_item"] = per_items
-                matched = sum(1 for it in per_items if it.get("photo_evidence"))
-                consistency["overall"] = f"Matched {matched} of {len(per_items)} items."
-    except Exception as _e:
-        logger.warning(f"targets-based compare failed: {_e}")
+                    parts_iter = image_parts
+                except NameError:
+                    parts_iter = []
+                found = {t: [] for t in _targets}
+                for idxp, part in enumerate(parts_iter[:12]):
+                    try:
+                        hits = vision_tag_photo_with_targets(part, _targets, t0=t0)
+                        for h in hits:
+                            if h in found:
+                                found[h].append(f"photo_{idxp+1}")
+                    except Exception as _e:
+                        logger.warning(f"targets compare error: {_e}")
+                per_items = []
+                for t in _targets:
+                    present = bool(found[t])
+                    per_items.append({
+                        "op": "present (visual)",
+                        "part": t,
+                        "side": "unspecified",
+                        "photo_evidence": present,
+                        "confidence": 0.8 if present else 0.2,
+                        "note": ("found in " + ", ".join(found[t][:4])) if present else "not clearly visible"
+                    })
+                if per_items:
+                    consistency["per_item"] = per_items
+                    matched = sum(1 for it in per_items if it.get("photo_evidence"))
+                    consistency["overall"] = f"Matched {matched} of {len(per_items)} items."
+        except Exception as _e:
+            logger.warning(f"targets-based compare failed: {_e}")
 # Guidelines comparison (enhanced narrative)
     guideline_block = build_guideline_comparison(
         effective_rules=effective_rules,
