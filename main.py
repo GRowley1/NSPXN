@@ -17,8 +17,6 @@ from openai import OpenAI
 
 ImageFile.LOAD_TRUNCATED_IMAGES = True
 
-VERSION = "2025-09-24.hotfix-vin"
-
 # ======================= SPEED / BEHAVIOR TUNABLES =======================
 PDF_OCR_DPI_EST = int(os.getenv("PDF_OCR_DPI_EST", "160"))
 PDF_OCR_DPI_TXT = int(os.getenv("PDF_OCR_DPI_TXT", "150"))
@@ -342,7 +340,7 @@ def vin_checksum_ok(v: str) -> bool:
 def best_vin_candidate(cands: List[str]) -> Optional[str]:
     for c in cands:
         vin = normalize_vin(c)
-        if vin and vin_checksum_ok(vin):
+        if vin and vin_checksum_ok(v):
             return vin
     for c in cands:
         vin = normalize_vin(c)
@@ -735,6 +733,57 @@ def call_openai_json_sure(messages: List[Dict[str, Any]], max_tokens: int, t0: f
             max_tokens = max(250, int(max_tokens * 0.7))
     return {"per_item": [], "not_in_photos": [], "extra_damage_in_photos": [], "overall": "Comparison unavailable (fallback used)."}
 
+
+# ---- Canonicalize estimate text -> a few matchable targets
+CCC_CANON = [
+    (r'\bfront\b.*\bbumper\b',            'front bumper'),
+    (r'\brear\b.*\bbumper\b',             'rear bumper'),
+    (r'\bgrille\b',                       'grille'),
+    (r'\brt\b.*\b(headlamp|head light)\b','right headlamp'),
+    (r'\brt\b.*\b(park|turn)\b',          'right park/turn lamp'),
+    (r'\btrailer\b.*\bhitch\b',           'trailer hitch'),
+]
+
+def parse_ccc_targets_from_text(text: str) -> list[str]:
+    targets, seen = [], set()
+    if not text:
+        return targets
+    txt = ' '.join(line.strip() for line in text.splitlines())
+    for rx, label in CCC_CANON:
+        if re.search(rx, txt, re.IGNORECASE):
+            if label not in seen:
+                seen.add(label); targets.append(label)
+    return targets
+
+def vision_tag_photo_with_targets(photo_part: dict, targets: list[str], *, t0: float) -> list[str]:
+    """photo_part is the dict you already pass to OpenAI (with type=image_url)."""
+    if not targets:
+        return []
+    out = call_openai_json_sure(
+        messages=[
+            {"role": "system", "content": "You identify car parts present in a photo. Respond STRICT JSON only."},
+            {"role": "user", "content": [
+                {"type": "text", "text": "Return JSON array of labels that are clearly visible from: " + json.dumps(targets)},
+                photo_part
+            ]}
+        ],
+        max_tokens=150, t0=t0, label="est-photo-tag"
+    )
+    # normalize to a list of strings
+    if isinstance(out, list):
+        return [str(x) for x in out if isinstance(x, str)]
+    if isinstance(out, dict) and isinstance(out.get("labels"), list):
+        return [str(x) for x in out["labels"] if isinstance(x, str)]
+    if isinstance(out, dict):  # tolerant: collect string values
+        vals = []
+        for v in out.values():
+            if isinstance(v, str): vals.append(v)
+            elif isinstance(v, list): vals.extend([str(x) for x in v if isinstance(x, str)])
+        return [x for x in vals if x in targets]
+    return []
+
+
+
 def compare_estimate_with_photos(items: List[Dict[str, str]], images_for_vision: List[Dict[str, Any]]) -> Dict[str, Any]:
     schema = {
         "type": "object",
@@ -894,7 +943,7 @@ def select_estimate_pdf(all_uploads: List[Tuple[str, bytes]]) -> Optional[Tuple[
 # ======================= Routes =======================
 @app.get("/")
 async def root():
-    return {"status": "ok", "version": VERSION}
+    return {"status": "ok"}
 
 @app.post("/vision-review")
 async def vision_review(
@@ -1077,7 +1126,29 @@ async def vision_review(
         elif not images_for_openai:
             consistency["overall"] = "No photos supplied for visual confirmation."
 
-    # Guidelines comparison (enhanced narrative)
+    
+# Second pass: if no per-item mapping yet, try conservative targets-based compare
+try:
+    _targets = parse_ccc_targets_from_text(estimate_text or full_est_text_pdftotext or combined_text)
+    if _targets and images_for_openai:
+        found = {t: [] for t in _targets}
+        for idxp, part in enumerate(images_for_openai[:12]):  # reuse the same image parts you already built
+            try:
+                hits = vision_tag_photo_with_targets(part, _targets, t0=t0)
+                for h in hits:
+                    if h in found:
+                        found[h].append(f"photo_{idxp+1}")
+            except Exception as _e:
+                logger.warning(f"targets compare error: {_e}")
+        per_items = [{"estimate_item": t,
+                      "status": "present" if found[t] else "not found",
+                      "photos": found[t][:4]} for t in _targets]
+        consistency["per_item"] = per_items
+        matched = sum(1 for x in per_items if x["status"] == "present")
+        consistency["overall"] = f"Matched {matched} of {len(per_items)} items."
+except Exception as _e:
+    logger.warning(f"targets-based compare failed: {_e}")
+# Guidelines comparison (enhanced narrative)
     guideline_block = build_guideline_comparison(
         effective_rules=effective_rules,
         combined_text=combined_text,
