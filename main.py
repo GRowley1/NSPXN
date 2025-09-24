@@ -17,7 +17,7 @@ from openai import OpenAI
 
 ImageFile.LOAD_TRUNCATED_IMAGES = True
 
-VERSION = "2025-09-23.merge1"
+VERSION = "2025-09-24.merge2"
 
 # ======================= SPEED / BEHAVIOR TUNABLES =======================
 PDF_OCR_DPI_EST = int(os.getenv("PDF_OCR_DPI_EST", "160"))
@@ -487,33 +487,6 @@ def _image_is_exterior_wide(img: Image.Image) -> bool:
     var = ImageStat.Stat(processed).var[0] if processed.mode == "L" else sum(ImageStat.Stat(processed).var)/3
     return len(text.strip()) < 10 and var > 150
 
-
-def _classify_presence_with_vision(image_blobs: List[Tuple[str, bytes]], t0: float) -> Dict[str, bool]:
-    if not image_blobs:
-        return {}
-    parts = []
-    total = 0
-    for name, blob in image_blobs[:6]:
-        b, m = ensure_openai_image(blob)
-        if m == "image/jpeg" and len(b) > MAX_PER_IMAGE_BYTES:
-            b = downscale_jpeg_to_max_bytes(b, MAX_PER_IMAGE_BYTES)
-        if total + len(b) > MAX_TOTAL_IMAGE_BYTES:
-            break
-        parts.append({"type":"image_url","image_url":{"url":make_data_url(b, m)}})
-        total += len(b)
-    schema = {"type":"object","properties":{"vin_present":{"type":"boolean"},"odometer_present":{"type":"boolean"},"license_plate_present":{"type":"boolean"}},"required":["vin_present","odometer_present","license_plate_present"]}
-    sys = "Classify whether any of these images include: (1) a VIN door-jamb label/plate; (2) an odometer/cluster; (3) a license plate. Return STRICT JSON only."
-    res = call_openai_json_sure(
-        messages=[{"role":"system","content":sys},{"role":"user","content":[{"type":"text","text":"Return JSON per schema: "+json.dumps(schema)}, *parts]}],
-        max_tokens=150, t0=t0, label="presence"
-    )
-    out = {}
-    if isinstance(res, dict):
-        out["vin"] = bool(res.get("vin_present"))
-        out["odometer"] = bool(res.get("odometer_present"))
-        out["license plate"] = bool(res.get("license_plate_present"))
-    return out
-
 def detect_required_photo_presence(image_blobs: List[Tuple[str, bytes]], t0: float) -> Dict[str, bool]:
     flags = {"four corners": False, "odometer": False, "vin": False, "license plate": False}
     ext_like = 0
@@ -556,18 +529,6 @@ def detect_required_photo_presence(image_blobs: List[Tuple[str, bytes]], t0: flo
 
     if ext_like >= 2 or corner_hits >= 3:
         flags["four corners"] = True
-    return flags
-
-    # Second pass: if still missing, use vision classifier to confirm VIN/ODO/Plate presence
-    need = [k for k, v in flags.items() if k in ("vin", "odometer", "license plate") and not v]
-    if need:
-        try:
-            vis = _classify_presence_with_vision(image_blobs[:10], t0)
-            for k in ("vin","odometer","license plate"):
-                if not flags.get(k) and vis.get(k) is True:
-                    flags[k] = True
-        except Exception:
-            pass
     return flags
 
 # ======================= Client guideline ingestion =======================
@@ -1169,6 +1130,7 @@ async def vision_review(
 
     # Save PDF
     pdf_path = os.path.join(PDF_DIR, f"{file_number}.pdf")
+email_status = {\"attempted\": False, \"status\": \"skipped\"}
     try:
         pdf_bytes = pdf.output(dest="S").encode("latin-1")
         with open(pdf_path, "wb") as f:
@@ -1177,21 +1139,13 @@ async def vision_review(
     except Exception as e:
         logger.error(f"PDF write error: {e}")
 
-    
-        # EMAIL with SSL or STARTTLS depending on SMTP_MODE; includes status in JSON
-        email_status = {"attempted": False, "status": "skipped"}
-        try:
-            host = os.getenv("SMTP_HOST"); user = os.getenv("SMTP_USER"); pwd = os.getenv("SMTP_PASS")
-            to_addr = os.getenv("SMTP_TO", "info@nspxn.com")
-            mode = (os.getenv("SMTP_MODE", "ssl") or "ssl").lower()  # "ssl" or "starttls"
-            port = int(os.getenv("SMTP_PORT", "465" if mode == "ssl" else "587"))
-            if host and user and pwd:
-                email_status["attempted"] = True
-                msg = EmailMessage()
-                msg["Subject"] = f"AI-4-IA Review: {claim_number}"
-                msg["From"] = os.getenv("SMTP_FROM", user)
-                msg["To"] = to_addr
-                email_body = f"""NSPXN.com AI4IA Review Report
+    # EMAIL
+    try:
+        msg = EmailMessage()
+        msg["Subject"] = f"AI-4-IA Review: {claim_number}"
+        msg["From"] = "noreply@nspxn.com"
+        msg["To"] = "info@nspxn.com"
+        email_body = f"""NSPXN.com AI4IA Review Report
 
 File Number: {file_number}
 IA Company: {ia_company}
@@ -1203,52 +1157,16 @@ VIN verification (estimate vs photo): {vin_verify_note}
 Vehicle: {vehicle_line}
 
 Compliance Score: {authoritative_score}%
+
+Compliance vs Client Guidelines
+{guideline_block}
 """
-                msg.set_content(scrub_text(email_body))
-                import smtplib
-                if mode == "starttls":
-                    with smtplib.SMTP(host, port, timeout=20) as smtp:
-                        smtp.ehlo(); smtp.starttls(); smtp.ehlo()
-                        smtp.login(user, pwd)
-                        smtp.send_message(msg)
-                else:
-                    with smtplib.SMTP_SSL(host, port, timeout=20) as smtp:
-                        smtp.login(user, pwd)
-                        smtp.send_message(msg)
-                email_status["status"] = "sent"
-            else:
-                # Fallback to the existing Tierra SMTP block from your working file, if present
-                try:
-                    import smtplib
-                    msg = EmailMessage()
-                    msg["Subject"] = f"AI-4-IA Review: {claim_number}"
-                    msg["From"] = "noreply@nspxn.com"
-                    msg["To"] = "info@nspxn.com"
-                    email_body = f"""NSPXN.com AI4IA Review Report
-
-File Number: {file_number}
-IA Company: {ia_company}
-Appraiser ID #: {appraiser_id}
-
-Claim #: {claim_number}
-VIN (from estimate): {vin_est}
-VIN verification (estimate vs photo): {vin_verify_note}
-Vehicle: {vehicle_line}
-
-Compliance Score: {authoritative_score}%
-"""
-                    msg.set_content(scrub_text(email_body))
-                    with smtplib.SMTP_SSL("mail.tierra.net", 465) as smtp:
-                        smtp.login("info@nspxn.com", "grr2025GRR")
-                        smtp.send_message(msg)
-                    email_status["attempted"] = True
-                    email_status["status"] = "sent (fallback)"
-                except Exception as ee:
-                    email_status["status"] = f"error: {ee}"
-        except Exception as e:
-            email_status["status"] = f"error: {e}"
-            logger.error(f"Email error: {e}")
-
+        msg.set_content(scrub_text(email_body))
+        with smtplib.SMTP_SSL("mail.tierra.net", 465) as smtp:
+            smtp.login("info@nspxn.com", "grr2025GRR")
+            smtp.send_message(msg)
+    except Exception as e:
+        logger.error(f"Email error (continuing): {e}")
 
     # ===== Build a single combined text block for the UI ("gpt_output") =====
     # This mirrors the email/PDF content so the front end never falls back to "No GPT Output".
@@ -1279,15 +1197,13 @@ Overall: {consistency.get('overall','')}
         "guideline_comparison": guideline_block,
         # >>>>>>>>>>>>>>>>>> NEW: feed the UI the combined human-readable block <<<<<<<<<<<<<<<<<<
         "gpt_output": gpt_output
-    ,
-        \"download_url\": f\"/download-pdf?file_number={file_number}\",
-        \"email_status\": email_status
     }
     return sanitize_json(response_payload)
 
 @app.get("/download-pdf")
 async def download_pdf(file_number: str):
     pdf_path = os.path.join(PDF_DIR, f"{file_number}.pdf")
+email_status = {\"attempted\": False, \"status\": \"skipped\"}
     if os.path.exists(pdf_path):
         return FileResponse(path=pdf_path, media_type="application/pdf", filename=f"{file_number}.pdf")
     return JSONResponse(status_code=404, content={"detail": "Not Found"})
