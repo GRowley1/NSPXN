@@ -1127,27 +1127,44 @@ async def vision_review(
             consistency["overall"] = "No photos supplied for visual confirmation."
 
     
-# Second pass: if no per-item mapping yet, try conservative targets-based compare
-try:
-    _targets = parse_ccc_targets_from_text(estimate_text or full_est_text_pdftotext or combined_text)
-    if _targets and images_for_openai:
-        found = {t: [] for t in _targets}
-        for idxp, part in enumerate(images_for_openai[:12]):  # reuse the same image parts you already built
+
+# Second pass: if still empty, do conservative targets-based compare
+if not consistency.get("per_item"):
+    try:
+        _targets = parse_ccc_targets_from_text((full_est_text_pdftotext or "") + "\n" + (combined_text or ""))
+        if _targets and images_for_openai:
+            # reuse the vision parts we already built, if available
+            parts_iter = []
             try:
-                hits = vision_tag_photo_with_targets(part, _targets, t0=t0)
-                for h in hits:
-                    if h in found:
-                        found[h].append(f"photo_{idxp+1}")
-            except Exception as _e:
-                logger.warning(f"targets compare error: {_e}")
-        per_items = [{"estimate_item": t,
-                      "status": "present" if found[t] else "not found",
-                      "photos": found[t][:4]} for t in _targets]
-        consistency["per_item"] = per_items
-        matched = sum(1 for x in per_items if x["status"] == "present")
-        consistency["overall"] = f"Matched {matched} of {len(per_items)} items."
-except Exception as _e:
-    logger.warning(f"targets-based compare failed: {_e}")
+                parts_iter = image_parts  # built above when images_for_openai is truthy
+            except NameError:
+                parts_iter = []
+            found = {t: [] for t in _targets}
+            for idxp, part in enumerate(parts_iter[:12]):
+                try:
+                    hits = vision_tag_photo_with_targets(part, _targets, t0=t0)
+                    for h in hits:
+                        if h in found:
+                            found[h].append(f"photo_{idxp+1}")
+                except Exception as _e:
+                    logger.warning(f"targets compare error: {_e}")
+            per_items = []
+            for t in _targets:
+                present = bool(found[t])
+                per_items.append({
+                    "op": "present (visual)",
+                    "part": t,
+                    "side": "unspecified",
+                    "photo_evidence": present,
+                    "confidence": 0.8 if present else 0.2,
+                    "note": ("found in " + ", ".join(found[t][:4])) if present else "not clearly visible"
+                })
+            if per_items:
+                consistency["per_item"] = per_items
+                matched = sum(1 for it in per_items if it.get("photo_evidence"))
+                consistency["overall"] = f"Matched {matched} of {len(per_items)} items."
+    except Exception as _e:
+        logger.warning(f"targets-based compare failed: {_e}")
 # Guidelines comparison (enhanced narrative)
     guideline_block = build_guideline_comparison(
         effective_rules=effective_rules,
