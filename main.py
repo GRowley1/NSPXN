@@ -1075,10 +1075,41 @@ async def vision_review(
         elif not images_for_openai:
             consistency["overall"] = "No photos supplied for visual confirmation."
 
-        # Second pass: if still empty, do conservative targets-based compare
+            # Second pass: if still empty, do conservative targets-based compare
     if not consistency.get("per_item"):
         try:
             _targets = parse_ccc_targets_from_text((full_est_text_pdftotext or "") + "\n" + (combined_text or ""))
+            # If parsing produced nothing, derive targets from text keywords or use sensible defaults
+            if not _targets:
+                _txt = ((full_est_text_pdftotext or "") + "\n" + (combined_text or "")).lower()
+                _kw_map = {
+                    "bumper": ["front bumper","rear bumper"],
+                    "grille": ["grille"],
+                    "hood": ["hood"],
+                    "fender": ["lf fender","rf fender"],
+                    "headlamp": ["lf headlamp","rf headlamp"],
+                    "headlight": ["lf headlamp","rf headlamp"],
+                    "park lamp": ["lf park/turn lamp","rf park/turn lamp"],
+                    "turn lamp": ["lf park/turn lamp","rf park/turn lamp"],
+                    "taillamp": ["lr tail lamp","rr tail lamp"],
+                    "tail lamp": ["lr tail lamp","rr tail lamp"],
+                    "door": ["lf door","rf door","lr door","rr door"],
+                    "mirror": ["lf mirror","rf mirror"],
+                    "quarter": ["lr quarter panel","rr quarter panel"],
+                    "tailgate": ["tailgate"],
+                    "hitch": ["trailer hitch"],
+                }
+                _t = []
+                for k, vals in _kw_map.items():
+                    if k in _txt:
+                        _t.extend(vals)
+                if not _t:
+                    _t = [
+                        "front bumper","rear bumper","grille","lf headlamp","rf headlamp",
+                        "lf fender","rf fender","hood","lr tail lamp","rr tail lamp",
+                        "tailgate","trailer hitch"
+                    ]
+                _targets = list(dict.fromkeys(_t))[:12]
             if _targets and images_for_openai:
                 parts_iter = []
                 try:
@@ -1086,7 +1117,7 @@ async def vision_review(
                 except NameError:
                     parts_iter = []
                 found = {t: [] for t in _targets}
-                for idxp, part in enumerate(parts_iter[:12]):
+                for idxp, part in enumerate(parts_iter[:16]):
                     try:
                         hits = vision_tag_photo_with_targets(part, _targets, t0=t0)
                         for h in hits:
@@ -1105,6 +1136,8 @@ async def vision_review(
                         "confidence": 0.8 if present else 0.2,
                         "note": ("found in " + ", ".join(found[t][:4])) if present else "not clearly visible"
                     })
+                if not per_items and _targets:
+                    per_items = [{"op":"present (visual)","part": t,"side":"unspecified","photo_evidence": False,"confidence": 0.2,"note":"not clearly visible"} for t in _targets[:6]]
                 if per_items:
                     consistency["per_item"] = per_items
                     matched = sum(1 for it in per_items if it.get("photo_evidence"))
