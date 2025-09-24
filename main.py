@@ -340,7 +340,7 @@ def vin_checksum_ok(v: str) -> bool:
 def best_vin_candidate(cands: List[str]) -> Optional[str]:
     for c in cands:
         vin = normalize_vin(c)
-        if vin and vin_checksum_ok(v):
+        if vin and vin_checksum_ok(vin):
             return vin
     for c in cands:
         vin = normalize_vin(c)
