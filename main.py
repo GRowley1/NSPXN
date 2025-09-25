@@ -340,7 +340,7 @@ def vin_checksum_ok(v: str) -> bool:
 def best_vin_candidate(cands: List[str]) -> Optional[str]:
     for c in cands:
         vin = normalize_vin(c)
-        if vin and vin_checksum_ok(v):
+        if vin and vin_checksum_ok(vin):
             return vin
     for c in cands:
         vin = normalize_vin(c)
@@ -733,51 +733,6 @@ def call_openai_json_sure(messages: List[Dict[str, Any]], max_tokens: int, t0: f
             max_tokens = max(250, int(max_tokens * 0.7))
     return {"per_item": [], "not_in_photos": [], "extra_damage_in_photos": [], "overall": "Comparison unavailable (fallback used)."}
 
-def _derive_fallback_items_from_text(text: str) -> List[Dict[str, str]]:
-    """Build a small synthetic item list from rough keywords when estimate items are empty."""
-    items: List[Dict[str, str]] = []
-    if not text:
-        text = ""
-    t = text.lower()
-    def add(part, side="unspecified"):
-        items.append({"op":"present","part":part, "side":side})
-    if "bumper" in t or "front bumper" in t:
-        add("front bumper","front")
-    if "rear bumper" in t or ("bumper" in t and "rear" in t):
-        add("rear bumper","rear")
-    if "grille" in t:
-        add("grille","front")
-    if "headlamp" in t or "headlight" in t:
-        add("lf headlamp","left front"); add("rf headlamp","right front")
-    if "fender" in t:
-        add("lf fender","left front"); add("rf fender","right front")
-    if "hood" in t:
-        add("hood","front")
-    if "tail lamp" in t or "taillamp" in t:
-        add("lr tail lamp","left rear"); add("rr tail lamp","right rear")
-    if "mirror" in t:
-        add("lf mirror","left front"); add("rf mirror","right front")
-    if "door" in t:
-        add("lf door","left front"); add("rf door","right front"); add("lr door","left rear"); add("rr door","right rear")
-    if "quarter" in t:
-        add("lr quarter panel","left rear"); add("rr quarter panel","right rear")
-    if "tailgate" in t:
-        add("tailgate","rear")
-    if "hitch" in t or "trailer hitch" in t:
-        add("trailer hitch","rear")
-    if not items:
-        defaults = ["front bumper","rear bumper","grille","lf headlamp","rf headlamp","lf fender","rf fender","hood","lr tail lamp","rr tail lamp","tailgate","trailer hitch"]
-        for p in defaults:
-            add(p, "unspecified")
-    seen = set()
-    unique = []
-    for it in items:
-        key = (it["part"], it["side"])
-        if key not in seen:
-            seen.add(key); unique.append(it)
-    return unique[:12]
-
-
 def compare_estimate_with_photos(items: List[Dict[str, str]], images_for_vision: List[Dict[str, Any]]) -> Dict[str, Any]:
     schema = {
         "type": "object",
@@ -1107,9 +1062,7 @@ async def vision_review(
             if mm == "image/jpeg" and len(bb) > MAX_PER_IMAGE_BYTES:
                 bb = downscale_jpeg_to_max_bytes(bb, MAX_PER_IMAGE_BYTES)
             image_parts.append({"type":"image_url","image_url":{"url":make_data_url(bb, mm)}})
-        text_scope = (full_est_text_pdftotext or "") + "\n" + (combined_text or "")
-        fallback_items = est_items or _derive_fallback_items_from_text(text_scope)
-        consistency = compare_estimate_with_photos(fallback_items, image_parts)
+        consistency = compare_estimate_with_photos(est_items, image_parts)
     else:
         consistency = {"per_item": [], "not_in_photos": [], "extra_damage_in_photos": [], "overall": "No photos supplied."}
 
