@@ -340,7 +340,7 @@ def vin_checksum_ok(v: str) -> bool:
 def best_vin_candidate(cands: List[str]) -> Optional[str]:
     for c in cands:
         vin = normalize_vin(c)
-        if vin and vin_checksum_ok(vin):
+        if vin and vin_checksum_ok(v):
             return vin
     for c in cands:
         vin = normalize_vin(c)
@@ -733,6 +733,51 @@ def call_openai_json_sure(messages: List[Dict[str, Any]], max_tokens: int, t0: f
             max_tokens = max(250, int(max_tokens * 0.7))
     return {"per_item": [], "not_in_photos": [], "extra_damage_in_photos": [], "overall": "Comparison unavailable (fallback used)."}
 
+def _derive_fallback_items_from_text(text: str) -> List[Dict[str, str]]:
+    """Build a small synthetic item list from rough keywords when estimate items are empty."""
+    items: List[Dict[str, str]] = []
+    if not text:
+        text = ""
+    t = text.lower()
+    def add(part, side="unspecified"):
+        items.append({"op":"present","part":part, "side":side})
+    if "bumper" in t or "front bumper" in t:
+        add("front bumper","front")
+    if "rear bumper" in t or ("bumper" in t and "rear" in t):
+        add("rear bumper","rear")
+    if "grille" in t:
+        add("grille","front")
+    if "headlamp" in t or "headlight" in t:
+        add("lf headlamp","left front"); add("rf headlamp","right front")
+    if "fender" in t:
+        add("lf fender","left front"); add("rf fender","right front")
+    if "hood" in t:
+        add("hood","front")
+    if "tail lamp" in t or "taillamp" in t:
+        add("lr tail lamp","left rear"); add("rr tail lamp","right rear")
+    if "mirror" in t:
+        add("lf mirror","left front"); add("rf mirror","right front")
+    if "door" in t:
+        add("lf door","left front"); add("rf door","right front"); add("lr door","left rear"); add("rr door","right rear")
+    if "quarter" in t:
+        add("lr quarter panel","left rear"); add("rr quarter panel","right rear")
+    if "tailgate" in t:
+        add("tailgate","rear")
+    if "hitch" in t or "trailer hitch" in t:
+        add("trailer hitch","rear")
+    if not items:
+        defaults = ["front bumper","rear bumper","grille","lf headlamp","rf headlamp","lf fender","rf fender","hood","lr tail lamp","rr tail lamp","tailgate","trailer hitch"]
+        for p in defaults:
+            add(p, "unspecified")
+    seen = set()
+    unique = []
+    for it in items:
+        key = (it["part"], it["side"])
+        if key not in seen:
+            seen.add(key); unique.append(it)
+    return unique[:12]
+
+
 def compare_estimate_with_photos(items: List[Dict[str, str]], images_for_vision: List[Dict[str, Any]]) -> Dict[str, Any]:
     schema = {
         "type": "object",
@@ -1062,7 +1107,9 @@ async def vision_review(
             if mm == "image/jpeg" and len(bb) > MAX_PER_IMAGE_BYTES:
                 bb = downscale_jpeg_to_max_bytes(bb, MAX_PER_IMAGE_BYTES)
             image_parts.append({"type":"image_url","image_url":{"url":make_data_url(bb, mm)}})
-        consistency = compare_estimate_with_photos(est_items, image_parts)
+        text_scope = (full_est_text_pdftotext or "") + "\n" + (combined_text or "")
+        fallback_items = est_items or _derive_fallback_items_from_text(text_scope)
+        consistency = compare_estimate_with_photos(fallback_items, image_parts)
     else:
         consistency = {"per_item": [], "not_in_photos": [], "extra_damage_in_photos": [], "overall": "No photos supplied."}
 
@@ -1075,76 +1122,7 @@ async def vision_review(
         elif not images_for_openai:
             consistency["overall"] = "No photos supplied for visual confirmation."
 
-            # Second pass: if still empty, do conservative targets-based compare
-    if not consistency.get("per_item"):
-        try:
-            _targets = parse_ccc_targets_from_text((full_est_text_pdftotext or "") + "\n" + (combined_text or ""))
-            # If parsing produced nothing, derive targets from text keywords or use sensible defaults
-            if not _targets:
-                _txt = ((full_est_text_pdftotext or "") + "\n" + (combined_text or "")).lower()
-                _kw_map = {
-                    "bumper": ["front bumper","rear bumper"],
-                    "grille": ["grille"],
-                    "hood": ["hood"],
-                    "fender": ["lf fender","rf fender"],
-                    "headlamp": ["lf headlamp","rf headlamp"],
-                    "headlight": ["lf headlamp","rf headlamp"],
-                    "park lamp": ["lf park/turn lamp","rf park/turn lamp"],
-                    "turn lamp": ["lf park/turn lamp","rf park/turn lamp"],
-                    "taillamp": ["lr tail lamp","rr tail lamp"],
-                    "tail lamp": ["lr tail lamp","rr tail lamp"],
-                    "door": ["lf door","rf door","lr door","rr door"],
-                    "mirror": ["lf mirror","rf mirror"],
-                    "quarter": ["lr quarter panel","rr quarter panel"],
-                    "tailgate": ["tailgate"],
-                    "hitch": ["trailer hitch"],
-                }
-                _t = []
-                for k, vals in _kw_map.items():
-                    if k in _txt:
-                        _t.extend(vals)
-                if not _t:
-                    _t = [
-                        "front bumper","rear bumper","grille","lf headlamp","rf headlamp",
-                        "lf fender","rf fender","hood","lr tail lamp","rr tail lamp",
-                        "tailgate","trailer hitch"
-                    ]
-                _targets = list(dict.fromkeys(_t))[:12]
-            if _targets and images_for_openai:
-                parts_iter = []
-                try:
-                    parts_iter = image_parts
-                except NameError:
-                    parts_iter = []
-                found = {t: [] for t in _targets}
-                for idxp, part in enumerate(parts_iter[:16]):
-                    try:
-                        hits = vision_tag_photo_with_targets(part, _targets, t0=t0)
-                        for h in hits:
-                            if h in found:
-                                found[h].append(f"photo_{idxp+1}")
-                    except Exception as _e:
-                        logger.warning(f"targets compare error: {_e}")
-                per_items = []
-                for t in _targets:
-                    present = bool(found[t])
-                    per_items.append({
-                        "op": "present (visual)",
-                        "part": t,
-                        "side": "unspecified",
-                        "photo_evidence": present,
-                        "confidence": 0.8 if present else 0.2,
-                        "note": ("found in " + ", ".join(found[t][:4])) if present else "not clearly visible"
-                    })
-                if not per_items and _targets:
-                    per_items = [{"op":"present (visual)","part": t,"side":"unspecified","photo_evidence": False,"confidence": 0.2,"note":"not clearly visible"} for t in _targets[:6]]
-                if per_items:
-                    consistency["per_item"] = per_items
-                    matched = sum(1 for it in per_items if it.get("photo_evidence"))
-                    consistency["overall"] = f"Matched {matched} of {len(per_items)} items."
-        except Exception as _e:
-            logger.warning(f"targets-based compare failed: {_e}")
-# Guidelines comparison (enhanced narrative)
+    # Guidelines comparison (enhanced narrative)
     guideline_block = build_guideline_comparison(
         effective_rules=effective_rules,
         combined_text=combined_text,
