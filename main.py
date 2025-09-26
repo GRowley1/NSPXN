@@ -458,7 +458,7 @@ async def vision_review(
         user = [
             {"type":"text","text":"CLIENT GUIDELINES:\n"+(client_rules or "")[:6000]},
             {"type":"text","text":"\n\nESTIMATE (OCR):\n"+(est_text or "")[:8000]},
-            {"type":"text","text":f\"\n\nDetected:\nCleanRetailProvided={has_clean_value}\nAdvisorReportProvided={has_advisor}\"}
+            {"type":"text","text":f"\n\nDetected:\nCleanRetailProvided={has_clean_value}\nAdvisorReportProvided={has_advisor}"},
         ]
         rsp = chat([{"role":"system","content":system},{"role":"user","content":user}], max_tokens=500)
         gpt_output = (rsp.choices[0].message.content if rsp else "Automated narrative unavailable.").strip()
@@ -493,7 +493,6 @@ async def vision_review(
     pdf.multi_cell(0,6,f"VIN verification (estimate vs photo): {vin_line}")
     pdf.multi_cell(0,6,f"Vehicle: {vehicle}")
     if mileage: pdf.multi_cell(0,6,f"Odometer (from estimate): {mileage}")
-    # include reported days line if present
     if reported_days is not None:
         pdf.multi_cell(0,6,f"Days to Repair (reported): {reported_days}")
     elif facts.get("hours",{}).get("days_formula_hrs_div_5"):
