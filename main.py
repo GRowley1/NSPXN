@@ -56,14 +56,12 @@ def compare_estimate_with_photos(*args, **kwargs):
     Safe no-JSON stub to remain compatible with older frontends that still invoke this.
     Returns a concise narrative string; never raises JSONDecodeError/NameError.
     """
-    est_text = kwargs.get("est_text") or (args[0] if len(args) > 0 else "")
     images = kwargs.get("images") or (args[1] if len(args) > 1 else [])
     if not images:
         return "Photos were not provided; photo comparison omitted."
-    # Keep it tiny to stay fast; actual comparison is handled in the main intent flows.
     return "Photo comparison included in narrative above."
 
-# ----------------- OCR helpers -----------------
+# ----------------- OCR/Text helpers -----------------
 def _pp(img: Image.Image) -> Image.Image:
     img = img.convert("L")
     img = ImageEnhance.Contrast(img).enhance(1.9)
@@ -74,6 +72,28 @@ def _pp(img: Image.Image) -> Image.Image:
 def pdf_pages(pdf_bytes: bytes, limit_pages: Optional[int] = None, dpi: int = 200) -> List[Image.Image]:
     pages = convert_from_bytes(pdf_bytes, dpi=dpi)
     return pages[:limit_pages] if limit_pages else pages
+
+def fast_pdf_text(pdf_bytes: bytes, limit_pages: Optional[int] = None) -> str:
+    """
+    Fast text-layer extraction (PyPDF2). Returns empty string if module not present or no text layer.
+    """
+    text = ""
+    try:
+        import PyPDF2
+        reader = PyPDF2.PdfReader(io.BytesIO(pdf_bytes))
+        pages = reader.pages
+        if limit_pages:
+            pages = pages[:limit_pages]
+        for i, page in enumerate(pages, 1):
+            try:
+                t = page.extract_text() or ""
+            except Exception:
+                t = ""
+            if t.strip():
+                text += f"\n[Page {i}]\n{t}"
+    except Exception as e:
+        log.info(f"PyPDF2 fast extract skipped: {e}")
+    return text or ""
 
 def ocr_pdf_text(pdf_bytes: bytes, limit_pages: Optional[int] = None, dpi: int = 200, psms=("--psm 6","--psm 3")) -> str:
     try:
@@ -125,8 +145,8 @@ def _vin_ok(v: str) -> bool:
     except Exception:
         return False
 
-VIN_RELAXED = re.compile(r"(?:VIN\b[^A-Z0-9]{0,10})((?:[A-HJ-NPR-Z0-9][\s\-]*){17})", re.IGNORECASE)
-VIN_TIGHT   = re.compile(r"\b([A-HJ-NPR-Z0-9]{17})\b")
+VIN_RELAXED = re.compile(r"(?:V\.?I\.?N\.?|VIN|Vehicle\\s+Identification\\s+Number)\\b[^A-Z0-9]{0,12}((?:[A-HJ-NPR-Z0-9][\\s\\-]*){17})", re.IGNORECASE)
+VIN_TIGHT   = re.compile(r"\\b([A-HJ-NPR-Z0-9]{17})\\b")
 
 def vin_from_text(text: str) -> Optional[str]:
     cands = []
@@ -150,7 +170,8 @@ def vin_from_pdf_boxes(pages: List[Image.Image]) -> Optional[str]:
             data = pytesseract.image_to_data(proc, lang="eng", output_type=Output.DICT)
             n = len(data["text"])
             for i in range(n):
-                if (data["text"][i] or "").strip().upper() == "VIN":
+                token = (data["text"][i] or "").strip().upper()
+                if token in ("VIN","V.I.N.","VEHICLE","IDENTIFICATION"):
                     line = data["line_num"][i]
                     left_anchor = data["left"][i]
                     tokens = []
@@ -180,14 +201,14 @@ STOP_TOKENS = {"GASOLINE","DIESEL","HYBRID","ELECTRIC","BLACK","WHITE","BLUE","R
                "GDI","DIRECT","INJECTION","TURBO","PAINT","CLEAR","COAT","COLOR"}
 
 def vehicle_from_text(text: str) -> Optional[str]:
-    lines = [re.sub(r"\s{2,}", " ", ln.strip()) for ln in (text or "").splitlines() if ln.strip()]
+    lines = [re.sub(r"\\s{2,}", " ", ln.strip()) for ln in (text or "").splitlines() if ln.strip()]
     for ln in lines:
-        if re.search(r"^\s*(19|20)\d{2}\b", ln) and not re.search(r"\b(AM|PM)\b", ln):
+        if re.search(r"^\\s*(19|20)\\d{2}\\b", ln) and not re.search(r"\\b(AM|PM)\\b", ln):
             toks = ln.split()
             year = toks[0]; tail = toks[1:]
             keep = []
             for t in tail:
-                raw = re.sub(r"[^\w\-]", "", t).upper()
+                raw = re.sub(r"[^\\w\\-]", "", t).upper()
                 if raw in STOP_TOKENS or raw in ("A/M","OEM"): break
                 keep.append(t)
                 if len(keep) >= 4: break
@@ -197,25 +218,30 @@ def vehicle_from_text(text: str) -> Optional[str]:
     for i, ln in enumerate(lines):
         if "VEHICLE" in ln.upper() and i+1 < len(lines):
             nxt = lines[i+1]
-            if re.search(r"(19|20)\d{2}", nxt):
+            if re.search(r"(19|20)\\d{2}", nxt):
                 return nxt.strip()
     return None
 
 def mileage_from_text(text: str) -> Optional[str]:
-    for p in [r"(?:Odometer|Odo|Mileage|Miles)\s*[:\-]?\s*([\d,]{2,7})\b",
-              r"\b([\d,]{2,7})\s*(?:mi|miles)\b"]:
+    for p in [r"(?:Odometer|Odo|Mileage|Miles)\\s*[:\\-]?\\s*([\\d,]{2,7})\\b",
+              r"\\b([\\d,]{2,7})\\s*(?:mi|miles)\\b"]:
         m = re.search(p, text, re.IGNORECASE)
         if m: return m.group(1)
     return None
 
 def claim_from_text(text: str) -> Optional[str]:
-    for pat in [r"Claim\s*(?:No\.?|Number|#)\s*[: ]\s*([A-Za-z0-9\-_\/]+)", r"Claim\s*[:#]\s*([A-Za-z0-9\-_\/]+)"]:
+    pats = [
+        r"Claim\\s*(?:No\\.?|Number|#)\\s*[: ]\\s*([A-Za-z0-9\\-_\\/]+)",
+        r"CLM\\s*#\\s*[: ]\\s*([A-Za-z0-9\\-_\\/]+)",
+        r"Claim\\s*[:#]\\s*([A-Za-z0-9\\-_\\/]+)"
+    ]
+    for pat in pats:
         m = re.search(pat, text, re.IGNORECASE)
         if m: return m.group(1).strip()
     return None
 
 def extract_reported_days(text: str) -> Optional[int]:
-    m = re.search(r"Days?\s*to\s*Repair\s*[:\-]?\s*([0-9]+)", text or "", re.IGNORECASE)
+    m = re.search(r"Days?\\s*to\\s*Repair\\s*[:\\-]?\\s*([0-9]+)", text or "", re.IGNORECASE)
     try:
         return int(m.group(1)) if m else None
     except:
@@ -223,40 +249,40 @@ def extract_reported_days(text: str) -> Optional[int]:
 
 # ----------------- Facts helpers (for grounded GPT) -----------------
 def money(label: str, text: str) -> Optional[str]:
-    m = re.search(rf"{label}[^$\n]{{0,60}}(?:\$)?\s*([\d,]+\.\d{{2}})", text, re.IGNORECASE)
+    m = re.search(rf"{label}[^$\\n]{{0,60}}(?:\\$)?\\s*([\\d,]+\\.\\d{{2}})", text, re.IGNORECASE)
     return m.group(1) if m else None
 
 def rate_hits(text: str) -> List[str]:
-    hits = re.findall(r"\$\s?\d{2,3}\.\d{2}\s*(?:/hr|per\s*hour|hr)", text, re.IGNORECASE)
+    hits = re.findall(r"\\$\\s?\\d{2,3}\\.\\d{2}\\s*(?:/hr|per\\s*hour|hr)", text, re.IGNORECASE)
     return list(dict.fromkeys(hits))[:6]
 
 def tax_rate(text: str) -> Optional[str]:
-    m = re.search(r"(\d{1,2}(?:\.\d{1,4})?)\s*%\s*(?:tax|sales)", text, re.IGNORECASE)
+    m = re.search(r"(\\d{1,2}(?:\\.\\d{1,4})?)\\s*%\\s*(?:tax|sales)", text, re.IGNORECASE)
     return m.group(1) + "%" if m else None
 
 def hours(label: str, text: str) -> Optional[float]:
-    m = re.search(rf"{label}[^0-9\n]{{0,40}}(\d+(?:\.\d+)?)\s*h", text, re.IGNORECASE)
+    m = re.search(rf"{label}[^0-9\\n]{{0,40}}(\\d+(?:\\.\\d+)?)\\s*h", text, re.IGNORECASE)
     try: return float(m.group(1)) if m else None
     except: return None
 
 def estimate_facts(text: str) -> Dict[str, Any]:
-    body_h = hours("Body\s*Labor|BL", text) or 0.0
-    paint_h = hours("Paint\s*Labor|PL", text) or 0.0
-    mech_h  = hours("Mech|Mechanical\s*Labor", text) or 0.0
-    frame_h = hours("Frame|Structural\s*Labor", text) or 0.0
+    body_h = hours("Body\\s*Labor|BL", text) or 0.0
+    paint_h = hours("Paint\\s*Labor|PL", text) or 0.0
+    mech_h  = hours("Mech|Mechanical\\s*Labor", text) or 0.0
+    frame_h = hours("Frame|Structural\\s*Labor", text) or 0.0
     total_h = round(body_h + paint_h + mech_h, 2) + (frame_h or 0.0)
     days_formula = round(total_h/5.0, 1) if total_h else None
     return {
         "totals": {
-            "total": money(r"(Total|Grand\s*Total|Total Cost of Repairs)", text),
+            "total": money(r"(Total|Grand\\s*Total|Total Cost of Repairs)", text),
             "parts": money("Parts", text),
-            "body_labor": money(r"(Body\s*Labor|BL)", text),
-            "paint_labor": money(r"(Paint\s*Labor|PL)", text),
-            "paint_supplies": money(r"(Paint\s*Suppl(?:y|ies)|Materials|P&M)", text),
+            "body_labor": money(r"(Body\\s*Labor|BL)", text),
+            "paint_labor": money(r"(Paint\\s*Labor|PL)", text),
+            "paint_supplies": money(r"(Paint\\s*Suppl(?:y|ies)|Materials|P&M)", text),
             "misc": money("Misc", text),
             "other": money("Other Charges", text),
             "subtotal": money("Subtotal", text),
-            "sales_tax": money("(Sales\s*Tax|Tax)", text),
+            "sales_tax": money("(Sales\\s*Tax|Tax)", text),
         },
         "rates": rate_hits(text),
         "tax_rate": tax_rate(text),
@@ -289,8 +315,8 @@ def chat(messages, max_tokens=900, model=MODEL):
         return None
 
 def strip_photo_claims(text: str) -> str:
-    text = re.sub(r"(?is)##\s*Client\s*Photo\s*Rules.*?(?=\n##|\Z)", "", text)
-    text = re.sub(r"(?is)##\s*Estimate.?↔.?Photos\s*Comparison.*?(?=\n##|\Z)", "", text)
+    text = re.sub(r"(?is)##\\s*Client\\s*Photo\\s*Rules.*?(?=\\n##|\\Z)", "", text)
+    text = re.sub(r"(?is)##\\s*Estimate.?↔.?Photos\\s*Comparison.*?(?=\\n##|\\Z)", "", text)
     text = re.sub(r"(?im)^-.*photo.*$", "", text)
     return text.strip()
 
@@ -300,13 +326,13 @@ def correct_false_negatives(text: str, mileage_present: bool, reported_days: Opt
     out = []
     for ln in lines:
         bad = False
-        if mileage_present and re.search(r"(?i)mileage\s+(not|missing)|mileage\s+noted\s+on\s+the\s+estimate\s*:\s*no", ln):
+        if mileage_present and re.search(r"(?i)mileage\\s+(not|missing)|mileage\\s+noted\\s+on\\s+the\\s+estimate\\s*:\\s*no", ln):
             bad = True
-        if (reported_days is not None) and re.search(r"(?i)(repair\s+days|approx(imate)?\s+repair\s+days).*(not|missing)", ln):
+        if (reported_days is not None) and re.search(r"(?i)(repair\\s+days|approx(imate)?\\s+repair\\s+days).*(not|missing)", ln):
             bad = True
         if not bad:
             out.append(ln)
-    return "\n".join(out).strip()
+    return "\\n".join(out).strip()
 
 # ----------------- API -----------------
 @app.get("/")
@@ -326,11 +352,9 @@ async def vision_review(
         return JSONResponse(status_code=400, content={"error":"Appraiser ID is required."})
 
     intent = ai_intent if ai_intent in INTENTS else "guidelines_only"
-
-    # Human-readable label for outputs
     request_type_label = INTENTS.get(intent, intent)
 
-    # partition uploads
+    # Partition uploads
     pdfs: List[Tuple[str, bytes]] = []
     images: List[Tuple[str, bytes]] = []
     docs: List[str] = []
@@ -344,11 +368,15 @@ async def vision_review(
 
     photos_present = len(images) > 0
 
-    # OCR estimate (fast)
+    # Estimate text (fast): text-layer first, then OCR fallback for sparse files
     limit = 12 if intent == "comprehensive" else 5
     est_text = ""
-    if pdfs: est_text = ocr_pdf_text(pdfs[0][1], limit_pages=limit, dpi=200)
-    elif docs: est_text = "\n\n".join(docs)
+    if pdfs:
+        est_text = fast_pdf_text(pdfs[0][1], limit_pages=limit)
+        if len(est_text.strip()) < 120:  # fallback only if text-layer is too thin
+            est_text = ocr_pdf_text(pdfs[0][1], limit_pages=limit, dpi=200)
+    elif docs:
+        est_text = "\\n\\n".join(docs)
 
     # ALWAYS extract VIN / vehicle / claim / mileage
     vin = None
@@ -368,8 +396,8 @@ async def vision_review(
     claim = claim_from_text(est_text) or "N/A"
 
     # Evidence flags & facts
-    has_clean_value = bool(re.search(r"(clean\s*retail|NADA|KBB|Black\s*Book|J\.?D\.?\s*Power|valuation)", est_text, re.IGNORECASE))
-    has_advisor = bool(re.search(r"(advisor\s*report|ccc\s*one\s*advisor)", est_text, re.IGNORECASE))
+    has_clean_value = bool(re.search(r"(clean\\s*retail|NADA|KBB|Black\\s*Book|J\\.?D\\.?\\s*Power|valuation)", est_text, re.IGNORECASE))
+    has_advisor = bool(re.search(r"(advisor\\s*report|ccc\\s*one\\s*advisor)", est_text, re.IGNORECASE))
     facts = estimate_facts(est_text)
     reported_days = facts.get("hours", {}).get("days_reported")
     mileage_present = bool(mileage)
@@ -385,21 +413,25 @@ async def vision_review(
 
     if intent == "guidelines_only":
         system = (
-            "Auto-damage compliance auditor.\n"
-            f"PhotosPresent={photos_present}. Do NOT mention photos if false.\n"
-            f"CleanRetailProvided={has_clean_value}. AdvisorReportProvided={has_advisor}.\n"
+            "Auto-damage compliance auditor.\\n"
+            f"PhotosPresent={photos_present}. Do NOT mention photos if false.\\n"
+            f"CleanRetailProvided={has_clean_value}. AdvisorReportProvided={has_advisor}.\\n"
             f"- MileagePresent={mileage_present}; DaysReported={reported_days}; "
-            f"DaysByFormula={facts.get('hours',{}).get('days_formula_hrs_div_5')}.\n"
-            "- If MileagePresent=True, explicitly cite the mileage from the estimate and DO NOT say mileage is missing.\n"
+            f"DaysByFormula={facts.get('hours',{}).get('days_formula_hrs_div_5')}.\\n"
+            "- If MileagePresent=True, explicitly cite the mileage from the estimate and DO NOT say mileage is missing.\\n"
             "- If DaysReported is a number, DO NOT say repair days are missing; cite 'Days to Repair: X'. "
-            "If DaysReported is None but hours exist, compute approximate days (hours/5) and label it as calculated.\n"
-            "Sections: Client Quick Summary, Fatal Errors (if any), Parts/Tax/Labor, Documentation Requirements, Summary.\n"
-            "Be concise, factual, and concrete. Use provided facts; do not invent values.\n"
+            "If DaysReported is None but hours exist, compute approximate days (hours/5) and label it as calculated.\\n"
+            "Sections (bullet points):\\n"
+            "1) Client Quick Summary (1-3 lines).\\n"
+            "2) Fatal Errors (only if any, be explicit).\\n"
+            "3) Parts/Tax/Labor Compliance (rates, P&M, tax).\\n"
+            "4) Documentation Requirements (Clean Retail Value, Advisor, open items).\\n"
+            "5) Summary & Recommendations (1-2 lines).\\n"
             + json.dumps(facts, indent=2)
         )
         user = [
-            {"type":"text","text":"CLIENT GUIDELINES:\n"+(client_rules or "")[:12000]},
-            {"type":"text","text":"\n\nESTIMATE (OCR):\n"+(est_text or "")[:12000]},
+            {"type":"text","text":"CLIENT GUIDELINES:\\n"+(client_rules or "")[:12000]},
+            {"type":"text","text":"\\n\\nESTIMATE (OCR/TEXT):\\n"+(est_text or "")[:12000]},
         ]
         rsp = chat([{"role":"system","content":system},{"role":"user","content":user}], max_tokens=900)
         gpt_output = (rsp.choices[0].message.content if rsp else "Automated narrative unavailable.").strip()
@@ -408,23 +440,23 @@ async def vision_review(
 
     elif intent == "comprehensive":
         system = (
-            "Auto-damage auditor.\n"
-            f"PhotosPresent={photos_present}. If false, omit photo sections and explicitly state no photos were provided.\n"
-            f"CleanRetailProvided={has_clean_value}. AdvisorReportProvided={has_advisor}. Only say 'included' if True; else 'missing'.\n"
+            "Auto-damage auditor.\\n"
+            f"PhotosPresent={photos_present}. If false, omit photo sections and explicitly state no photos were provided.\\n"
+            f"CleanRetailProvided={has_clean_value}. AdvisorReportProvided={has_advisor}. Only say 'included' if True; else 'missing'.\\n"
             f"- MileagePresent={mileage_present}; DaysReported={reported_days}; "
-            f"DaysByFormula={facts.get('hours',{}).get('days_formula_hrs_div_5')}.\n"
-            "- If MileagePresent=True, explicitly cite the mileage from the estimate and DO NOT say mileage is missing.\n"
+            f"DaysByFormula={facts.get('hours',{}).get('days_formula_hrs_div_5')}.\\n"
+            "- If MileagePresent=True, explicitly cite the mileage from the estimate and DO NOT say mileage is missing.\\n"
             "- If DaysReported is a number, DO NOT say repair days are missing; cite 'Days to Repair: X'. "
-            "If DaysReported is None but hours exist, compute approximate days (hours/5) and label it as calculated.\n"
+            "If DaysReported is None but hours exist, compute approximate days (hours/5) and label it as calculated.\\n"
             "Sections: Client Quick Summary Compliance → Fatal Errors → "
             + ("Client Photo Rules → Estimate↔Photos Comparison → " if photos_present else "")
-            + "Parts/Tax/Labor → Summary.\n"
-            "Be concise and concrete. Use provided facts; do not invent values.\n"
+            + "Parts/Tax/Labor → Summary.\\n"
+            "Be concise and concrete. Use provided facts; do not invent values.\\n"
             + json.dumps(facts, indent=2)
         )
         user = [
-            {"type":"text","text":"CLIENT GUIDELINES:\n"+(client_rules or "")[:8000]},
-            {"type":"text","text":"\n\nESTIMATE (OCR):\n"+(est_text or "")[:10000]},
+            {"type":"text","text":"CLIENT GUIDELINES:\\n"+(client_rules or "")[:8000]},
+            {"type":"text","text":"\\n\\nESTIMATE (OCR/TEXT):\\n"+(est_text or "")[:10000]},
         ]
         if photos_present: user.extend(vision_images())
         rsp = chat([{"role":"system","content":system},{"role":"user","content":user}], max_tokens=950)
@@ -437,7 +469,7 @@ async def vision_review(
             gpt_output = "No photos were provided with this request."
         else:
             system = "Compare ESTIMATE to PHOTOS only. Sections: Photo Coverage, Visible Damage vs Estimate, Discrepancies, Summary."
-            user = [{"type":"text","text":"ESTIMATE (OCR):\n"+(est_text or "")[:8000]}]
+            user = [{"type":"text","text":"ESTIMATE (OCR/TEXT):\\n"+(est_text or "")[:8000]}]
             user.extend(vision_images())
             rsp = chat([{"role":"system","content":system},{"role":"user","content":user}], max_tokens=700)
             gpt_output = (rsp.choices[0].message.content if rsp else "Automated narrative unavailable.").strip()
@@ -452,13 +484,13 @@ async def vision_review(
 
         photo_note = "Photos were NOT provided; do not invent photo content." if not photos_present else "Photos were provided."
         system = (
-            "Audit whether the supplement/estimate is substantiated by attached invoices and (if present) by the photos.\n"
-            f"{photo_note}\n"
+            "Audit whether the supplement/estimate is substantiated by attached invoices and (if present) by the photos.\\n"
+            f"{photo_note}\\n"
             "Write sections: Invoices Summary, Support vs Estimate Lines, (Photo Corroboration, omit if no photos), Missing Documentation, Summary."
         )
         user = [
-            {"type":"text","text":"ESTIMATE (OCR):\n"+(est_text or "")[:6000]},
-            {"type":"text","text":"\n\nINVOICES (OCR):\n"+(invoices_text or "")[:6000]},
+            {"type":"text","text":"ESTIMATE (OCR/TEXT):\\n"+(est_text or "")[:6000]},
+            {"type":"text","text":"\\n\\nINVOICES (OCR):\\n"+(invoices_text or "")[:6000]},
         ]
         if photos_present: user.extend(vision_images())
         rsp = chat([{"role":"system","content":system},{"role":"user","content":user}], max_tokens=800)
@@ -472,9 +504,9 @@ async def vision_review(
             "and any other required docs mentioned in guidelines. If not found, mark 'missing'. Be terse and factual."
         )
         user = [
-            {"type":"text","text":"CLIENT GUIDELINES:\n"+(client_rules or "")[:6000]},
-            {"type":"text","text":"\n\nESTIMATE (OCR):\n"+(est_text or "")[:8000]},
-            {"type":"text","text":f"\n\nDetected:\nCleanRetailProvided={has_clean_value}\nAdvisorReportProvided={has_advisor}"},
+            {"type":"text","text":"CLIENT GUIDELINES:\\n"+(client_rules or "")[:6000]},
+            {"type":"text","text":"\\n\\nESTIMATE (OCR/TEXT):\\n"+(est_text or "")[:8000]},
+            {"type":"text","text":f"\\n\\nDetected:\\nCleanRetailProvided={has_clean_value}\\nAdvisorReportProvided={has_advisor}"},
         ]
         rsp = chat([{"role":"system","content":system},{"role":"user","content":user}], max_tokens=400)
         gpt_output = (rsp.choices[0].message.content if rsp else "Automated narrative unavailable.").strip()
@@ -483,12 +515,12 @@ async def vision_review(
     def light_score(txt: str, rules: str) -> int:
         score = 100
         if rules and intent in ("guidelines_only","comprehensive","docs_checklist"):
-            if "labor" in rules.lower() and not re.search(r"(labor|rate).{0,80}\$", txt, re.IGNORECASE | re.DOTALL): score -= 10
+            if "labor" in rules.lower() and not re.search(r"(labor|rate).{0,80}\\$", txt, re.IGNORECASE | re.DOTALL): score -= 10
             if "tax" in rules.lower() and "tax" not in txt.lower(): score -= 10
         return max(0, min(100, score))
     comp_score = light_score(est_text, client_rules)
 
-    # ----------------- PDF (same layout) -----------------
+    # ----------------- PDF -----------------
     pdf = FPDF(); pdf.add_page()
     try:
         pdf.add_font("DejaVu","","DejaVuSans.ttf", uni=True); pdf.set_font("DejaVu", size=11)
@@ -533,7 +565,7 @@ async def vision_review(
     except Exception as e:
         log.error(f"PDF write error: {e}")
 
-    # ----------------- Email (same structure) -----------------
+    # ----------------- Email -----------------
     try:
         msg = EmailMessage()
         msg["Subject"] = f"AI-4-IA Review: {claim}"
@@ -593,7 +625,7 @@ async def get_client_rules(client_name: str):
     if os.path.exists(fp):
         try:
             doc = Document(fp)
-            text = "\n".join([p.text for p in doc.paragraphs if p.text.strip()])
+            text = "\\n".join([p.text for p in doc.paragraphs if p.text.strip()])
             return {"text": text}
         except Exception as e:
             return JSONResponse(status_code=500, content={"error": str(e)})
