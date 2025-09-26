@@ -366,6 +366,27 @@ async def vision_review(
         elif name.endswith(".docx"): docs.append(ocr_docx_text(io.BytesIO(raw)))
         elif name.endswith(".txt"): docs.append(raw.decode("utf-8", errors="ignore"))
 
+elif name.endswith(".zip"):
+    import zipfile
+    try:
+        with zipfile.ZipFile(io.BytesIO(raw)) as zf:
+            for zi in zf.infolist():
+                if zi.is_dir():
+                    continue
+                zname = zi.filename.lower()
+                zdata = zf.read(zi)
+                if zname.endswith(".pdf"):
+                    pdfs.append((zname, zdata))
+                elif zname.endswith((".jpg",".jpeg",".png",".webp")):
+                    images.append((zname, zdata))
+                elif zname.endswith(".docx"):
+                    docs.append(ocr_docx_text(io.BytesIO(zdata)))
+                elif zname.endswith(".txt"):
+                    docs.append(zdata.decode("utf-8", errors="ignore"))
+    except Exception as e:
+        log.warning(f"ZIP parse error for {name}: {e}")
+
+
     photos_present = len(images) > 0
 
     # Estimate text (fast): text-layer first, then OCR fallback for sparse files
@@ -394,6 +415,17 @@ async def vision_review(
     vehicle = vehicle_from_text(est_text) or "N/A"
     mileage = mileage_from_text(est_text)
     claim = claim_from_text(est_text) or "N/A"
+
+# VIN/Claim deep fallback: scan more pages if still N/A
+if (vin == "N/A" or claim == "N/A") and pdfs:
+    deep_text = fast_pdf_text(pdfs[0][1], limit_pages=20)
+    if vin == "N/A":
+        v2 = vin_from_text(deep_text)
+        if v2: vin = v2
+    if claim == "N/A":
+        c2 = claim_from_text(deep_text)
+        if c2: claim = c2
+
 
     # Evidence flags & facts
     has_clean_value = bool(re.search(r"(clean\\s*retail|NADA|KBB|Black\\s*Book|J\\.?D\\.?\\s*Power|valuation)", est_text, re.IGNORECASE))
@@ -427,7 +459,9 @@ async def vision_review(
             "3) Parts/Tax/Labor Compliance (rates, P&M, tax).\\n"
             "4) Documentation Requirements (Clean Retail Value, Advisor, open items).\\n"
             "5) Summary & Recommendations (1-2 lines).\\n"
-            + json.dumps(facts, indent=2)
+            "- Never invent valuations (e.g., Average Price Paid, Trade-In Value). If CleanRetailProvided=False, mark it as missing and do NOT fabricate numbers.\n"
+            f"- VINFound={vin != 'N/A'}, VehicleFound={(vehicle != 'N/A')}, ClaimFound={(claim != 'N/A')}. If any is False, do NOT guess values.\n"
++ json.dumps(facts, indent=2)
         )
         user = [
             {"type":"text","text":"CLIENT GUIDELINES:\\n"+(client_rules or "")[:12000]},
@@ -452,7 +486,9 @@ async def vision_review(
             + ("Client Photo Rules → Estimate↔Photos Comparison → " if photos_present else "")
             + "Parts/Tax/Labor → Summary.\\n"
             "Be concise and concrete. Use provided facts; do not invent values.\\n"
-            + json.dumps(facts, indent=2)
+            "- Never invent valuations (e.g., Average Price Paid, Trade-In Value). If CleanRetailProvided=False, mark it as missing and do NOT fabricate numbers.\n"
+            f"- VINFound={vin != 'N/A'}, VehicleFound={(vehicle != 'N/A')}, ClaimFound={(claim != 'N/A')}. If any is False, do NOT guess values.\n"
++ json.dumps(facts, indent=2)
         )
         user = [
             {"type":"text","text":"CLIENT GUIDELINES:\\n"+(client_rules or "")[:8000]},
