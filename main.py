@@ -95,7 +95,9 @@ _translit = {**{str(i): i for i in range(10)},
 _weights = [8,7,6,5,4,3,2,10,0,9,8,7,6,5,4,3,2]
 
 def normalize_vin(s: str) -> Optional[str]:
-    s = (s or "").strip().upper().replace(" ", "").replace("O","0").replace("I","1").replace("Q","0")
+    s = (s or "").upper()
+    s = re.sub(r"[^A-HJ-NPR-Z0-9]", "", s)  # drop spaces, dashes, punctuation
+    s = s.replace("O","0").replace("I","1").replace("Q","0")
     if len(s) != 17 or any(ch not in VIN_ALLOWED for ch in s): return None
     return s
 
@@ -115,37 +117,72 @@ def pick_best_vin(cands: List[str]) -> Optional[str]:
         v = normalize_vin(c)
         if v and v not in seen:
             uniq.append(v); seen.add(v)
-    # prefer checksum-valid
     for v in uniq:
         if vin_checksum_ok(v): return v
     return uniq[0] if uniq else None
 
-def find_vin_in_text(text: str) -> Optional[str]:
-    label_hits = re.findall(r"(?:VIN[:\s\-]*)([A-HJ-NPR-Z0-9]{10,20})", text, re.IGNORECASE)
-    line_hits = re.findall(r"\b([A-HJ-NPR-Z0-9]{17})\b", text)
-    return pick_best_vin(label_hits + line_hits)
+# relaxed text matcher: handles VIN: 1 N4 BL4... and VIN 1N4BL...
+VIN_RELAXED = re.compile(r"(?:VIN\b[^A-Z0-9]{0,10})((?:[A-HJ-NPR-Z0-9][\s\-]*){17})", re.IGNORECASE)
+VIN_TIGHT   = re.compile(r"\b([A-HJ-NPR-Z0-9]{17})\b")
 
-def find_vin_via_data(img: Image.Image) -> Optional[str]:
-    """Use Tesseract word boxes: find 'VIN' then nearest 17-char token on the same line."""
+def find_vin_in_text(text: str) -> Optional[str]:
+    cands = []
+    for m in VIN_RELAXED.finditer(text or ""):
+        cands.append(m.group(1))
+    cands += VIN_TIGHT.findall(text or "")
+    return pick_best_vin(cands)
+
+def find_vin_via_boxes(img: Image.Image) -> Optional[str]:
+    """Find 'VIN' by word boxes, then harvest a 17-char token on/after that line."""
     try:
         proc = preprocess_image(img)
         data = pytesseract.image_to_data(proc, lang="eng", output_type=Output.DICT)
         n = len(data["text"])
         for i in range(n):
             word = (data["text"][i] or "").strip().upper()
-            if word == "VIN":
+            if word == "VIN" and int(data.get("conf", ["0"])[i]) >= 50:
                 line = data["line_num"][i]
-                # collect tokens from same line
-                cands = []
+                # grab same line tokens to the right
+                tokens = []
+                vin_x = data["left"][i]
                 for j in range(n):
                     if data["line_num"][j] == line:
                         t = (data["text"][j] or "").strip().upper()
-                        if re.fullmatch(r"[A-HJ-NPR-Z0-9]{17}", t):
-                            cands.append(t)
-                if cands:
-                    return pick_best_vin(cands)
+                        if data["left"][j] >= vin_x - 5:
+                            tokens.append(t)
+                joined = " ".join(tokens)
+                v = pick_best_vin([joined])
+                if v: return v
+                # fallback: crop a band around that line
+                top = data["top"][i] - 10
+                height = data["height"][i] + 20
+                left, right = 0, proc.width
+                band = proc.crop((left, max(0, top), right, min(proc.height, top+height)))
+                txt = pytesseract.image_to_string(band, lang="eng", config="--psm 7 -c tessedit_char_whitelist=ABCDEFGHJKLMNPRSTUVWXYZ0123456789")
+                v2 = pick_best_vin([txt])
+                if v2: return v2
     except Exception:
         pass
+    return None
+
+def robust_vin_from_pdf(pdf_bytes: bytes, max_pages: int = 3) -> Optional[str]:
+    # pass 1: text OCR @200 dpi (few pages)
+    text = ocr_pdf_text(pdf_bytes, limit_pages=max_pages, dpi=200)
+    v = find_vin_in_text(text)
+    if v: return v
+    # pass 2: word boxes @240 dpi (few pages), try rotations + invert
+    pages = ocr_pdf_pages(pdf_bytes, limit_pages=max_pages, dpi=240)
+    for p in pages:
+        for rot in (0, 90, 180, 270):
+            img = p.rotate(rot, expand=True)
+            for variant in (img, ImageOps.invert(img.convert("L")).convert("RGB")):
+                v2 = find_vin_via_boxes(variant)
+                if v2: return v2
+                # global whitelist scan
+                txt = pytesseract.image_to_string(preprocess_image(variant), lang="eng",
+                                                  config="--psm 6 -c tessedit_char_whitelist=ABCDEFGHJKLMNPRSTUVWXYZ0123456789")
+                v3 = find_vin_in_text(txt)
+                if v3: return v3
     return None
 
 MAKE_MAP = {
@@ -174,7 +211,6 @@ def extract_vehicle(text: str) -> Optional[str]:
             if kept:
                 mk = MAKE_MAP.get(kept[0].upper(), kept[0].capitalize())
                 return " ".join([year, mk] + kept[1:])
-    # fallback: VEHICLE header → next line
     for i, ln in enumerate(lines):
         if "VEHICLE" in ln.upper() and i+1 < len(lines):
             nxt = lines[i+1]
@@ -183,22 +219,18 @@ def extract_vehicle(text: str) -> Optional[str]:
     return None
 
 def extract_mileage(text: str) -> Optional[str]:
-    pats = [
-        r"(?:Odometer|Odo|Mileage|Miles)\s*[:\-]?\s*([\d,]{2,7})\b",
-        r"\b([\d,]{2,7})\s*(?:mi|miles)\b",
-    ]
-    for p in pats:
+    for p in [r"(?:Odometer|Odo|Mileage|Miles)\s*[:\-]?\s*([\d,]{2,7})\b",
+              r"\b([\d,]{2,7})\s*(?:mi|miles)\b"]:
         m = re.search(p, text, re.IGNORECASE)
         if m:
-            val = m.group(1)
-            return val
+            return m.group(1)
     return None
 
 # =========================
-# Totals/rates parsing (anchor GPT to facts)
+# Totals/rates parsing (anchors for GPT)
 # =========================
 def find_money(label: str, text: str) -> Optional[str]:
-    pat = rf"{label}[^$\n]{{0,40}}(?:\$)?\s*([\d,]+\.\d{{2}})"
+    pat = rf"{label}[^$\n]{{0,60}}(?:\$)?\s*([\d,]+\.\d{{2}})"
     m = re.search(pat, text, re.IGNORECASE)
     return m.group(1) if m else None
 
@@ -207,10 +239,21 @@ def find_rate_block(text: str) -> List[str]:
     return list(dict.fromkeys(hits))[:6]
 
 def find_tax_rate(text: str) -> Optional[str]:
-    m = re.search(r"(\d{1,2}\.\d{3,4}|\d{1,2}\.\d{1,2}|\d{1,2})\s*%\s*(?:tax|sales)", text, re.IGNORECASE)
-    return m.group(1) + "%" if m else None
+    m = re.search(r"(\d{1,2}(?:\.\d{1,4})?)\s*%\s*(?:tax|sales)", text, re.IGNORECASE)
+    return (m.group(1) + "%") if m else None
+
+def find_hours(label: str, text: str) -> Optional[float]:
+    m = re.search(rf"{label}[^0-9\n]{{0,40}}(\d+(?:\.\d+)?)\s*h", text, re.IGNORECASE)
+    try: return float(m.group(1)) if m else None
+    except: return None
 
 def parse_estimate_facts(text: str) -> Dict[str, Any]:
+    body_h = find_hours("Body\s*Labor|BL", text) or 0.0
+    paint_h = find_hours("Paint\s*Labor|PL", text) or 0.0
+    mech_h  = find_hours("Mech|Mechanical\s*Labor", text) or 0.0
+    frame_h = find_hours("Frame|Structural\s*Labor", text) or 0.0
+    total_hours = round(body_h + paint_h + mech_h + frame_h, 2)
+    days = round(total_hours/5.0, 1) if total_hours else None
     return {
         "totals": {
             "total": find_money(r"(Total|Grand\s*Total|Total Cost of Repairs)", text),
@@ -220,9 +263,19 @@ def parse_estimate_facts(text: str) -> Dict[str, Any]:
             "paint_supplies": find_money(r"(Paint\s*Suppl(?:y|ies)|Materials|P&M)", text),
             "misc": find_money("Misc", text),
             "other": find_money("Other Charges", text),
+            "subtotal": find_money("Subtotal", text),
+            "sales_tax": find_money("(Sales\s*Tax|Tax)", text),
         },
         "rates": find_rate_block(text),
         "tax_rate": find_tax_rate(text),
+        "hours": {
+            "body": body_h or None,
+            "paint": paint_h or None,
+            "mech": mech_h or None,
+            "frame": frame_h or None,
+            "total_hours": total_hours or None,
+            "days_formula_hrs_div_5": days
+        }
     }
 
 # =========================
@@ -313,31 +366,26 @@ async def vision_review(
     # --- OCR (fast): always read a few pages for fields
     limit = 12 if intent == "comprehensive" else 5
     estimate_text = ""
-    pages_200 = []
     if pdfs:
         estimate_text = ocr_pdf_text(pdfs[0][1], limit_pages=limit, dpi=200)
-        pages_200 = ocr_pdf_pages(pdfs[0][1], limit_pages=min(3, limit), dpi=200)
-        # If VIN still missing, try two-page 240dpi + word-box VIN scan
-        if not find_vin_in_text(estimate_text):
-            pages_240 = ocr_pdf_pages(pdfs[0][1], limit_pages=2, dpi=240)
-            # merge text
-            for p in pages_240:
-                estimate_text = f"{estimate_text}\n" + pytesseract.image_to_string(preprocess_image(p), lang="eng", config="--psm 6")
-            # try word-box scan
-            if not find_vin_in_text(estimate_text):
-                for p in pages_240:
-                    vin_box = find_vin_via_data(p)
-                    if vin_box:
-                        estimate_text += f"\nVIN_FOUND:{vin_box}"
-                        break
     elif docs:
         estimate_text = "\n\n".join(docs)
 
     # --- ALWAYS extract VIN, Vehicle, Mileage from estimate
-    vin_from_est = find_vin_in_text(estimate_text) or "N/A"
+    vin_from_est = None
+    if pdfs:
+        vin_from_est = robust_vin_from_pdf(pdfs[0][1], max_pages=3)
+        if not vin_from_est:
+            # as a last resort, scrape from text we already OCR'd
+            vin_from_est = find_vin_in_text(estimate_text)
+    else:
+        vin_from_est = find_vin_in_text(estimate_text)
+    vin_from_est = vin_from_est or "N/A"
+
     vehicle_desc = extract_vehicle(estimate_text) or "N/A"
-    est_mileage = extract_mileage(estimate_text)  # may be None if truly absent
-    claim_number = (re.search(r"Claim\s*(?:No\.?|Number|#)[:\s]*([A-Za-z0-9\-_/]+)", estimate_text, re.IGNORECASE) or re.search(r"Claim\s*[:#]\s*([A-Za-z0-9\-_/]+)", estimate_text, re.IGNORECASE))
+    est_mileage = extract_mileage(estimate_text)  # may be None if absent
+    claim_number = (re.search(r"Claim\s*(?:No\.?|Number|#)[:\s]*([A-Za-z0-9\-_/]+)", estimate_text, re.IGNORECASE) or
+                    re.search(r"Claim\s*[:#]\s*([A-Za-z0-9\-_/]+)", estimate_text, re.IGNORECASE))
     claim_number = claim_number.group(1) if claim_number else "N/A"
 
     # Evidence flags to prevent hallucinations
@@ -357,46 +405,34 @@ async def vision_review(
         return out
 
     gpt_output = ""
-    if intent == "guidelines_only":
+    if intent in ("guidelines_only","comprehensive"):
+        # unified prompt that omits photo sections when none were uploaded
+        photo_directive = (
+            "- Photos were NOT provided. Omit any photo sections and do not claim photo compliance.\n"
+            if not photos_present else
+            "- Photos were provided; you may comment on photo requirements.\n"
+        )
+        sections = ("Client Quick Summary Compliance → Fatal Errors → Parts/Tax/Labor → Documentation Requirements → Summary"
+                    if not photos_present else
+                    "Client Quick Summary Compliance → Fatal Errors → Client Photo Rules → Parts/Tax/Labor → Estimate↔Photos Comparison → Summary")
         system = (
-            "You are an auto-damage compliance auditor.\n"
-            "TASK: Compare CLIENT GUIDELINES to the ESTIMATE only.\n"
+            "You are an auto-damage auditor.\n"
+            "TASK: Compare CLIENT GUIDELINES to the ESTIMATE"
+            + (" and include a brief estimate↔photos comparison" if photos_present else "")
+            + ".\n"
             "HARD RULES:\n"
-            f"- PhotosPresent={photos_present}. If false, DO NOT mention photos.\n"
+            f"{photo_directive}"
             f"- CleanRetailProvided={has_clean_value}. AdvisorReportProvided={has_advisor}. "
-            "Only say 'included' if the flag is True; otherwise mark 'missing/not provided'.\n"
+            "Only say 'included' if the flag is True; else mark 'missing/not provided'.\n"
             "- Use these extracted facts when present (do not invent numbers):\n"
             f"{json.dumps(facts, indent=2)}\n"
-            "- Sections: Client Quick Summary, Fatal Errors (if any), Parts/Tax/Labor, Documentation Requirements, Summary.\n"
-            "- Be concise, factual, and concrete."
+            f"- Sections: {sections}.\n"
+            "- Be concise, factual, and concrete. Include dollar amounts, rates, hours, and calculated repair days when available."
         )
         user_parts = [
             {"type":"text","text":"CLIENT GUIDELINES:\n" + (client_rules or "")[:12000]},
             {"type":"text","text":"\n\nESTIMATE (OCR):\n" + (estimate_text or "")[:12000]},
             {"type":"text","text":f"\n\nAPPRAISER REQUEST: {ai_request}"},
-        ]
-        rsp = safe_chat_completion(messages=[{"role":"system","content":system},{"role":"user","content":user_parts}], max_tokens=1000)
-        gpt_output = (rsp.choices[0].message.content if rsp else "Automated narrative unavailable (OpenAI error).").strip()
-        if not photos_present:
-            gpt_output = strip_photo_claims(gpt_output)
-
-    elif intent == "comprehensive":
-        system = (
-            "You are an auto-damage auditor.\n"
-            "TASK: Guidelines + Estimate (+ Photos only if provided).\n"
-            "HARD RULES:\n"
-            f"- PhotosPresent={photos_present}. If false, explicitly state no photos and OMIT photo sections.\n"
-            f"- CleanRetailProvided={has_clean_value}. AdvisorReportProvided={has_advisor}. "
-            "Only say 'included' if the flag is True; else 'missing'.\n"
-            "- Use these extracted facts when present:\n"
-            f"{json.dumps(facts, indent=2)}\n"
-            "Sections: Client Quick Summary Compliance → Fatal Errors → (Photo Rules, omit if no photos) → "
-            "Parts/Tax/Labor → (Estimate↔Photos Comparison, omit if no photos) → Summary.\n"
-            "Be concise and specific."
-        )
-        user_parts = [
-            {"type":"text","text":"CLIENT GUIDELINES:\n" + (client_rules or "")[:8000]},
-            {"type":"text","text":"\n\nESTIMATE (OCR):\n" + (estimate_text or "")[:10000]},
         ]
         if photos_present:
             user_parts.extend(vision_images())
@@ -457,7 +493,7 @@ async def vision_review(
             user_parts.extend(vision_images())
         if client_rules:
             user_parts.append({"type":"text","text":"\n\nCLIENT GUIDELINES:\n" + client_rules[:8000]})
-        user_parts.append({"type":"text","text":f"\n\nAPPRAISER REQUEST: {ai_request}"} )
+        user_parts.append({"type":"text","text":f"\n\nAPPRAISER REQUEST: {ai_request}"})
         rsp = safe_chat_completion(messages=[{"role":"system","content":system},{"role":"user","content":user_parts}], max_tokens=1000)
         gpt_output = (rsp.choices[0].message.content if rsp else "Automated narrative unavailable (OpenAI error).").strip()
         if not photos_present:
@@ -495,9 +531,9 @@ async def vision_review(
     pdf.multi_cell(0, 6, f"Claim #: {claim_number}")
     pdf.multi_cell(0, 6, f"VIN (from estimate): {vin_from_est}")
     pdf.multi_cell(0, 6, f"VIN verification (estimate vs photo): Not requested")
-    pdf.multi_cell(0, 6, f"Vehicle: {vehicle_desc}")
-    if est_mileage:
-        pdf.multi_cell(0, 6, f"Odometer (from estimate): {est_mileage}")
+    pdf.multi_cell(0, 6, f"Vehicle: {extract_vehicle(estimate_text) or 'N/A'}")
+    if extract_mileage(estimate_text):
+        pdf.multi_cell(0, 6, f"Odometer (from estimate): {extract_mileage(estimate_text)}")
     pdf.multi_cell(0, 6, f"Compliance Score: {comp_score}%")
 
     pdf.ln(4)
@@ -538,8 +574,8 @@ Appraiser Request: {ai_request or 'N/A'}
 Claim #: {claim_number}
 VIN (from estimate): {vin_from_est}
 VIN verification (estimate vs photo): Not requested
-Vehicle: {vehicle_desc}
-{"Odometer (from estimate): " + est_mileage if est_mileage else ""}
+Vehicle: {extract_vehicle(estimate_text) or 'N/A'}
+{"Odometer (from estimate): " + (extract_mileage(estimate_text) or "") if extract_mileage(estimate_text) else ""}
 
 Compliance Score: {comp_score}%
 
@@ -557,10 +593,10 @@ Summary:
         "gpt_output": gpt_output,
         "file_number": file_number,
         "claim_number": claim_number,
-        "vehicle": vehicle_desc,
+        "vehicle": extract_vehicle(estimate_text) or "N/A",
         "vin_estimate": vin_from_est,
         "vin_verification": "Not requested",
-        "odometer_estimate": est_mileage or "Not documented",
+        "odometer_estimate": extract_mileage(estimate_text) or "Not documented",
         "score": f"{comp_score}%"
     }
 
@@ -583,6 +619,7 @@ async def get_client_rules(client_name: str):
         except Exception as e:
             return JSONResponse(status_code=500, content={"error": str(e)})
     return JSONResponse(status_code=404, content={"error": "Rules not found for this client."})
+
 
 
 
