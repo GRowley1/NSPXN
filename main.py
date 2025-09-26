@@ -1,7 +1,7 @@
 
 from fastapi import FastAPI, File, UploadFile, Form
 from fastapi.responses import JSONResponse, FileResponse
-from fastapi.middleware.cors import CORSMiddleware
+from fastapi.middleware.cors import CORSMIDDLEWARE, CORSMiddleware
 from typing import List, Tuple, Optional, Dict, Any
 import os, re, io, json, logging, base64, smtplib, zipfile, time
 from email.message import EmailMessage
@@ -22,12 +22,15 @@ os.makedirs(PDF_DIR, exist_ok=True)
 logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s")
 log = logging.getLogger("ai4ia-lite")
 
+# OpenAI client with sane defaults
 if "OPENAI_API_KEY" not in os.environ:
     raise RuntimeError("OPENAI_API_KEY not set.")
 client = OpenAI(api_key=os.environ["OPENAI_API_KEY"])
 MODEL_PRIMARY = os.getenv("OAI_MODEL", "gpt-4o-mini")
 MODEL_FALLBACK = "gpt-3.5-turbo"
+OPENAI_TIMEOUT = float(os.getenv("OPENAI_TIMEOUT", "60"))  # seconds
 
+# Whitelisted request types
 INTENTS = {
     "guidelines_only": "Guidelines → Estimate (no photos)",
     "comprehensive": "Comprehensive: Guidelines + Estimate + Photos (with VIN check)",
@@ -44,14 +47,16 @@ app.add_middleware(
         "https://nspxn.com","https://www.nspxn.com",
         "http://nspxn.com","http://www.nspxn.com",
         "https://nspxn.onrender.com",
+        "*",
     ],
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
 )
 
-# ----------------- Helpers (fast) -----------------
-def _pp(img: Image.Image) -> Image.Image:
+# ----------------- Helpers -----------------
+def _pp(img):
+    """Light image preproc for OCR fallback."""
     img = img.convert("L")
     img = ImageEnhance.Contrast(img).enhance(1.9)
     img = ImageFilter.MedianFilter(3)(img)
@@ -73,11 +78,11 @@ def fast_pdf_text(pdf_bytes: bytes, limit_pages: Optional[int] = None) -> str:
             if t.strip():
                 out.append(f"[Page {i}]\n{t}")
     except Exception as e:
-        log.warning(f"PyPDF2 failed: {e}")
+        log.warning(f"PyPDF2 extract failed: {e}")
     return "\n\n".join(out)
 
-def quick_ocr_text(pdf_bytes: bytes, max_pages: int = 4, dpi: int = 220) -> str:
-    """Very shallow OCR fallback for image-based estimates to recover VIN/Claim quickly."""
+def quick_ocr_text(pdf_bytes: bytes, max_pages: int = 4, dpi: int = 240) -> str:
+    """Very shallow OCR fallback to recover VIN/Claim quickly for scanned estimates."""
     try:
         pages = convert_from_bytes(pdf_bytes, dpi=dpi)[:max_pages]
         out = []
@@ -178,10 +183,16 @@ def extract_days(text: str) -> Optional[int]:
     except: return None
 
 def openai_chat(messages, max_tokens=900):
-    # small retry with backoff; fallback model if rate-limited
+    # retry with backoff; hard client timeout to avoid 502s
     for attempt in range(3):
         try:
-            return client.chat.completions.create(model=MODEL_PRIMARY, messages=messages, max_tokens=max_tokens, temperature=0)
+            return client.chat.completions.create(
+                model=MODEL_PRIMARY,
+                messages=messages,
+                max_tokens=max_tokens,
+                temperature=0,
+                timeout=OPENAI_TIMEOUT,
+            )
         except Exception as e:
             s = str(e).lower()
             if "429" in s or "rate" in s or "timeout" in s:
@@ -189,8 +200,15 @@ def openai_chat(messages, max_tokens=900):
                 continue
             break
     try:
-        return client.chat.completions.create(model=MODEL_FALLBACK, messages=messages, max_tokens=max_tokens, temperature=0)
-    except Exception:
+        return client.chat.completions.create(
+            model=MODEL_FALLBACK,
+            messages=messages,
+            max_tokens=max_tokens,
+            temperature=0,
+            timeout=OPENAI_TIMEOUT,
+        )
+    except Exception as e:
+        log.error(f"OpenAI fallback failed: {e}")
         return None
 
 def strip_photo_sections(text: str) -> str:
@@ -224,6 +242,7 @@ async def vision_review(
 
     intent = ai_intent if ai_intent in INTENTS else "guidelines_only"
     request_type_label = INTENTS.get(intent, intent)
+    log.info(f"Intent={intent} ({request_type_label})")
 
     # Partition uploads (PDF/IMG/DOC/TXT/ZIP)
     pdfs: List[Tuple[str, bytes]] = []
@@ -271,12 +290,13 @@ async def vision_review(
 
     est_pdf = pick_estimate_pdf(pdfs)
 
-    # Estimate text: text-first; shallow OCR fallback only if text layer empty/too short
+    # Estimate text: text-first; shallow OCR fallback only if text layer empty/short
     limit = 12 if intent == "comprehensive" else 6
     est_text = ""
     if est_pdf:
         est_text = fast_pdf_text(est_pdf[1], limit_pages=limit)
         if len(est_text.strip()) < 80:
+            log.info("Text layer thin — using shallow OCR fallback (max 4 pages).")
             est_text = quick_ocr_text(est_pdf[1], max_pages=4, dpi=240)
     if not est_text and docs:
         est_text = "\n\n".join(docs)
@@ -308,14 +328,14 @@ async def vision_review(
             out.append({"type":"image_url","image_url":{"url":f"data:image/jpeg;base64,{b64}"}})
         return out
 
-    # ----------------- Intent routing -----------------
+    # ----------------- Intent routing (strict) -----------------
     gpt_output = ""
     if intent == "guidelines_only":
         system = (
             "Auto-damage compliance auditor. Compare client guidelines against the ESTIMATE content only. "
-            "Do not restate guidelines; output compliance decisions with short justifications from estimate text. "
+            "Do NOT restate the guidelines; output compliance decisions with short justifications from the estimate text. "
             f"PhotosPresent={photos_present}. If false, do NOT mention photos.\n"
-            "- Output tight bullets; no extra prose.\n"
+            "- Tight bullets; no fluff.\n"
             "Sections:\n"
             "1) Client Quick Summary (2 bullets)\n"
             "2) Checklist — Guidelines vs Estimate (each rule: [Compliant|Non-compliant|Not found] — reason)\n"
@@ -333,7 +353,7 @@ async def vision_review(
     elif intent == "comprehensive":
         system = (
             "Comprehensive audit: compare client guidelines to ESTIMATE, and compare ESTIMATE to PHOTOS (if photos present). "
-            "Do not restate guidelines; give compliance decisions with brief citations from estimate/photos. "
+            "Do NOT restate the guidelines; give compliance decisions with brief citations from estimate/photos. "
             "Numbered sections; hyphen bullets; no emojis.\n"
             f"PhotosPresent={photos_present}. If false, omit photo-dependent sections.\n"
             + json.dumps(facts, indent=2)
@@ -363,7 +383,7 @@ async def vision_review(
                 invoices_text += fast_pdf_text(raw, limit_pages=5) or quick_ocr_text(raw, max_pages=2)
         system = (
             f"PhotosPresent={photos_present}. If false, omit photo-related sections.\n"
-            "Audit if the supplement/estimate is substantiated by invoices and, if present, by photos. "
+            "Audit whether the supplement/estimate is substantiated by invoices and, if present, by photos. "
             "Sections: Invoices Summary, Support vs Estimate Lines, (Photo Corroboration), Missing Documentation, Summary."
         )
         user = [
