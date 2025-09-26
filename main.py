@@ -1,4 +1,4 @@
-# main.py
+
 from fastapi import FastAPI, File, UploadFile, Form
 from fastapi.responses import JSONResponse, FileResponse
 from fastapi.middleware.cors import CORSMiddleware
@@ -27,7 +27,7 @@ if "OPENAI_API_KEY" not in os.environ:
 client = OpenAI(api_key=os.environ["OPENAI_API_KEY"])
 MODEL = os.getenv("OAI_MODEL", "gpt-4o-mini")
 
-# Whitelisted request types
+# Whitelisted request types (trimmed per user spec)
 INTENTS = {
     "guidelines_only": "Compare client guidelines to the estimate only",
     "comprehensive": "Guidelines + Estimate + Photos (VIN/Vehicle & Rates/Tax included)",
@@ -201,6 +201,13 @@ def claim_from_text(text: str) -> Optional[str]:
         if m: return m.group(1).strip()
     return None
 
+def extract_reported_days(text: str) -> Optional[int]:
+    m = re.search(r"Days?\s*to\s*Repair\s*[:\-]?\s*([0-9]+)", text or "", re.IGNORECASE)
+    try:
+        return int(m.group(1)) if m else None
+    except:
+        return None
+
 # ----------------- Facts helpers (for grounded GPT) -----------------
 def money(label: str, text: str) -> Optional[str]:
     m = re.search(rf"{label}[^$\n]{{0,60}}(?:\$)?\s*([\d,]+\.\d{{2}})", text, re.IGNORECASE)
@@ -225,7 +232,7 @@ def estimate_facts(text: str) -> Dict[str, Any]:
     mech_h  = hours("Mech|Mechanical\s*Labor", text) or 0.0
     frame_h = hours("Frame|Structural\s*Labor", text) or 0.0
     total_h = round(body_h + paint_h + mech_h + frame_h, 2)
-    days = round(total_h/5.0, 1) if total_h else None
+    days_formula = round(total_h/5.0, 1) if total_h else None
     return {
         "totals": {
             "total": money(r"(Total|Grand\s*Total|Total Cost of Repairs)", text),
@@ -243,7 +250,9 @@ def estimate_facts(text: str) -> Dict[str, Any]:
         "hours": {
             "body": body_h or None, "paint": paint_h or None,
             "mech": mech_h or None, "frame": frame_h or None,
-            "total_hours": total_h or None, "days_formula_hrs_div_5": days
+            "total_hours": total_h or None,
+            "days_formula_hrs_div_5": days_formula,
+            "days_reported": extract_reported_days(text)
         }
     }
 
@@ -271,6 +280,20 @@ def strip_photo_claims(text: str) -> str:
     text = re.sub(r"(?is)##\s*Estimate.?↔.?Photos\s*Comparison.*?(?=\n##|\Z)", "", text)
     text = re.sub(r"(?im)^-.*photo.*$", "", text)
     return text.strip()
+
+def correct_false_negatives(text: str, mileage_present: bool, reported_days: Optional[int]) -> str:
+    if not text: return text
+    lines = text.splitlines()
+    out = []
+    for ln in lines:
+        bad = False
+        if mileage_present and re.search(r"(?i)mileage\s+(not|missing)|mileage\s+noted\s+on\s+the\s+estimate\s*:\s*no", ln):
+            bad = True
+        if (reported_days is not None) and re.search(r"(?i)(repair\s+days|approx(imate)?\s+repair\s+days).*(not|missing)", ln):
+            bad = True
+        if not bad:
+            out.append(ln)
+    return "\n".join(out).strip()
 
 # ----------------- API -----------------
 @app.get("/")
@@ -332,6 +355,8 @@ async def vision_review(
     has_clean_value = bool(re.search(r"(clean\s*retail|NADA|KBB|Black\s*Book|J\.?D\.?\s*Power|valuation)", est_text, re.IGNORECASE))
     has_advisor = bool(re.search(r"(advisor\s*report|ccc\s*one\s*advisor)", est_text, re.IGNORECASE))
     facts = estimate_facts(est_text)
+    reported_days = facts.get("hours", {}).get("days_reported")
+    mileage_present = bool(mileage)
 
     def vision_images():
         out=[]
@@ -347,7 +372,11 @@ async def vision_review(
             "Auto-damage compliance auditor.\n"
             f"PhotosPresent={photos_present}. Do NOT mention photos if false.\n"
             f"CleanRetailProvided={has_clean_value}. AdvisorReportProvided={has_advisor}.\n"
-            "Only say 'included' if True; else 'missing/not provided'.\n"
+            f"- MileagePresent={mileage_present}; DaysReported={reported_days}; "
+            f"DaysByFormula={facts.get('hours',{}).get('days_formula_hrs_div_5')}.\n"
+            "- If MileagePresent=True, explicitly cite the mileage from the estimate and DO NOT say mileage is missing.\n"
+            "- If DaysReported is a number, DO NOT say repair days are missing; cite 'Days to Repair: X'. "
+            "If DaysReported is None but hours exist, compute approximate days (hours/5) and label it as calculated.\n"
             "Sections: Client Quick Summary, Fatal Errors (if any), Parts/Tax/Labor, Documentation Requirements, Summary.\n"
             "Be concise, factual, and concrete. Use provided facts; do not invent values.\n"
             + json.dumps(facts, indent=2)
@@ -356,15 +385,21 @@ async def vision_review(
             {"type":"text","text":"CLIENT GUIDELINES:\n"+(client_rules or "")[:12000]},
             {"type":"text","text":"\n\nESTIMATE (OCR):\n"+(est_text or "")[:12000]},
         ]
-        rsp = chat([{"role":"system","content":system},{"role":"user","content":user}], max_tokens=1000)
+        rsp = chat([{"role":"system","content":system},{"role":"user","content":user}], max_tokens=1100)
         gpt_output = (rsp.choices[0].message.content if rsp else "Automated narrative unavailable.").strip()
         if not photos_present: gpt_output = strip_photo_claims(gpt_output)
+        gpt_output = correct_false_negatives(gpt_output, mileage_present, reported_days)
 
     elif intent == "comprehensive":
         system = (
             "Auto-damage auditor.\n"
             f"PhotosPresent={photos_present}. If false, omit photo sections and explicitly state no photos were provided.\n"
             f"CleanRetailProvided={has_clean_value}. AdvisorReportProvided={has_advisor}. Only say 'included' if True; else 'missing'.\n"
+            f"- MileagePresent={mileage_present}; DaysReported={reported_days}; "
+            f"DaysByFormula={facts.get('hours',{}).get('days_formula_hrs_div_5')}.\n"
+            "- If MileagePresent=True, explicitly cite the mileage from the estimate and DO NOT say mileage is missing.\n"
+            "- If DaysReported is a number, DO NOT say repair days are missing; cite 'Days to Repair: X'. "
+            "If DaysReported is None but hours exist, compute approximate days (hours/5) and label it as calculated.\n"
             "Sections: Client Quick Summary Compliance → Fatal Errors → "
             + ("Client Photo Rules → Estimate↔Photos Comparison → " if photos_present else "")
             + "Parts/Tax/Labor → Summary.\n"
@@ -376,9 +411,10 @@ async def vision_review(
             {"type":"text","text":"\n\nESTIMATE (OCR):\n"+(est_text or "")[:10000]},
         ]
         if photos_present: user.extend(vision_images())
-        rsp = chat([{"role":"system","content":system},{"role":"user","content":user}], max_tokens=1100)
+        rsp = chat([{"role":"system","content":system},{"role":"user","content":user}], max_tokens=1200)
         gpt_output = (rsp.choices[0].message.content if rsp else "Automated narrative unavailable.").strip()
         if not photos_present: gpt_output = strip_photo_claims(gpt_output)
+        gpt_output = correct_false_negatives(gpt_output, mileage_present, reported_days)
 
     elif intent == "photos_only":
         if not photos_present:
@@ -412,6 +448,7 @@ async def vision_review(
         rsp = chat([{"role":"system","content":system},{"role":"user","content":user}], max_tokens=950)
         gpt_output = (rsp.choices[0].message.content if rsp else "Automated narrative unavailable.").strip()
         if not photos_present: gpt_output = strip_photo_claims(gpt_output)
+        gpt_output = correct_false_negatives(gpt_output, mileage_present, reported_days)
 
     elif intent == "docs_checklist":
         system = (
@@ -421,7 +458,7 @@ async def vision_review(
         user = [
             {"type":"text","text":"CLIENT GUIDELINES:\n"+(client_rules or "")[:6000]},
             {"type":"text","text":"\n\nESTIMATE (OCR):\n"+(est_text or "")[:8000]},
-            {"type":"text","text":f"\n\nDetected:\nCleanRetailProvided={has_clean_value}\nAdvisorReportProvided={has_advisor}"}
+            {"type":"text","text":f\"\n\nDetected:\nCleanRetailProvided={has_clean_value}\nAdvisorReportProvided={has_advisor}\"}
         ]
         rsp = chat([{"role":"system","content":system},{"role":"user","content":user}], max_tokens=500)
         gpt_output = (rsp.choices[0].message.content if rsp else "Automated narrative unavailable.").strip()
@@ -456,6 +493,11 @@ async def vision_review(
     pdf.multi_cell(0,6,f"VIN verification (estimate vs photo): {vin_line}")
     pdf.multi_cell(0,6,f"Vehicle: {vehicle}")
     if mileage: pdf.multi_cell(0,6,f"Odometer (from estimate): {mileage}")
+    # include reported days line if present
+    if reported_days is not None:
+        pdf.multi_cell(0,6,f"Days to Repair (reported): {reported_days}")
+    elif facts.get("hours",{}).get("days_formula_hrs_div_5"):
+        pdf.multi_cell(0,6,f"Approx. Days to Repair (calc.): {facts['hours']['days_formula_hrs_div_5']}")
     pdf.multi_cell(0,6,f"Compliance Score: {comp_score}%")
 
     pdf.ln(4); pdf.set_font_size(12); pdf.cell(0,8,"AI-4-IA Review Summary",ln=True)
@@ -494,6 +536,7 @@ VIN (from estimate): {vin}
 VIN verification (estimate vs photo): {vin_line}
 Vehicle: {vehicle}
 {('Odometer (from estimate): ' + mileage) if mileage else ''}
+{('Days to Repair (reported): ' + str(reported_days)) if reported_days is not None else (('Approx. Days to Repair (calc.): ' + str(facts.get('hours',{}).get('days_formula_hrs_div_5'))) if facts.get('hours',{}).get('days_formula_hrs_div_5') else '')}
 
 Compliance Score: {comp_score}%
 
@@ -515,6 +558,7 @@ Summary:
         "vin_estimate": vin,
         "vin_verification": vin_line,
         "odometer_estimate": mileage or "Not documented",
+        "days_to_repair": reported_days if reported_days is not None else (facts.get("hours",{}).get("days_formula_hrs_div_5") or "Not documented"),
         "score": f"{comp_score}%"
     }
 
@@ -537,17 +581,3 @@ async def get_client_rules(client_name: str):
         except Exception as e:
             return JSONResponse(status_code=500, content={"error": str(e)})
     return JSONResponse(status_code=404, content={"error":"Rules not found for this client."})
-
-
-
-
-
-
-
-
-
-
-
-
-
-
