@@ -8,4 +8,4 @@ python-docx==1.1.0
 openai==1.40.0
 httpx==0.26.0
 python-multipart==0.0.9
-PyPDF2
+PyPDF2==3.0.1
