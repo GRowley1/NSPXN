@@ -482,7 +482,7 @@ async def vision_review(
 
     pdf_path = os.path.join(PDF_DIR, f"{file_number}.pdf")
     try:
-        with open(pdf_path,"wb") as f: f.write(pdf.output(dest="S").encode("latin-1"))
+        with open(pdf_path,"wb") as f: f.write(pdf.output(dest="S").encode("latin-1", errors="ignore"))
         log.info(f"PDF saved → {pdf_path}")
     except Exception as e:
         log.error(f"PDF write error: {e}")
