@@ -223,26 +223,23 @@ def strip_photo_sections(text: str) -> str:
     return text.strip()
 
 
-
-# ---- Minimal helper: parse compliance score from narrative ----
-_SCORE_PATTERNS = [
-    re.compile(r'(?i)Final\s*(?:Evaluation|Score)\s*[:\-]?\s*(\d{1,3})\s*%'),
-    re.compile(r'(?i)Compliance\s*Score\s*[:\-]?\s*(\d{1,3})\s*%'),
-    re.compile(r'(?<!\d)(\d{1,3})\s*%(?!\d)'),
-]
-
-def extract_score(narrative: str) -> str:
-    s = narrative or ""
-    for pat in _SCORE_PATTERNS:
-        m = pat.search(s)
-        if m:
-            try:
-                val = int(m.group(1))
-                val = max(0, min(100, val))
-                return f"{val}%"
-            except Exception:
-                continue
-    return "N/A"
+def _save_pdf_dual(file_number: str, pdf_obj) -> None:
+    try:
+        pdf_bytes = pdf_obj.output(dest="S").encode("latin-1")
+    except Exception:
+        # Fallback: some FPDF versions allow output(dest="S").encode("latin-1")
+        pdf_bytes = pdf_obj.output(dest="S").encode("latin-1", errors="ignore")
+    paths = [
+        os.path.join("/tmp", f"{file_number}.pdf"),
+        os.path.join("/mnt/data", f"{file_number}.pdf"),
+        os.path.join(os.getenv("PDF_DIR", "/tmp"), f"{file_number}.pdf"),
+    ]
+    for p in paths:
+        try:
+            with open(p, "wb") as f:
+                f.write(pdf_bytes)
+        except Exception as e:
+            logging.getLogger(__name__).warning(f"PDF save failed for {p}: {e}")
 # ----------------- API -----------------
 @app.get("/")
 async def root():
@@ -499,7 +496,9 @@ Summary:
     except Exception as e:
         logging.getLogger("ai4ia-lite").warning(f"Email send error (continuing): {e}")
 
-    return {
+    
+    _save_pdf_dual(file_number, pdf)
+return {
         "request_type": request_type_label,
         "gpt_output": gpt_output,
         "file_number": file_number,
@@ -513,7 +512,16 @@ Summary:
 
 @app.get("/download-pdf")
 async def download_pdf(file_number: str):
-    path = os.path.join(PDF_DIR, f"{file_number}.pdf")
-    if os.path.exists(path):
-        return FileResponse(path=path, media_type="application/pdf", filename=f"{file_number}.pdf")
-    return JSONResponse(status_code=404, content={"detail":"Not Found"})
+    # Try common locations and names
+    candidates = [
+        os.path.join("/tmp", f"{file_number}.pdf"),
+        os.path.join("/mnt/data", f"{file_number}.pdf"),
+        os.path.join(os.getenv("PDF_DIR", "/tmp"), f"{file_number}.pdf"),
+    ]
+    for path in candidates:
+        try:
+            if os.path.exists(path):
+                return FileResponse(path=path, media_type="application/pdf", filename=f"{file_number}.pdf")
+        except Exception:
+            continue
+    return JSONResponse(status_code=404, content={"detail": "Not Found", "checked": candidates})
