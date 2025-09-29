@@ -417,7 +417,7 @@ async def vision_review(
     pdf.multi_cell(0,6,sanitize_latin1(f"Vehicle: {vehicle}"))
     if mileage: pdf.multi_cell(0,6,sanitize_latin1(f"Odometer (from estimate): {mileage}"))
     if days is not None: pdf.multi_cell(0,6,sanitize_latin1(f"Days to Repair (reported): {days}"))
-    pdf.multi_cell(0,6,sanitize_latin1(f"Compliance Score: {comp if comp is not None else 'N/A'}%"))
+    pdf.multi_cell(0,6,sanitize_latin1(f"Compliance Score: {comp if comp is not None else 'N/A'}%"
     pdf.ln(4); pdf.set_font_size(12); pdf.cell(0,8,sanitize_latin1("AI-4-IA Review Summary"),ln=True)
     pdf.set_font_size(10); pdf.multi_cell(0,6,sanitize_latin1(gpt_output or "No narrative generated."))
     pdf.ln(4); pdf.set_font_size(12); pdf.cell(0,8,sanitize_latin1("Estimate <-> Photos Consistency Review"),ln=True)
