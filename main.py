@@ -31,12 +31,12 @@ client = OpenAI(api_key=os.environ["OPENAI_API_KEY"], timeout=OPENAI_TIMEOUT)
 MODEL_PRIMARY = os.getenv("OAI_MODEL", "gpt-4o-mini")
 MODEL_FALLBACK = "gpt-3.5-turbo"
 
-# Whitelisted request types
+# Whitelisted request types (ASCII only for PDF)
 INTENTS = {
-    "guidelines_only": "Guidelines → Estimate (no photos)",
+    "guidelines_only": "Guidelines -> Estimate (no photos)",
     "comprehensive": "Comprehensive: Guidelines + Estimate + Photos (with VIN check)",
     "photos_only": "Photos Only: Compare to Estimate",
-    "invoices_with_photos": "Supplement ↔ Invoices (+ Photos)",
+    "invoices_with_photos": "Supplement <-> Invoices (+ Photos)",
     "docs_checklist": "Documentation Checklist",
 }
 
@@ -221,6 +221,24 @@ def strip_photo_sections(text: str) -> str:
         text = re.sub(pat, "", text, flags=re.MULTILINE)
     text = re.sub(r"(?im)^\s*[-•].*photo.*$", "", text)
     return text.strip()
+
+def sanitize_latin1(s: str) -> str:
+    if not s:
+        return ""
+    repl = {
+        "\u2018": "'", "\u2019": "'", "\u201C": '"', "\u201D": '"',
+        "\u2013": "-", "\u2014": "-", "\u2010": "-", "\u2011": "-",
+        "\u2022": "-", "\u2026": "...", "\u2192": "->", "\u2194": "<->",
+        "\u2190": "<-", "\u2713": "[OK]", "\u2714": "[OK]", "\u00A0": " ",
+        "\u2212": "-", "\u200B": ""
+    }
+    for k, v in repl.items():
+        s = s.replace(k, v)
+    try:
+        s = s.encode("latin-1", "ignore").decode("latin-1", "ignore")
+    except Exception:
+        pass
+    return s
 
 def safe_filename(s: str) -> str:
     s = (s or "").strip()
@@ -416,32 +434,32 @@ async def vision_review(
     pdf = FPDF(); pdf.add_page()
     pdf.set_font("Arial", size=11)
 
-    pdf.cell(200,10,"NSPXN.com AI Review Report",ln=True,align="C")
+    pdf.cell(200,10,sanitize_latin1("NSPXN.com AI Review Report"),ln=True,align="C")
     pdf.ln(5); pdf.set_font_size(10)
-    pdf.multi_cell(0,6,f"File Number: {file_number}")
-    pdf.multi_cell(0,6,f"IA Company: {ia_company}")
-    pdf.multi_cell(0,6,f"Request Type: {request_type_label}")
-    pdf.multi_cell(0,6,f"Appraiser ID #: {appraiser_id}")
+    pdf.multi_cell(0,6,sanitize_latin1(f"File Number: {file_number}"))
+    pdf.multi_cell(0,6,sanitize_latin1(f"IA Company: {ia_company}"))
+    pdf.multi_cell(0,6,sanitize_latin1(f"Request Type: {request_type_label}"))
+    pdf.multi_cell(0,6,sanitize_latin1(f"Appraiser ID #: {appraiser_id}"))
     pdf.ln(4)
-    pdf.multi_cell(0,6,f"Claim #: {claim}")
-    pdf.multi_cell(0,6,f"VIN (from estimate): {vin}")
+    pdf.multi_cell(0,6,sanitize_latin1(f"Claim #: {claim}"))
+    pdf.multi_cell(0,6,sanitize_latin1(f"VIN (from estimate): {vin}"))
     vin_line = "Included in narrative" if (intent == "comprehensive" and photos_present) else ("Photos not provided" if intent == "comprehensive" else "Not requested")
-    pdf.multi_cell(0,6,f"VIN verification (estimate vs photo): {vin_line}")
-    pdf.multi_cell(0,6,f"Vehicle: {vehicle}")
-    if mileage: pdf.multi_cell(0,6,f"Odometer (from estimate): {mileage}")
+    pdf.multi_cell(0,6,sanitize_latin1(f"VIN verification (estimate vs photo): {vin_line}"))
+    pdf.multi_cell(0,6,sanitize_latin1(f"Vehicle: {vehicle}"))
+    if mileage: pdf.multi_cell(0,6,sanitize_latin1(f"Odometer (from estimate): {mileage}"))
     if days_reported is not None:
-        pdf.multi_cell(0,6,f"Days to Repair (reported): {days_reported}")
-    pdf.multi_cell(0,6,"Compliance Score: N/A")
+        pdf.multi_cell(0,6,sanitize_latin1(f"Days to Repair (reported): {days_reported}"))
+    pdf.multi_cell(0,6,sanitize_latin1("Compliance Score: N/A"))
 
-    pdf.ln(4); pdf.set_font_size(12); pdf.cell(0,8,"AI-4-IA Review Summary",ln=True)
-    pdf.set_font_size(10); pdf.multi_cell(0,6,gpt_output or "No narrative generated.")
+    pdf.ln(4); pdf.set_font_size(12); pdf.cell(0,8,sanitize_latin1("AI-4-IA Review Summary"),ln=True)
+    pdf.set_font_size(10); pdf.multi_cell(0,6,sanitize_latin1(gpt_output or "No narrative generated."))
 
-    pdf.ln(4); pdf.set_font_size(12); pdf.cell(0,8,"Estimate ↔ Photos Consistency Review",ln=True)
+    pdf.ln(4); pdf.set_font_size(12); pdf.cell(0,8,sanitize_latin1("Estimate <-> Photos Consistency Review"),ln=True)
     pdf.set_font_size(10)
     if intent in ("comprehensive","photos_only","invoices_with_photos") and photos_present:
-        pdf.multi_cell(0,6,"Included in narrative above (single-pass review).")
+        pdf.multi_cell(0,6,sanitize_latin1("Included in narrative above (single-pass review)."))
     else:
-        pdf.multi_cell(0,6,"Not requested or no photos provided.")
+        pdf.multi_cell(0,6,sanitize_latin1("Not requested or no photos provided."))
 
     # Create bytes once; write to disk; also return base64
     pdf_bytes = pdf.output(dest="S").encode("latin-1")
@@ -449,7 +467,7 @@ async def vision_review(
     try:
         with open(pdf_path,"wb") as f:
             f.write(pdf_bytes)
-        log.info(f"PDF saved → {pdf_path}")
+        log.info(f"PDF saved -> {pdf_path}")
     except Exception as e:
         log.error(f"PDF write error: {e}")
 
