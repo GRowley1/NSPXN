@@ -83,7 +83,7 @@ def fast_pdf_text(pdf_bytes: bytes, limit_pages: Optional[int] = None) -> str:
     return "\n\n".join(out)
 
 def quick_ocr_text(pdf_bytes: bytes, max_pages: int = 4, dpi: int = 240) -> str:
-    """Very shallow OCR fallback to recover VIN/Claim quickly for scanned estimates."""
+    """Very shallow OCR fallback to recover text quickly for scanned estimates."""
     try:
         pages = convert_from_bytes(pdf_bytes, dpi=dpi)[:max_pages]
         out = []
@@ -110,7 +110,7 @@ _trans = {**{str(i): i for i in range(10)},
           **dict(A=1,B=2,C=3,D=4,E=5,F=6,G=7,H=8,J=1,K=2,L=3,M=4,N=5,P=7,R=9,S=2,T=3,U=4,V=5,W=6,X=7,Y=8,Z=9)}
 _w = [8,7,6,5,4,3,2,10,0,9,8,7,6,5,4,3,2]
 VIN_TIGHT = re.compile(r"\b([A-HJ-NPR-Z0-9]{17})\b")
-VIN_RELAX = re.compile(r"(?:V\.?I\.?N\.?|VIN|Vehicle\s+Identification\s+Number)\b[^A-Z0-9]{0,20}((?:[A-HJ-NPR-Z0-9][\s\-]*){17})", re.IGNORECASE)
+VIN_RELAX = re.compile(r"(?:V\.?I\.?N\.?|VIN|Vehicle\s+Identification\s+Number)\b[^A-Z0-9]{0,40}((?:[A-HJ-NPR-Z0-9][\s\-]*){17})", re.IGNORECASE)
 
 def _norm_vin(s: str) -> Optional[str]:
     s = (s or "").upper()
@@ -245,6 +245,29 @@ def safe_filename(s: str) -> str:
     s = re.sub(r"[^\w.\-]+", "-", s)
     return s.strip("-_.") or f"report-{int(time.time())}"
 
+# --- VIN from images and PDF bytes ---
+def vin_from_images(images: List[Tuple[str, bytes]], max_imgs: int = 8) -> Optional[str]:
+    whitelist = "0123456789ABCDEFGHJKLMNPRSTUVWXYZ- "
+    for i, (_, blob) in enumerate(images[:max_imgs]):
+        try:
+            img = Image.open(io.BytesIO(blob))
+            txt = pytesseract.image_to_string(_pp(img), lang="eng",
+                config=f'--psm 6 -c tessedit_char_whitelist={whitelist}')
+            v = vin_from_text(txt or "")
+            if v: return v
+        except Exception:
+            continue
+    return None
+
+def vin_from_pdf_bytes(pdf_bytes: bytes) -> Optional[str]:
+    # 1) Text first (more pages)
+    t = fast_pdf_text(pdf_bytes, limit_pages=25)
+    v = vin_from_text(t or "")
+    if v: return v
+    # 2) OCR a few more pages for VIN
+    t2 = quick_ocr_text(pdf_bytes, max_pages=8, dpi=240)
+    return vin_from_text(t2 or "")
+
 # ----------------- API -----------------
 @app.get("/")
 async def root():
@@ -333,6 +356,29 @@ async def vision_review(
     mileage = mileage_from_text(est_text)
     claim = claim_from_text(est_text) or "N/A"
     days_reported = extract_days(est_text)
+
+    # Robust VIN fallback: scan full PDF and, if photos, scan images
+    if vin == "N/A" and est_pdf:
+        v2 = vin_from_pdf_bytes(est_pdf[1])
+        if v2: vin = v2
+    vin_photo = None
+    if photos_present:
+        vin_photo = vin_from_images(images)
+
+    # VIN verification line
+    if intent == "comprehensive" and photos_present:
+        if vin and vin != "N/A" and vin_photo:
+            vin_line = "Verified: MATCH" if vin == vin_photo else f"Verified: MISMATCH (photo VIN {vin_photo})"
+        elif vin and vin != "N/A" and not vin_photo:
+            vin_line = "Not verified: VIN not visible in photos"
+        elif (not vin or vin == "N/A") and vin_photo:
+            vin_line = f"Not verified: VIN missing in estimate text (photo VIN {vin_photo})"
+        else:
+            vin_line = "Not verified: VIN not found in estimate or photos"
+    elif intent == "comprehensive" and not photos_present:
+        vin_line = "Photos not provided"
+    else:
+        vin_line = "Not requested"
 
     facts = {
         "vin": vin,
@@ -443,7 +489,6 @@ async def vision_review(
     pdf.ln(4)
     pdf.multi_cell(0,6,sanitize_latin1(f"Claim #: {claim}"))
     pdf.multi_cell(0,6,sanitize_latin1(f"VIN (from estimate): {vin}"))
-    vin_line = "Included in narrative" if (intent == "comprehensive" and photos_present) else ("Photos not provided" if intent == "comprehensive" else "Not requested")
     pdf.multi_cell(0,6,sanitize_latin1(f"VIN verification (estimate vs photo): {vin_line}"))
     pdf.multi_cell(0,6,sanitize_latin1(f"Vehicle: {vehicle}"))
     if mileage: pdf.multi_cell(0,6,sanitize_latin1(f"Odometer (from estimate): {mileage}"))
@@ -516,6 +561,7 @@ Summary:
         "claim_number": claim,
         "vehicle": vehicle,
         "vin_estimate": vin,
+        "vin_from_photos": vin_photo or "Not found",
         "vin_verification": vin_line,
         "odometer_estimate": mileage or "Not documented",
         "days_to_repair": days_reported or "Not documented",
