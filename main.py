@@ -1,538 +1,762 @@
-
 from fastapi import FastAPI, File, UploadFile, Form
 from fastapi.responses import JSONResponse, FileResponse
 from fastapi.middleware.cors import CORSMiddleware
 from typing import List, Tuple, Optional, Dict, Any
-import os, re, io, json, logging, base64, smtplib, zipfile, time
+import os
+import re
+import io
+import base64
+import json
+import logging
+
+import smtplib
 from email.message import EmailMessage
-# --- Fallback extractors (minimal, additive; used only if primary returns None/N/A) ---
-import re as _re_patch
-
-def vin_from_text_plus(text: str):
-    text_u = (text or "").upper()
-    # Labeled VIN patterns with spaces/hyphens allowed
-    label_pat = _re_patch.compile(r'(?i)(?:V\.?\s*I\.?\s*N\.?|VIN|Vehicle\s*Identification\s*Number)\s*[:#\-\s]*((?:[A-HJ-NPR-Z0-9IOQ][\s\-]*){17})')
-    cands = []
-    for m in label_pat.finditer(text_u):
-        raw = m.group(1)
-        v = _re_patch.sub(r'[^A-HJ-NPR-Z0-9]', '', raw).replace('O','0').replace('I','1').replace('Q','0')
-        if len(v) == 17:
-            cands.append(v)
-    # Tight 17-char sequences
-    for m in _re_patch.finditer(r'\b([A-HJ-NPR-Z0-9IOQ]{17})\b', text_u):
-        v = m.group(1).replace('O','0').replace('I','1').replace('Q','0')
-        cands.append(v)
-    # Deduplicate
-    seen=set(); ordered=[]
-    for v in cands:
-        if v not in seen:
-            ordered.append(v); seen.add(v)
-    # Prefer checksum-valid using existing _vin_ok if present
-    try:
-        for v in ordered:
-            if '_vin_ok' in globals() and _vin_ok(v):
-                return v
-    except Exception:
-        pass
-    return ordered[0] if ordered else None
-
-def claim_from_text_plus(text: str):
-    s = text or ""
-    pats = [
-        _re_patch.compile(r'(?im)^\s*(?:Claim(?:\s*(?:#|No\.?|Number|ID))|CLM|ClaimID)\s*[:#\-\s]*([A-Za-z0-9][A-Za-z0-9\-_\/\.]{3,})'),
-        _re_patch.compile(r'(?i)claim\s*(?:#|no\.?|number|id)?\s*[:#\-\s]*([A-Za-z0-9][A-Za-z0-9\-_\/\.]{3,})'),
-    ]
-    for pat in pats:
-        m = pat.search(s)
-        if m:
-            return m.group(1).strip().rstrip('.,;:')
-    return None
-
 
 from fpdf import FPDF
 from docx import Document
-import PyPDF2
 from pdf2image import convert_from_bytes
 import pytesseract
-from PIL import Image, ImageEnhance, ImageOps, ImageFilter
-
+from PIL import Image, ImageEnhance, ImageOps, ImageFilter, ImageStat, Image
 from openai import OpenAI
 
-# ----------------- Config -----------------
+# =========================================
+# PDF storage: save to /tmp but filename stays {file_number}.pdf
+# =========================================
 PDF_DIR = os.getenv("PDF_DIR", "/tmp")
 os.makedirs(PDF_DIR, exist_ok=True)
 
-logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s")
-log = logging.getLogger("ai4ia-lite")
+# =========================================
+# Logging
+# =========================================
+logging.basicConfig(
+    level=logging.DEBUG,
+    filename="app.log",
+    filemode="a",
+    format="%(asctime)s - %(levelname)s - %(message)s"
+)
+logger = logging.getLogger(__name__)
 
-OPENAI_TIMEOUT = float(os.getenv("OPENAI_TIMEOUT", "60"))  # seconds
-
-# OpenAI client with sane defaults
+# =========================================
+# OpenAI client (gpt-4o)
+# =========================================
 if "OPENAI_API_KEY" not in os.environ:
-    raise RuntimeError("OPENAI_API_KEY not set.")
-client = OpenAI(api_key=os.environ["OPENAI_API_KEY"], timeout=OPENAI_TIMEOUT)
-MODEL_PRIMARY = os.getenv("OAI_MODEL", "gpt-4o-mini")
-MODEL_FALLBACK = "gpt-3.5-turbo"
+    raise RuntimeError("❌ OPENAI_API_KEY environment variable is NOT set.")
 
-# Whitelisted request types
-INTENTS = {
-    "guidelines_only": "Guidelines → Estimate (no photos)",
-    "comprehensive": "Comprehensive: Guidelines + Estimate + Photos (with VIN check)",
-    "photos_only": "Photos Only: Compare to Estimate",
-    "invoices_with_photos": "Supplement ↔ Invoices (+ Photos)",
-    "docs_checklist": "Documentation Checklist",
-}
+client = OpenAI(api_key=os.environ["OPENAI_API_KEY"])
+MODEL = "gpt-4o"
 
-# ----------------- App -----------------
+# =========================================
+# FastAPI app + CORS
+# =========================================
 app = FastAPI()
 app.add_middleware(
     CORSMiddleware,
     allow_origins=[
-        "https://nspxn.com","https://www.nspxn.com",
-        "http://nspxn.com","http://www.nspxn.com",
+        "https://nspxn.com",
+        "https://www.nspxn.com",
+        "http://nspxn.com",
+        "http://www.nspxn.com",
         "https://nspxn.onrender.com",
-        "*",
     ],
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
 )
 
-# ----------------- Helpers -----------------
-def _pp(img):
-    """Light image preproc for OCR fallback."""
+# =========================================
+# OCR helpers
+# =========================================
+def preprocess_image(img: Image.Image) -> Image.Image:
     img = img.convert("L")
-    img = ImageEnhance.Contrast(img).enhance(1.9)
+    img = ImageEnhance.Contrast(img).enhance(2.0)
     img = img.filter(ImageFilter.MedianFilter(3))
     img = ImageOps.autocontrast(img)
     return img
 
-def fast_pdf_text(pdf_bytes: bytes, limit_pages: Optional[int] = None) -> str:
-    out = []
+def extract_text_from_pdf(file_like: io.BytesIO) -> str:
     try:
-        reader = PyPDF2.PdfReader(io.BytesIO(pdf_bytes))
-        pages = reader.pages
-        if limit_pages:
-            pages = pages[:limit_pages]
-        for i, page in enumerate(pages, 1):
+        file_like.seek(0)
+        images = convert_from_bytes(file_like.read(), dpi=200)
+        text_output = ""
+        for i, img in enumerate(images, 1):
+            processed = preprocess_image(img)
             try:
-                t = page.extract_text() or ""
+                ocr_text = pytesseract.image_to_string(processed, lang="eng", config="--psm 6")
             except Exception:
-                t = ""
-            if t.strip():
-                out.append(f"[Page {i}]\n{t}")
+                ocr_text = pytesseract.image_to_string(processed, lang="eng", config="--psm 3")
+            if len(ocr_text.strip()) < 30:
+                logger.warning(f"OCR page {i} too short; skipping noise.")
+                continue
+            text_output += f"\n[Page {i}]\n{ocr_text}"
+        return text_output
     except Exception as e:
-        log.warning(f"PyPDF2 extract failed: {e}")
-    return "\n\n".join(out)
-
-def quick_ocr_text(pdf_bytes: bytes, max_pages: int = 4, dpi: int = 240) -> str:
-    """Very shallow OCR fallback to recover VIN/Claim quickly for scanned estimates."""
-    try:
-        pages = convert_from_bytes(pdf_bytes, dpi=dpi)[:max_pages]
-        out = []
-        for i, p in enumerate(pages, 1):
-            txt = pytesseract.image_to_string(_pp(p), lang="eng", config="--psm 6")
-            if txt.strip():
-                out.append(f"[OCR Page {i}]\n{txt}")
-        return "\n\n".join(out)
-    except Exception as e:
-        log.warning(f"OCR fallback failed: {e}")
+        logger.error(f"OCR error: {e}")
         return ""
 
-def ocr_docx_text(file_like: io.BytesIO) -> str:
+def extract_text_from_docx(file_like: io.BytesIO) -> str:
     try:
         doc = Document(file_like)
         return "\n".join(p.text for p in doc.paragraphs if p.text.strip())
     except Exception as e:
-        log.warning(f"DOCX read error: {e}")
+        logger.error(f"DOCX read error: {e}")
         return ""
 
-# ---- Extractors ----
-VIN_ALLOWED = set("0123456789ABCDEFGHJKLMNPRSTUVWXYZ")
-_trans = {**{str(i): i for i in range(10)},
-          **dict(A=1,B=2,C=3,D=4,E=5,F=6,G=7,H=8,J=1,K=2,L=3,M=4,N=5,P=7,R=9,S=2,T=3,U=4,V=5,W=6,X=7,Y=8,Z=9)}
-_w = [8,7,6,5,4,3,2,10,0,9,8,7,6,5,4,3,2]
-VIN_TIGHT = re.compile(r"\b([A-HJ-NPR-Z0-9]{17})\b")
-VIN_RELAX = re.compile(r"(?:V\.?I\.?N\.?|VIN|Vehicle\s+Identification\s+Number)\b[^A-Z0-9]{0,20}((?:[A-HJ-NPR-Z0-9][\s\-]*){17})", re.IGNORECASE)
+# =========================================
+# NEW: harvest photos from PDF & count corner labels
+# =========================================
+CORNER_LABEL_PAT = re.compile(
+    r'\b(?:left\s*front|right\s*front|left\s*rear|right\s*rear|lf|rf|lr|rr)\b',
+    re.IGNORECASE
+)
 
-def _norm_vin(s: str) -> Optional[str]:
-    s = (s or "").upper()
-    s = re.sub(r"[^A-HJ-NPR-Z0-9]", "", s).replace("O","0").replace("I","1").replace("Q","0")
-    if len(s) != 17 or any(ch not in VIN_ALLOWED for ch in s): return None
+def count_corner_labels(text: str) -> int:
+    """
+    Returns count of unique corner cues in text.
+    Accepts 'Left Front/Right Front/Left Rear/Right Rear' or LF/RF/LR/RR.
+    """
+    found = set()
+    for m in re.finditer(CORNER_LABEL_PAT, text or ""):
+        token = m.group(0).lower().replace(" ", "")
+        # normalize tokens
+        if token in ("lf", "leftfront"): found.add("lf")
+        elif token in ("rf", "rightfront"): found.add("rf")
+        elif token in ("lr", "leftrear"): found.add("lr")
+        elif token in ("rr", "rightrear"): found.add("rr")
+    return len(found)
+
+def harvest_photos_from_pdf(pdf_bytes: bytes, max_pages: int = 20) -> List[Tuple[str, bytes]]:
+    """
+    Convert PDF pages to images and return (name, jpeg_bytes) for pages that look like photo pages.
+    - Prefer pages whose OCR contains 'Image Report' OR corner labels.
+    - Fallback: visually rich pages (variance threshold).
+    """
+    out: List[Tuple[str, bytes]] = []
+    try:
+        pages = convert_from_bytes(pdf_bytes, dpi=200)[:max_pages]
+        for i, page in enumerate(pages, 1):
+            proc = preprocess_image(page)
+            ocr = pytesseract.image_to_string(proc, lang="eng")
+            is_img_report = "image report" in (ocr or "").lower()
+            corner_hits = count_corner_labels(ocr)
+            var = ImageStat.Stat(proc).var[0] if proc.mode == "L" else sum(ImageStat.Stat(proc).var)/3
+            looks_like_photos = var > 120 or corner_hits >= 2
+
+            if is_img_report or looks_like_photos:
+                buf = io.BytesIO()
+                # save the original color page for vision (better than preprocessed)
+                page.save(buf, format="JPEG", quality=85)
+                tag = "imgrep" if is_img_report else ("corner" if corner_hits else "pdfphoto")
+                out.append((f"pdf-{tag}-p{i}.jpg", buf.getvalue()))
+    except Exception as e:
+        logger.warning(f"harvest_photos_from_pdf error: {e}")
+    return out
+
+# =========================================
+# VIN utilities (normalization + checksum)
+# =========================================
+VIN_ALLOWED = set("0123456789ABCDEFGHJKLMNPRSTUVWXYZ")
+
+def normalize_vin(s: str) -> Optional[str]:
+    s = s.strip().upper()
+    s = s.replace(" ", "")
+    s = s.replace("O", "0").replace("I", "1").replace("Q", "0")
+    if len(s) != 17 or any(ch not in VIN_ALLOWED for ch in s):
+        return None
     return s
 
-def _vin_ok(v: str) -> bool:
+_translit = {**{str(i): i for i in range(10)},
+             **dict(A=1, B=2, C=3, D=4, E=5, F=6, G=7, H=8,
+                    J=1, K=2, L=3, M=4, N=5, P=7, R=9,
+                    S=2, T=3, U=4, V=5, W=6, X=7, Y=8, Z=9)}
+_weights = [8,7,6,5,4,3,2,10,0,9,8,7,6,5,4,3,2]
+
+def vin_checksum_ok(v: str) -> bool:
+    if len(v) != 17: return False
     try:
-        total = sum(_trans[ch] * _w[i] for i, ch in enumerate(v))
+        total = 0
+        for i, ch in enumerate(v):
+            total += _translit[ch] * _weights[i]
         check = total % 11
         return v[8] == ("X" if check == 10 else str(check))
     except Exception:
         return False
 
-def vin_from_text(text: str) -> Optional[str]:
-    cands = [m.group(1) for m in VIN_RELAX.finditer(text or "")] + VIN_TIGHT.findall(text or "")
-    seen = set()
-    uniq = []
+def best_vin_candidate(cands: List[str]) -> Optional[str]:
     for c in cands:
-        v = _norm_vin(c)
-        if v and v not in seen:
-            uniq.append(v); seen.add(v)
-    for v in uniq:
-        if _vin_ok(v): return v
-    return uniq[0] if uniq else None
-
-MAKE_MAP = {"NISSAN":"Nissan","CHEV":"Chevrolet","CHEVY":"Chevrolet","TOYOTA":"Toyota","FORD":"Ford","HONDA":"Honda","HYUNDAI":"Hyundai","KIA":"Kia","BMW":"BMW","MERCEDES":"Mercedes-Benz","MB":"Mercedes-Benz","VW":"Volkswagen","VOLKS":"Volkswagen","SUBARU":"Subaru","MAZDA":"Mazda","DODGE":"Dodge"}
-STOP = {"GASOLINE","DIESEL","HYBRID","ELECTRIC","BLACK","WHITE","BLUE","RED","SILVER","GRAY","GREY","4D","2D","SED","SDN","SUV","COUPE","HATCH","TRUCK","WAGON","AWD","FWD","RWD","2.5L","3.5L","L","GDI","DIRECT","INJECTION","TURBO","PAINT","CLEAR","COAT","COLOR"}
-
-def vehicle_from_text(text: str) -> Optional[str]:
-    lines = [re.sub(r"\s{2,}", " ", ln.strip()) for ln in (text or "").splitlines() if ln.strip()]
-    for ln in lines:
-        if re.search(r"^\s*(19|20)\d{2}\b", ln) and not re.search(r"\b(AM|PM)\b", ln):
-            toks = ln.split(); year = toks[0]; tail = toks[1:]
-            keep = []
-            for t in tail:
-                raw = re.sub(r"[^\w\-]", "", t).upper()
-                if raw in STOP or raw in ("A/M","OEM"): break
-                keep.append(t)
-                if len(keep) >= 4: break
-            if keep:
-                mk = MAKE_MAP.get(keep[0].upper(), keep[0].capitalize())
-                return " ".join([year, mk] + keep[1:])
+        vin = normalize_vin(c)
+        if vin and vin_checksum_ok(vin):
+            return vin
+    for c in cands:
+        vin = normalize_vin(c)
+        if vin:
+            return vin
     return None
 
-def mileage_from_text(text: str) -> Optional[str]:
-    for p in [r"(?:Odometer|Odo|Mileage|Miles)\s*[:\-]?\s*([\d,]{2,7})\b", r"\b([\d,]{2,7})\s*(?:mi|miles)\b"]:
+# =========================================
+# Field extraction
+# =========================================
+def extract_claim_from_text(text: str) -> Optional[str]:
+    patterns = [
+        r"(?:^|\s)(?:Claim\s*(?:#|No\.?|Number)[:\s]*)\s*([A-Za-z0-9\-]+)",
+        r"(?:^|\s)Claim\s*[:#]\s*([A-Za-z0-9\-]+)"
+    ]
+    for p in patterns:
         m = re.search(p, text, re.IGNORECASE)
-        if m: return m.group(1)
+        if m:
+            return m.group(1).strip()
     return None
 
-def claim_from_text(text: str) -> Optional[str]:
+def extract_vin_from_text(text: str) -> Optional[str]:
+    label_block = re.findall(r"(?:^|\n).{0,40}VIN[:\s\-]*([A-HJ-NPR-Z0-9]{10,20}).*", text, re.IGNORECASE)
+    if label_block:
+        vin = best_vin_candidate(label_block)
+        if vin:
+            return vin
+    candidates = re.findall(r"\b([A-HJ-NPR-Z0-9]{17})\b", text, re.IGNORECASE)
+    return best_vin_candidate(candidates)
+
+def extract_vehicle_from_text(text: str) -> Optional[str]:
+    m1 = re.search(r"\b(20\d{2})\s+([A-Za-z]{3,})\s+([A-Za-z0-9\-]{2,})", text)
+    m2 = re.search(r"(?:Odometer|Mileage)\s*[:\-]?\s*([\d,]+)", text, re.IGNORECASE)
+    if m1:
+        year, make, model = m1.groups()
+        miles = m2.group(1) if m2 else "Mileage unknown"
+        return f"{year} {make} {model}, {miles} miles"
+    return None
+
+
+# ---- Robust fallbacks for VIN & Claim extraction (minimal, additive) ----
+import re as _re_fx
+
+def extract_vin_from_text_plus(text: str):
+    t = (text or "").upper()
+    # Labels like VIN:, V.I.N., Vehicle Identification Number:
+    label = _re_fx.compile(r'(?i)(?:V\.?\s*I\.?\s*N\.?|VIN|Vehicle\s*Identification\s*Number)\s*[:#\-\s]*((?:[A-HJ-NPR-Z0-9IOQ][\s\-]*){17})')
+    cands = []
+    for m in label.finditer(t):
+        raw = m.group(1)
+        v = _re_fx.sub(r'[^A-HJ-NPR-Z0-9]', '', raw).replace('O','0').replace('I','1').replace('Q','0')
+        if len(v) == 17:
+            cands.append(v)
+    # Tight 17-char sequences
+    for m in _re_fx.finditer(r'\\b([A-HJ-NPR-Z0-9IOQ]{17})\\b', t):
+        v = m.group(1).replace('O','0').replace('I','1').replace('Q','0')
+        cands.append(v)
+    # dedupe
+    seen=set(); ordered=[]
+    for v in cands:
+        if v not in seen:
+            ordered.append(v); seen.add(v)
+    # prefer checksum valid if our validator exists
+    try:
+        for v in ordered:
+            if 'vin_checksum_ok' in globals() and vin_checksum_ok(v):
+                return v
+    except Exception:
+        pass
+    return ordered[0] if ordered else None
+
+def extract_claim_from_text_plus(text: str):
+    s = text or ""
     pats = [
-        r"(?:Carrier|Insurance|Insurer)?\s*Claim\s*(?:No\.?|Number|#)\s*[: ]\s*([A-Za-z0-9\-_\\/]{5,25})",
-        r"(?:Shop|Body\s*Shop)\s*Claim\s*(?:No\.?|Number|#)\s*[: ]\s*([A-Za-z0-9\-_\\/]{5,25})",
-        r"(?:SCA|IA)\s*Claim\s*(?:No\.?|Number|#)\s*[: ]\s*([A-Za-z0-9\-_\\/]{5,25})",
-        r"(?:Assignment|Reference|Ref)\s*(?:No\.?|Number|#)\s*[: ]\s*([A-Za-z0-9\-_\\/]{5,25})",
-        r"Claim\s*[:#]\s*([A-Za-z0-9\-_\\/]{5,25})",
+        _re_fx.compile(r'(?im)^\\s*(?:Claim(?:\\s*(?:#|No\\.?|Number|ID))|CLM|ClaimID)\\s*[:#\\-\\s]*([A-Za-z0-9][A-Za-z0-9_\\-/\\.]{2,})'),
+        _re_fx.compile(r'(?i)claim\\s*(?:#|no\\.?|number|id)?\\s*[:#\\-\\s]*([A-Za-z0-9][A-Za-z0-9_\\-/\\.]{2,})')
     ]
     for pat in pats:
-        m = re.search(pat, text, re.IGNORECASE)
-        if m: return m.group(1).strip().rstrip(".:,;")
-    m2 = re.search(r"Claim[^A-Za-z0-9]{0,20}([A-Za-z0-9\-_\\/]{5,25})", text or "", re.IGNORECASE)
-    if m2: return m2.group(1).strip().rstrip(".:,;")
+        m = pat.search(s)
+        if m:
+            return m.group(1).strip().rstrip('.,;:')
+    return None
+# =========================================
+# Photo parsing & requirements
+# =========================================
+def _image_is_exterior_wide(img: Image.Image) -> bool:
+    processed = preprocess_image(img)
+    text = pytesseract.image_to_string(processed, lang="eng")
+    var = ImageStat.Stat(processed).var[0] if processed.mode == "L" else sum(ImageStat.Stat(processed).var)/3
+    return len(text.strip()) < 10 and var > 150
+
+def extract_vin_from_photos(image_blobs: List[Tuple[str, bytes]]) -> Optional[str]:
+    rots = [0, 90, 180, 270]
+    found: List[str] = []
+    for name, blob in image_blobs:
+        try:
+            base = Image.open(io.BytesIO(blob))
+            for r in rots:
+                img = base.rotate(r, expand=True)
+                proc = preprocess_image(img)
+                for psm in ("--psm 7", "--psm 6", "--psm 11"):
+                    ocr = pytesseract.image_to_string(proc, lang="eng", config=psm)
+                    cands = re.findall(r"\b([A-HJ-NPR-Z0-9]{17})\b", ocr.upper())
+                    if cands:
+                        found.extend(cands)
+        except Exception as e:
+            logger.warning(f"VIN photo OCR error ({name}): {e}")
+    return best_vin_candidate(found)
+
+def extract_odometer_from_photos(image_blobs: List[Tuple[str, bytes]]) -> Optional[str]:
+    for name, blob in image_blobs:
+        try:
+            img = Image.open(io.BytesIO(blob))
+            proc = preprocess_image(img)
+            ocr = pytesseract.image_to_string(proc, lang="eng")
+            m = re.search(r"\b(\d{1,3}(?:,\d{3})+|\d{2,6})\b\s*(?:mi|miles|km)\b", ocr, re.IGNORECASE)
+            if m:
+                return m.group(1)
+        except Exception as e:
+            logger.warning(f"Odometer photo OCR error ({name}): {e}")
     return None
 
-def extract_days(text: str) -> Optional[int]:
-    m = re.search(r"Days?\s*to\s*Repair\s*[:\-]?\s*([0-9]+)", text or "", re.IGNORECASE)
-    try: return int(m.group(1)) if m else None
-    except: return None
+def check_required_photos(image_blobs: List[Tuple[str, bytes]], ocr_text: str) -> List[str]:
+    """
+    Required: four corners, odometer, VIN, license plate.
+    Now also recognizes:
+      - Photo pages harvested from PDF (tagged 'imgrep' or 'corner')
+      - Corner labels in OCR text (LF/RF/LR/RR or full words)
+    """
+    required = ["four corners", "odometer", "vin", "license plate"]
+    present = set()
+    txt = (ocr_text or "").lower()
 
-def openai_chat(messages, max_tokens=900):
-    # retry with backoff; client-level timeout already set
-    for attempt in range(3):
+    if any(k in txt for k in ["odometer", "mileage photo", "dashboard mileage"]):
+        present.add("odometer")
+    if any(k in txt for k in ["vin", "vehicle identification number", "vin photo"]):
+        present.add("vin")
+    if any(k in txt for k in ["license plate", "registration plate"]):
+        present.add("license plate")
+
+    ext_like = 0
+    for name, blob in image_blobs:
         try:
-            return client.chat.completions.create(
-                model=MODEL_PRIMARY,
-                messages=messages,
-                max_tokens=max_tokens,
-                temperature=0,
-            )
+            img = Image.open(io.BytesIO(blob))
+            proc = preprocess_image(img)
+            ocr = pytesseract.image_to_string(proc, lang="eng")
+            if re.search(r"\b[A-HJ-NPR-Z0-9]{17}\b", ocr, re.IGNORECASE):
+                present.add("vin")
+            if re.search(r"\d{1,3}(,\d{3})*\s*(miles|km)", ocr, re.IGNORECASE):
+                present.add("odometer")
+            if re.search(r"(license|registration)\s*plate|\b[A-Z0-9]{5,8}\b", ocr, re.IGNORECASE):
+                present.add("license plate")
+            if _image_is_exterior_wide(img):
+                ext_like += 1
         except Exception as e:
-            s = str(e).lower()
-            if "429" in s or "rate" in s or "timeout" in s:
-                time.sleep(1.25 * (attempt + 1))
-                continue
-            break
-    try:
-        return client.chat.completions.create(
-            model=MODEL_FALLBACK,
-            messages=messages,
-            max_tokens=max_tokens,
-            temperature=0,
-        )
-    except Exception as e:
-        log.error(f"OpenAI fallback failed: {e}")
-        return None
+            logger.warning(f"Image parse error {name}: {e}")
 
-def strip_photo_sections(text: str) -> str:
-    if not text: return text
-    patterns = [
-        r"(?is)^\s*#{1,6}\s*Client\s*Photo\s*Rules.*?(?=^\s*#{1,6}\s|\Z)",
-        r"(?is)^\s*#{1,6}\s*Estimate.?↔.?Photos\s*Comparison.*?(?=^\s*#{1,6}\s|\Z)",
-        r"(?is)^\s*#{1,6}\s*Photos?\s*(?:Provided|Coverage|Summary).*(?=^\s*#{1,6}\s|\Z)",
+    # Count harvested PDF indicators
+    imgrep_count = sum(1 for n, _ in image_blobs if "imgrep" in n.lower())
+    corner_page_count = sum(1 for n, _ in image_blobs if "corner" in n.lower())
+
+    # Also parse OCR text (from the estimate PDF) for explicit corner labels
+    corner_labels_in_text = count_corner_labels(ocr_text)
+
+    # Satisfy four corners if any of these hold:
+    # - Enough exterior-like photos detected
+    # - Multiple Image Report pages present
+    # - Corner labels found across pages/text
+    if ext_like >= 2 or imgrep_count >= 2 or (corner_page_count + corner_labels_in_text) >= 3:
+        present.add("four corners")
+
+    missing = [p for p in required if p not in present]
+    logger.debug(
+        f"Photo check → present={sorted(list(present))}, "
+        f"missing={missing}, ext_like={ext_like}, imgrep={imgrep_count}, "
+        f"corner_pages={corner_page_count}, corner_labels_in_text={corner_labels_in_text}"
+    )
+    return missing
+
+# =========================================
+# Labor/tax compliance checks
+# =========================================
+def check_labor_and_tax_score(text: str, client_rules: str) -> int:
+    adj = 0
+    def has_rate(label: str) -> bool:
+        pat = rf"{label}[^\n]{{0,120}}?\$\s*\d{{2,3}}(?:\.\d+)?\s*(?:/hr|/hour|per\s*hour|hr)"
+        return re.search(pat, text, re.IGNORECASE) is not None
+    labels = ["Body Labor", "Paint Labor", "Mechanical Labor", "Structural Labor"]
+    if not any(has_rate(lbl) for lbl in labels):
+        adj -= 50
+    if re.search(r"tax\s*(required|must|utilize|apply)", client_rules, re.IGNORECASE):
+        if not re.search(r"(sales\s*tax|tax)[^\n]{0,80}?(\d{1,3}\.\d+%|\d{1,3}%|\$\s*\d+(\.\d{2})?)", text, re.IGNORECASE):
+            adj -= 25
+    return adj
+
+# =========================================
+# Estimate parsing (line items for comparison)
+# =========================================
+PANELS = [
+    "bumper", "fender", "door", "hood", "grille", "headlamp", "headlight",
+    "taillamp", "tail lamp", "quarter panel", "rocker", "roof", "trunk",
+    "decklid", "mirror", "apron", "radiator support", "wheel", "tire",
+    "pillar", "garnish", "molding", "fog lamp", "reinforcement", "cover"
+]
+OPS = ["replace", "repair", "refinish", "r&i", "r & i", "align", "blend", "calibrate"]
+
+def extract_estimate_items(text: str) -> List[Dict[str, str]]:
+    items: List[Dict[str, str]] = []
+    for line in text.splitlines():
+        l = line.strip().lower()
+        if not l or len(l) < 6:
+            continue
+        if any(op in l for op in OPS) and any(p in l for p in PANELS):
+            side = "unspecified"
+            if "left" in l or re.search(r"\blh\b", l): side = "left"
+            if "right" in l or re.search(r"\brh\b", l): side = "right"
+            op = next((op for op in OPS if op in l), "unspecified")
+            panel = next((p for p in PANELS if p in l), "component")
+            items.append({"op": op, "part": panel, "side": side, "raw": line.strip()})
+    uniq, seen = [], set()
+    for it in items:
+        key = (it["op"], it["part"], it["side"])
+        if key not in seen:
+            uniq.append(it); seen.add(key)
+    return uniq
+
+# =========================================
+# GPT compare: estimate ↔ photos (JSON)
+# =========================================
+def compare_estimate_with_photos(items: List[Dict[str, str]],
+                                 images_for_vision: List[Dict[str, Any]]) -> Dict[str, Any]:
+    """
+    Returns dict:
+      per_item: [{op,part,side,photo_evidence,confidence,note}]
+      not_in_photos: [raw...]
+      extra_damage_in_photos: ["desc"...]
+      overall: "short"
+    """
+    schema = {
+        "type": "object",
+        "properties": {
+            "per_item": {"type":"array","items":{
+                "type":"object",
+                "properties":{
+                    "op":{"type":"string"},
+                    "part":{"type":"string"},
+                    "side":{"type":"string"},
+                    "photo_evidence":{"type":"boolean"},
+                    "confidence":{"type":"number"},
+                    "note":{"type":"string"}
+                },
+                "required":["op","part","side","photo_evidence","confidence","note"]
+            }},
+            "not_in_photos":{"type":"array","items":{"type":"string"}},
+            "extra_damage_in_photos":{"type":"array","items":{"type":"string"}},
+            "overall":{"type":"string"}
+        },
+        "required":["per_item","not_in_photos","extra_damage_in_photos","overall"]
+    }
+
+    system = (
+        "You are an auto-damage visual auditor. "
+        "Given estimate line items and vehicle photos, decide for EACH item whether visible photo evidence exists. "
+        "Hidden ops (calibration, internal R&I) may not be visible → mark as no-evidence with a short 3–10 word note. "
+        "Also list obvious damages seen in photos that are NOT listed in the estimate. "
+        "Return STRICT JSON ONLY per this schema:\n" + json.dumps(schema)
+    )
+
+    user_parts: List[Dict[str, Any]] = [
+        {"type": "text", "text": "Estimate items:\n" + json.dumps(items, ensure_ascii=False)}
     ]
-    for pat in patterns:
-        text = re.sub(pat, "", text, flags=re.MULTILINE)
-    text = re.sub(r"(?im)^\s*[-•].*photo.*$", "", text)
-    return text.strip()
+    user_parts.extend(images_for_vision)
 
-# ----------------- API -----------------
+    try:
+        rsp = client.chat.completions.create(
+            model=MODEL,
+            messages=[
+                {"role": "system", "content": system},
+                {"role": "user",   "content": user_parts}
+            ],
+            max_tokens=1200,
+            temperature=0
+        )
+        txt = (rsp.choices[0].message.content or "").strip()
+        txt = txt.removeprefix("```json").removesuffix("```").strip()
+        data = json.loads(txt)
+        if not isinstance(data, dict) or "per_item" not in data:
+            raise ValueError("JSON shape mismatch")
+        return data
+    except Exception as e:
+        logger.error(f"Vision compare JSON error: {type(e).__name__}: {e}")
+        return {
+            "per_item": [],
+            "not_in_photos": [],
+            "extra_damage_in_photos": [],
+            "overall": f"Comparison unavailable ({type(e).__name__})."
+        }
+
+# =========================================
+# PDF helpers
+# =========================================
+def pdf_add_section_title(pdf: FPDF, title: str):
+    pdf.set_font_size(12)
+    pdf.cell(0, 8, txt=title, ln=True)
+    pdf.set_font_size(10)
+
+def pdf_kv(pdf: FPDF, key: str, val: str):
+    pdf.set_font_size(10)
+    pdf.multi_cell(0, 6, f"{key}: {val}")
+
+# =========================================
+# Routes
+# =========================================
 @app.get("/")
 async def root():
-    return {"status":"ok"}
+    return {"status": "ok"}
 
 @app.post("/vision-review")
 async def vision_review(
     files: List[UploadFile] = File(...),
-    client_rules: str = Form(""),
+    client_rules: str = Form(...),
     file_number: str = Form(...),
     ia_company: str = Form(...),
-    appraiser_id: str = Form(...),
-    ai_intent: str = Form("guidelines_only")
+    appraiser_id: str = Form(...)
 ):
     if not appraiser_id.strip():
-        return JSONResponse(status_code=400, content={"error":"Appraiser ID is required."})
+        return JSONResponse(status_code=400, content={"error": "Appraiser ID is required."})
 
-    intent = ai_intent if ai_intent in INTENTS else "guidelines_only"
-    request_type_label = INTENTS.get(intent, intent)
-    log.info(f"Intent={intent} ({request_type_label})")
+    # ----- read uploads once
+    texts: List[str] = []
+    image_blobs: List[Tuple[str, bytes]] = []
+    images_for_vision: List[Dict[str, Any]] = []
 
-    # Partition uploads (PDF/IMG/DOC/TXT/ZIP)
-    pdfs: List[Tuple[str, bytes]] = []
-    images: List[Tuple[str, bytes]] = []
-    docs: List[str] = []
     for f in files:
         raw = await f.read()
         name = (f.filename or "upload").lower()
-        if name.endswith(".pdf"):
-            pdfs.append((name, raw))
-        elif name.endswith((".jpg",".jpeg",".png",".webp")):
-            images.append((name, raw))
+        if name.endswith((".jpg", ".jpeg", ".png", ".webp")):
+            image_blobs.append((name, raw))
+            b64 = base64.b64encode(raw).decode("utf-8")
+            images_for_vision.append({"type": "image_url", "image_url": {"url": f"data:image/jpeg;base64,{b64}"}})
+        elif name.endswith(".pdf"):
+            # existing: extract estimate text
+            texts.append(extract_text_from_pdf(io.BytesIO(raw)))
+            # NEW: also harvest photo-like pages from the PDF so photo checks see them
+            harvested = harvest_photos_from_pdf(raw)
+            for hname, hbytes in harvested:
+                image_blobs.append((hname, hbytes))
+                b64 = base64.b64encode(hbytes).decode("utf-8")
+                images_for_vision.append({"type": "image_url", "image_url": {"url": f"data:image/jpeg;base64,{b64}"}})
         elif name.endswith(".docx"):
-            docs.append(ocr_docx_text(io.BytesIO(raw)))
+            texts.append(extract_text_from_docx(io.BytesIO(raw)))
         elif name.endswith(".txt"):
-            docs.append(raw.decode("utf-8", errors="ignore"))
-        elif name.endswith(".zip"):
-            try:
-                with zipfile.ZipFile(io.BytesIO(raw)) as zf:
-                    for zi in zf.infolist():
-                        if zi.is_dir():
-                            continue
-                        zname = zi.filename.lower()
-                        zdata = zf.read(zi)
-                        if zname.endswith(".pdf"):
-                            pdfs.append((zname, zdata))
-                        elif zname.endswith((".jpg",".jpeg",".png",".webp")):
-                            images.append((zname, zdata))
-                        elif zname.endswith(".docx"):
-                            docs.append(ocr_docx_text(io.BytesIO(zdata)))
-                        elif zname.endswith(".txt"):
-                            docs.append(zdata.decode("utf-8", errors="ignore"))
-            except Exception as e:
-                log.warning(f"ZIP parse error for {name}: {e}")
-
-    photos_present = len(images) > 0
-
-    # Pick primary estimate PDF (prefer name with est/estimate)
-    def pick_estimate_pdf(pdfs_list):
-        if not pdfs_list: return None
-        for nm, blob in pdfs_list:
-            if "est" in nm or "estimate" in nm:
-                return (nm, blob)
-        return pdfs_list[0]
-
-    est_pdf = pick_estimate_pdf(pdfs)
-
-    # Estimate text: text-first; shallow OCR fallback only if text layer empty/short
-    limit = 12 if intent == "comprehensive" else 6
-    est_text = ""
-    if est_pdf:
-        est_text = fast_pdf_text(est_pdf[1], limit_pages=limit)
-        if len(est_text.strip()) < 80:
-            log.info("Text layer thin — using shallow OCR fallback (max 4 pages).")
-            est_text = quick_ocr_text(est_pdf[1], max_pages=4, dpi=240)
-    if not est_text and docs:
-        est_text = "\n\n".join(docs)
-
-    # Client rules text from form field only
-    rules_text = (client_rules or "")
-
-    # Extract identifiers from estimate text
-    vin = vin_from_text(est_text) or vin_from_text_plus(est_text) or "N/A"
-    vehicle = vehicle_from_text(est_text) or "N/A"
-    mileage = mileage_from_text(est_text)
-    claim = claim_from_text(est_text) or claim_from_text_plus(est_text) or "N/A"
-    days_reported = extract_days(est_text)
-
-    facts = {
-        "vin": vin,
-        "vehicle": vehicle,
-        "claim": claim,
-        "mileage_present": bool(mileage),
-        "days_reported": days_reported,
-        "photos_present": photos_present
-    }
-
-    # Build images payload (to GPT) only if photos present
-    def vision_images(max_imgs=16):
-        out=[]
-        for i, (_, blob) in enumerate(images[:max_imgs]):
-            b64 = base64.b64encode(blob).decode("utf-8")
-            out.append({"type":"image_url","image_url":{"url":f"data:image/jpeg;base64,{b64}"}})
-        return out
-
-    # ----------------- Intent routing (strict) -----------------
-    gpt_output = ""
-    if intent == "guidelines_only":
-        system = (
-            "Auto-damage compliance auditor. Compare client guidelines against the ESTIMATE content only. "
-            "Do NOT restate the guidelines; output compliance decisions with short justifications from the estimate text. "
-            f"PhotosPresent={photos_present}. If false, do NOT mention photos.\n"
-            "- Tight bullets; no fluff.\n"
-            "Sections:\n"
-            "1) Client Quick Summary (2 bullets)\n"
-            "2) Checklist — Guidelines vs Estimate (each rule: [Compliant|Non-compliant|Not found] — reason)\n"
-            "3) Summary & Next Steps (1–2 bullets)\n"
-            + json.dumps(facts, indent=2)
-        )
-        user = [
-            {"type":"text","text":"CLIENT GUIDELINES:\n"+(rules_text or "")[:10000]},
-            {"type":"text","text":"\n\nESTIMATE TEXT:\n"+(est_text or "")[:12000]},
-        ]
-        rsp = openai_chat([{"role":"system","content":system},{"role":"user","content":user}], max_tokens=900)
-        gpt_output = (rsp.choices[0].message.content if rsp else "Automated narrative unavailable.").strip()
-        if not photos_present: gpt_output = strip_photo_sections(gpt_output)
-
-    elif intent == "comprehensive":
-        system = (
-            "Comprehensive audit: compare client guidelines to ESTIMATE, and compare ESTIMATE to PHOTOS (if photos present). "
-            "Do NOT restate the guidelines; give compliance decisions with brief citations from estimate/photos. "
-            "Numbered sections; hyphen bullets; no emojis.\n"
-            f"PhotosPresent={photos_present}. If false, omit photo-dependent sections.\n"
-            + json.dumps(facts, indent=2)
-        )
-        user = [
-            {"type":"text","text":"CLIENT GUIDELINES:\n"+(rules_text or "")[:9000]},
-            {"type":"text","text":"\n\nESTIMATE TEXT:\n"+(est_text or "")[:12000]},
-        ]
-        if photos_present: user.extend(vision_images())
-        rsp = openai_chat([{"role":"system","content":system},{"role":"user","content":user}], max_tokens=1200)
-        gpt_output = (rsp.choices[0].message.content if rsp else "Automated narrative unavailable.").strip()
-        if not photos_present: gpt_output = strip_photo_sections(gpt_output)
-
-    elif intent == "photos_only":
-        if not photos_present:
-            gpt_output = "No photos were provided with this request."
+            texts.append(raw.decode("utf-8", errors="ignore"))
         else:
-            system = "Compare ESTIMATE to PHOTOS only. Sections: Photo Coverage, Visible Damage vs Estimate, Discrepancies, Summary."
-            user = [{"type":"text","text":"ESTIMATE TEXT:\n"+(est_text or "")[:8000]}] + vision_images()
-            rsp = openai_chat([{"role":"system","content":system},{"role":"user","content":user}], max_tokens=800)
-            gpt_output = (rsp.choices[0].message.content if rsp else "Automated narrative unavailable.").strip()
+            texts.append(f"⚠️ Skipped unsupported file: {f.filename}")
 
-    elif intent == "invoices_with_photos":
-        invoices_text = ""
-        for nm, raw in pdfs:
-            if any(k in nm for k in ("invoice","receipt","supplement")):
-                invoices_text += fast_pdf_text(raw, limit_pages=5) or quick_ocr_text(raw, max_pages=2)
-        system = (
-            f"PhotosPresent={photos_present}. If false, omit photo-related sections.\n"
-            "Audit whether the supplement/estimate is substantiated by invoices and, if present, by photos. "
-            "Sections: Invoices Summary, Support vs Estimate Lines, (Photo Corroboration), Missing Documentation, Summary."
+    combined_text = "\n".join(texts)
+
+    # ----- photo checks + VIN/odo
+    missing_photos = check_required_photos(image_blobs, combined_text)
+
+    vin_est = extract_vin_from_text(combined_text) or extract_vin_from_text_plus(combined_text)
+    vin_photos = extract_vin_from_photos(image_blobs)
+    vin_final = vin_est or vin_photos or "N/A"
+
+    vehicle_desc = extract_vehicle_from_text(combined_text) or "N/A"
+    claim_number = extract_claim_from_text(combined_text) or extract_claim_from_text_plus(combined_text) or "N/A"
+    odo_photos = extract_odometer_from_photos(image_blobs)
+
+    # ----- parse estimate items & compare to photos
+    est_items = extract_estimate_items(combined_text)
+    consistency = compare_estimate_with_photos(est_items, images_for_vision)
+
+    # ----- vision narrative (compliance summary)
+    photo_hint = f"\n\nMISSING PHOTOS: {', '.join(missing_photos) if missing_photos else 'None'}"
+    system_prompt = f"""
+You are an AI auto damage auditor. Evaluate STRICTLY by these rules:
+
+- Start at 100% and deduct only for: labor (-50% if ALL sections missing), tax (-25% if rules require but not present), photos (-25% per missing type), parts (-25% if a 2024–2025 vehicle uses LKQ/AM in violation).
+- Required photos: four corners, odometer, VIN, license plate.
+- "Four corners" is satisfied if at least two exterior corner views are present (already computed for you) OR multiple Image Report pages/corner labels are present.
+- Do NOT assume total loss unless explicitly stated.
+- If any labor rate is present (body OR paint OR mechanical OR structural), do NOT apply the -50% deduction.
+
+Rules to follow from client:
+{client_rules}
+""".strip()
+
+    user_parts: List[Dict[str, Any]] = []
+    if combined_text:
+        user_parts.append({"type": "text", "text": combined_text + photo_hint})
+    if images_for_vision:
+        user_parts.extend(images_for_vision)
+
+    try:
+        response = client.chat.completions.create(
+            model=MODEL,
+            messages=[
+                {"role": "system", "content": system_prompt},
+                {"role": "user",   "content": user_parts}
+            ],
+            max_tokens=900
         )
-        user = [
-            {"type":"text","text":"ESTIMATE TEXT:\n"+(est_text or "")[:6000]},
-            {"type":"text","text":"\n\nINVOICES TEXT:\n"+(invoices_text or '')[:6000]},
-        ]
-        if photos_present: user.extend(vision_images())
-        rsp = openai_chat([{"role":"system","content":system},{"role":"user","content":user}], max_tokens=900)
-        gpt_output = (rsp.choices[0].message.content if rsp else "Automated narrative unavailable.").strip()
-        if not photos_present: gpt_output = strip_photo_sections(gpt_output)
+        gpt_output = response.choices[0].message.content or "⚠️ GPT returned no output."
+    except Exception as e:
+        err = f"{type(e).__name__}: {e}"
+        logger.error(f"OpenAI error: {err}")
+        gpt_output = f"⚠️ AI review failed: {err}"
 
-    elif intent == "docs_checklist":
-        system = (
-            "Documentation checklist only. State if the estimate includes each required doc mentioned in the client guidelines. "
-            "Mark 'missing' if not found. Be terse; bullets only."
-        )
-        user = [
-            {"type":"text","text":"CLIENT GUIDELINES:\n"+(rules_text or "")[:6000]},
-            {"type":"text","text":"\n\nESTIMATE TEXT:\n"+(est_text or "")[:8000]},
-        ]
-        rsp = openai_chat([{"role":"system","content":system},{"role":"user","content":user}], max_tokens=500)
-        gpt_output = (rsp.choices[0].message.content if rsp else "Automated narrative unavailable.").strip()
+    # ----- SCORE: single authoritative number used everywhere -----
+    score_ai = None
+    for pat in [
+        r"Total\s*Evaluation\s*[:\-]?\s*(\d{1,3})\s*%?",
+        r"Final\s*Score\s*[:\-]?\s*(\d{1,3})\s*%?",
+        r"Compliance\s*Score\s*[:\-]?\s*(\d{1,3})\s*%?",
+    ]:
+        m = re.search(pat, gpt_output, re.IGNORECASE)
+        if m:
+            score_ai = int(m.group(1))
+            break
 
-    # ----------------- PDF (shell unchanged) -----------------
-    pdf = FPDF(); pdf.add_page()
-    pdf.set_font("Arial", size=11)
+    labor_tax_adj = check_labor_and_tax_score(combined_text, client_rules)
+    photo_adj = -25 * len(missing_photos)
+    computed = max(0, 100 + labor_tax_adj + photo_adj)
+    authoritative_score = max(0, min(100, score_ai if score_ai is not None else computed))
 
-    pdf.cell(200,10,"NSPXN.com AI Review Report",ln=True,align="C")
-    pdf.ln(5); pdf.set_font_size(10)
-    pdf.multi_cell(0,6,f"File Number: {file_number}")
-    pdf.multi_cell(0,6,f"IA Company: {ia_company}")
-    pdf.multi_cell(0,6,f"Request Type: {request_type_label}")
-    pdf.multi_cell(0,6,f"Appraiser ID #: {appraiser_id}")
-    pdf.ln(4)
-    pdf.multi_cell(0,6,f"Claim #: {claim}")
-    pdf.multi_cell(0,6,f"VIN (from estimate): {vin}")
-    vin_line = "Included in narrative" if (intent == "comprehensive" and photos_present) else ("Photos not provided" if intent == "comprehensive" else "Not requested")
-    pdf.multi_cell(0,6,f"VIN verification (estimate vs photo): {vin_line}")
-    pdf.multi_cell(0,6,f"Vehicle: {vehicle}")
-    if mileage: pdf.multi_cell(0,6,f"Odometer (from estimate): {mileage}")
-    if days_reported is not None:
-        pdf.multi_cell(0,6,f"Days to Repair (reported): {days_reported}")
-    pdf.multi_cell(0,6,"Compliance Score: N/A")
+    # Remove any score lines from the AI paragraph before adding to PDF
+    gpt_output_clean = re.sub(
+        r'(?im)^(?:Final\s*Score|Compliance\s*Score|Total\s*Evaluation)\s*[:\-]?\s*\d{1,3}\s*%.*$',
+        '',
+        gpt_output
+    ).strip()
 
-    pdf.ln(4); pdf.set_font_size(12); pdf.cell(0,8,"AI-4-IA Review Summary",ln=True)
-    pdf.set_font_size(10); pdf.multi_cell(0,6,gpt_output or "No narrative generated.")
+    # =========================================
+    # PDF build
+    # =========================================
+    pdf = FPDF()
+    pdf.add_page()
+    try:
+        pdf.add_font("DejaVu", "", "DejaVuSans.ttf", uni=True)
+        pdf.set_font("DejaVu", size=11)
+    except Exception:
+        pdf.set_font("Arial", size=11)
 
-    pdf.ln(4); pdf.set_font_size(12); pdf.cell(0,8,"Estimate ↔ Photos Consistency Review",ln=True)
+    pdf.cell(200, 10, txt="NSPXN.com AI Review Report", ln=True, align="C")
+    pdf.ln(5)
     pdf.set_font_size(10)
-    if intent in ("comprehensive","photos_only","invoices_with_photos") and photos_present:
-        pdf.multi_cell(0,6,"Included in narrative above (single-pass review).")
-    else:
-        pdf.multi_cell(0,6,"Not requested or no photos provided.")
+    pdf.multi_cell(0, 6, f"File Number: {file_number}")
+    pdf.multi_cell(0, 6, f"IA Company: {ia_company}")
+    pdf.multi_cell(0, 6, f"Appraiser ID #: {appraiser_id}")
+    pdf.ln(4)
+    pdf.multi_cell(0, 6, f"Claim #: {claim_number}")
+    pdf.multi_cell(0, 6, f"VIN: {vin_final}")
+    pdf.multi_cell(0, 6, f"Vehicle: {vehicle_desc}")
+    if odo_photos:
+        pdf.multi_cell(0, 6, f"Odometer (from photos): {odo_photos}")
+    pdf.multi_cell(0, 6, f"Compliance Score: {authoritative_score}%")
 
+    pdf.ln(4)
+    pdf_add_section_title(pdf, "AI-4-IA Review Summary")
+    pdf.multi_cell(0, 6, gpt_output_clean)
+
+    # ======== Estimate ↔ Photos Consistency Review ========
+    pdf.ln(4)
+    pdf_add_section_title(pdf, "Estimate ↔ Photos Consistency Review")
+
+    if consistency.get("per_item"):
+        for it in consistency["per_item"][:40]:
+            ev = "YES" if it.get("photo_evidence") else "NO"
+            try:
+                conf = float(it.get("confidence", 0))
+            except Exception:
+                conf = 0.0
+            conf_txt = f"{round(conf*100)}%"
+            line = f"- {it.get('side','unspecified').title()} {it.get('part','component')} · {it.get('op','op')} → Photo: {ev} ({conf_txt}); {it.get('note','')}"
+            pdf.multi_cell(0, 6, line)
+    else:
+        pdf.multi_cell(0, 6, "Per-item comparison unavailable.")
+
+    if consistency.get("not_in_photos"):
+        pdf.ln(2)
+        pdf_add_section_title(pdf, "Items Estimated but Not Evident in Photos")
+        for raw in consistency["not_in_photos"][:20]:
+            pdf.multi_cell(0, 6, f"- {raw}")
+
+    if consistency.get("extra_damage_in_photos"):
+        pdf.ln(2)
+        pdf_add_section_title(pdf, "Damage Visible in Photos but Missing on Estimate")
+        for d in consistency["extra_damage_in_photos"][:20]:
+            pdf.multi_cell(0, 6, f"- {d}")
+
+    pdf.ln(2)
+    pdf_kv(pdf, "Consistency Overall", consistency.get("overall", ""))
+
+    # Save PDF to /tmp with name {file_number}.pdf
     pdf_path = os.path.join(PDF_DIR, f"{file_number}.pdf")
     try:
-        with open(pdf_path,"wb") as f: f.write(pdf.output(dest="S").encode("latin-1", errors="ignore"))
-        log.info(f"PDF saved → {pdf_path}")
+        pdf_bytes = pdf.output(dest="S").encode("latin-1")
+        with open(pdf_path, "wb") as f:
+            f.write(pdf_bytes)
+        logger.info(f"PDF saved → {pdf_path}")
     except Exception as e:
-        log.error(f"PDF write error: {e}")
+        logger.error(f"PDF write error: {e}")
 
-    # ----------------- Email (shell unchanged) -----------------
+    # OPTIONAL email (unchanged)
     try:
         msg = EmailMessage()
-        msg["Subject"] = f"AI-4-IA Review: {claim}"
+        msg["Subject"] = f"AI-4-IA Review: {claim_number}"
         msg["From"] = "noreply@nspxn.com"
         msg["To"] = "info@nspxn.com"
-        body = f"""NSPXN.com AI4IA Review Report
+        email_body = f"""NSPXN.com AI4IA Review Report
 
 File Number: {file_number}
 IA Company: {ia_company}
 Appraiser ID #: {appraiser_id}
 
-Request Type: {request_type_label}
+Claim #: {claim_number}
+VIN: {vin_final}
+Vehicle: {vehicle_desc}
 
-Claim #: {claim}
-VIN (from estimate): {vin}
-VIN verification (estimate vs photo): {vin_line}
-Vehicle: {vehicle}
-{('Odometer (from estimate): ' + mileage) if mileage else ''}
-{('Days to Repair (reported): ' + str(days_reported)) if days_reported is not None else ''}
+Compliance Score: {authoritative_score}%
 
-Summary:
-{gpt_output}
+AI Review Summary:
+{gpt_output_clean}
 """
-        msg.set_content(body)
+        msg.set_content(email_body)
         with smtplib.SMTP_SSL("mail.tierra.net", 465) as smtp:
             smtp.login("info@nspxn.com", "grr2025GRR")
             smtp.send_message(msg)
     except Exception as e:
-        logging.getLogger("ai4ia-lite").warning(f"Email send error (continuing): {e}")
+        logger.error(f"Email error (continuing): {e}")
 
     return {
-        "request_type": request_type_label,
-        "gpt_output": gpt_output,
+        "gpt_output": gpt_output_clean,
         "file_number": file_number,
-        "claim_number": claim,
-        "vehicle": vehicle,
-        "vin_estimate": vin,
-        "vin_verification": vin_line,
-        "odometer_estimate": mileage or "Not documented",
-        "days_to_repair": days_reported or "Not documented",
+        "claim_number": claim_number,
+        "vehicle": vehicle_desc,
+        "vin": vin_final,
+        "score": f"{authoritative_score}%",
+        "consistency_review": consistency
     }
 
 @app.get("/download-pdf")
 async def download_pdf(file_number: str):
-    path = os.path.join(PDF_DIR, f"{file_number}.pdf")
-    if os.path.exists(path):
-        return FileResponse(path=path, media_type="application/pdf", filename=f"{file_number}.pdf")
-    return JSONResponse(status_code=404, content={"detail":"Not Found"})
+    pdf_path = os.path.join(PDF_DIR, f"{file_number}.pdf")
+    if os.path.exists(pdf_path):
+        return FileResponse(path=pdf_path, media_type="application/pdf", filename=f"{file_number}.pdf")
+    return JSONResponse(status_code=404, content={"detail": "Not Found"})
+
+@app.get("/client-rules/{client_name}")
+async def get_client_rules(client_name: str):
+    rules_dir = "client_rules"
+    file_name = f"{client_name}.docx"
+    file_path = os.path.join(rules_dir, file_name)
+    if os.path.exists(file_path):
+        try:
+            doc = Document(file_path)
+            text = "\n".join([p.text for p in doc.paragraphs if p.text.strip()])
+            logger.debug(f"Client rules for {client_name}: {text[:500]}...")
+            return {"text": text}
+        except Exception as e:
+            logger.error(f"Client rules error: {str(e)}")
+            return JSONResponse(status_code=500, content={"error": str(e)})
+    else:
+        logger.error(f"Rules not found for client: {client_name}")
+        return JSONResponse(status_code=404, content={"error": "Rules not found for this client."})
+
+
+
+
+
+
+
+
+
