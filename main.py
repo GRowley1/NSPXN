@@ -14,7 +14,7 @@ from PIL import Image, ImageEnhance, ImageOps, ImageFilter
 
 from openai import OpenAI
 
-# ---------- Config (minimal) ----------
+# ----------- Config ----------
 PDF_DIR = os.getenv("PDF_DIR", "/tmp"); os.makedirs(PDF_DIR, exist_ok=True)
 logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s")
 log = logging.getLogger("ai4ia-slim")
@@ -27,7 +27,6 @@ if "OPENAI_API_KEY" not in os.environ or not os.environ["OPENAI_API_KEY"]:
     raise RuntimeError("OPENAI_API_KEY not set")
 client = OpenAI(api_key=os.environ["OPENAI_API_KEY"])
 
-# Request types kept small & strict
 INTENTS = {
     "guidelines_only": "Guidelines -> Estimate (no photos)",
     "comprehensive": "Comprehensive: Guidelines + Estimate + Photos (with VIN check)",
@@ -36,11 +35,14 @@ INTENTS = {
     "docs_checklist": "Documentation Checklist",
 }
 
-# ---------- App ----------
+# ----------- App ----------
 app = FastAPI()
-app.add_middleware(CORSMiddleware, allow_origins=["*"], allow_credentials=True, allow_methods=["*"], allow_headers=["*"])
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"], allow_credentials=True, allow_methods=["*"], allow_headers=["*"],
+)
 
-# ---------- Tiny helpers (VIN/vehicle only; everything else = GPT) ----------
+# ----------- Tiny helpers ----------
 def _pp(img):
     img = img.convert("L")
     img = ImageEnhance.Contrast(img).enhance(1.8)
@@ -69,6 +71,7 @@ def quick_pdf_ocr(pdf_bytes: bytes, max_pages: int = 2, dpi: int = 200) -> str:
         log.warning(f"OCR fallback failed: {e}")
         return ""
 
+# VIN / vehicle extraction
 VIN_ALLOWED = set("0123456789ABCDEFGHJKLMNPRSTUVWXYZ")
 VIN_TIGHT = re.compile(r"\b([A-HJ-NPR-Z0-9]{17})\b")
 VIN_RELAX = re.compile(r"(?:V\.?I\.?N\.?|Vehicle\s+Identification\s+Number|VIN)\b[^A-Z0-9]{0,40}((?:[A-HJ-NPR-Z0-9][\s\-]*){17})", re.IGNORECASE)
@@ -92,8 +95,7 @@ def vin_from_text(text: str) -> Optional[str]:
     uniq=[]; seen=set()
     for c in cands:
         v = _norm_vin(c)
-        if v and v not in seen:
-            uniq.append(v); seen.add(v)
+        if v and v not in seen: uniq.append(v); seen.add(v)
     for v in uniq:
         if _vin_ok(v): return v
     return uniq[0] if uniq else None
@@ -121,29 +123,19 @@ def mileage_from_text(text: str) -> Optional[str]:
     m = re.search(r"(?:Odometer|Mileage|Miles)\s*[:\-]?\s*([\d,]{2,7})\b", text or "", re.IGNORECASE)
     return m.group(1) if m else None
 
-# ---------- EDIT #1: safer Claim extractor (requires at least one digit) ----------
+# Claim extractor that REQUIRES at least one digit (avoids “Services”)
 def claim_from_text(text: str) -> Optional[str]:
-    """
-    Extract a claim/reference/assignment number. Must contain at least one digit
-    to avoid false hits like the word 'Services'.
-    """
-    if not text:
-        return None
-
-    CLAIM_TOKEN = r"[A-Za-z0-9][A-Za-z0-9\-_\/]*\d[A-Za-z0-9\-_\/]*"  # must include a digit
-
+    if not text: return None
+    CLAIM_TOKEN = r"[A-Za-z0-9][A-Za-z0-9\-_\/]*\d[A-Za-z0-9\-_\/]*"
     pats = [
         rf"(?:Carrier|Insurance|Insurer)?\s*Claim\s*(?:No\.?|Number|#)?\s*[:\-]?\s*({CLAIM_TOKEN})",
         rf"(?:Assignment|Reference|Ref)\s*(?:No\.?|Number|#)?\s*[:\-]?\s*({CLAIM_TOKEN})",
         rf"(?<!Policy)\bClaim\b[^A-Za-z0-9]{{0,20}}({CLAIM_TOKEN})",
     ]
-
     for pat in pats:
         m = re.search(pat, text, re.IGNORECASE)
         if m:
-            out = m.group(1).strip().rstrip(".:,;")
-            return out
-
+            return m.group(1).strip().rstrip(".:,;")
     return None
 
 def days_from_text(text: str) -> Optional[int]:
@@ -171,31 +163,6 @@ def final_percent(narr: str) -> Optional[int]:
         except: return None
     return None
 
-def openai_chat(messages, max_tokens=800):
-    for attempt in range(2):
-        try:
-            return client.chat.completions.create(
-                model=MODEL_PRIMARY,
-                messages=messages,
-                max_tokens=max_tokens,
-                temperature=0,
-                timeout=OPENAI_TIMEOUT,   # pass timeout per call
-            )
-        except Exception as e:
-            if "429" in str(e) or "timeout" in str(e).lower(): time.sleep(1.25*(attempt+1)); continue
-            break
-    try:
-        return client.chat.completions.create(
-            model=MODEL_FALLBACK,
-            messages=messages,
-            max_tokens=max_tokens,
-            temperature=0,
-            timeout=OPENAI_TIMEOUT,   # pass timeout per call
-        )
-    except Exception as e:
-        log.error(f"OAI fail: {e}"); return None
-
-# ---------- EDIT #3: reflect VIN verification from narrative ----------
 def vin_line_from_narrative(narr: str, photos_present: bool) -> str:
     if not photos_present:
         return "Photos not provided"
@@ -205,15 +172,30 @@ def vin_line_from_narrative(narr: str, photos_present: bool) -> str:
     if not m:
         return "Included in narrative"
     tag = m.group(1).upper().replace("  ", " ")
-    if tag == "MATCH":
-        return "Verified: MATCH"
-    if tag == "MISMATCH":
-        return "Verified: MISMATCH"
-    if tag == "NOT VERIFIED":
-        return "Not verified"
+    if tag == "MATCH": return "Verified: MATCH"
+    if tag == "MISMATCH": return "Verified: MISMATCH"
+    if tag == "NOT VERIFIED": return "Not verified"
     return "Photos not provided"
 
-# ---------- API ----------
+def openai_chat(messages, max_tokens=800):
+    for attempt in range(2):
+        try:
+            return client.chat.completions.create(
+                model=MODEL_PRIMARY, messages=messages, max_tokens=max_tokens, temperature=0,
+                timeout=OPENAI_TIMEOUT
+            )
+        except Exception as e:
+            if "429" in str(e) or "timeout" in str(e).lower(): time.sleep(1.25*(attempt+1)); continue
+            break
+    try:
+        return client.chat.completions.create(
+            model=MODEL_FALLBACK, messages=messages, max_tokens=max_tokens, temperature=0,
+            timeout=OPENAI_TIMEOUT
+        )
+    except Exception as e:
+        log.error(f"OAI fail: {e}"); return None
+
+# ----------- API ----------
 @app.post("/vision-review")
 async def vision_review(
     files: List[UploadFile] = File(...),
@@ -229,7 +211,7 @@ async def vision_review(
     request_type_label = INTENTS[intent]
     file_number = safe_filename(file_number)
 
-    # Collect content (bare minimum)
+    # Gather content
     pdfs: List[Tuple[str, bytes]] = []
     images: List[Tuple[str, bytes]] = []
     texts: List[str] = []
@@ -262,14 +244,14 @@ async def vision_review(
 
     photos_present = len(images) > 0
 
-    # Choose an estimate PDF (prefer names with 'est')
+    # Prefer an estimate PDF containing 'est'
     est_pdf = None
     for nm, blob in pdfs:
         if "est" in nm or "estimate" in nm:
             est_pdf = (nm, blob); break
     if est_pdf is None and pdfs: est_pdf = pdfs[0]
 
-    # Minimal text for GPT (short, fast). Add tiny OCR only if completely blank.
+    # Fast text; tiny OCR only if needed
     est_text = ""
     if est_pdf:
         est_text = fast_pdf_text(est_pdf[1], limit_pages=8)
@@ -278,20 +260,20 @@ async def vision_review(
     if texts and not est_text:
         est_text = "\n\n".join(texts)[:12000]
 
-    # Always extract VIN/vehicle/mileage/claim/days from estimate text
+    # Always extract these from the estimate
     vin = vin_from_text(est_text) or "N/A"
     vehicle = vehicle_from_text(est_text) or "N/A"
     mileage = mileage_from_text(est_text)
     claim = claim_from_text(est_text) or "N/A"
     days = days_from_text(est_text)
 
-    # Build GPT messages strictly by intent
-    sys_common = "You are an auto-claims appraisal assistant. Only analyze what is allowed by the selected Request Type. Be concise, bullet-first, no fluff. Always end with a single line: 'Final Evaluation: NN%'."
+    # Build GPT messages strictly by the selected request
+    sys_common = "You are an auto-claims appraisal assistant. Only analyze what the selected Request Type allows. Be concise, bullet-first, no fluff. Always end with a single line: 'Final Evaluation: NN%'."
     facts = {"photos_present": photos_present, "vin_estimate": vin, "vehicle": vehicle, "claim": claim, "mileage_present": bool(mileage)}
     messages = [{"role":"system","content":sys_common + " " + json.dumps(facts)}]
 
     def img_payload(max_imgs=12):
-        out = []
+        out=[]
         for _, blob in images[:max_imgs]:
             b64 = base64.b64encode(blob).decode("utf-8")
             out.append({"type":"image_url","image_url":{"url":f"data:image/jpeg;base64,{b64}"}})
@@ -308,7 +290,7 @@ async def vision_review(
         rsp = openai_chat(messages, max_tokens=650)
 
     elif intent == "comprehensive":
-        # ---------- EDIT #2: strong mandatory output for Comprehensive ----------
+        # Force the full structure so Comprehensive is never “missing a lot”
         system = (
             "Comprehensive review: guidelines vs estimate AND estimate vs photos. "
             "If photos_present=false, omit photo sections entirely. "
@@ -386,15 +368,12 @@ async def vision_review(
         rsp = openai_chat(messages, max_tokens=600)
 
     gpt_output = (rsp.choices[0].message.content if rsp else locals().get("gpt_output","Automated narrative unavailable.")).strip()
-
-    # Guard: if no photos, try to remove accidental photo chatter
     if not photos_present:
         gpt_output = re.sub(r"(?im)^.*photo.*$", "", gpt_output).strip()
 
-    # Compliance score = the Final Evaluation percent if present
     comp = final_percent(gpt_output)
 
-    # VIN verification line (mirror from narrative for comprehensive/photos paths)
+    # VIN verification line in header (mirrors narrative, no image OCR)
     if intent == "comprehensive":
         vin_line = vin_line_from_narrative(gpt_output, photos_present)
     elif intent in ("photos_only", "invoices_with_photos"):
@@ -402,7 +381,7 @@ async def vision_review(
     else:
         vin_line = "Not requested"
 
-    # ---------- Build PDF (unchanged layout) ----------
+    # ----------- PDF (same format) ----------
     pdf = FPDF(); pdf.add_page(); pdf.set_font("Arial", size=11)
     pdf.cell(200,10,sanitize_latin1("NSPXN.com AI Review Report"),ln=True,align="C")
     pdf.ln(5); pdf.set_font_size(10)
@@ -426,14 +405,11 @@ async def vision_review(
 
     pdf_bytes = pdf.output(dest="S").encode("latin-1")
     pdf_path = os.path.join(PDF_DIR, f"{file_number}.pdf")
-    try:
-        with open(pdf_path,"wb") as f: f.write(pdf_bytes)
-    except Exception as e:
-        log.warning(f"PDF write error: {e}")
+    with open(pdf_path,"wb") as f: f.write(pdf_bytes)
     pdf_b64 = base64.b64encode(pdf_bytes).decode("utf-8")
     pdf_url = f"/download-pdf?file_number={file_number}"
 
-    # ---------- Email (unchanged shell) ----------
+    # ----------- Email (same shell) ----------
     try:
         msg = EmailMessage()
         msg["Subject"] = f"AI-4-IA Review: {claim or 'N/A'}"
