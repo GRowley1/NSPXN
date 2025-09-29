@@ -165,16 +165,16 @@ def mileage_from_text(text: str) -> Optional[str]:
 
 def claim_from_text(text: str) -> Optional[str]:
     pats = [
-        r"(?:Carrier|Insurance|Insurer)?\s*Claim\s*(?:No\.?|Number|#)\s*[: ]\s*([A-Za-z0-9\-_\\/]{5,25})",
-        r"(?:Shop|Body\s*Shop)\s*Claim\s*(?:No\.?|Number|#)\s*[: ]\s*([A-Za-z0-9\-_\\/]{5,25})",
-        r"(?:SCA|IA)\s*Claim\s*(?:No\.?|Number|#)\s*[: ]\s*([A-Za-z0-9\-_\\/]{5,25})",
-        r"(?:Assignment|Reference|Ref)\s*(?:No\.?|Number|#)\s*[: ]\s*([A-Za-z0-9\-_\\/]{5,25})",
-        r"Claim\s*[:#]\s*([A-Za-z0-9\-_\\/]{5,25})",
+        r"(?:Carrier|Insurance|Insurer)?\s*Claim\s*(?:No\.?|Number|#)\s*[: ]\s*([A-Za-z0-9\-_\\/]{3,40})",
+        r"(?:Shop|Body\s*Shop)\s*Claim\s*(?:No\.?|Number|#)\s*[: ]\s*([A-Za-z0-9\-_\\/]{3,40})",
+        r"(?:SCA|IA)\s*Claim\s*(?:No\.?|Number|#)\s*[: ]\s*([A-Za-z0-9\-_\\/]{3,40})",
+        r"(?:Assignment|Reference|Ref)\s*(?:No\.?|Number|#)\s*[: ]\s*([A-Za-z0-9\-_\\/]{3,40})",
+        r"Claim\s*[:#]\s*([A-Za-z0-9\-_\\/]{3,40})",
     ]
     for pat in pats:
         m = re.search(pat, text, re.IGNORECASE)
         if m: return m.group(1).strip().rstrip(".:,;")
-    m2 = re.search(r"Claim[^A-Za-z0-9]{0,20}([A-Za-z0-9\-_\\/]{5,25})", text or "", re.IGNORECASE)
+    m2 = re.search(r"Claim[^A-Za-z0-9]{0,20}([A-Za-z0-9\-_\\/]{3,40})", text or "", re.IGNORECASE)
     if m2: return m2.group(1).strip().rstrip(".:,;")
     return None
 
@@ -222,6 +222,11 @@ def strip_photo_sections(text: str) -> str:
     text = re.sub(r"(?im)^\s*[-•].*photo.*$", "", text)
     return text.strip()
 
+def safe_filename(s: str) -> str:
+    s = (s or "").strip()
+    s = re.sub(r"[^\w.\-]+", "-", s)
+    return s.strip("-_.") or f"report-{int(time.time())}"
+
 # ----------------- API -----------------
 @app.get("/")
 async def root():
@@ -241,7 +246,8 @@ async def vision_review(
 
     intent = ai_intent if ai_intent in INTENTS else "guidelines_only"
     request_type_label = INTENTS.get(intent, intent)
-    log.info(f"Intent={intent} ({request_type_label})")
+    file_number = safe_filename(file_number)
+    log.info(f"Intent={intent} ({request_type_label}), file_number={file_number}")
 
     # Partition uploads (PDF/IMG/DOC/TXT/ZIP)
     pdfs: List[Tuple[str, bytes]] = []
@@ -406,7 +412,7 @@ async def vision_review(
         rsp = openai_chat([{"role":"system","content":system},{"role":"user","content":user}], max_tokens=500)
         gpt_output = (rsp.choices[0].message.content if rsp else "Automated narrative unavailable.").strip()
 
-    # ----------------- PDF (shell unchanged) -----------------
+    # ----------------- PDF (write + base64 return) -----------------
     pdf = FPDF(); pdf.add_page()
     pdf.set_font("Arial", size=11)
 
@@ -437,12 +443,19 @@ async def vision_review(
     else:
         pdf.multi_cell(0,6,"Not requested or no photos provided.")
 
+    # Create bytes once; write to disk; also return base64
+    pdf_bytes = pdf.output(dest="S").encode("latin-1")
     pdf_path = os.path.join(PDF_DIR, f"{file_number}.pdf")
     try:
-        with open(pdf_path,"wb") as f: f.write(pdf.output(dest="S").encode("latin-1"))
+        with open(pdf_path,"wb") as f:
+            f.write(pdf_bytes)
         log.info(f"PDF saved → {pdf_path}")
     except Exception as e:
         log.error(f"PDF write error: {e}")
+
+    pdf_b64 = base64.b64encode(pdf_bytes).decode("utf-8")
+    pdf_url = f"/download-pdf?file_number={file_number}"
+    pdf_filename = f"{file_number}.pdf"
 
     # ----------------- Email (shell unchanged) -----------------
     try:
@@ -477,6 +490,9 @@ Summary:
 
     return {
         "request_type": request_type_label,
+        "pdf_url": pdf_url,
+        "pdf_filename": pdf_filename,
+        "pdf_b64": pdf_b64,
         "gpt_output": gpt_output,
         "file_number": file_number,
         "claim_number": claim,
@@ -489,7 +505,9 @@ Summary:
 
 @app.get("/download-pdf")
 async def download_pdf(file_number: str):
-    path = os.path.join(PDF_DIR, f"{file_number}.pdf")
+    safe = re.sub(r"[^\w.\-]+", "-", file_number).strip("-_.")
+    path = os.path.join(PDF_DIR, f"{safe}.pdf")
     if os.path.exists(path):
-        return FileResponse(path=path, media_type="application/pdf", filename=f"{file_number}.pdf")
+        return FileResponse(path=path, media_type="application/pdf", filename=f"{safe}.pdf")
+    logging.getLogger("ai4ia-lite").warning(f"PDF not found at {path}")
     return JSONResponse(status_code=404, content={"detail":"Not Found"})
