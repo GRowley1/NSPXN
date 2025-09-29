@@ -5,6 +5,49 @@ from fastapi.middleware.cors import CORSMiddleware
 from typing import List, Tuple, Optional, Dict, Any
 import os, re, io, json, logging, base64, smtplib, zipfile, time
 from email.message import EmailMessage
+# --- Fallback extractors (minimal, additive; used only if primary returns None/N/A) ---
+import re as _re_patch
+
+def vin_from_text_plus(text: str):
+    text_u = (text or "").upper()
+    # Labeled VIN patterns with spaces/hyphens allowed
+    label_pat = _re_patch.compile(r'(?i)(?:V\.?\s*I\.?\s*N\.?|VIN|Vehicle\s*Identification\s*Number)\s*[:#\-\s]*((?:[A-HJ-NPR-Z0-9IOQ][\s\-]*){17})')
+    cands = []
+    for m in label_pat.finditer(text_u):
+        raw = m.group(1)
+        v = _re_patch.sub(r'[^A-HJ-NPR-Z0-9]', '', raw).replace('O','0').replace('I','1').replace('Q','0')
+        if len(v) == 17:
+            cands.append(v)
+    # Tight 17-char sequences
+    for m in _re_patch.finditer(r'\b([A-HJ-NPR-Z0-9IOQ]{17})\b', text_u):
+        v = m.group(1).replace('O','0').replace('I','1').replace('Q','0')
+        cands.append(v)
+    # Deduplicate
+    seen=set(); ordered=[]
+    for v in cands:
+        if v not in seen:
+            ordered.append(v); seen.add(v)
+    # Prefer checksum-valid using existing _vin_ok if present
+    try:
+        for v in ordered:
+            if '_vin_ok' in globals() and _vin_ok(v):
+                return v
+    except Exception:
+        pass
+    return ordered[0] if ordered else None
+
+def claim_from_text_plus(text: str):
+    s = text or ""
+    pats = [
+        _re_patch.compile(r'(?im)^\s*(?:Claim(?:\s*(?:#|No\.?|Number|ID))|CLM|ClaimID)\s*[:#\-\s]*([A-Za-z0-9][A-Za-z0-9\-_\/\.]{3,})'),
+        _re_patch.compile(r'(?i)claim\s*(?:#|no\.?|number|id)?\s*[:#\-\s]*([A-Za-z0-9][A-Za-z0-9\-_\/\.]{3,})'),
+    ]
+    for pat in pats:
+        m = pat.search(s)
+        if m:
+            return m.group(1).strip().rstrip('.,;:')
+    return None
+
 
 from fpdf import FPDF
 from docx import Document
@@ -222,30 +265,10 @@ def strip_photo_sections(text: str) -> str:
     text = re.sub(r"(?im)^\s*[-•].*photo.*$", "", text)
     return text.strip()
 
-
-def _save_pdf_dual(file_number: str, pdf_obj) -> None:
-    try:
-        pdf_bytes = pdf_obj.output(dest="S").encode("latin-1")
-    except Exception:
-        # Fallback: some FPDF versions allow output(dest="S").encode("latin-1")
-        pdf_bytes = pdf_obj.output(dest="S").encode("latin-1", errors="ignore")
-    paths = [
-        os.path.join("/tmp", f"{file_number}.pdf"),
-        os.path.join("/mnt/data", f"{file_number}.pdf"),
-        os.path.join(os.getenv("PDF_DIR", "/tmp"), f"{file_number}.pdf"),
-    ]
-    for p in paths:
-        try:
-            with open(p, "wb") as f:
-                f.write(pdf_bytes)
-        except Exception as e:
-            logging.getLogger(__name__).warning(f"PDF save failed for {p}: {e}")
 # ----------------- API -----------------
 @app.get("/")
 async def root():
-    return {"status":"ok",
-        "compliance_score": extract_score(gpt_output)
-    }
+    return {"status":"ok"}
 
 @app.post("/vision-review")
 async def vision_review(
@@ -324,10 +347,10 @@ async def vision_review(
     rules_text = (client_rules or "")
 
     # Extract identifiers from estimate text
-    vin = vin_from_text(est_text) or "N/A"
+    vin = vin_from_text(est_text) or vin_from_text_plus(est_text) or "N/A"
     vehicle = vehicle_from_text(est_text) or "N/A"
     mileage = mileage_from_text(est_text)
-    claim = claim_from_text(est_text) or "N/A"
+    claim = claim_from_text(est_text) or claim_from_text_plus(est_text) or "N/A"
     days_reported = extract_days(est_text)
 
     facts = {
@@ -445,8 +468,7 @@ async def vision_review(
     if mileage: pdf.multi_cell(0,6,f"Odometer (from estimate): {mileage}")
     if days_reported is not None:
         pdf.multi_cell(0,6,f"Days to Repair (reported): {days_reported}")
-    score_txt = extract_score(gpt_output)
-    pdf.multi_cell(0,6,f"Compliance Score: {score_txt}")
+    pdf.multi_cell(0,6,"Compliance Score: N/A")
 
     pdf.ln(4); pdf.set_font_size(12); pdf.cell(0,8,"AI-4-IA Review Summary",ln=True)
     pdf.set_font_size(10); pdf.multi_cell(0,6,gpt_output or "No narrative generated.")
@@ -496,9 +518,7 @@ Summary:
     except Exception as e:
         logging.getLogger("ai4ia-lite").warning(f"Email send error (continuing): {e}")
 
-    
-    _save_pdf_dual(file_number, pdf)
-return {
+    return {
         "request_type": request_type_label,
         "gpt_output": gpt_output,
         "file_number": file_number,
@@ -512,16 +532,7 @@ return {
 
 @app.get("/download-pdf")
 async def download_pdf(file_number: str):
-    # Try common locations and names
-    candidates = [
-        os.path.join("/tmp", f"{file_number}.pdf"),
-        os.path.join("/mnt/data", f"{file_number}.pdf"),
-        os.path.join(os.getenv("PDF_DIR", "/tmp"), f"{file_number}.pdf"),
-    ]
-    for path in candidates:
-        try:
-            if os.path.exists(path):
-                return FileResponse(path=path, media_type="application/pdf", filename=f"{file_number}.pdf")
-        except Exception:
-            continue
-    return JSONResponse(status_code=404, content={"detail": "Not Found", "checked": candidates})
+    path = os.path.join(PDF_DIR, f"{file_number}.pdf")
+    if os.path.exists(path):
+        return FileResponse(path=path, media_type="application/pdf", filename=f"{file_number}.pdf")
+    return JSONResponse(status_code=404, content={"detail":"Not Found"})
