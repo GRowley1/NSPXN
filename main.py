@@ -1,7 +1,7 @@
 
 from fastapi import FastAPI, File, UploadFile, Form
 from fastapi.responses import JSONResponse, FileResponse
-from fastapi.middleware.cors import CORSMIDDLEWARE, CORSMiddleware
+from fastapi.middleware.cors import CORSMiddleware
 from typing import List, Tuple, Optional, Dict, Any
 import os, re, io, json, logging, base64, smtplib, zipfile, time
 from email.message import EmailMessage
@@ -22,13 +22,14 @@ os.makedirs(PDF_DIR, exist_ok=True)
 logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s")
 log = logging.getLogger("ai4ia-lite")
 
+OPENAI_TIMEOUT = float(os.getenv("OPENAI_TIMEOUT", "60"))  # seconds
+
 # OpenAI client with sane defaults
 if "OPENAI_API_KEY" not in os.environ:
     raise RuntimeError("OPENAI_API_KEY not set.")
-client = OpenAI(api_key=os.environ["OPENAI_API_KEY"])
+client = OpenAI(api_key=os.environ["OPENAI_API_KEY"], timeout=OPENAI_TIMEOUT)
 MODEL_PRIMARY = os.getenv("OAI_MODEL", "gpt-4o-mini")
 MODEL_FALLBACK = "gpt-3.5-turbo"
-OPENAI_TIMEOUT = float(os.getenv("OPENAI_TIMEOUT", "60"))  # seconds
 
 # Whitelisted request types
 INTENTS = {
@@ -59,7 +60,7 @@ def _pp(img):
     """Light image preproc for OCR fallback."""
     img = img.convert("L")
     img = ImageEnhance.Contrast(img).enhance(1.9)
-    img = ImageFilter.MedianFilter(3)(img)
+    img = img.filter(ImageFilter.MedianFilter(3))
     img = ImageOps.autocontrast(img)
     return img
 
@@ -183,7 +184,7 @@ def extract_days(text: str) -> Optional[int]:
     except: return None
 
 def openai_chat(messages, max_tokens=900):
-    # retry with backoff; hard client timeout to avoid 502s
+    # retry with backoff; client-level timeout already set
     for attempt in range(3):
         try:
             return client.chat.completions.create(
@@ -191,7 +192,6 @@ def openai_chat(messages, max_tokens=900):
                 messages=messages,
                 max_tokens=max_tokens,
                 temperature=0,
-                timeout=OPENAI_TIMEOUT,
             )
         except Exception as e:
             s = str(e).lower()
@@ -205,7 +205,6 @@ def openai_chat(messages, max_tokens=900):
             messages=messages,
             max_tokens=max_tokens,
             temperature=0,
-            timeout=OPENAI_TIMEOUT,
         )
     except Exception as e:
         log.error(f"OpenAI fallback failed: {e}")
