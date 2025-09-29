@@ -22,7 +22,10 @@ log = logging.getLogger("ai4ia-slim")
 OPENAI_TIMEOUT = float(os.getenv("OPENAI_TIMEOUT", "60"))
 MODEL_PRIMARY = os.getenv("OAI_MODEL", "gpt-4o-mini")
 MODEL_FALLBACK = "gpt-3.5-turbo"
-client = OpenAI(api_key=os.environ.get("OPENAI_API_KEY",""), timeout=OPENAI_TIMEOUT)
+
+if "OPENAI_API_KEY" not in os.environ or not os.environ["OPENAI_API_KEY"]:
+    raise RuntimeError("OPENAI_API_KEY not set")
+client = OpenAI(api_key=os.environ["OPENAI_API_KEY"])
 
 # Request types kept small & strict
 INTENTS = {
@@ -77,11 +80,13 @@ def _norm_vin(s: str) -> Optional[str]:
     s = re.sub(r"[^A-HJ-NPR-Z0-9]", "", s).replace("O","0").replace("I","1").replace("Q","0")
     if len(s) != 17 or any(ch not in VIN_ALLOWED for ch in s): return None
     return s
+
 def _vin_ok(v: str) -> bool:
     try:
         tot = sum(_trans[ch]*_w[i] for i,ch in enumerate(v)); chk = tot % 11
         return v[8] == ("X" if chk==10 else str(chk))
     except: return False
+
 def vin_from_text(text: str) -> Optional[str]:
     cands = [m.group(1) for m in VIN_RELAX.finditer(text or "")] + VIN_TIGHT.findall(text or "")
     uniq=[]; seen=set()
@@ -95,6 +100,7 @@ def vin_from_text(text: str) -> Optional[str]:
 
 MAKE_MAP = {"NISSAN":"Nissan","CHEV":"Chevrolet","CHEVY":"Chevrolet","TOYOTA":"Toyota","FORD":"Ford","HONDA":"Honda","HYUNDAI":"Hyundai","KIA":"Kia","BMW":"BMW","MERCEDES":"Mercedes-Benz","MB":"Mercedes-Benz","VW":"Volkswagen","VOLKS":"Volkswagen","SUBARU":"Subaru","MAZDA":"Mazda","DODGE":"Dodge"}
 STOP = {"GASOLINE","DIESEL","HYBRID","ELECTRIC","BLACK","WHITE","BLUE","RED","SILVER","GRAY","GREY","4D","2D","SED","SDN","SUV","COUPE","HATCH","TRUCK","WAGON","AWD","FWD","RWD","L","GDI","TURBO","PAINT","CLEAR","COAT","COLOR"}
+
 def vehicle_from_text(text: str) -> Optional[str]:
     for ln in (text or "").splitlines():
         ln = re.sub(r"\s{2,}"," ",ln.strip())
@@ -114,15 +120,32 @@ def vehicle_from_text(text: str) -> Optional[str]:
 def mileage_from_text(text: str) -> Optional[str]:
     m = re.search(r"(?:Odometer|Mileage|Miles)\s*[:\-]?\s*([\d,]{2,7})\b", text or "", re.IGNORECASE)
     return m.group(1) if m else None
+
+# ---------- EDIT #1: safer Claim extractor (requires at least one digit) ----------
 def claim_from_text(text: str) -> Optional[str]:
-    for pat in [
-        r"(?:Carrier|Insurance|Insurer)?\s*Claim\s*(?:No\.?|Number|#)?\s*[:\-]?\s*([A-Za-z0-9\-_\\/]{3,40})",
-        r"(?:Assignment|Reference|Ref)\s*(?:No\.?|Number|#)?\s*[:\-]?\s*([A-Za-z0-9\-_\\/]{3,40})",
-    ]:
-        m = re.search(pat, text or "", re.IGNORECASE)
-        if m: return m.group(1).strip().rstrip(".:,;")
-    m2 = re.search(r"Claim[^A-Za-z0-9]{0,20}([A-Za-z0-9\-_\\/]{3,40})", text or "", re.IGNORECASE)
-    return m2.group(1).strip().rstrip(".:,;") if m2 else None
+    """
+    Extract a claim/reference/assignment number. Must contain at least one digit
+    to avoid false hits like the word 'Services'.
+    """
+    if not text:
+        return None
+
+    CLAIM_TOKEN = r"[A-Za-z0-9][A-Za-z0-9\-_\/]*\d[A-Za-z0-9\-_\/]*"  # must include a digit
+
+    pats = [
+        rf"(?:Carrier|Insurance|Insurer)?\s*Claim\s*(?:No\.?|Number|#)?\s*[:\-]?\s*({CLAIM_TOKEN})",
+        rf"(?:Assignment|Reference|Ref)\s*(?:No\.?|Number|#)?\s*[:\-]?\s*({CLAIM_TOKEN})",
+        rf"(?<!Policy)\bClaim\b[^A-Za-z0-9]{{0,20}}({CLAIM_TOKEN})",
+    ]
+
+    for pat in pats:
+        m = re.search(pat, text, re.IGNORECASE)
+        if m:
+            out = m.group(1).strip().rstrip(".:,;")
+            return out
+
+    return None
+
 def days_from_text(text: str) -> Optional[int]:
     m = re.search(r"Days?\s*to\s*Repair\s*[:\-]?\s*([0-9]+)", text or "", re.IGNORECASE)
     try: return int(m.group(1)) if m else None
@@ -151,14 +174,44 @@ def final_percent(narr: str) -> Optional[int]:
 def openai_chat(messages, max_tokens=800):
     for attempt in range(2):
         try:
-            return client.chat.completions.create(model=MODEL_PRIMARY, messages=messages, max_tokens=max_tokens, temperature=0)
+            return client.chat.completions.create(
+                model=MODEL_PRIMARY,
+                messages=messages,
+                max_tokens=max_tokens,
+                temperature=0,
+                timeout=OPENAI_TIMEOUT,   # pass timeout per call
+            )
         except Exception as e:
             if "429" in str(e) or "timeout" in str(e).lower(): time.sleep(1.25*(attempt+1)); continue
             break
     try:
-        return client.chat.completions.create(model=MODEL_FALLBACK, messages=messages, max_tokens=max_tokens, temperature=0)
+        return client.chat.completions.create(
+            model=MODEL_FALLBACK,
+            messages=messages,
+            max_tokens=max_tokens,
+            temperature=0,
+            timeout=OPENAI_TIMEOUT,   # pass timeout per call
+        )
     except Exception as e:
         log.error(f"OAI fail: {e}"); return None
+
+# ---------- EDIT #3: reflect VIN verification from narrative ----------
+def vin_line_from_narrative(narr: str, photos_present: bool) -> str:
+    if not photos_present:
+        return "Photos not provided"
+    if not narr:
+        return "Included in narrative"
+    m = re.search(r"VIN\s*Verification\s*:\s*(MATCH|MISMATCH|NOT\s*VERIFIED|PHOTOS\s*NOT\s*PROVIDED)", narr, re.IGNORECASE)
+    if not m:
+        return "Included in narrative"
+    tag = m.group(1).upper().replace("  ", " ")
+    if tag == "MATCH":
+        return "Verified: MATCH"
+    if tag == "MISMATCH":
+        return "Verified: MISMATCH"
+    if tag == "NOT VERIFIED":
+        return "Not verified"
+    return "Photos not provided"
 
 # ---------- API ----------
 @app.post("/vision-review")
@@ -255,7 +308,28 @@ async def vision_review(
         rsp = openai_chat(messages, max_tokens=650)
 
     elif intent == "comprehensive":
-        system = "Comprehensive review: guidelines vs estimate AND estimate vs photos. If photos_present=false, omit photo sections entirely. Provide clear sections and finish with 'Final Evaluation: NN%'."
+        # ---------- EDIT #2: strong mandatory output for Comprehensive ----------
+        system = (
+            "Comprehensive review: guidelines vs estimate AND estimate vs photos. "
+            "If photos_present=false, omit photo sections entirely. "
+            "MANDATORY OUTPUT SHAPE:\n"
+            "VIN Verification: <MATCH | MISMATCH | NOT VERIFIED | PHOTOS NOT PROVIDED>\n"
+            "1) Client Quick Summary (2–3 bullets)\n"
+            "2) Fatal Errors (bullet list)\n"
+            "3) Client Photo Rules (only if photos_present=true) — each item begins with [Compliant] | [Non-compliant] | [Not found]\n"
+            "4) Estimate/Supplement Release Rules — bracketed tags per item\n"
+            "5) Parts Application Rules — bracketed tags per item\n"
+            "6) Total Loss Rules — bracketed tags per item (or 'Not applicable')\n"
+            "7) Tow Charge Rules — bracketed tags per item\n"
+            "8) Supplement Handling Rules — bracketed tags per item\n"
+            "9) Betterment/Depreciation Rules — bracketed tags per item\n"
+            "10) Documentation Requirements — bracketed tags per item (call out Clean Retail Value & Advisor Report explicitly)\n"
+            "11) Rates and Sales Tax Rules — bracketed tags per item\n"
+            "12) Miscellaneous Rules — bracketed tags per item\n"
+            "13) Estimate ↔ Photos Comparison (only if photos_present=true): damage match, discrepancies, missing views/measurements\n"
+            "14) Summary & Next Steps (2 bullets)\n"
+            "Always end with a single line: Final Evaluation: NN%."
+        )
         user = [
             {"type":"text","text":"CLIENT GUIDELINES:\n"+(client_rules or "")[:8000]},
             {"type":"text","text":"\n\nESTIMATE TEXT:\n"+(est_text or "")[:12000]}
@@ -270,7 +344,16 @@ async def vision_review(
             rsp = None
             gpt_output = "No photos were provided with this request."
         else:
-            system = "Compare photos to the estimate only. Do not restate guidelines. Provide Photo Coverage, Damage vs Estimate, Discrepancies, Summary. End with 'Final Evaluation: NN%'."
+            system = (
+                "Compare photos to the estimate only. Do not restate guidelines. "
+                "MANDATORY OUTPUT SHAPE:\n"
+                "VIN Verification: <MATCH | MISMATCH | NOT VERIFIED | PHOTOS NOT PROVIDED>\n"
+                "Photo Coverage\n"
+                "Visible Damage vs Estimate\n"
+                "Discrepancies\n"
+                "Summary\n"
+                "Final Evaluation: NN%."
+            )
             user = [{"type":"text","text":"ESTIMATE TEXT:\n"+(est_text or "")[:9000]}] + img_payload()
             messages.append({"role":"system","content":system})
             messages.append({"role":"user","content":user})
@@ -311,9 +394,11 @@ async def vision_review(
     # Compliance score = the Final Evaluation percent if present
     comp = final_percent(gpt_output)
 
-    # VIN verification line (minimal truthfulness, no photo OCR)
+    # VIN verification line (mirror from narrative for comprehensive/photos paths)
     if intent == "comprehensive":
-        vin_line = "Photos not provided" if not photos_present else "Included in narrative"
+        vin_line = vin_line_from_narrative(gpt_output, photos_present)
+    elif intent in ("photos_only", "invoices_with_photos"):
+        vin_line = "Included in narrative" if photos_present else "Not requested"
     else:
         vin_line = "Not requested"
 
