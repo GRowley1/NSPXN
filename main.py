@@ -37,13 +37,40 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 # =========================================
-# OpenAI client (gpt-4o)
+# OpenAI client (fast model + retry/fallback)
 # =========================================
 if "OPENAI_API_KEY" not in os.environ:
     raise RuntimeError("❌ OPENAI_API_KEY environment variable is NOT set.")
 
 client = OpenAI(api_key=os.environ["OPENAI_API_KEY"])
-MODEL = "gpt-4o"
+MODEL = os.getenv("OAI_MODEL", "gpt-4o-mini")  # fast default
+
+def _call_openai_once(messages, max_tokens=900, model=MODEL):
+    return client.chat.completions.create(
+        model=model,
+        messages=messages,
+        max_tokens=max_tokens,
+        temperature=0
+    )
+
+def safe_chat_completion(messages, max_tokens=700):
+    """
+    One fast attempt on MODEL; if 429/rate-limit, immediately fall back to gpt-3.5-turbo.
+    No long backoffs to keep total runtime tight.
+    """
+    try:
+        return _call_openai_once(messages, max_tokens=max_tokens, model=MODEL)
+    except Exception as e:
+        msg = str(e)
+        if "429" in msg or "RateLimitError" in msg or "rate limit" in msg.lower():
+            logger.warning("429 RateLimit → falling back to gpt-3.5-turbo")
+            try:
+                return _call_openai_once(messages, max_tokens=max_tokens, model="gpt-3.5-turbo")
+            except Exception as e2:
+                logger.error(f"Fallback model also failed: {e2}")
+                return None
+        logger.error(f"OpenAI call failed: {e}")
+        return None
 
 # =========================================
 # FastAPI app + CORS
@@ -117,7 +144,6 @@ def count_corner_labels(text: str) -> int:
     found = set()
     for m in re.finditer(CORNER_LABEL_PAT, text or ""):
         token = m.group(0).lower().replace(" ", "")
-        # normalize tokens
         if token in ("lf", "leftfront"): found.add("lf")
         elif token in ("rf", "rightfront"): found.add("rf")
         elif token in ("lr", "leftrear"): found.add("lr")
@@ -224,49 +250,6 @@ def extract_vehicle_from_text(text: str) -> Optional[str]:
         return f"{year} {make} {model}, {miles} miles"
     return None
 
-
-# ---- Robust fallbacks for VIN & Claim extraction (minimal, additive) ----
-import re as _re_fx
-
-def extract_vin_from_text_plus(text: str):
-    t = (text or "").upper()
-    # Labels like VIN:, V.I.N., Vehicle Identification Number:
-    label = _re_fx.compile(r'(?i)(?:V\.?\s*I\.?\s*N\.?|VIN|Vehicle\s*Identification\s*Number)\s*[:#\-\s]*((?:[A-HJ-NPR-Z0-9IOQ][\s\-]*){17})')
-    cands = []
-    for m in label.finditer(t):
-        raw = m.group(1)
-        v = _re_fx.sub(r'[^A-HJ-NPR-Z0-9]', '', raw).replace('O','0').replace('I','1').replace('Q','0')
-        if len(v) == 17:
-            cands.append(v)
-    # Tight 17-char sequences
-    for m in _re_fx.finditer(r'\\b([A-HJ-NPR-Z0-9IOQ]{17})\\b', t):
-        v = m.group(1).replace('O','0').replace('I','1').replace('Q','0')
-        cands.append(v)
-    # dedupe
-    seen=set(); ordered=[]
-    for v in cands:
-        if v not in seen:
-            ordered.append(v); seen.add(v)
-    # prefer checksum valid if our validator exists
-    try:
-        for v in ordered:
-            if 'vin_checksum_ok' in globals() and vin_checksum_ok(v):
-                return v
-    except Exception:
-        pass
-    return ordered[0] if ordered else None
-
-def extract_claim_from_text_plus(text: str):
-    s = text or ""
-    pats = [
-        _re_fx.compile(r'(?im)^\\s*(?:Claim(?:\\s*(?:#|No\\.?|Number|ID))|CLM|ClaimID)\\s*[:#\\-\\s]*([A-Za-z0-9][A-Za-z0-9_\\-/\\.]{2,})'),
-        _re_fx.compile(r'(?i)claim\\s*(?:#|no\\.?|number|id)?\\s*[:#\\-\\s]*([A-Za-z0-9][A-Za-z0-9_\\-/\\.]{2,})')
-    ]
-    for pat in pats:
-        m = pat.search(s)
-        if m:
-            return m.group(1).strip().rstrip('.,;:')
-    return None
 # =========================================
 # Photo parsing & requirements
 # =========================================
@@ -387,9 +370,10 @@ PANELS = [
     "bumper", "fender", "door", "hood", "grille", "headlamp", "headlight",
     "taillamp", "tail lamp", "quarter panel", "rocker", "roof", "trunk",
     "decklid", "mirror", "apron", "radiator support", "wheel", "tire",
-    "pillar", "garnish", "molding", "fog lamp", "reinforcement", "cover"
+    "pillar", "garnish", "molding", "fog lamp", "reinforcement", "cover",
+    "finish panel", "combo lamp"
 ]
-OPS = ["replace", "repair", "refinish", "r&i", "r & i", "align", "blend", "calibrate"]
+OPS = ["replace", "repair", "refinish", "r&i", "r & i", "align", "blend", "calibrate", "repl", "rpr", "r&r"]
 
 def extract_estimate_items(text: str) -> List[Dict[str, str]]:
     items: List[Dict[str, str]] = []
@@ -402,6 +386,7 @@ def extract_estimate_items(text: str) -> List[Dict[str, str]]:
             if "left" in l or re.search(r"\blh\b", l): side = "left"
             if "right" in l or re.search(r"\brh\b", l): side = "right"
             op = next((op for op in OPS if op in l), "unspecified")
+            op = op.replace("r&r", "replace").replace("r & i", "r&i")
             panel = next((p for p in PANELS if p in l), "component")
             items.append({"op": op, "part": panel, "side": side, "raw": line.strip()})
     uniq, seen = [], set()
@@ -412,7 +397,7 @@ def extract_estimate_items(text: str) -> List[Dict[str, str]]:
     return uniq
 
 # =========================================
-# GPT compare: estimate ↔ photos (JSON)
+# GPT compare: estimate ↔ photos (JSON) — now uses safe_chat_completion
 # =========================================
 def compare_estimate_with_photos(items: List[Dict[str, str]],
                                  images_for_vision: List[Dict[str, Any]]) -> Dict[str, Any]:
@@ -459,15 +444,15 @@ def compare_estimate_with_photos(items: List[Dict[str, str]],
     user_parts.extend(images_for_vision)
 
     try:
-        rsp = client.chat.completions.create(
-            model=MODEL,
+        rsp = safe_chat_completion(
             messages=[
                 {"role": "system", "content": system},
                 {"role": "user",   "content": user_parts}
             ],
-            max_tokens=1200,
-            temperature=0
+            max_tokens=1200
         )
+        if not rsp:
+            raise RuntimeError("OpenAI unavailable")
         txt = (rsp.choices[0].message.content or "").strip()
         txt = txt.removeprefix("```json").removesuffix("```").strip()
         data = json.loads(txt)
@@ -526,9 +511,9 @@ async def vision_review(
             b64 = base64.b64encode(raw).decode("utf-8")
             images_for_vision.append({"type": "image_url", "image_url": {"url": f"data:image/jpeg;base64,{b64}"}})
         elif name.endswith(".pdf"):
-            # existing: extract estimate text
+            # extract estimate text
             texts.append(extract_text_from_pdf(io.BytesIO(raw)))
-            # NEW: also harvest photo-like pages from the PDF so photo checks see them
+            # harvest photo-like pages from the PDF
             harvested = harvest_photos_from_pdf(raw)
             for hname, hbytes in harvested:
                 image_blobs.append((hname, hbytes))
@@ -546,31 +531,50 @@ async def vision_review(
     # ----- photo checks + VIN/odo
     missing_photos = check_required_photos(image_blobs, combined_text)
 
-    vin_est = extract_vin_from_text(combined_text) or extract_vin_from_text_plus(combined_text)
+    vin_est = extract_vin_from_text(combined_text)
     vin_photos = extract_vin_from_photos(image_blobs)
     vin_final = vin_est or vin_photos or "N/A"
 
     vehicle_desc = extract_vehicle_from_text(combined_text) or "N/A"
-    claim_number = extract_claim_from_text(combined_text) or extract_claim_from_text_plus(combined_text) or "N/A"
+    claim_number = extract_claim_from_text(combined_text) or "N/A"
     odo_photos = extract_odometer_from_photos(image_blobs)
 
     # ----- parse estimate items & compare to photos
     est_items = extract_estimate_items(combined_text)
     consistency = compare_estimate_with_photos(est_items, images_for_vision)
 
+    # ----- VIN verification note (explicit)
+    presence_flags = {"vin": "license plate" not in missing_photos}  # dummy to quiet static checkers
+    if "vin" in missing_photos:
+        vin_verify_note = "VIN PHOTO NOT FOUND"
+    else:
+        if vin_est:
+            if vin_photos and vin_photos == vin_est:
+                vin_verify_note = "MATCH"
+            elif vin_photos and vin_photos != vin_est:
+                vin_verify_note = "MISMATCH"
+            else:
+                vin_verify_note = "VIN PHOTO PRESENT—TEXT UNREADABLE"
+        else:
+            vin_verify_note = "VIN PHOTO PRESENT (no VIN in estimate text)"
+
     # ----- vision narrative (compliance summary)
     photo_hint = f"\n\nMISSING PHOTOS: {', '.join(missing_photos) if missing_photos else 'None'}"
     system_prompt = f"""
-You are an AI auto damage auditor. Evaluate STRICTLY by these rules:
+You are an AI auto damage auditor. Write a concise, professional report titled:
+"Comprehensive Audit of Estimate and Photos Comparison".
 
-- Start at 100% and deduct only for: labor (-50% if ALL sections missing), tax (-25% if rules require but not present), photos (-25% per missing type), parts (-25% if a 2024–2025 vehicle uses LKQ/AM in violation).
-- Required photos: four corners, odometer, VIN, license plate.
-- "Four corners" is satisfied if at least two exterior corner views are present (already computed for you) OR multiple Image Report pages/corner labels are present.
-- Do NOT assume total loss unless explicitly stated.
-- If any labor rate is present (body OR paint OR mechanical OR structural), do NOT apply the -50% deduction.
+Style requirements:
+- Use short sections with headings that mirror: Client Quick Summary, Fatal Errors, Photo Rules, Parts/Tax/Labor, Estimate↔Photos Comparison, Summary.
+- Be definitive but avoid guessing. Do not state total loss unless the estimate says so.
+- If registration photo or windshield VIN is missing, call it out.
+- If tax rate and labor rates appear, mark compliant (do not over-explain).
+- Keep it tight and readable (bullets + short sentences). No fluff.
 
-Rules to follow from client:
+Input rules from client (verbatim may be partial):
 {client_rules}
+
+Now analyze the provided estimate text and the attached photos.
 """.strip()
 
     user_parts: List[Dict[str, Any]] = []
@@ -580,15 +584,17 @@ Rules to follow from client:
         user_parts.extend(images_for_vision)
 
     try:
-        response = client.chat.completions.create(
-            model=MODEL,
+        response = safe_chat_completion(
             messages=[
                 {"role": "system", "content": system_prompt},
                 {"role": "user",   "content": user_parts}
             ],
             max_tokens=900
         )
-        gpt_output = response.choices[0].message.content or "⚠️ GPT returned no output."
+        if response:
+            gpt_output = response.choices[0].message.content or "⚠️ GPT returned no output."
+        else:
+            gpt_output = "Automated narrative unavailable (OpenAI error)."
     except Exception as e:
         err = f"{type(e).__name__}: {e}"
         logger.error(f"OpenAI error: {err}")
@@ -637,7 +643,7 @@ Rules to follow from client:
     pdf.multi_cell(0, 6, f"Appraiser ID #: {appraiser_id}")
     pdf.ln(4)
     pdf.multi_cell(0, 6, f"Claim #: {claim_number}")
-    pdf.multi_cell(0, 6, f"VIN: {vin_final}")
+    pdf.multi_cell(0, 6, f"VIN: {vin_final if isinstance(vin_final, str) else vin_est or 'N/A'}")
     pdf.multi_cell(0, 6, f"Vehicle: {vehicle_desc}")
     if odo_photos:
         pdf.multi_cell(0, 6, f"Odometer (from photos): {odo_photos}")
@@ -676,10 +682,6 @@ Rules to follow from client:
         for d in consistency["extra_damage_in_photos"][:20]:
             pdf.multi_cell(0, 6, f"- {d}")
 
-    pdf.ln(2)
-    pdf_kv(pdf, "Consistency Overall", consistency.get("overall", ""))
-
-    # Save PDF to /tmp with name {file_number}.pdf
     pdf_path = os.path.join(PDF_DIR, f"{file_number}.pdf")
     try:
         pdf_bytes = pdf.output(dest="S").encode("latin-1")
@@ -702,7 +704,7 @@ IA Company: {ia_company}
 Appraiser ID #: {appraiser_id}
 
 Claim #: {claim_number}
-VIN: {vin_final}
+VIN: {vin_final if isinstance(vin_final, str) else vin_est or 'N/A'}
 Vehicle: {vehicle_desc}
 
 Compliance Score: {authoritative_score}%
@@ -722,7 +724,7 @@ AI Review Summary:
         "file_number": file_number,
         "claim_number": claim_number,
         "vehicle": vehicle_desc,
-        "vin": vin_final,
+        "vin": vin_final if isinstance(vin_final, str) else (vin_est or "N/A"),
         "score": f"{authoritative_score}%",
         "consistency_review": consistency
     }
@@ -751,6 +753,7 @@ async def get_client_rules(client_name: str):
     else:
         logger.error(f"Rules not found for client: {client_name}")
         return JSONResponse(status_code=404, content={"error": "Rules not found for this client."})
+
 
 
 
