@@ -16,6 +16,26 @@ from PIL import Image, ImageEnhance, ImageOps, ImageFilter, ImageStat, ImageFile
 from openai import OpenAI
 
 
+
+# --- Compatibility shims (legacy call sites) ---
+def extract_vin_from_text(text: str):
+    try:
+        return vin_from_text(text)
+    except Exception:
+        return None
+
+def extract_vehicle_from_text(text: str):
+    try:
+        return vehicle_from_text(text)
+    except Exception:
+        return None
+
+def extract_mileage_from_text(text: str):
+    try:
+        return mileage_from_text(text)
+    except Exception:
+        return None
+
 # === NSPXN speed/robustness helpers (no behavior change) ===
 from contextvars import ContextVar
 
