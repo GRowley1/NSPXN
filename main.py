@@ -218,7 +218,7 @@ GENERIC_PAT = re.compile(r"(Average Price|Estimated Trade-?In Value|Clean Retail
 def detect_valuations(pdfs: List[Tuple[str, bytes]], est_pdf_name: Optional[str]) -> Tuple[bool, list, list]:
     sources, names = [], []
     for nm, blob in pdfs:
-        if est_pdf_name and nm == est_pdf_name: 
+        if est_pdf_name and nm == est_pdf_name:
             continue
         try:
             t = (first_page_ocr(blob) + "\n" + fast_pdf_text(blob, limit_pages=2)).upper()
@@ -233,9 +233,43 @@ def detect_valuations(pdfs: List[Tuple[str, bytes]], est_pdf_name: Optional[str]
         if hit:
             sources.append(hit)
             names.append(nm)
-    # Deduplicate sources
     sources = list(dict.fromkeys(sources))
     return (len(sources) > 0), sources, names
+
+# --- Client rules detection (from uploaded files) ---
+RULE_NAME_HINT = re.compile(r"(rule|guideline|policy|client|procedur|fatal\s+error|photo\s+rules|quick\s+summary)", re.I)
+RULE_TEXT_HINT = re.compile(
+    r"(quick\s+summary|fatal\s+errors?|photo\s+rules|parts\s+application|supplement|documentation\s+requirements|rates?\s*&\s*tax|tow\s+charge|total\s+loss)",
+    re.I
+)
+
+def detect_client_rules(pdfs: List[Tuple[str, bytes]], texts: List[str], est_pdf_name: Optional[str]) -> Tuple[bool, str, list]:
+    collected = []
+    sources = []
+    # TXT / DOCX texts already extracted in `texts`
+    for t in texts:
+        if RULE_TEXT_HINT.search(t):
+            collected.append(t)
+            sources.append("text-upload")
+    # PDFs that look like rules (exclude the estimate)
+    for nm, blob in pdfs:
+        if est_pdf_name and nm == est_pdf_name:
+            continue
+        is_name_hit = RULE_NAME_HINT.search(nm or "")
+        try:
+            t = (first_page_ocr(blob) + "\n" + fast_pdf_text(blob, limit_pages=4))
+        except:
+            t = ""
+        is_text_hit = RULE_TEXT_HINT.search(t or "")
+        if is_name_hit or is_text_hit:
+            if (t and len(t) > 400) or is_name_hit:
+                collected.append(t)
+                sources.append(nm)
+    if collected:
+        # Keep it to a sane size for the prompt
+        joined = "\n\n".join(collected)
+        return True, joined[:18000], sources[:6]
+    return False, "", []
 
 # ----------- API ----------
 @app.post("/vision-review")
@@ -317,6 +351,17 @@ async def vision_review(
     est_name = est_pdf[0] if est_pdf else None
     valuation_present, valuation_sources, valuation_doc_names = detect_valuations(pdfs, est_name)
 
+    # Detect client rules from uploads if textarea is empty/short
+    rules_text = (client_rules or "").strip()
+    rules_present = len(rules_text) >= 50
+    rules_sources = []
+    if not rules_present:
+        found, det_text, sources = detect_client_rules(pdfs, texts, est_name)
+        if found:
+            rules_text = det_text
+            rules_present = True
+            rules_sources = sources
+
     # GPT messages
     facts = {
         "photos_present": photos_present,
@@ -327,18 +372,19 @@ async def vision_review(
         "days_to_repair_estimate": days if days is not None else "",
         "valuation_present": valuation_present,
         "valuation_sources": valuation_sources,
-        "valuation_docs": valuation_doc_names,
+        "rules_present": rules_present,
+        "rules_sources": rules_sources,
         "intent": intent
     }
     sys_common = (
         "You are an auto-claims appraisal assistant. Use ONLY the provided materials (estimate text, uploaded photos, client rules). "
         "Do NOT invent details. If something is not present, write 'Not found in provided documents'. "
         "Total-loss-only items (salvage bids, valuation sheets, owner-retain) appear ONLY if the estimate explicitly declares a total loss; otherwise: Not applicable (repairable). "
-        "For any 'Clean Retail Value' requirement: treat **ANY uploaded valuation** (KBB, NADA/J.D. Power, Black Book, Edmunds, or generic valuation sheet that shows Average Price/Trade-In Value) as compliant; name the source(s) you detect. "
+        "For any 'Clean Retail Value' requirement: treat ANY uploaded valuation (KBB, NADA/J.D. Power, Black Book, Edmunds, generic valuation sheet) as compliant; name the source(s) you detect. "
         "VIN policy: only consider VINs that are 17 contiguous characters using A–H, J–N, P, R–Z and digits 0–9 (no I/O/Q). Normalize by removing spaces/hyphens; ignore anything not exactly 17 after normalization. "
         "Always end with a single line: Final Evaluation: NN%."
     )
-    header_hint = {k:v for k,v in facts.items() if k in ["vin_estimate","vehicle","claim","mileage_estimate","days_to_repair_estimate","valuation_present","valuation_sources"]}
+    header_hint = {k:v for k,v in facts.items() if k in ["vin_estimate","vehicle","claim","mileage_estimate","days_to_repair_estimate","valuation_present","valuation_sources","rules_present","rules_sources"]}
     messages = [{"role":"system","content":sys_common + " Parsed header context: " + json.dumps(header_hint)}]
 
     def img_payload(max_imgs=12):
@@ -351,13 +397,14 @@ async def vision_review(
     if intent == "guidelines_only":
         system = (
             "Compare client guidelines to the ESTIMATE only. "
-            "Do NOT mention photos. "
+            "Do NOT restate guidelines verbatim. Produce compliance vs deviation with short evidence quotes from the estimate text. "
+            "If rules_present=false, explicitly say: 'No client rules provided' and do not fabricate rules. "
             "Count ANY uploaded valuation as satisfying 'Clean Retail Value' and name the source(s) if present. "
             "Include an 'Estimate Snapshot' with totals, labor/paint materials hours & rates, tax rate, and days to repair—only if present in the estimate text. "
-            "Mark missing items as 'Not found in provided documents'."
+            "Mark truly missing items as 'Not found in provided documents'."
         )
         user = [
-            {"type":"text","text":"CLIENT GUIDELINES:\n"+(client_rules or "")[:9000]},
+            {"type":"text","text":"CLIENT GUIDELINES:\n"+(rules_text if rules_present else "")[:9000]},
             {"type":"text","text":"\n\nESTIMATE TEXT:\n"+(est_text or "")[:12000]}
         ]
         messages.append({"role":"system","content":system})
@@ -368,9 +415,10 @@ async def vision_review(
         system = (
             "Comprehensive audit. Compare client guidelines ↔ estimate AND estimate ↔ photos. "
             "Never restate guidelines; list where the estimate COMPLIES vs DEVIATES, each with a 3–12 word evidence quote from the estimate text only. "
+            "If rules_present=false, say 'No client rules provided' and skip compliance scoring vs rules (still do estimate↔photos). "
             "If photos_present=false, omit all photo sections AND do not refer to photos anywhere. "
             "When photos are provided, identify primary damage location(s) using automotive convention (Left/Right is driver-perspective); call out specific panels (e.g., left front door, left quarter, rear bumper). "
-            "For 'Clean Retail Value', count ANY uploaded valuation (KBB, NADA/J.D. Power, Black Book, Edmunds, or generic valuation sheet) as compliant; name the source(s). "
+            "For 'Clean Retail Value', count ANY uploaded valuation as compliant; name the source(s). "
             "VIN Verification: output one of <MATCH | MISMATCH | NOT VERIFIED | PHOTOS NOT PROVIDED>. "
             "- MATCH only if an explicit 17-char estimate VIN equals a clear 17-char VIN from a VIN photo (after normalization). "
             "- MISMATCH only if both are explicit 17-char VINs and they differ. "
@@ -379,14 +427,14 @@ async def vision_review(
             "Sections:\n"
             "- Estimate Snapshot (estimate text only): totals, labor/paint materials hours & rates, tax rate, days to repair (only if present)\n"
             "- VIN Verification: <...>\n"
-            "- Compliance vs Guidelines: [Compliant]/[Non-compliant]/[Not found] + short evidence quote\n"
+            "- Compliance vs Guidelines (only if rules_present=true): [Compliant]/[Non-compliant]/[Not found] + short evidence quote\n"
             "- Estimate ↔ Photos: damage match (note LEFT/RIGHT & panels), discrepancies, missing photo angles/measurements\n"
             "- Missing Documents & Risks\n"
             "- Next Steps (1–3 bullets)\n"
             "Always end with: Final Evaluation: NN%."
         )
         user = [
-            {"type":"text","text":"CLIENT GUIDELINES:\n"+(client_rules or "")[:8000]},
+            {"type":"text","text":"CLIENT GUIDELINES:\n"+(rules_text if rules_present else "")[:8000]},
             {"type":"text","text":"\n\nESTIMATE TEXT:\n"+(est_text or "")[:12000]}
         ]
         if photos_present: user += img_payload()
@@ -436,12 +484,14 @@ async def vision_review(
     elif intent == "docs_checklist":
         system = (
             "Documentation checklist only based on estimate text (and photos if provided). "
+            "If rules_present=false, say 'No client rules provided' and check only general documentation from the estimate/photos. "
             "Mark Present / Missing / Not found. End with: Final Evaluation: NN%."
         )
         user = [
-            {"type":"text","text":"CLIENT GUIDELINES:\n"+(client_rules or "")[:6000]},
+            {"type":"text","text":"CLIENT GUIDELINES:\n"+(rules_text if rules_present else "")[:6000]},
             {"type":"text","text":"\n\nESTIMATE TEXT:\n"+(est_text or "")[:8000]}
         ]
+        if photos_present: user += img_payload(6)
         messages.append({"role":"system","content":system})
         messages.append({"role":"user","content":user})
         rsp = openai_chat(messages, max_tokens=600)
@@ -537,6 +587,8 @@ Summary:
         "compliance_score": comp if comp is not None else "N/A",
         "valuation_present": valuation_present,
         "valuation_sources": valuation_sources,
+        "rules_present": rules_present,
+        "rules_sources": rules_sources,
     }
 
 @app.get("/download-pdf")
