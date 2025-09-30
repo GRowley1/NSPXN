@@ -1,8 +1,8 @@
 
 def scan_estimate_for_vin(pdf_bytes: bytes) -> Optional[str]:
-    Lightweight but robust VIN finder for the estimate PDF only.
+    """Lightweight but robust VIN finder for the estimate PDF only.
     Strategy: read up to 12 text pages; if none found, OCR up to 8 pages @240 DPI.
-    Prefer check-digit-valid VIN; else return the first normalized 17-char VIN seen.
+    Prefer check-digit-valid VIN; else return the first normalized 17-char VIN seen."""
     
     text_12 = ""
     try:
@@ -1408,7 +1408,6 @@ async def get_client_rules(client_name: str):
     else:
         logger.error(f"Rules not found for client: {client_name}")
         return JSONResponse(status_code=404, content={"error": "Rules not found for this client."})
-
 
 
 
