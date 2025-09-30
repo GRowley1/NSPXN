@@ -1,4 +1,41 @@
 
+def scan_estimate_for_vin(pdf_bytes: bytes) -> Optional[str]:
+    Lightweight but robust VIN finder for the estimate PDF only.
+    Strategy: read up to 12 text pages; if none found, OCR up to 8 pages @240 DPI.
+    Prefer check-digit-valid VIN; else return the first normalized 17-char VIN seen.
+    
+    text_12 = ""
+    try:
+        text_12 = fast_pdf_text(pdf_bytes, limit_pages=12)
+    except Exception:
+        text_12 = ""
+    # First pass: strict VIN from text
+    v = vin_from_text(text_12)
+    if not v:
+        # Try OCR (more pages, but capped)
+        try:
+            pages = convert_from_bytes(pdf_bytes, dpi=240)[:8]
+        except Exception:
+            pages = []
+        ocr_all = []
+        for im in pages:
+            try:
+                im = _pp(im)
+                ocr_all.append(pytesseract.image_to_string(im, lang="eng", config="--psm 6"))
+            except Exception:
+                pass
+        ocr_text = "\n".join(ocr_all)
+        v = vin_from_text(text_12 + "\n" + ocr_text)
+        if not v:
+            # final relaxed: accept first 17-char VIN-like even if check-digit fails
+            cands = re.findall(r"\b([A-HJ-NPR-Z0-9\-\s]{17,40})\b", text_12 + "\n" + ocr_text, flags=re.I)
+            for c in cands:
+                cc = re.sub(r"[^A-HJ-NPR-Z0-9]", "", c.upper()).replace("O","0").replace("I","1").replace("Q","0")
+                if len(cc) == 17 and re.fullmatch(r"[A-HJ-NPR-Z0-9]{17}", cc):
+                    return cc
+            return None
+    return v
+
 
 def ocr_pages_for_vin(pdf_bytes: bytes, max_pages: int = 4, dpi: int = 250) -> str:
     """Lightweight multi-page OCR used only if VIN not found in text.
@@ -1158,7 +1195,7 @@ async def vision_review(
             else:
                 vin_verify_note = "VIN PHOTO PRESENT—TEXT UNREADABLE"
         else:
-            vin_verify_note = "VIN PHOTO PRESENT (no VIN on estimate)"
+            vin_verify_note = "Photos not provided"
 
     # Labor/Tax/Mileage
     basis_text = (full_est_text_pdftotext or "") + "\n" + first_page_scope
