@@ -1,3 +1,14 @@
+
+# --- Compatibility shim for legacy callsite ---
+def extract_vehicle_line_from_first_page(text: str):
+    """Best-effort vehicle line from the first-page text; returns None if not found.
+    Prefer minimal logic; delegate to vehicle_from_text.
+    """
+    try:
+        return vehicle_from_text(text)
+    except Exception:
+        return None
+
 from fastapi import FastAPI, File, UploadFile, Form
 from fastapi.responses import JSONResponse, FileResponse
 from fastapi.middleware.cors import CORSMiddleware
