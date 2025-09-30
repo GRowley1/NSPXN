@@ -18,7 +18,7 @@ from openai import OpenAI
 # ----------- Config ----------
 PDF_DIR = os.getenv("PDF_DIR", "/tmp"); os.makedirs(PDF_DIR, exist_ok=True)
 logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s")
-log = logging.getLogger("ai4ia-slim")
+log = logging.getLogger("ai4ia")
 
 OPENAI_TIMEOUT = float(os.getenv("OPENAI_TIMEOUT", "60"))
 MODEL_PRIMARY = os.getenv("OAI_MODEL", "gpt-4o-mini")
@@ -43,7 +43,7 @@ app.add_middleware(
     allow_origins=["*"], allow_credentials=True, allow_methods=["*"], allow_headers=["*"],
 )
 
-# ----------- Tiny helpers ----------
+# ----------- Tiny helpers (lean, fast) ----------
 def _pp(img):
     img = img.convert("L")
     img = ImageEnhance.Contrast(img).enhance(1.8)
@@ -56,16 +56,16 @@ def fast_pdf_text(pdf_bytes: bytes, limit_pages: int = 8) -> str:
         rdr = PyPDF2.PdfReader(io.BytesIO(pdf_bytes))
         for i, pg in enumerate(rdr.pages[:limit_pages], 1):
             t = pg.extract_text() or ""
-            if t.strip(): out.append(f"[Page {i}]\\n{t}")
+            if t.strip(): out.append(f"[Page {i}]\n{t}")
     except Exception as e:
         log.warning(f"PDF text read failed: {e}")
-    return "\\n\\n".join(out)
+    return "\n\n".join(out)
 
 def quick_pdf_ocr(pdf_bytes: bytes, max_pages: int = 2, dpi: int = 200) -> str:
     try:
         imgs = convert_from_bytes(pdf_bytes, dpi=dpi)[:max_pages]
-        return "\\n\\n".join(
-            f"[OCR {i+1}]\\n{pytesseract.image_to_string(_pp(im), lang='eng', config='--psm 6')}"
+        return "\n\n".join(
+            f"[OCR {i+1}]\n{pytesseract.image_to_string(_pp(im), lang='eng', config='--psm 6')}"
             for i, im in enumerate(imgs)
         )
     except Exception as e:
@@ -74,8 +74,8 @@ def quick_pdf_ocr(pdf_bytes: bytes, max_pages: int = 2, dpi: int = 200) -> str:
 
 # VIN / vehicle extraction
 VIN_ALLOWED = set("0123456789ABCDEFGHJKLMNPRSTUVWXYZ")
-VIN_TIGHT = re.compile(r"\\b([A-HJ-NPR-Z0-9]{17})\\b")
-VIN_RELAX = re.compile(r"(?:V\\.?I\\.?N\\.?|Vehicle\\s+Identification\\s+Number|VIN)\\b[^A-Z0-9]{0,40}((?:[A-HJ-NPR-Z0-9][\\s\\-]*){17})", re.IGNORECASE)
+VIN_TIGHT = re.compile(r"\b([A-HJ-NPR-Z0-9]{17})\b")
+VIN_RELAX = re.compile(r"(?:V\.?I\.?N\.?|Vehicle\s+Identification\s+Number|VIN)\b[^A-Z0-9]{0,40}((?:[A-HJ-NPR-Z0-9][\s\-]*){17})", re.IGNORECASE)
 _trans = {**{str(i): i for i in range(10)}, **dict(A=1,B=2,C=3,D=4,E=5,F=6,G=7,H=8,J=1,K=2,L=3,M=4,N=5,P=7,R=9,S=2,T=3,U=4,V=5,W=6,X=7,Y=8,Z=9)}
 _w = [8,7,6,5,4,3,2,10,0,9,8,7,6,5,4,3,2]
 
@@ -106,12 +106,12 @@ STOP = {"GASOLINE","DIESEL","HYBRID","ELECTRIC","BLACK","WHITE","BLUE","RED","SI
 
 def vehicle_from_text(text: str) -> Optional[str]:
     for ln in (text or "").splitlines():
-        ln = re.sub(r"\\s{2,}"," ",ln.strip())
-        if re.match(r"^\\s*(19|20)\\d{2}\\b", ln) and not re.search(r"\\b(AM|PM)\\b", ln):
+        ln = re.sub(r"\s{2,}"," ",ln.strip())
+        if re.match(r"^\s*(19|20)\d{2}\b", ln) and not re.search(r"\b(AM|PM)\b", ln):
             parts = ln.split(); year=parts[0]; tail=parts[1:]
             keep=[]
             for t in tail:
-                raw = re.sub(r"[^\\w\\-]","",t).upper()
+                raw = re.sub(r"[^\w\-]","",t).upper()
                 if raw in STOP or raw in ("A/M","OEM"): break
                 keep.append(t)
                 if len(keep)>=4: break
@@ -121,17 +121,17 @@ def vehicle_from_text(text: str) -> Optional[str]:
     return None
 
 def mileage_from_text(text: str) -> Optional[str]:
-    m = re.search(r"(?:Odometer|Mileage|Miles)\\s*[:\\-]?\\s*([\\d,]{2,7})\\b", text or "", re.IGNORECASE)
+    m = re.search(r"(?:Odometer|Mileage|Miles)\s*[:\-]?\s*([\d,]{2,7})\b", text or "", re.IGNORECASE)
     return m.group(1) if m else None
 
 # Claim extractor that REQUIRES at least one digit (avoids “Services”)
 def claim_from_text(text: str) -> Optional[str]:
     if not text: return None
-    CLAIM_TOKEN = r"[A-Za-z0-9][A-Za-z0-9\\-_\\/]*\\d[A-Za-z0-9\\-_\\/]*"
+    CLAIM_TOKEN = r"[A-Za-z0-9][A-Za-z0-9\-_\/]*\d[A-Za-z0-9\-_\/]*"
     pats = [
-        rf"(?:Carrier|Insurance|Insurer)?\\s*Claim\\s*(?:No\\.?|Number|#)?\\s*[:\\-]?\\s*({CLAIM_TOKEN})",
-        rf"(?:Assignment|Reference|Ref)\\s*(?:No\\.?|Number|#)?\\s*[:\\-]?\\s*({CLAIM_TOKEN})",
-        rf"(?<!Policy)\\bClaim\\b[^A-Za-z0-9]{{0,20}}({CLAIM_TOKEN})",
+        rf"(?:Carrier|Insurance|Insurer)?\s*Claim\s*(?:No\.?|Number|#)?\s*[:\-]?\s*({CLAIM_TOKEN})",
+        rf"(?:Assignment|Reference|Ref)\s*(?:No\.?|Number|#)?\s*[:\-]?\s*({CLAIM_TOKEN})",
+        rf"(?<!Policy)\bClaim\b[^A-Za-z0-9]{{0,20}}({CLAIM_TOKEN})",
     ]
     for pat in pats:
         m = re.search(pat, text, re.IGNORECASE)
@@ -140,23 +140,23 @@ def claim_from_text(text: str) -> Optional[str]:
     return None
 
 def days_from_text(text: str) -> Optional[int]:
-    m = re.search(r"Days?\\s*to\\s*Repair\\s*[:\\-]?\\s*([0-9]+)", text or "", re.IGNORECASE)
+    m = re.search(r"Days?\s*to\s*Repair\s*[:\-]?\s*([0-9]+)", text or "", re.IGNORECASE)
     try: return int(m.group(1)) if m else None
     except: return None
 
 def sanitize_latin1(s: str) -> str:
     if not s: return ""
-    repl = {"\\u2018":"'","\\u2019":"'","\\u201C":'"',"\\u201D":'"',"\\u2013":"-","\\u2014":"-","\\u2022":"-","\\u2026":"...","\\u2192":"->","\\u2194":"<->","\\u00A0":" "}
+    repl = {"\u2018":"'","\u2019":"'","\u201C":'"',"\u201D":'"',"\u2013":"-","\u2014":"-","\u2022":"-","\u2026":"...","\u2192":"->","\u2194":"<->","\u00A0":" "}
     for k,v in repl.items(): s = s.replace(k,v)
     return s.encode("latin-1","ignore").decode("latin-1","ignore")
 
 def safe_filename(s: str) -> str:
     s = (s or "").strip()
-    s = re.sub(r"[^\\w.\\-]+","-",s)
+    s = re.sub(r"[^\w.\-]+","-",s)
     return s.strip("-_.") or f"report-{int(time.time())}"
 
 def final_percent(narr: str) -> Optional[int]:
-    m = re.search(r"(final\\s*(evaluation|score|compliance)\\s*[:\\-]?\\s*)(\\d{1,3})\\s*%", narr or "", re.IGNORECASE)
+    m = re.search(r"(final\s*(evaluation|score|compliance)\s*[:\-]?\s*)(\d{1,3})\s*%", narr or "", re.IGNORECASE)
     if m:
         try:
             v = int(m.group(3)); 
@@ -169,7 +169,7 @@ def vin_line_from_narrative(narr: str, photos_present: bool) -> str:
         return "Photos not provided"
     if not narr:
         return "Included in narrative"
-    m = re.search(r"VIN\\s*Verification\\s*:\\s*(MATCH|MISMATCH|NOT\\s*VERIFIED|PHOTOS\\s*NOT\\s*PROVIDED)", narr, re.IGNORECASE)
+    m = re.search(r"VIN\s*Verification\s*:\s*(MATCH|MISMATCH|NOT\s*VERIFIED|PHOTOS\s*NOT\s*PROVIDED)", narr, re.IGNORECASE)
     if not m:
         return "Included in narrative"
     tag = m.group(1).upper().replace("  ", " ")
@@ -177,6 +177,15 @@ def vin_line_from_narrative(narr: str, photos_present: bool) -> str:
     if tag == "MISMATCH": return "Verified: MISMATCH"
     if tag == "NOT VERIFIED": return "Not verified"
     return "Photos not provided"
+
+def strip_photo_sections(narr: str) -> str:
+    # Remove photo-specific sections if no photos present
+    s = narr
+    s = re.sub(r'(?is)\n\s*3\)\s*Client Photo Rules.*?(?=\n\s*\d+\)\s|\Z)', '\n', s)
+    s = re.sub(r'(?is)\n\s*13\)\s*Estimate[^\n]*Comparison.*?(?=\n\s*\d+\)\s|\Z)', '\n', s)
+    s = re.sub(r'(?im)^.*photo.*$', '', s)  # safety
+    s = re.sub(r'\n{3,}', '\n\n', s)
+    return s.strip()
 
 def openai_chat(messages, max_tokens=800):
     for attempt in range(2):
@@ -226,7 +235,7 @@ async def vision_review(
             images.append((name, raw))
         elif name.endswith(".docx"):
             try:
-                txt = "\\n".join(p.text for p in Document(io.BytesIO(raw)).paragraphs if p.text.strip())
+                txt = "\n".join(p.text for p in Document(io.BytesIO(raw)).paragraphs if p.text.strip())
                 texts.append(txt)
             except: pass
         elif name.endswith(".txt"):
@@ -259,7 +268,7 @@ async def vision_review(
         if len(est_text.strip()) < 40:
             est_text = quick_pdf_ocr(est_pdf[1], max_pages=2, dpi=200)
     if texts and not est_text:
-        est_text = "\\n\\n".join(texts)[:12000]
+        est_text = "\n\n".join(texts)[:12000]
 
     # Always extract these from the estimate
     vin = vin_from_text(est_text) or "N/A"
@@ -269,7 +278,12 @@ async def vision_review(
     days = days_from_text(est_text)
 
     # Build GPT messages strictly by the selected request
-    sys_common = "You are an auto-claims appraisal assistant. Only analyze what the selected Request Type allows. Be concise, bullet-first, no fluff. Always end with a single line: 'Final Evaluation: NN%'."
+    sys_common = (
+        "You are an auto-claims appraisal assistant. Use ONLY the content provided in this request "
+        "(estimate text, uploaded photos, client rules). DO NOT invent details or infer from general knowledge. "
+        "If something is not present, write 'Not found in provided documents'. "
+        "Be concise, bullet-first, and finish with a single line: 'Final Evaluation: NN%'."
+    )
     facts = {"photos_present": photos_present, "vin_estimate": vin, "vehicle": vehicle, "claim": claim, "mileage_present": bool(mileage)}
     messages = [{"role":"system","content":sys_common + " " + json.dumps(facts)}]
 
@@ -283,8 +297,8 @@ async def vision_review(
     if intent == "guidelines_only":
         system = "Analyze client guidelines strictly against the ESTIMATE only. If photos_present=false, do NOT mention photos."
         user = [
-            {"type":"text","text":"CLIENT GUIDELINES:\\n"+(client_rules or "")[:9000]},
-            {"type":"text","text":"\\n\\nESTIMATE TEXT:\\n"+(est_text or "")[:12000]}
+            {"type":"text","text":"CLIENT GUIDELINES:\n"+(client_rules or "")[:9000]},
+            {"type":"text","text":"\n\nESTIMATE TEXT:\n"+(est_text or "")[:12000]}
         ]
         messages.append({"role":"system","content":system})
         messages.append({"role":"user","content":user})
@@ -309,10 +323,16 @@ VIN Verification: <MATCH | MISMATCH | NOT VERIFIED | PHOTOS NOT PROVIDED>
 12) Miscellaneous Rules — bracketed tags per item
 13) Estimate ↔ Photos Comparison (only if photos_present=true): damage match, discrepancies, missing views/measurements
 14) Summary & Next Steps (2 bullets)
+
+HARD RULES:
+- Use ONLY the provided materials. If you cannot verify, write 'Not found in provided documents'.
+- VIN Verification: set 'MISMATCH' ONLY if you can explicitly see two VINs (estimate text vs a VIN photo) that differ.
+  If photos are missing, use 'PHOTOS NOT PROVIDED'. If the VIN photo or the estimate VIN cannot be read, use 'NOT VERIFIED'.
+
 Always end with a single line: Final Evaluation: NN%."""
         user = [
-            {"type":"text","text":"CLIENT GUIDELINES:\\n"+(client_rules or "")[:8000]},
-            {"type":"text","text":"\\n\\nESTIMATE TEXT:\\n"+(est_text or "")[:12000]}
+            {"type":"text","text":"CLIENT GUIDELINES:\n"+(client_rules or "")[:8000]},
+            {"type":"text","text":"\n\nESTIMATE TEXT:\n"+(est_text or "")[:12000]}
         ]
         if photos_present: user += img_payload()
         messages.append({"role":"system","content":system})
@@ -334,7 +354,7 @@ Always end with a single line: Final Evaluation: NN%."""
                 "Summary\n"
                 "Final Evaluation: NN%."
             )
-            user = [{"type":"text","text":"ESTIMATE TEXT:\\n"+(est_text or "")[:9000]}] + img_payload()
+            user = [{"type":"text","text":"ESTIMATE TEXT:\n"+(est_text or "")[:9000]}] + img_payload()
             messages.append({"role":"system","content":system})
             messages.append({"role":"user","content":user})
             rsp = openai_chat(messages, max_tokens=800)
@@ -347,8 +367,8 @@ Always end with a single line: Final Evaluation: NN%."""
                 inv_text += fast_pdf_text(blob, limit_pages=4)
         system = "Compare supplement/invoices to the estimate, and (if present) to photos. Sections: Invoices Summary, Support vs Estimate Lines, Photo Corroboration (if photos_present), Missing Documentation, Summary. End with 'Final Evaluation: NN%'."
         user = [
-            {"type":"text","text":"ESTIMATE TEXT:\\n"+(est_text or "")[:8000]},
-            {"type":"text","text":"\\n\\nINVOICES TEXT:\\n"+(inv_text or '')[:6000]}
+            {"type":"text","text":"ESTIMATE TEXT:\n"+(est_text or "")[:8000]},
+            {"type":"text","text":"\n\nINVOICES TEXT:\n"+(inv_text or '')[:6000]}
         ]
         if photos_present: user += img_payload()
         messages.append({"role":"system","content":system})
@@ -358,16 +378,17 @@ Always end with a single line: Final Evaluation: NN%."""
     elif intent == "docs_checklist":
         system = "Documentation checklist only. State present/missing for each item required by client guidelines based on the estimate text. End with 'Final Evaluation: NN%'."
         user = [
-            {"type":"text","text":"CLIENT GUIDELINES:\\n"+(client_rules or "")[:6000]},
-            {"type":"text","text":"\\n\\nESTIMATE TEXT:\\n"+(est_text or "")[:8000]}
+            {"type":"text","text":"CLIENT GUIDELINES:\n"+(client_rules or "")[:6000]},
+            {"type":"text","text":"\n\nESTIMATE TEXT:\n"+(est_text or "")[:8000]}
         ]
         messages.append({"role":"system","content":system})
         messages.append({"role":"user","content":user})
         rsp = openai_chat(messages, max_tokens=600)
 
     gpt_output = (rsp.choices[0].message.content if rsp else locals().get("gpt_output","Automated narrative unavailable.")).strip()
-    if not photos_present:
-        gpt_output = re.sub(r"(?im)^.*photo.*$", "", gpt_output).strip()
+
+    if not photos_present and intent in ("comprehensive","photos_only","invoices_with_photos"):
+        gpt_output = strip_photo_sections(gpt_output)
 
     comp = final_percent(gpt_output)
 
@@ -457,7 +478,7 @@ Summary:
 
 @app.get("/download-pdf")
 async def download_pdf(file_number: str):
-    safe = re.sub(r"[^\\w.\\-]+","-", file_number).strip("-_.")
+    safe = re.sub(r"[^\w.\-]+","-", file_number).strip("-_.")
     path = os.path.join(PDF_DIR, f"{safe}.pdf")
     if os.path.exists(path):
         return FileResponse(path=path, media_type="application/pdf", filename=f"{safe}.pdf")
