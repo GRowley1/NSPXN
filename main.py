@@ -50,7 +50,7 @@ def _pp(img: Image.Image) -> Image.Image:
     img = ImageOps.autocontrast(img)
     return img
 
-def fast_pdf_text(pdf_bytes: bytes, limit_pages: int = 8) -> str:
+def fast_pdf_text(pdf_bytes: bytes, limit_pages: int = 6) -> str:
     out = []
     try:
         rdr = PyPDF2.PdfReader(io.BytesIO(pdf_bytes))
@@ -122,7 +122,18 @@ def mileage_from_text(text: str) -> Optional[str]:
     m = re.search(r"(?:Odometer|Mileage|Miles)\s*[:\-]?\s*([\d,]{2,7})\b", text or "", re.IGNORECASE)
     return m.group(1) if m else None
 
-# Claim extractor with multiple labels and mandatory digit (avoids 'Services')
+# Claim extractor with stronger plausibility filter (avoid model text like 'sedan-4d')
+MODEL_WORDS = re.compile(r"(sedan|coupe|hatch|suv|truck|van|wagon|convertible|"
+                         r"corolla|altima|civic|accord|camry|sentra|elantra|rogue|rav4|tacoma|silverado|ram|f150)", re.I)
+
+def _is_plausible_claim(tok: str) -> bool:
+    if not tok: return False
+    tok = tok.strip().strip(".:,;")
+    if not (5 <= len(tok) <= 25): return False
+    if len(re.findall(r"\d", tok)) < 2: return False   # force ≥2 digits
+    if "/" in tok and MODEL_WORDS.search(tok): return False
+    return True
+
 def claim_from_text(text: str) -> Optional[str]:
     if not text: return None
     CLAIM_TOKEN = r"[A-Za-z0-9][A-Za-z0-9\-_\/]*\d[A-Za-z0-9\-_\/]*"
@@ -134,7 +145,9 @@ def claim_from_text(text: str) -> Optional[str]:
     for pat in pats:
         m = re.search(pat, text, re.IGNORECASE)
         if m:
-            return m.group(1).strip().rstrip(".:,;")
+            cand = m.group(1)
+            if _is_plausible_claim(cand):
+                return cand.strip().rstrip(".:,;")
     return None
 
 def days_from_text(text: str) -> Optional[int]:
@@ -251,7 +264,7 @@ async def vision_review(
     # Extract text: Always take first-page OCR + first pages text to catch headers
     est_text = ""
     if est_pdf:
-        est_text = (first_page_ocr(est_pdf[1]) + "\n\n" + fast_pdf_text(est_pdf[1], limit_pages=8)).strip()
+        est_text = (first_page_ocr(est_pdf[1]) + "\n\n" + fast_pdf_text(est_pdf[1], limit_pages=6)).strip()
 
     # Combined header text from *all* PDFs as fallback
     all_pdf_text = est_text
@@ -274,7 +287,8 @@ async def vision_review(
         "vin_estimate": vin,
         "vehicle": vehicle,
         "claim": claim,
-        "mileage_present": bool(mileage),
+        "mileage_estimate": mileage or "",
+        "days_to_repair_estimate": days if days is not None else "",
         "intent": intent
     }
     sys_common = (
@@ -285,7 +299,7 @@ async def vision_review(
         "otherwise write 'Not applicable (repairable)'. "
         "Always end with a single line: Final Evaluation: NN%."
     )
-    messages = [{"role":"system","content":sys_common + " " + json.dumps(facts)}]
+    messages = [{"role":"system","content":sys_common + " Parsed header context: " + json.dumps({k:v for k,v in facts.items() if k in ["vin_estimate","vehicle","claim","mileage_estimate","days_to_repair_estimate"]})}]
 
     def img_payload(max_imgs=12):
         out=[]
@@ -310,17 +324,26 @@ async def vision_review(
         rsp = openai_chat(messages, max_tokens=700)
 
     elif intent == "comprehensive":
+        # Explicit photo handling + left/right damage orientation guidance
         system = (
             "Comprehensive audit. Compare client guidelines ↔ estimate AND estimate ↔ photos. "
-            "Do NOT restate guidelines; instead, list where the estimate COMPLIES vs DEVIATES, with short evidence quotes from the estimate text. "
-            "If photos are not provided, omit photo sections entirely. "
+            "Never restate guidelines; list where the estimate COMPLIES vs DEVIATES, each with a 3–12 word evidence quote from the estimate text only. "
+            "If photos_present=false, omit all photo sections AND do not refer to photos anywhere. "
+            "When photos are provided, identify primary damage location(s) using automotive convention (Left/Right is driver-perspective); "
+            "call out specific panels (e.g., left front door, left quarter, rear bumper). "
+            "VIN Verification: output one of <MATCH | MISMATCH | NOT VERIFIED | PHOTOS NOT PROVIDED>. "
+            "- MATCH only if an explicit 17-char estimate VIN equals a clear 17-char VIN visible in a VIN photo. "
+            "- MISMATCH only if both are explicit 17-char VINs and they differ. "
+            "- PHOTOS NOT PROVIDED if no VIN photo exists. "
+            "- NOT VERIFIED if a VIN photo exists but is unreadable/partial. "
+            "Total-loss-only items (salvage bids, valuation sheets, owner-retain) appear ONLY if the estimate explicitly declares total loss; otherwise: Not applicable (repairable). "
             "Sections:\n"
-            "- Estimate Snapshot (from estimate text only): totals, labor/paint materials hours & rates, tax rate, days to repair (only if present)\n"
-            "- VIN Verification: <MATCH | MISMATCH | NOT VERIFIED | PHOTOS NOT PROVIDED> (MISMATCH only if two explicit VINs differ; if no photos, PHOTOS NOT PROVIDED; if unreadable, NOT VERIFIED)\n"
-            "- Compliance vs Guidelines: each bullet labeled [Compliant] / [Non-compliant] / [Not found] with a 3–12 word evidence quote from the estimate\n"
-            "- Estimate ↔ Photos (only if photos_present=true): damage match, discrepancies, missing required photo angles/measurements\n"
-            "- Missing Documents & Risks: bullets\n"
-            "- Next Steps: 1–3 bullets\n"
+            "- Estimate Snapshot (estimate text only): totals, labor/paint materials hours & rates, tax rate, days to repair (only if present)\n"
+            "- VIN Verification: <...>\n"
+            "- Compliance vs Guidelines: [Compliant]/[Non-compliant]/[Not found] + short evidence quote\n"
+            "- Estimate ↔ Photos: damage match (note LEFT/RIGHT & panels), discrepancies, missing photo angles/measurements\n"
+            "- Missing Documents & Risks\n"
+            "- Next Steps (1–3 bullets)\n"
             "Always end with: Final Evaluation: NN%."
         )
         user = [
@@ -341,6 +364,7 @@ async def vision_review(
                 "Compare photos to the estimate only. "
                 "Do NOT restate guidelines. "
                 "If totals are cited, include a brief 'Estimate Snapshot' (only if present in estimate text). "
+                "Identify primary damage location(s) with left/right/panel naming. "
                 "Sections: Photo Coverage, Visible Damage vs Estimate, Discrepancies, Summary. "
                 "End with: Final Evaluation: NN%."
             )
@@ -358,7 +382,7 @@ async def vision_review(
         system = (
             "Analyze supplement/invoices against the estimate (and photos if provided). "
             "Do NOT restate guidelines. "
-            "Sections: Invoices Summary, Support vs Estimate Lines, Photo Corroboration (if photos_present), Missing Documentation, Summary. "
+            "Sections: Invoices Summary, Support vs Estimate Lines, Photo Corroboration (if photos_present; identify left/right/panels), Missing Documentation, Summary. "
             "End with: Final Evaluation: NN%."
         )
         user = [
@@ -392,10 +416,11 @@ async def vision_review(
     # Single source of truth for score
     comp = final_percent(gpt_output)
 
-    # Mirror VIN-verification tag from narrative when available (else generic)
+    # Mirror VIN-verification tag from narrative when available (else honest default)
     vin_ver_tag = parse_vin_verification(gpt_output)
     if intent in ("comprehensive","photos_only","invoices_with_photos"):
-        vin_line = (vin_ver_tag.capitalize().replace("Not ","Not ") if vin_ver_tag else ("Photos not provided" if not photos_present else "Included in narrative"))
+        vin_line = (vin_ver_tag.capitalize() if vin_ver_tag
+                    else ("Photos not provided" if not photos_present else "Not verified"))
     else:
         vin_line = "Not requested"
 
