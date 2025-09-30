@@ -43,7 +43,7 @@ app.add_middleware(
     allow_origins=["*"], allow_credentials=True, allow_methods=["*"], allow_headers=["*"],
 )
 
-# ----------- Helpers (lean; GPT does the heavy lifting) ----------
+# ----------- Helpers ----------
 def _pp(img: Image.Image) -> Image.Image:
     img = img.convert("L")
     img = ImageEnhance.Contrast(img).enhance(1.7)
@@ -181,7 +181,6 @@ def parse_vin_verification(narr: str) -> Optional[str]:
 
 def strip_photo_sections(narr: str) -> str:
     s = narr
-    # Remove photo-specific sections if no photos present (loose but safe)
     s = re.sub(r'(?is)\n\s*Estimate\s*[^\n]*Photos.*?(?=\n\s*[A-Z0-9]+[\).\s]|$)', '\n', s)
     s = re.sub(r'(?im)^.*photo.*$', '', s)
     s = re.sub(r'\n{3,}', '\n\n', s)
@@ -204,6 +203,39 @@ def openai_chat(messages, max_tokens=900):
         )
     except Exception as e:
         log.error(f"OAI fail: {e}"); return None
+
+# --- Valuation detection (ANY source) ---
+VAL_KEYS = [
+    ("Kelley Blue Book", "KBB"),
+    ("KBB.com", "KBB"),
+    ("NADA", "NADA/J.D. Power"),
+    ("J.D. Power", "NADA/J.D. Power"),
+    ("Black Book", "Black Book"),
+    ("Edmunds", "Edmunds"),
+]
+GENERIC_PAT = re.compile(r"(Average Price|Estimated Trade-?In Value|Clean Retail Value|Vehicle Valuation)", re.I)
+
+def detect_valuations(pdfs: List[Tuple[str, bytes]], est_pdf_name: Optional[str]) -> Tuple[bool, list, list]:
+    sources, names = [], []
+    for nm, blob in pdfs:
+        if est_pdf_name and nm == est_pdf_name: 
+            continue
+        try:
+            t = (first_page_ocr(blob) + "\n" + fast_pdf_text(blob, limit_pages=2)).upper()
+        except:
+            t = ""
+        hit = None
+        for key, lab in VAL_KEYS:
+            if key.upper() in t:
+                hit = lab; break
+        if not hit and GENERIC_PAT.search(t):
+            hit = "Generic Valuation"
+        if hit:
+            sources.append(hit)
+            names.append(nm)
+    # Deduplicate sources
+    sources = list(dict.fromkeys(sources))
+    return (len(sources) > 0), sources, names
 
 # ----------- API ----------
 @app.post("/vision-review")
@@ -254,19 +286,19 @@ async def vision_review(
 
     photos_present = len(images) > 0
 
-    # Identify the estimate PDF (prefer names with 'est')
+    # Identify estimate PDF
     est_pdf = None
     for nm, blob in pdfs:
         if "est" in nm or "estimate" in nm:
             est_pdf = (nm, blob); break
     if est_pdf is None and pdfs: est_pdf = pdfs[0]
 
-    # Extract text: Always take first-page OCR + first pages text to catch headers
+    # Extract estimate text
     est_text = ""
     if est_pdf:
         est_text = (first_page_ocr(est_pdf[1]) + "\n\n" + fast_pdf_text(est_pdf[1], limit_pages=6)).strip()
 
-    # Combined header text from *all* PDFs as fallback
+    # Combine other docs text
     all_pdf_text = est_text
     for nm, blob in pdfs:
         if not est_pdf or nm != est_pdf[0]:
@@ -274,14 +306,18 @@ async def vision_review(
     if texts:
         all_pdf_text += "\n\n" + "\n\n".join(texts)[:8000]
 
-    # Extract header fields (estimate first, then fallback)
+    # Parse header fields
     vin = vin_from_text(est_text) or vin_from_text(all_pdf_text) or "N/A"
     vehicle = vehicle_from_text(est_text) or vehicle_from_text(all_pdf_text) or "N/A"
     mileage = mileage_from_text(est_text) or mileage_from_text(all_pdf_text)
     claim = claim_from_text(est_text) or claim_from_text(all_pdf_text) or "N/A"
     days = days_from_text(est_text) or days_from_text(all_pdf_text)
 
-    # GPT messages (minimal logic; GPT performs the analysis)
+    # Detect ANY valuation
+    est_name = est_pdf[0] if est_pdf else None
+    valuation_present, valuation_sources, valuation_doc_names = detect_valuations(pdfs, est_name)
+
+    # GPT messages
     facts = {
         "photos_present": photos_present,
         "vin_estimate": vin,
@@ -289,17 +325,21 @@ async def vision_review(
         "claim": claim,
         "mileage_estimate": mileage or "",
         "days_to_repair_estimate": days if days is not None else "",
+        "valuation_present": valuation_present,
+        "valuation_sources": valuation_sources,
+        "valuation_docs": valuation_doc_names,
         "intent": intent
     }
     sys_common = (
         "You are an auto-claims appraisal assistant. Use ONLY the provided materials (estimate text, uploaded photos, client rules). "
-        "Do NOT restate client rules. Do NOT invent details. "
-        "If something is not present, write 'Not found in provided documents'. "
-        "Total-loss-only items (salvage bids, valuation sheets, owner-retain) must be included ONLY if a total loss is explicit; "
-        "otherwise write 'Not applicable (repairable)'. "
+        "Do NOT invent details. If something is not present, write 'Not found in provided documents'. "
+        "Total-loss-only items (salvage bids, valuation sheets, owner-retain) appear ONLY if the estimate explicitly declares a total loss; otherwise: Not applicable (repairable). "
+        "For any 'Clean Retail Value' requirement: treat **ANY uploaded valuation** (KBB, NADA/J.D. Power, Black Book, Edmunds, or generic valuation sheet that shows Average Price/Trade-In Value) as compliant; name the source(s) you detect. "
+        "VIN policy: only consider VINs that are 17 contiguous characters using A–H, J–N, P, R–Z and digits 0–9 (no I/O/Q). Normalize by removing spaces/hyphens; ignore anything not exactly 17 after normalization. "
         "Always end with a single line: Final Evaluation: NN%."
     )
-    messages = [{"role":"system","content":sys_common + " Parsed header context: " + json.dumps({k:v for k,v in facts.items() if k in ["vin_estimate","vehicle","claim","mileage_estimate","days_to_repair_estimate"]})}]
+    header_hint = {k:v for k,v in facts.items() if k in ["vin_estimate","vehicle","claim","mileage_estimate","days_to_repair_estimate","valuation_present","valuation_sources"]}
+    messages = [{"role":"system","content":sys_common + " Parsed header context: " + json.dumps(header_hint)}]
 
     def img_payload(max_imgs=12):
         out=[]
@@ -312,6 +352,7 @@ async def vision_review(
         system = (
             "Compare client guidelines to the ESTIMATE only. "
             "Do NOT mention photos. "
+            "Count ANY uploaded valuation as satisfying 'Clean Retail Value' and name the source(s) if present. "
             "Include an 'Estimate Snapshot' with totals, labor/paint materials hours & rates, tax rate, and days to repair—only if present in the estimate text. "
             "Mark missing items as 'Not found in provided documents'."
         )
@@ -324,19 +365,17 @@ async def vision_review(
         rsp = openai_chat(messages, max_tokens=700)
 
     elif intent == "comprehensive":
-        # Explicit photo handling + left/right damage orientation guidance
         system = (
             "Comprehensive audit. Compare client guidelines ↔ estimate AND estimate ↔ photos. "
             "Never restate guidelines; list where the estimate COMPLIES vs DEVIATES, each with a 3–12 word evidence quote from the estimate text only. "
             "If photos_present=false, omit all photo sections AND do not refer to photos anywhere. "
-            "When photos are provided, identify primary damage location(s) using automotive convention (Left/Right is driver-perspective); "
-            "call out specific panels (e.g., left front door, left quarter, rear bumper). "
+            "When photos are provided, identify primary damage location(s) using automotive convention (Left/Right is driver-perspective); call out specific panels (e.g., left front door, left quarter, rear bumper). "
+            "For 'Clean Retail Value', count ANY uploaded valuation (KBB, NADA/J.D. Power, Black Book, Edmunds, or generic valuation sheet) as compliant; name the source(s). "
             "VIN Verification: output one of <MATCH | MISMATCH | NOT VERIFIED | PHOTOS NOT PROVIDED>. "
-            "- MATCH only if an explicit 17-char estimate VIN equals a clear 17-char VIN visible in a VIN photo. "
+            "- MATCH only if an explicit 17-char estimate VIN equals a clear 17-char VIN from a VIN photo (after normalization). "
             "- MISMATCH only if both are explicit 17-char VINs and they differ. "
             "- PHOTOS NOT PROVIDED if no VIN photo exists. "
             "- NOT VERIFIED if a VIN photo exists but is unreadable/partial. "
-            "Total-loss-only items (salvage bids, valuation sheets, owner-retain) appear ONLY if the estimate explicitly declares total loss; otherwise: Not applicable (repairable). "
             "Sections:\n"
             "- Estimate Snapshot (estimate text only): totals, labor/paint materials hours & rates, tax rate, days to repair (only if present)\n"
             "- VIN Verification: <...>\n"
@@ -409,14 +448,11 @@ async def vision_review(
 
     gpt_output = (rsp.choices[0].message.content if rsp else locals().get("gpt_output","Automated narrative unavailable.")).strip()
 
-    # Strip photo sections if none provided (belt & suspenders)
     if not photos_present and intent in ("comprehensive","photos_only","invoices_with_photos"):
         gpt_output = strip_photo_sections(gpt_output)
 
-    # Single source of truth for score
     comp = final_percent(gpt_output)
 
-    # Mirror VIN-verification tag from narrative when available (else honest default)
     vin_ver_tag = parse_vin_verification(gpt_output)
     if intent in ("comprehensive","photos_only","invoices_with_photos"):
         vin_line = (vin_ver_tag.capitalize() if vin_ver_tag
@@ -424,7 +460,7 @@ async def vision_review(
     else:
         vin_line = "Not requested"
 
-    # ----------- PDF (format unchanged) ----------
+    # ----------- PDF ----------
     pdf = FPDF(); pdf.add_page(); pdf.set_font("Arial", size=11)
     pdf.cell(200,10,sanitize_latin1("NSPXN.com AI Review Report"),ln=True,align="C")
     pdf.ln(5); pdf.set_font_size(10)
@@ -452,7 +488,7 @@ async def vision_review(
     pdf_b64 = base64.b64encode(pdf_bytes).decode("utf-8")
     pdf_url = f"/download-pdf?file_number={file_number}"
 
-    # ----------- Email (unchanged shell) ----------
+    # ----------- Email ----------
     try:
         msg = EmailMessage()
         msg["Subject"] = f"AI-4-IA Review: {claim or 'N/A'}"
@@ -499,6 +535,8 @@ Summary:
         "odometer_estimate": mileage or "Not documented",
         "days_to_repair": days or "Not documented",
         "compliance_score": comp if comp is not None else "N/A",
+        "valuation_present": valuation_present,
+        "valuation_sources": valuation_sources,
     }
 
 @app.get("/download-pdf")
@@ -508,4 +546,5 @@ async def download_pdf(file_number: str):
     if os.path.exists(path):
         return FileResponse(path=path, media_type="application/pdf", filename=f"{safe}.pdf")
     return JSONResponse(status_code=404, content={"detail":"Not Found"})
+
 
