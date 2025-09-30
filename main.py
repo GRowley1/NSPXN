@@ -1,4 +1,21 @@
 
+
+def ocr_pages_for_vin(pdf_bytes: bytes, max_pages: int = 4, dpi: int = 250) -> str:
+    """Lightweight multi-page OCR used only if VIN not found in text.
+    Capped pages + dpi to keep latency low.
+    """
+    try:
+        pages = convert_from_bytes(pdf_bytes, dpi=dpi)[:max_pages]
+    except Exception:
+        return ""
+    out = []
+    for im in pages:
+        try:
+            im = _pp(im)
+            out.append(pytesseract.image_to_string(im, lang="eng", config="--psm 6"))
+        except Exception:
+            pass
+    return "\n".join(out)
 # --- Compatibility shim for legacy callsite ---
 def extract_vehicle_line_from_first_page(text: str):
     """Best-effort vehicle line from the first-page text; returns None if not found.
