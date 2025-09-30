@@ -389,11 +389,51 @@ async def vision_review(
         "6) Estimate ↔ Photos Comparison",
         "7) Summary & Next Steps",
     ]
-    sys = (
-        "You are an auto-claims appraisal assistant. Be concise and specific. "
-        "Where you cannot verify, say 'Not found in provided documents'. "
-        "Always end with a single line: Final Evaluation: NN%."
-    )
+    if (ai_intent or "").strip().lower() == "comprehensive":
+        sys = (
+            "Comprehensive review: compare client guidelines to the estimate AND compare the estimate to the photos. "
+            "If photos are not provided, OMIT all photo-related sections. "
+            "MANDATORY OUTPUT SHAPE:
+"
+            "VIN Verification: <MATCH | MISMATCH | NOT VERIFIED | PHOTOS NOT PROVIDED>
+"
+            "1) Client Quick Summary (2–3 bullets)
+"
+            "2) Fatal Errors (bullet list; only truly fatal items)
+"
+            "3) Client Photo Rules (only if photos_present=true) — each item begins with [Compliant] | [Non-compliant] | [Not found]
+"
+            "4) Estimate/Supplement Release Rules — bracketed tags per item
+"
+            "5) Parts Application Rules — bracketed tags per item
+"
+            "6) Total Loss Rules — bracketed tags per item (or 'Not applicable')
+"
+            "7) Tow Charge Rules — bracketed tags per item
+"
+            "8) Supplement Handling Rules — bracketed tags per item
+"
+            "9) Betterment/Depreciation Rules — bracketed tags per item
+"
+            "10) Documentation Requirements — bracketed tags per item (explicitly call out Clean Retail Value printout and Advisor Report)
+"
+            "11) Rates and Sales Tax Rules — bracketed tags per item
+"
+            "12) Miscellaneous Rules — bracketed tags per item
+"
+            "13) Estimate ↔ Photos Comparison (only if photos_present=true): damage match, discrepancies, missing views/measurements
+"
+            "14) Summary & Next Steps (2 bullets)
+"
+            "Be concise, specific, and only use the provided materials. "
+            "Always end with a single line: Final Evaluation: NN%."
+        )
+    else:
+        sys = (
+            "You are an auto-claims appraisal assistant. Be concise and specific. "
+            "Where you cannot verify, say 'Not found in provided documents'. "
+            "Always end with a single line: Final Evaluation: NN%."
+        )
     user_parts: List[Dict[str, Any]] = []
     user_parts.append({"type":"text","text": f"CLIENT GUIDELINES:\n{client_rules[:8000]}"})
     user_parts.append({"type":"text","text": f"ESTIMATE TEXT (OCR):\n{est_text[:12000]}"})
