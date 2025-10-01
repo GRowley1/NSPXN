@@ -558,39 +558,39 @@ Rules to follow from client:
         logger.error(f"OpenAI error: {err}")
         gpt_output = f"⚠️ AI review failed: {err}"
 
-        # ----- SCORE: single authoritative number used everywhere -----
-        # If in supplement mode, bypass deterministic deductions (photos/NADA/Advisor/etc.)
-        if supplement_mode:
-            score_ai = None
-            # try to read score from AI if provided
-            m = re.search(r"(Final|Total|Compliance)\s*(Score|Evaluation)?\s*[:\-]?\s*(\d{1,3})\s*%?", gpt_output, re.IGNORECASE)
-            if m:
-                try:
-                    score_ai = int(m.group(3))
-                except:
-                    score_ai = None
-            labor_tax_adj = 0
-            photo_adj = 0
-            computed = 100
-            authoritative_score = max(0, min(100, score_ai if score_ai is not None else computed))
-            else:
-            score_ai = None
-            for pat in [
-                r"Total\s*Evaluation\s*[:\-]?\s*(\d{1,3})\s*%?",
-                r"Final\s*Score\s*[:\-]?\s*(\d{1,3})\s*%?",
-                r"Compliance\s*Score\s*[:\-]?\s*(\d{1,3})\s*%?",
-            ]:
-                m = re.search(pat, gpt_output, re.IGNORECASE)
-                if m:
-                    score_ai = int(m.group(1))
-                    break
-
-            labor_tax_adj = check_labor_and_tax_score(combined_text, client_rules)
-            photo_adj = -25 * len(missing_photos)
-            computed = max(0, 100 + labor_tax_adj + photo_adj)
-            authoritative_score = max(0, min(100, score_ai if score_ai is not None else computed))
-
-        gpt_output_clean = re.sub(
+    # ----- SCORE: single authoritative number used everywhere -----
+    # If in supplement mode, bypass deterministic deductions (photos/NADA/Advisor/etc.)
+    if supplement_mode:
+    score_ai = None
+    # try to read score from AI if provided
+    m = re.search(r"(Final|Total|Compliance)\s*(Score|Evaluation)?\s*[:\-]?\s*(\d{1,3})\s*%?", gpt_output, re.IGNORECASE)
+    if m:
+    try:
+    score_ai = int(m.group(3))
+    except:
+    score_ai = None
+    labor_tax_adj = 0
+    photo_adj = 0
+    computed = 100
+    authoritative_score = max(0, min(100, score_ai if score_ai is not None else computed))
+    else:
+    score_ai = None
+    for pat in [
+    r"Total\s*Evaluation\s*[:\-]?\s*(\d{1,3})\s*%?",
+    r"Final\s*Score\s*[:\-]?\s*(\d{1,3})\s*%?",
+    r"Compliance\s*Score\s*[:\-]?\s*(\d{1,3})\s*%?",
+    ]:
+    m = re.search(pat, gpt_output, re.IGNORECASE)
+    if m:
+    score_ai = int(m.group(1))
+    break
+    
+    labor_tax_adj = check_labor_and_tax_score(combined_text, client_rules)
+    photo_adj = -25 * len(missing_photos)
+    computed = max(0, 100 + labor_tax_adj + photo_adj)
+    authoritative_score = max(0, min(100, score_ai if score_ai is not None else computed))
+    
+    gpt_output_clean = re.sub(
         r'(?im)^(?:Final\s*Score|Compliance\s*Score|Total\s*Evaluation)\s*[:\-]?\s*\d{1,3}\s*%.*$',
         '',
         gpt_output
@@ -737,7 +737,6 @@ async def get_client_rules(client_name: str):
     else:
         logger.error(f"Rules not found for client: {client_name}")
         return JSONResponse(status_code=404, content={"error": "Rules not found for this client."})
-
 
 
 
