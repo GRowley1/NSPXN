@@ -500,15 +500,6 @@ async def vision_review(
             texts.append(f"⚠️ Skipped unsupported file: {f.filename}")
 
     combined_text = "\n".join(texts)
-    # ----- determine intent/mode -----
-    intent = (ai_intent or "").strip().lower()
-    supplement_mode = intent in (
-        "invoices_with_photos",
-        "supplement",
-        "supplement_with_photos",
-        "invoices",
-        "supplement↔invoices"
-    )
 
     # ----- determine intent/mode -----
     intent = (ai_intent or "").strip().lower()
@@ -567,34 +558,190 @@ Rules to follow from client:
         logger.error(f"OpenAI error: {err}")
         gpt_output = f"⚠️ AI review failed: {err}"
 
-# ----- SCORE: single authoritative number used everywhere -----
-if supplement_mode:
-    score_ai = None
-    m = re.search(r"(Final|Total|Compliance)\s*(Score|Evaluation)?\s*[:\-]?\s*(\d{1,3})\s*%?", gpt_output, re.IGNORECASE)
-    if m:
-        try:
-            score_ai = int(m.group(3))
-        except:
-            score_ai = None
-    labor_tax_adj = 0
-    photo_adj = 0
-    computed = 100
-    authoritative_score = max(0, min(100, score_ai if score_ai is not None else computed))
-else:
-    score_ai = None
-    for pat in [
-        r"Total\s*Evaluation\s*[:\-]?\s*(\d{1,3})\s*%?",
-        r"Final\s*Score\s*[:\-]?\s*(\d{1,3})\s*%?",
-        r"Compliance\s*Score\s*[:\-]?\s*(\d{1,3})\s*%?",
-    ]:
-        m = re.search(pat, gpt_output, re.IGNORECASE)
+    # ----- SCORE: single authoritative number used everywhere -----
+    # If in supplement mode, bypass deterministic deductions (photos/NADA/Advisor/etc.)
+    if supplement_mode:
+        score_ai = None
+        # try to read score from AI if provided
+        m = re.search(r"(Final|Total|Compliance)\s*(Score|Evaluation)?\s*[:\-]?\s*(\d{1,3})\s*%?", gpt_output, re.IGNORECASE)
         if m:
-            score_ai = int(m.group(1))
-            break
+            try:
+                score_ai = int(m.group(3))
+            except:
+                score_ai = None
+        labor_tax_adj = 0
+        photo_adj = 0
+        computed = 100
+        authoritative_score = max(0, min(100, score_ai if score_ai is not None else computed))
+        else:
+        score_ai = None
+        for pat in [
+            r"Total\s*Evaluation\s*[:\-]?\s*(\d{1,3})\s*%?",
+            r"Final\s*Score\s*[:\-]?\s*(\d{1,3})\s*%?",
+            r"Compliance\s*Score\s*[:\-]?\s*(\d{1,3})\s*%?",
+        ]:
+            m = re.search(pat, gpt_output, re.IGNORECASE)
+            if m:
+                score_ai = int(m.group(1))
+                break
 
-    labor_tax_adj = check_labor_and_tax_score(combined_text, client_rules)
-    photo_adj = -25 * len(missing_photos)
-    computed = max(0, 100 + labor_tax_adj + photo_adj)
-    authoritative_score = max(0, min(100, score_ai if score_ai is not None else computed))
+        labor_tax_adj = check_labor_and_tax_score(combined_text, client_rules)
+        photo_adj = -25 * len(missing_photos)
+        computed = max(0, 100 + labor_tax_adj + photo_adj)
+        authoritative_score = max(0, min(100, score_ai if score_ai is not None else computed))
 
-# Remove any score lines from the AI paragraph before adding to PDF
+    gpt_output_clean = re.sub(
+        r'(?im)^(?:Final\s*Score|Compliance\s*Score|Total\s*Evaluation)\s*[:\-]?\s*\d{1,3}\s*%.*$',
+        '',
+        gpt_output
+    ).strip()
+
+    # =========================================
+    # PDF build
+    # =========================================
+    pdf = FPDF()
+    pdf.add_page()
+    try:
+        pdf.add_font("DejaVu", "", "DejaVuSans.ttf", uni=True)
+        pdf.set_font("DejaVu", size=11)
+    except Exception:
+        pdf.set_font("Arial", size=11)
+
+    pdf.cell(200, 10, txt="NSPXN.com AI Review Report", ln=True, align="C")
+    pdf.ln(5)
+    pdf.set_font_size(10)
+    pdf.multi_cell(0, 6, f"File Number: {file_number}")
+    pdf.multi_cell(0, 6, f"IA Company: {ia_company}")
+    pdf.multi_cell(0, 6, f"Appraiser ID #: {appraiser_id}")
+    request_type_label = {
+        "guidelines_only": "Guidelines → Estimate (no photos)",
+        "comprehensive": "Comprehensive: Guidelines + Estimate + Photos (with VIN check)",
+        "photos_only": "Photos Only: Compare to Estimate",
+        "invoices_with_photos": "Supplement ↔ Invoices (+ Photos)",
+        "docs_checklist": "Documentation Checklist"
+    }.get(ai_intent, "Comprehensive Audit")
+    pdf.multi_cell(0,6,f"Request Type: {request_type_label}")
+    pdf.ln(4)
+    pdf.multi_cell(0, 6, f"Claim #: {claim_number}")
+    pdf.multi_cell(0, 6, f"VIN: {vin_final}")
+    pdf.multi_cell(0, 6, f"Vehicle: {vehicle_desc}")
+    if odo_photos:
+        pdf.multi_cell(0, 6, f"Odometer (from photos): {odo_photos}")
+    pdf.multi_cell(0, 6, f"Compliance Score: {authoritative_score}%")
+
+    pdf.ln(4)
+    pdf_add_section_title(pdf, "AI-4-IA Review Summary")
+    pdf.multi_cell(0, 6, gpt_output_clean)
+
+    # ======== Estimate ↔ Photos Consistency Review ========
+    pdf.ln(4)
+    pdf_add_section_title(pdf, "Estimate ↔ Photos Consistency Review")
+
+    if consistency.get("per_item"):
+        for it in consistency["per_item"][:40]:
+            ev = "YES" if it.get("photo_evidence") else "NO"
+            try:
+                conf = float(it.get("confidence", 0))
+            except Exception:
+                conf = 0.0
+            conf_txt = f"{round(conf*100)}%"
+            line = f"- {it.get('side','unspecified').title()} {it.get('part','component')} · {it.get('op','op')} → Photo: {ev} ({conf_txt}); {it.get('note','')}"
+            pdf.multi_cell(0, 6, line)
+    else:
+        pdf.multi_cell(0, 6, "Per-item comparison unavailable.")
+
+    if consistency.get("not_in_photos"):
+        pdf.ln(2)
+        pdf_add_section_title(pdf, "Items Estimated but Not Evident in Photos")
+        for raw in consistency["not_in_photos"][:20]:
+            pdf.multi_cell(0, 6, f"- {raw}")
+
+    if consistency.get("extra_damage_in_photos"):
+        pdf.ln(2)
+        pdf_add_section_title(pdf, "Damage Visible in Photos but Missing on Estimate")
+        for d in consistency["extra_damage_in_photos"][:20]:
+            pdf.multi_cell(0, 6, f"- {d}")
+
+    pdf.ln(2)
+    pdf_kv(pdf, "Consistency Overall", consistency.get("overall", ""))
+
+    # Save PDF to /tmp with name {file_number}.pdf
+    pdf_path = os.path.join(PDF_DIR, f"{file_number}.pdf")
+    try:
+        pdf_bytes = pdf.output(dest="S").encode("latin-1")
+        with open(pdf_path, "wb") as f:
+            f.write(pdf_bytes)
+        logger.info(f"PDF saved → {pdf_path}")
+    except Exception as e:
+        logger.error(f"PDF write error: {e}")
+
+    # OPTIONAL email (unchanged)
+    try:
+        msg = EmailMessage()
+        msg["Subject"] = f"AI-4-IA Review: {claim_number}"
+        msg["From"] = "noreply@nspxn.com"
+        msg["To"] = "info@nspxn.com"
+        email_body = f"""NSPXN.com AI4IA Review Report
+
+File Number: {file_number}
+IA Company: {ia_company}
+Appraiser ID #: {appraiser_id}
+
+Claim #: {claim_number}
+VIN: {vin_final}
+Vehicle: {vehicle_desc}
+
+Compliance Score: {authoritative_score}%
+
+AI Review Summary:
+{gpt_output_clean}
+"""
+        msg.set_content(email_body)
+        with smtplib.SMTP_SSL("mail.tierra.net", 465) as smtp:
+            smtp.login("info@nspxn.com", "grr2025GRR")
+            smtp.send_message(msg)
+    except Exception as e:
+        logger.error(f"Email error (continuing): {e}")
+
+    return {
+        "gpt_output": gpt_output_clean,
+        "file_number": file_number,
+        "claim_number": claim_number,
+        "vehicle": vehicle_desc,
+        "vin": vin_final,
+        "score": f"{authoritative_score}%",
+        "consistency_review": consistency
+    }
+
+@app.get("/download-pdf")
+async def download_pdf(file_number: str):
+    pdf_path = os.path.join(PDF_DIR, f"{file_number}.pdf")
+    if os.path.exists(pdf_path):
+        return FileResponse(path=pdf_path, media_type="application/pdf", filename=f"{file_number}.pdf")
+    return JSONResponse(status_code=404, content={"detail": "Not Found"})
+
+@app.get("/client-rules/{client_name}")
+async def get_client_rules(client_name: str):
+    rules_dir = "client_rules"
+    file_name = f"{client_name}.docx"
+    file_path = os.path.join(rules_dir, file_name)
+    if os.path.exists(file_path):
+        try:
+            doc = Document(file_path)
+            text = "\n".join([p.text for p in doc.paragraphs if p.text.strip()])
+            logger.debug(f"Client rules for {client_name}: {text[:500]}...")
+            return {"text": text}
+        except Exception as e:
+            logger.error(f"Client rules error: {str(e)}")
+            return JSONResponse(status_code=500, content={"error": str(e)})
+    else:
+        logger.error(f"Rules not found for client: {client_name}")
+        return JSONResponse(status_code=404, content={"error": "Rules not found for this client."})
+
+
+
+
+
+
+
+
