@@ -500,6 +500,15 @@ async def vision_review(
             texts.append(f"⚠️ Skipped unsupported file: {f.filename}")
 
     combined_text = "\n".join(texts)
+    # ----- determine intent/mode -----
+    intent = (ai_intent or "").strip().lower()
+    supplement_mode = intent in (
+        "invoices_with_photos",
+        "supplement",
+        "supplement_with_photos",
+        "invoices",
+        "supplement↔invoices"
+    )
 
     # ----- determine intent/mode -----
     intent = (ai_intent or "").strip().lower()
