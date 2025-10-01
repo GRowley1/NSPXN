@@ -502,8 +502,8 @@ async def vision_review(
     combined_text = "\n".join(texts)
 
     # ----- determine intent/mode -----
-    intent = (ai_intent or \"\").strip().lower()
-    supplement_mode = intent in (\"invoices_with_photos\", \"supplement\", \"supplement_with_photos\", \"invoices\", \"supplement↔invoices\")
+    intent = (ai_intent or "").strip().lower()
+    supplement_mode = intent in ("invoices_with_photos", "supplement", "supplement_with_photos", "invoices", "supplement↔invoices")
 
 
 
@@ -563,7 +563,7 @@ Rules to follow from client:
     if supplement_mode:
         score_ai = None
         # try to read score from AI if provided
-        m = re.search(r\"(Final|Total|Compliance)\s*(Score|Evaluation)?\s*[:\-]?\s*(\d{1,3})\s*%?\", gpt_output, re.IGNORECASE)
+        m = re.search(r"(Final|Total|Compliance)\s*(Score|Evaluation)?\s*[:\-]?\s*(\d{1,3})\s*%?", gpt_output, re.IGNORECASE)
         if m:
             try:
                 score_ai = int(m.group(3))
@@ -598,6 +598,14 @@ Rules to follow from client:
     pdf.multi_cell(0, 6, f"File Number: {file_number}")
     pdf.multi_cell(0, 6, f"IA Company: {ia_company}")
     pdf.multi_cell(0, 6, f"Appraiser ID #: {appraiser_id}")
+    request_type_label = {
+        "guidelines_only": "Guidelines → Estimate (no photos)",
+        "comprehensive": "Comprehensive: Guidelines + Estimate + Photos (with VIN check)",
+        "photos_only": "Photos Only: Compare to Estimate",
+        "invoices_with_photos": "Supplement ↔ Invoices (+ Photos)",
+        "docs_checklist": "Documentation Checklist"
+    }.get(ai_intent, "Comprehensive Audit")
+    pdf.multi_cell(0,6,f"Request Type: {request_type_label}")
     pdf.ln(4)
     pdf.multi_cell(0, 6, f"Claim #: {claim_number}")
     pdf.multi_cell(0, 6, f"VIN: {vin_final}")
@@ -714,7 +722,6 @@ async def get_client_rules(client_name: str):
     else:
         logger.error(f"Rules not found for client: {client_name}")
         return JSONResponse(status_code=404, content={"error": "Rules not found for this client."})
-
 
 
 
