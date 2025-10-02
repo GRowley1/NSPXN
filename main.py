@@ -100,7 +100,7 @@ async def get_client_rules(client_name: str):
         return JSONResponse(status_code=404, content={"error": "Rules not found for this client."})
 
 # =========================================
-# Deterministic pre-extraction (to boost reliability)
+# Deterministic pre-extraction + VIN compare (strict MATCH/MISMATCH)
 # =========================================
 def _clean(s: str) -> str:
     return (s or "").replace("\r", "")
@@ -119,25 +119,65 @@ def extract_claim_number(text: str) -> Optional[str]:
             return m.group(1).strip().rstrip(".,;")
     return None
 
-def normalize_vin(v: str) -> Optional[str]:
-    if not v: return None
-    v = v.upper().replace(" ", "").replace("O","0").replace("I","1").replace("Q","0")
-    if not re.fullmatch(r"[A-HJ-NPR-Z0-9]{17}", v): return None
-    return v
+VIN_ALLOWED = set("0123456789ABCDEFGHJKLMNPRSTUVWXYZ")
+_trans = {**{str(i): i for i in range(10)},
+          **dict(A=1,B=2,C=3,D=4,E=5,F=6,G=7,H=8,J=1,K=2,L=3,M=4,N=5,P=7,R=9,S=2,T=3,U=4,V=5,W=6,X=7,Y=8,Z=9)}
+_w = [8,7,6,5,4,3,2,10,0,9,8,7,6,5,4,3,2]
+
+def _vin_checksum_ok(v: str) -> bool:
+    try:
+        tot = sum(_trans[ch] * _w[i] for i, ch in enumerate(v))
+        chk = tot % 11
+        return v[8] == ("X" if chk == 10 else str(chk))
+    except Exception:
+        return False
+
+def _normalize_vin_basic(s: str) -> Optional[str]:
+    s = (s or "").upper().replace(" ", "")
+    s = s.replace("O","0").replace("I","1").replace("Q","0")
+    if len(s) != 17 or any(ch not in VIN_ALLOWED for ch in s):
+        return None
+    return s
+
+def _vin_ambiguous_variants(v: str):
+    swaps = {'S':['S','5'], '5':['5','S'], 'B':['B','8'], '8':['8','B'], 'Z':['Z','2'], '2':['2','Z']}
+    cands = ['']
+    for ch in v:
+        opts = swaps.get(ch, [ch])
+        cands = [p + o for p in cands for o in opts]
+        if len(cands) > 64:
+            cands = cands[:64]
+    return cands
+
+def _vin_candidates_from_text(t: str) -> list:
+    t = (t or "").upper()
+    cands = []
+    labeled = re.findall(r"\bVIN\s*[:#\-]?\s*([A-HJ-NPR-Z0-9]{10,20})", t, re.IGNORECASE)
+    cands.extend(labeled)
+    cands.extend(re.findall(r"\b([A-HJ-NPR-Z0-9]{17})\b", t, re.IGNORECASE))
+    out = []
+    for raw in cands:
+        base = _normalize_vin_basic(raw)
+        if not base: 
+            continue
+        if _vin_checksum_ok(base):
+            out.append(base)
+            continue
+        for var in _vin_ambiguous_variants(base):
+            if len(var) == 17 and all(ch in VIN_ALLOWED for ch in var) and _vin_checksum_ok(var):
+                out.append(var); break
+    seen = set(); uniq = []
+    for v in out:
+        if v not in seen:
+            seen.add(v); uniq.append(v)
+    return uniq
 
 def extract_vin(text: str) -> Optional[str]:
-    t = _clean(text).upper()
-    # Try explicit label first
-    lab = re.findall(r"\bVIN\s*[:#\-]?\s*([A-HJ-NPR-Z0-9]{10,20})", t, re.IGNORECASE)
-    for c in lab:
-        v = normalize_vin(c)
-        if v: return v
-    # Then any 17-char candidate
-    cands = re.findall(r"\b([A-HJ-NPR-Z0-9]{17})\b", t, re.IGNORECASE)
-    for c in cands:
-        v = normalize_vin(c)
-        if v: return v
-    return None
+    vins = _vin_candidates_from_text(text)
+    return vins[0] if vins else None
+
+def extract_all_vins(text: str) -> list:
+    return _vin_candidates_from_text(text)
 
 MAKE_MAP = {
     "CHEV":"Chevrolet","CHEVY":"Chevrolet","MB":"Mercedes-Benz","MERCEDES":"Mercedes-Benz",
@@ -147,12 +187,10 @@ MAKE_MAP = {
 }
 def extract_vehicle(text: str) -> Optional[str]:
     t = _clean(text)
-    # Look for a "Vehicle:" line first
     m = re.search(r"Vehicle\s*[:\-]\s*(.+)", t, re.IGNORECASE)
     if m:
         val = m.group(1).strip()
-        if len(val) > 2 and len(val) < 120: return val
-    # Else a "YEAR MAKE MODEL" line
+        if 2 < len(val) < 120: return val
     best = None
     for ln in t.splitlines():
         ln = ln.strip()
@@ -172,11 +210,22 @@ def extract_odometer_estimate(text: str) -> Optional[str]:
     lab = re.search(r"Odometer\s*(?:Reading|)\s*[:\-]?\s*([\d,]{2,7})\s*(?:mi|miles|km)?", t, re.IGNORECASE)
     if lab:
         return lab.group(1)
-    # Sometimes it's "Mileage"
     m = re.search(r"Mileage\s*[:\-]?\s*([\d,]{2,7})", t, re.IGNORECASE)
     if m:
         return m.group(1)
     return None
+
+def _ocr_image_to_texts(im: Image.Image) -> list:
+    texts = []
+    for angle in (0, 90):
+        try:
+            rim = im.rotate(angle, expand=True) if angle else im
+            txt = pytesseract.image_to_string(_pp(rim), lang="eng", config="--psm 6")
+            if txt.strip():
+                texts.append(txt)
+        except Exception:
+            pass
+    return texts
 
 # ==========================
 # Routes
@@ -191,11 +240,11 @@ async def vision_review(
     client_rules: str = Form(""),
     file_number: str = Form(...),
     ia_company: str = Form(""),
-    appraiser_id: str = Form(...),
+    appraiser_id: str = Form(""),
     ai_intent: str = Form("comprehensive")
 ):
-    # Ingest: gather text + a few compressed images (for speed)
     texts: List[str] = []
+    photo_texts: List[str] = []
     images_b64: List[Dict[str, Any]] = []
     max_imgs = {"invoices_with_photos":2, "supplement":2, "photos_only":6, "comprehensive":6}.get(ai_intent, 0)
 
@@ -210,6 +259,8 @@ async def vision_review(
             try:
                 im = Image.open(io.BytesIO(raw)).convert("RGB")
                 im.thumbnail((1280,1280))
+                for t in _ocr_image_to_texts(im):
+                    photo_texts.append(t)
                 b = io.BytesIO()
                 im.save(b, format="JPEG", quality=72, optimize=True)
                 b64 = base64.b64encode(b.getvalue()).decode("utf-8")
@@ -221,9 +272,9 @@ async def vision_review(
         elif name.endswith(".txt"):
             texts.append(raw.decode("utf-8","ignore"))
 
-    combined_text = "\n".join(texts)[:8000]  # leave a bit more room for field search
+    combined_text = "\n".join(texts)[:8000]
+    photos_text = "\n".join(photo_texts)[:4000]
 
-    # Deterministic pre-extract to boost reliability
     pre = {
         "claim_number": extract_claim_number(combined_text) or "N/A",
         "vin": extract_vin(combined_text) or "N/A",
@@ -231,7 +282,16 @@ async def vision_review(
         "odometer_estimate_only": extract_odometer_estimate(combined_text) or "N/A",
     }
 
-    # Use GPT for EVERYTHING else; also cross-check and improve pre-extracted fields
+    vins_in_photos = extract_all_vins(photos_text)
+    vin_est = pre["vin"] if pre["vin"] != "N/A" else None
+    if vin_est:
+        if vins_in_photos:
+            vin_verify = "MATCH" if vin_est in vins_in_photos else "MISMATCH"
+        else:
+            vin_verify = "MISMATCH"
+    else:
+        vin_verify = "MISMATCH"
+
     intent_labels = {
         "guidelines_only": "Guidelines → Estimate (no photos)",
         "comprehensive": "Comprehensive: Guidelines + Estimate + Photos (with VIN check)",
@@ -246,52 +306,90 @@ async def vision_review(
         "You are an auto-claims appraisal assistant. "
         "Given the OCR'ed text and up to a few images, do ALL analysis based on the request type. "
         "Never invent data. If a field is not present, return 'N/A'. "
-        "VIN Verification must be one of: MATCH, MISMATCH, or NOT VERIFIED. "
+        "VIN Verification must be one of: MATCH, MISMATCH. "
         "Compliance Score must be an integer 0-100. "
         "Return ONLY valid JSON and nothing else."
     )
 
-    SUPP_DETAILS = (
-        "When the request type is a supplement (invoices_with_photos or supplement), "
-        "produce a detailed markdown summary with these sections:\n\n"
-        "### Supplement Overview\n"
-        "- High-level summary of the supplement scope and totals.\n\n"
-        "### Invoice vs Estimate — Line-Item Deltas\n"
-        "Provide a compact table with columns: Part/Operation | Qty | $Estimate | $Invoice | Δ (±) | Rationale.\n"
-        "Use item descriptions and amounts extracted verbatim from the provided text when possible.\n\n"
-        "### Photo Evidence Mapping\n"
-        "Assume attached images are ordered as Photo 1..N in the same order provided. "
-        "List each key added/changed item and reference the most relevant Photo #(s) if any cues from the text/photos suggest it. "
-        "If ambiguous, say 'No clear photo evidence'.\n\n"
-        "### Missing or Unclear Evidence\n"
-        "List any items where invoices or estimate references are incomplete or not found.\n\n"
-        "End with a single line exactly in this format: Final Evaluation: NN%"
-    )
-
-    PER_INTENT = {
-        "guidelines_only": "Ignore photos. Analyze estimate text against provided client rules (if any).",
-        "photos_only": "Ignore guidelines. Compare photos to estimate text for damage consistency and completeness.",
-        "invoices_with_photos": "Analyze supplement invoices against estimate text. Include photos only if relevant. No photo/NADA/Advisor deductions.",
-        "supplement": "Analyze supplement invoices against estimate text. Include photos only if relevant. No photo/NADA/Advisor deductions.",
-        "docs_checklist": "Create a documentation checklist status strictly from the provided text.",
-        "comprehensive": "Analyze guidelines + estimate + photos. Verify VIN between estimate and photos if possible."
+    MODE_DETAILS = {
+        "guidelines_only": (
+            "### Overview\n"
+            "Briefly summarize the estimate context and scope.\n\n"
+            "### Guidelines Compliance\n"
+            "Bulleted list of compliance checks (labor rates, materials, tax applicability, OEM procedures, sublet documentation).\n\n"
+            "### Missing or Issues\n"
+            "Bullet any gaps or ambiguous items.\n\n"
+            "End with: Final Evaluation: NN%"
+        ),
+        "photos_only": (
+            "### Overview\n"
+            "Summarize photo set coverage and quality.\n\n"
+            "### Damage Consistency vs Estimate\n"
+            "Table: Area/Part | Est. Operation | Photo Ref(s) | Consistency (Yes/No) | Notes.\n\n"
+            "### Required Photos Check\n"
+            "List missing VIN/plate/odometer/4-corners if any.\n\n"
+            "End with: Final Evaluation: NN%"
+        ),
+        "comprehensive": (
+            "### Overview\n"
+            "Summarize estimate scope and photo coverage.\n\n"
+            "### Estimate Integrity\n"
+            "Bullet checks for labor rates, refinish overlap, materials, tax, sublet.\n\n"
+            "### Photo Evidence Mapping\n"
+            "Key line items with Photo Ref(s) and brief rationale.\n\n"
+            "### VIN Verification\n"
+            "State MATCH or MISMATCH based on strict comparison of estimate VIN vs any VIN seen in photo OCR.\n\n"
+            "### Missing or Issues\n"
+            "Bulleted list.\n\n"
+            "End with: Final Evaluation: NN%"
+        ),
+        "invoices_with_photos": (
+            "### Supplement Overview\n"
+            "Scope and totals.\n\n"
+            "### Invoice vs Estimate — Line-Item Deltas\n"
+            "Table: Part/Operation | Qty | $Estimate | $Invoice | Δ (±) | Rationale.\n\n"
+            "### Photo Evidence Mapping\n"
+            "Map important deltas to Photo Ref(s); if unclear, say so.\n\n"
+            "### Missing or Unclear Evidence\n"
+            "Bulleted list.\n\n"
+            "End with: Final Evaluation: NN%"
+        ),
+        "supplement": (
+            "### Supplement Overview\n"
+            "Scope and totals.\n\n"
+            "### Invoice vs Estimate — Line-Item Deltas\n"
+            "Table: Part/Operation | Qty | $Estimate | $Invoice | Δ (±) | Rationale.\n\n"
+            "### Photo Evidence Mapping\n"
+            "Map important deltas to Photo Ref(s); if unclear, say so.\n\n"
+            "### Missing or Unclear Evidence\n"
+            "Bulleted list.\n\n"
+            "End with: Final Evaluation: NN%"
+        ),
+        "docs_checklist": (
+            "### Documentation Checklist\n"
+            "Table: Item | Present? | Notes (e.g., blurry/partial)\n"
+            "Items to include: estimate, invoice(s), photos (4 corners, VIN, plate, odometer, damage close-ups), registration, policy docs.\n\n"
+            "### Missing Items\n"
+            "Bulleted list.\n\n"
+            "End with: Final Evaluation: NN%"
+        )
     }
-    mode_tip = PER_INTENT.get(ai_intent, PER_INTENT["comprehensive"])
 
     JSON_KEYS = ["file_number","request_type","claim_number","vin","vin_verification","vehicle","odometer_estimate_only","compliance_score","summary_brief","summary_markdown"]
 
-    preface = f"Mode: {ai_intent}. {mode_tip}\n"
-    if ai_intent in ("invoices_with_photos","supplement"):
-        preface += SUPP_DETAILS + "\n\n"
-    preface += (
+    mode_detail = MODE_DETAILS.get(ai_intent, MODE_DETAILS["comprehensive"])
+    preface = (
+        f"Mode: {ai_intent}. {mode_detail}\n"
         f"Return JSON with keys exactly: {JSON_KEYS}.\n"
-        "Rules: VIN verification must be one of: MATCH, MISMATCH, NOT VERIFIED; Compliance Score integer 0-100; "
-        "Populate all fields ONLY from the provided content; If missing, use 'N/A'.\n"
+        "Rules: VIN verification is already determined outside the model; DO NOT change it. "
+        "Compliance Score must be an integer 0-100; Populate all fields ONLY from the provided content; If missing, use 'N/A'.\n"
         "Provide summary_brief as a single short paragraph (<=280 chars), plain text (no bullets/markdown).\n"
         "Provide summary_markdown as the full detailed write‑up.\n\n"
         f"REQUEST TYPE: {req_label}\n\nCLIENT RULES (if provided):\n{client_rules[:2500]}\n\n"
-        f"PRE-EXTRACTED (use to cross-check, correct if wrong):\n{json.dumps(pre)}\n\n"
+        f"PRE-EXTRACTED (use to cross-check, correct if wrong, but DO NOT change vin_verification):\n"
+        f"{json.dumps({'claim_number': pre['claim_number'], 'vin': pre['vin'], 'vehicle': pre['vehicle'], 'odometer_estimate_only': pre['odometer_estimate_only'], 'vin_verification': vin_verify})}\n\n"
         f"ESTIMATE/CONTENT (OCR):\n{combined_text}\n\n"
+        f"PHOTO OCR (VIN candidates may appear here):\n{photos_text}\n\n"
         f"NOTE: The next {len(images_b64)} images (if any) are the photos in order: Photo 1..Photo {len(images_b64)}."
     )
 
@@ -303,7 +401,7 @@ async def vision_review(
         rsp = client.chat.completions.create(
             model=MODEL,
             messages=[{"role":"system","content": SYSTEM},{"role":"user","content": user_parts}],
-            max_tokens=700 if ai_intent in ("invoices_with_photos","supplement") else 500,
+            max_tokens=800 if ai_intent in ("invoices_with_photos","supplement","comprehensive") else 550,
             temperature=0
         )
         raw = (rsp.choices[0].message.content or "").strip()
@@ -313,13 +411,12 @@ async def vision_review(
         log.error(f"OpenAI error or JSON parse error: {e}")
         data = {}
 
-    # Fill with pre-extracted defaults if GPT missed them
     safe = {
         "file_number": file_number,
         "request_type": req_label,
         "claim_number": data.get("claim_number") or pre["claim_number"],
         "vin": data.get("vin") or pre["vin"],
-        "vin_verification": data.get("vin_verification") or "NOT VERIFIED",
+        "vin_verification": vin_verify,
         "vehicle": data.get("vehicle") or pre["vehicle"],
         "odometer_estimate_only": data.get("odometer_estimate_only") or pre["odometer_estimate_only"],
         "compliance_score": data.get("compliance_score") if isinstance(data.get("compliance_score"), int) else 100,
@@ -327,7 +424,6 @@ async def vision_review(
         "summary_markdown": data.get("summary_markdown") or "AI analysis unavailable."
     }
 
-    # Build PDF
     pdf = FPDF()
     pdf.add_page()
     try:
@@ -354,7 +450,6 @@ async def vision_review(
     mc("AI-4-IA Review Summary")
     mc((safe["summary_markdown"] or "No summary.").strip())
 
-    # Save with sanitized name
     safe_file = _safe_name(file_number)
     pdf_path = os.path.join(PDF_DIR, f"{safe_file}.pdf")
     try:
@@ -363,7 +458,6 @@ async def vision_review(
     except Exception as e:
         log.warning(f"PDF write error: {e}")
 
-    # Email
     try:
         msg = EmailMessage()
         msg["Subject"] = f"AI-4-IA Review: {safe['claim_number']}"
@@ -402,8 +496,8 @@ AI-4-IA Review Summary
         "compliance_score": safe["compliance_score"],
         "summary_brief": safe["summary_brief"],
         "summary_markdown": safe["summary_markdown"],
-        "web_summary": safe["summary_brief"],   # alias for older UI
-        "gpt_output": safe["summary_markdown"], # alias for older UI
+        "web_summary": safe["summary_brief"],
+        "gpt_output": safe["summary_markdown"],
         "pdf_url": f"/download-pdf?file_number={safe_file}",
         "pdf_filename": f"{safe_file}.pdf"
     }
@@ -414,7 +508,6 @@ async def download_pdf(file_number: str):
     path = os.path.join(PDF_DIR, f"{safe}.pdf")
     if os.path.exists(path):
         return FileResponse(path=path, media_type="application/pdf", filename=f"{safe}.pdf")
-    # backward compatibility: try raw name if exists
     raw_path = os.path.join(PDF_DIR, f"{file_number}.pdf")
     if os.path.exists(raw_path):
         return FileResponse(path=raw_path, media_type="application/pdf", filename=f"{file_number}.pdf")
