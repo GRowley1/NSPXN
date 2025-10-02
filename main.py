@@ -1,6 +1,6 @@
 
 from fastapi import FastAPI, File, UploadFile, Form
-from fastapi.responses import JSONResponse, FileResponse
+from fastapi.responses import JSONResponse, FileResponse, PlainTextResponse
 from fastapi.middleware.cors import CORSMiddleware
 from typing import List, Tuple, Optional, Dict, Any
 import os, re, io, base64, json, logging, smtplib
@@ -46,6 +46,60 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+# ==========================
+# Client Rules endpoints (restore "Paste Client Rules" support)
+# ==========================
+def _norm_company(name: str) -> str:
+    return (name or "").strip().lower()
+
+DEFAULT_CLIENT_RULES = {
+    "_default": (
+        "Standard Client Rules:\n"
+        "- Use prevailing labor rates as provided in the estimate.\n"
+        "- Apply sales tax to taxable parts and materials per state/local law.\n"
+        "- Require 4-corner photos, VIN, license plate, and odometer when photos are requested.\n"
+        "- Sublet and fees must include itemized descriptions.\n"
+        "- OEM procedures must be followed where applicable."
+    ),
+    "progressive": (
+        "Progressive Client Rules:\n"
+        "- Use market labor rates; verify refinish overlap per CCC logic.\n"
+        "- Apply tax to parts/materials when applicable; document exemptions.\n"
+        "- Prior damage and unrelated damage must be excluded.\n"
+        "- Require photos: 4-corners, VIN, plate, odometer when photos requested."
+    ),
+    "state farm": (
+        "State Farm Client Rules:\n"
+        "- Labor rates and operations per region; verify corrosion protection.\n"
+        "- Tax per jurisdiction; document materials.\n"
+        "- LKQ and aftermarket parts must be equivalent quality and documented.\n"
+        "- Standard photo set when applicable."
+    ),
+    "geico": (
+        "GEICO Client Rules:\n"
+        "- Follow OEM position statements for ADAS/calibration.\n"
+        "- Verify paint materials cap and body/paint labor rates.\n"
+        "- Sales tax on taxable items; itemize sublet.\n"
+        "- Required photos if photo review selected."
+    ),
+}
+
+@app.get("/client-rules", response_class=PlainTextResponse)
+async def get_client_rules(ia_company: str = ""):
+    key = _norm_company(ia_company)
+    rules = DEFAULT_CLIENT_RULES.get(key, DEFAULT_CLIENT_RULES["_default"])
+    return rules
+
+# Backward-compat aliases some frontends use
+@app.get("/rules", response_class=PlainTextResponse)
+async def get_rules_alias(ia_company: str = ""):
+    return await get_client_rules(ia_company)
+
+@app.get("/guidelines", response_class=PlainTextResponse)
+async def get_guidelines_alias(ia_company: str = ""):
+    return await get_client_rules(ia_company)
+
 
 # ==========================
 # Minimal OCR helpers
