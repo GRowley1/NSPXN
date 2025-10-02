@@ -1,6 +1,6 @@
 
 from fastapi import FastAPI, File, UploadFile, Form
-from fastapi.responses import JSONResponse, FileResponse
+from fastapi.responses import JSONResponse, FileResponse, PlainTextResponse
 from fastapi.middleware.cors import CORSMiddleware
 from typing import List, Tuple, Optional, Dict, Any
 import os, re, io, base64, json, logging, smtplib
@@ -68,18 +68,39 @@ def pdf_text_ocr(pdf_bytes: bytes, dpi: int = 200, max_pages: int = 12) -> str:
         try:
             txt = pytesseract.image_to_string(_pp(pg), lang="eng", config="--psm 6")
             if txt.strip():
-                out.append(f"[Page {i}]\\n{txt}")
+                out.append(f"[Page {i}]\n{txt}")
         except Exception as e:
             log.warning(f"OCR page {i} failed: {e}")
-    return "\\n\\n".join(out)
+    return "\n\n".join(out)
 
 def docx_text(blob: bytes) -> str:
     try:
         d = Document(io.BytesIO(blob))
-        return "\\n".join(p.text for p in d.paragraphs if p.text.strip())
+        return "\n".join(p.text for p in d.paragraphs if p.text.strip())
     except Exception as e:
         log.warning(f"docx read error: {e}")
         return ""
+
+# =========================================
+# Client Rules endpoint (legacy JSON behavior)
+# =========================================
+@app.get("/client-rules/{client_name}")
+async def get_client_rules(client_name: str):
+    rules_dir = "client_rules"
+    file_name = f"{client_name}.docx"
+    file_path = os.path.join(rules_dir, file_name)
+    if os.path.exists(file_path):
+        try:
+            doc = Document(file_path)
+            text = "\n".join([p.text for p in doc.paragraphs if p.text.strip()])
+            log.debug(f"Client rules for {client_name}: {text[:500]}...")
+            return {"text": text}
+        except Exception as e:
+            log.error(f"Client rules error: {str(e)}")
+            return JSONResponse(status_code=500, content={"error": str(e)})
+    else:
+        log.error(f"Rules not found for client: {client_name}")
+        return JSONResponse(status_code=404, content={"error": "Rules not found for this client."})
 
 # ==========================
 # Routes
@@ -100,7 +121,7 @@ async def vision_review(
     # Ingest: gather text + a few compressed images (for speed)
     texts: List[str] = []
     images_b64: List[Dict[str, Any]] = []
-    max_imgs = {"invoices_with_photos":2, "supplement":2, "photos_only":4, "comprehensive":6}.get(ai_intent, 0)
+    max_imgs = {"invoices_with_photos":2, "supplement":2, "photos_only":6, "comprehensive":6}.get(ai_intent, 0)
 
     for f in files:
         raw = await f.read()
@@ -124,7 +145,7 @@ async def vision_review(
         elif name.endswith(".txt"):
             texts.append(raw.decode("utf-8","ignore"))
 
-    combined_text = "\\n".join(texts)[:6000]  # trim for speed
+    combined_text = "\n".join(texts)[:5000]  # trim for speed
 
     # Use GPT for EVERYTHING: extract fields + compute score + build summary
     intent_labels = {
@@ -146,6 +167,24 @@ async def vision_review(
         "Return ONLY valid JSON and nothing else."
     )
 
+    # Enhanced supplement breakdown guidance (markdown)
+    SUPP_DETAILS = (
+        "When the request type is a supplement (invoices_with_photos or supplement), "
+        "produce a detailed markdown summary with these sections:\n\n"
+        "### Supplement Overview\n"
+        "- High-level summary of the supplement scope and totals.\n\n"
+        "### Invoice vs Estimate — Line-Item Deltas\n"
+        "Provide a compact table with columns: Part/Operation | Qty | $Estimate | $Invoice | Δ (±) | Rationale.\n"
+        "Use item descriptions and amounts extracted verbatim from the provided text when possible.\n\n"
+        "### Photo Evidence Mapping\n"
+        "Assume attached images are ordered as Photo 1..N in the same order provided. "
+        "List each key added/changed item and reference the most relevant Photo #(s) if any cues from the text/photos suggest it. "
+        "If ambiguous, say 'No clear photo evidence'.\n\n"
+        "### Missing or Unclear Evidence\n"
+        "List any items where invoices or estimate references are incomplete or not found.\n\n"
+        "End with a single line exactly in this format: Final Evaluation: NN%"
+    )
+
     PER_INTENT = {
         "guidelines_only": "Ignore photos. Analyze estimate text against provided client rules (if any).",
         "photos_only": "Ignore guidelines. Compare photos to estimate text for damage consistency and completeness.",
@@ -158,30 +197,33 @@ async def vision_review(
 
     JSON_KEYS = ["file_number","request_type","claim_number","vin","vin_verification","vehicle","odometer_estimate_only","compliance_score","summary_markdown"]
 
-    user_parts: List[Dict[str, Any]] = [
-        {"type":"text","text": (
-            f"Mode: {ai_intent}. {mode_tip}\n"
-            f"Return JSON with keys exactly: {JSON_KEYS}.\n"
-            "Rules: VIN verification must be one of: MATCH, MISMATCH, NOT VERIFIED; Compliance Score integer 0-100; "
-            "Populate all fields ONLY from the provided content; If missing, use 'N/A'.\n\n"
-            f"REQUEST TYPE: {req_label}\n\nCLIENT RULES (if provided):\n{client_rules[:2500]}\n\n"
-            f"ESTIMATE/CONTENT (OCR):\n{combined_text}"
-        )}
-    ]
+    # Tell the model that the upcoming images are ordered Photo 1..N
+    preface = f"Mode: {ai_intent}. {mode_tip}\n"
+    if ai_intent in ("invoices_with_photos","supplement"):
+        preface += SUPP_DETAILS + "\n\n"
+    preface += (
+        f"Return JSON with keys exactly: {JSON_KEYS}.\n"
+        "Rules: VIN verification must be one of: MATCH, MISMATCH, NOT VERIFIED; Compliance Score integer 0-100; "
+        "Populate all fields ONLY from the provided content; If missing, use 'N/A'.\n\n"
+        f"REQUEST TYPE: {req_label}\n\nCLIENT RULES (if provided):\n{client_rules[:2500]}\n\n"
+        f"ESTIMATE/CONTENT (OCR):\n{combined_text}\n\n"
+        f"NOTE: The next {len(images_b64)} images (if any) are the photos in order: Photo 1..Photo {len(images_b64)}."
+    )
+
+    user_parts: List[Dict[str, Any]] = [{"type":"text","text": preface}]
     if images_b64:
         user_parts.extend(images_b64)
 
-    import json as _json
     try:
         rsp = client.chat.completions.create(
             model=MODEL,
             messages=[{"role":"system","content": SYSTEM},{"role":"user","content": user_parts}],
-            max_tokens=450,
+            max_tokens=650 if ai_intent in ("invoices_with_photos","supplement") else 450,
             temperature=0
         )
         raw = (rsp.choices[0].message.content or "").strip()
         raw = raw.strip().removeprefix("```json").removesuffix("```").strip()
-        data = _json.loads(raw)
+        data = json.loads(raw)
     except Exception as e:
         log.error(f"OpenAI error or JSON parse error: {e}")
         data = {
@@ -273,29 +315,6 @@ AI-4-IA Review Summary
         "pdf_url": f"/download-pdf?file_number={safe_file}",
         "pdf_filename": f"{safe_file}.pdf"
     }
-
-
-
-# =========================================
-# Client Rules endpoint (exact legacy behavior)
-# =========================================
-@app.get("/client-rules/{client_name}")
-async def get_client_rules(client_name: str):
-    rules_dir = "client_rules"
-    file_name = f"{client_name}.docx"
-    file_path = os.path.join(rules_dir, file_name)
-    if os.path.exists(file_path):
-        try:
-            doc = Document(file_path)
-            text = "\n".join([p.text for p in doc.paragraphs if p.text.strip()])
-            log.debug(f"Client rules for {client_name}: {text[:500]}...")
-            return {"text": text}
-        except Exception as e:
-            log.error(f"Client rules error: {str(e)}")
-            return JSONResponse(status_code=500, content={"error": str(e)})
-    else:
-        log.error(f"Rules not found for client: {client_name}")
-        return JSONResponse(status_code=404, content={"error": "Rules not found for this client."})
 
 @app.get("/download-pdf")
 async def download_pdf(file_number: str):
