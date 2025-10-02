@@ -3,7 +3,6 @@ from fastapi import FastAPI, File, UploadFile, Form
 from fastapi.responses import JSONResponse, FileResponse
 from fastapi.middleware.cors import CORSMiddleware
 from typing import List, Optional, Dict, Any
-from difflib import SequenceMatcher
 import os, re, io, base64, json, logging, smtplib
 from email.message import EmailMessage
 
@@ -83,75 +82,25 @@ def docx_text(blob: bytes) -> str:
         return ""
 
 # =========================================
-# Robust Client Rules endpoint (exact .docx with smart matching)
+# Client Rules endpoint (unchanged logic from last build)
 # =========================================
-def _norm(s: str) -> str:
-    return re.sub(r"[^a-z0-9]+", "", (s or "").lower())
-
 @app.get("/client-rules/{client_name}")
 async def get_client_rules(client_name: str):
-    """
-    Loads the exact client rule .docx for the selected carrier.
-    - Looks in CLIENT_RULES_DIR (default 'client_rules') recursively for *.docx
-    - Tries exact normalized match first, then prefix/contains, then best similarity
-    - Returns JSON: {"text": "...", "file": "relative/path.docx"}
-    - If not found, returns 404 with a short list of available basenames
-    """
     rules_dir = os.getenv("CLIENT_RULES_DIR", "client_rules")
-    if not os.path.isdir(rules_dir):
-        return JSONResponse(status_code=404, content={"error": "Rules directory not found.", "dir": rules_dir})
-
-    # Collect candidates
-    cands = []  # (norm_name, base, fullpath)
-    for root, _, files in os.walk(rules_dir):
-        for fn in files:
-            if fn.lower().endswith(".docx"):
-                full = os.path.join(root, fn)
-                base = os.path.splitext(fn)[0]
-                cands.append((_norm(base), base, full))
-
-    if not cands:
-        return JSONResponse(status_code=404, content={"error": "No .docx rules found in directory.", "dir": rules_dir})
-
-    key = _norm(client_name)
-
-    # 1) exact normalized match
-    for n, base, full in cands:
-        if n == key:
-            try:
-                doc = Document(full)
-                text = "\n".join([p.text for p in doc.paragraphs if p.text.strip()])
-                return {"text": text, "file": os.path.relpath(full, rules_dir)}
-            except Exception as e:
-                return JSONResponse(status_code=500, content={"error": f"Unable to read rules: {e}", "file": full})
-
-    # 2) startswith / contains
-    for n, base, full in cands:
-        if n.startswith(key) or key.startswith(n):
-            try:
-                doc = Document(full)
-                text = "\n".join([p.text for p in doc.paragraphs if p.text.strip()])
-                return {"text": text, "file": os.path.relpath(full, rules_dir)}
-            except Exception as e:
-                return JSONResponse(status_code=500, content={"error": f"Unable to read rules: {e}", "file": full})
-
-    # 3) best similarity
-    scored = sorted([(SequenceMatcher(None, key, n).ratio(), base, full) for n, base, full in cands], reverse=True)
-    if scored and scored[0][0] >= 0.6:
-        _, base, full = scored[0]
+    file_name = f"{client_name}.docx"
+    file_path = os.path.join(rules_dir, file_name)
+    if os.path.exists(file_path):
         try:
-            doc = Document(full)
+            doc = Document(file_path)
             text = "\n".join([p.text for p in doc.paragraphs if p.text.strip()])
-            return {"text": text, "file": os.path.relpath(full, rules_dir)}
+            return {"text": text}
         except Exception as e:
-            return JSONResponse(status_code=500, content={"error": f"Unable to read rules: {e}", "file": full})
-
-    # Not found
-    avail = [base for _, base, _ in cands]
-    return JSONResponse(status_code=404, content={"error":"Rules not found for this client.", "tried": client_name, "available": avail[:30]})
+            return JSONResponse(status_code=500, content={"error": str(e)})
+    else:
+        return JSONResponse(status_code=404, content={"error": "Rules not found for this client."})
 
 # =========================================
-# Deterministic pre-extraction + VIN compare (strict MATCH/MISMATCH)
+# VIN helpers with checksum + OCR-ambiguity repair
 # =========================================
 def _clean(s: str) -> str:
     return (s or "").replace("\r", "")
@@ -170,7 +119,6 @@ def extract_claim_number(text: str) -> Optional[str]:
             return m.group(1).strip().rstrip(".,;")
     return None
 
-# VIN helpers with checksum + OCR-ambiguity repair
 VIN_ALLOWED = set("0123456789ABCDEFGHJKLMNPRSTUVWXYZ")
 _trans = {**{str(i): i for i in range(10)},
           **dict(A=1,B=2,C=3,D=4,E=5,F=6,G=7,H=8,J=1,K=2,L=3,M=4,N=5,P=7,R=9,S=2,T=3,U=4,V=5,W=6,X=7,Y=8,Z=9)}
@@ -191,33 +139,38 @@ def _normalize_vin_basic(s: str) -> Optional[str]:
         return None
     return s
 
+_swaps = {'S':['S','5'], '5':['5','S'], 'B':['B','8'], '8':['8','B'], 'Z':['Z','2'], '2':['2','Z']}
 def _vin_ambiguous_variants(v: str):
-    swaps = {'S':['S','5'], '5':['5','S'], 'B':['B','8'], '8':['8','B'], 'Z':['Z','2'], '2':['2','Z']}
     cands = ['']
     for ch in v:
-        opts = swaps.get(ch, [ch])
+        opts = _swaps.get(ch, [ch])
         cands = [p + o for p in cands for o in opts]
-        if len(cands) > 64:
-            cands = cands[:64]
+        if len(cands) > 128:
+            cands = cands[:128]
     return cands
+
+def _canon_vin(v: Optional[str]) -> Optional[str]:
+    """Return a checksum-valid VIN by exploring ambiguous swaps; else None."""
+    if not v: return None
+    base = _normalize_vin_basic(v)
+    if not base: return None
+    if _vin_checksum_ok(base): return base
+    for var in _vin_ambiguous_variants(base):
+        if len(var)==17 and all(ch in VIN_ALLOWED for ch in var) and _vin_checksum_ok(var):
+            return var
+    return None
 
 def _vin_candidates_from_text(t: str) -> list:
     t = (t or "").upper()
-    cands = []
-    labeled = re.findall(r"\bVIN\s*[:#\-]?\s*([A-HJ-NPR-Z0-9]{10,20})", t, re.IGNORECASE)
-    cands.extend(labeled)
-    cands.extend(re.findall(r"\b([A-HJ-NPR-Z0-9]{17})\b", t, re.IGNORECASE))
+    raw_cands = []
+    raw_cands.extend(re.findall(r"\bVIN\s*[:#\-]?\s*([A-HJ-NPR-Z0-9]{10,20})", t, re.IGNORECASE))
+    raw_cands.extend(re.findall(r"\b([A-HJ-NPR-Z0-9]{17})\b", t, re.IGNORECASE))
     out = []
-    for raw in cands:
-        base = _normalize_vin_basic(raw)
-        if not base: 
-            continue
-        if _vin_checksum_ok(base):
-            out.append(base)
-            continue
-        for var in _vin_ambiguous_variants(base):
-            if len(var) == 17 and all(ch in VIN_ALLOWED for ch in var) and _vin_checksum_ok(var):
-                out.append(var); break
+    for raw in raw_cands:
+        can = _canon_vin(raw)
+        if can:
+            out.append(can)
+    # dedupe preserving order
     seen = set(); uniq = []
     for v in out:
         if v not in seen:
@@ -225,12 +178,18 @@ def _vin_candidates_from_text(t: str) -> list:
     return uniq
 
 def extract_vin(text: str) -> Optional[str]:
-    vins = _vin_candidates_from_text(text)
-    return vins[0] if vins else None
+    c = _vin_candidates_from_text(text)
+    return c[0] if c else None
 
 def extract_all_vins(text: str) -> list:
     return _vin_candidates_from_text(text)
 
+MAKE_MAP = {
+    "CHEV":"Chevrolet","CHEVY":"Chevrolet","MB":"Mercedes-Benz","MERCEDES":"Mercedes-Benz",
+    "VW":"Volkswagen","VOLKS":"Volkswagen","GMC":"GMC","TOYOTA":"Toyota","HONDA":"Honda",
+    "NISSAN":"Nissan","HYUNDAI":"Hyundai","KIA":"Kia","FORD":"Ford","DODGE":"Dodge","RAM":"Ram",
+    "SUBARU":"Subaru","MAZDA":"Mazda","BMW":"BMW","AUDI":"Audi","JEEP":"Jeep"
+}
 def extract_vehicle(text: str) -> Optional[str]:
     t = _clean(text)
     m = re.search(r"Vehicle\s*[:\-]\s*(.+)", t, re.IGNORECASE)
@@ -246,7 +205,7 @@ def extract_vehicle(text: str) -> Optional[str]:
     if best:
         parts = best.split()
         year = parts[0]
-        mk = parts[1].capitalize()
+        mk = MAKE_MAP.get(parts[1].upper(), parts[1].capitalize())
         model = " ".join(parts[2:]).strip()
         return f"{year} {mk} {model}"
     return None
@@ -321,25 +280,23 @@ async def vision_review(
     combined_text = "\n".join(texts)[:8000]
     photos_text = "\n".join(photo_texts)[:4000]
 
-    pre = {
-        "claim_number": extract_claim_number(combined_text) or "N/A",
-        "vin": extract_vin(combined_text) or "N/A",
-        "vehicle": extract_vehicle(combined_text) or "N/A",
-        "odometer_estimate_only": extract_odometer_estimate(combined_text) or "N/A",
-    }
+    # Pre-extract (now canonicalized)
+    pre_claim = extract_claim_number(combined_text) or "N/A"
+    pre_vin_est = extract_vin(combined_text)  # already canonicalized with checksum
+    pre_vehicle = extract_vehicle(combined_text) or "N/A"
+    pre_odo = extract_odometer_estimate(combined_text) or "N/A"
 
-    vins_in_photos = extract_all_vins(photos_text)
-    vin_est = pre["vin"] if pre["vin"] != "N/A" else None
-    if vin_est:
-        if vins_in_photos:
-            vin_verify = "MATCH" if vin_est in vins_in_photos else "MISMATCH"
+    photo_vins = extract_all_vins(photos_text)  # canonicalized list
+    vin_est_c = _canon_vin(pre_vin_est) if pre_vin_est else None
+    if vin_est_c:
+        if photo_vins:
+            vin_verify = "MATCH" if vin_est_c in photo_vins else "MISMATCH"
         else:
             vin_verify = "MISMATCH"
     else:
         vin_verify = "MISMATCH"
 
-    # Choose the VIN to DISPLAY: prefer validated estimate VIN; else first photo VIN; else N/A
-    vin_display = pre["vin"] if pre["vin"] != "N/A" else (vins_in_photos[0] if vins_in_photos else "N/A")
+    vin_display = vin_est_c or (photo_vins[0] if photo_vins else "N/A")
 
     intent_labels = {
         "guidelines_only": "Guidelines → Estimate (no photos)",
@@ -353,28 +310,16 @@ async def vision_review(
 
     SYSTEM = (
         "You are an auto-claims appraisal assistant. "
-        "Return ONLY valid JSON. Do not include markdown fences."
+        "Return ONLY valid JSON (no backticks)."
     )
 
     MODE_DETAILS = {
-        "guidelines_only": (
-            "### Overview\n### Guidelines Compliance\n### Missing or Issues\nEnd with: Final Evaluation: NN%"
-        ),
-        "photos_only": (
-            "### Overview\n### Damage Consistency vs Estimate\n### Required Photos Check\nEnd with: Final Evaluation: NN%"
-        ),
-        "comprehensive": (
-            "### Overview\n### Estimate Integrity\n### Photo Evidence Mapping\n### VIN Verification\n### Missing or Issues\nEnd with: Final Evaluation: NN%"
-        ),
-        "invoices_with_photos": (
-            "### Supplement Overview\n### Invoice vs Estimate — Line-Item Deltas\n### Photo Evidence Mapping\n### Missing or Unclear Evidence\nEnd with: Final Evaluation: NN%"
-        ),
-        "supplement": (
-            "### Supplement Overview\n### Invoice vs Estimate — Line-Item Deltas\n### Photo Evidence Mapping\n### Missing or Unclear Evidence\nEnd with: Final Evaluation: NN%"
-        ),
-        "docs_checklist": (
-            "### Documentation Checklist\n### Missing Items\nEnd with: Final Evaluation: NN%"
-        )
+        "guidelines_only": "### Overview\n### Guidelines Compliance\n### Missing or Issues\nEnd with: Final Evaluation: NN%",
+        "photos_only": "### Overview\n### Damage Consistency vs Estimate\n### Required Photos Check\nEnd with: Final Evaluation: NN%",
+        "comprehensive": "### Overview\n### Estimate Integrity\n### Photo Evidence Mapping\n### VIN Verification\n### Missing or Issues\nEnd with: Final Evaluation: NN%",
+        "invoices_with_photos": "### Supplement Overview\n### Invoice vs Estimate — Line-Item Deltas\n### Photo Evidence Mapping\n### Missing or Unclear Evidence\nEnd with: Final Evaluation: NN%",
+        "supplement": "### Supplement Overview\n### Invoice vs Estimate — Line-Item Deltas\n### Photo Evidence Mapping\n### Missing or Unclear Evidence\nEnd with: Final Evaluation: NN%",
+        "docs_checklist": "### Documentation Checklist\n### Missing Items\nEnd with: Final Evaluation: NN%"
     }
 
     JSON_KEYS = ["file_number","request_type","claim_number","vin","vin_verification","vehicle","odometer_estimate_only","compliance_score","summary_brief","summary_markdown"]
@@ -386,7 +331,7 @@ async def vision_review(
         "Rules: VIN verification is already determined outside the model; DO NOT change it. Compliance Score integer 0-100.\n"
         "Provide summary_brief (<=280 chars, plain text). Provide summary_markdown (full detail).\n\n"
         f"REQUEST TYPE: {req_label}\n\nCLIENT RULES (if provided):\n{client_rules[:2500]}\n\n"
-        f"PRE-EXTRACTED: {{'claim_number': '{pre['claim_number']}', 'vin': '{pre['vin']}', 'vehicle': '{pre['vehicle']}', 'odometer_estimate_only': '{pre['odometer_estimate_only']}', 'vin_verification': '{vin_verify}'}}\n\n"
+        f"PRE-EXTRACTED: {{'claim_number': '{pre_claim}', 'vin': '{vin_display}', 'vehicle': '{pre_vehicle}', 'odometer_estimate_only': '{pre_odo}', 'vin_verification': '{vin_verify}'}}\n\n"
         f"ESTIMATE/CONTENT (OCR):\n{combined_text}\n\n"
         f"PHOTO OCR:\n{photos_text}\n\n"
         f"NOTE: The next {len(images_b64)} images are Photo 1..{len(images_b64)}."
@@ -417,19 +362,19 @@ async def vision_review(
     summary_full = re.sub(r"###\s*VIN Verification.*?(?=\n### |\Z)", "", summary_full, flags=re.IGNORECASE | re.DOTALL).strip()
     vin_block = "### VIN Verification\n- Result: {res}\n- Estimate VIN: {v_est}\n- Photo VIN(s): {v_ph}\n".format(
         res=vin_verify,
-        v_est=(vin_est or "N/A"),
-        v_ph=(", ".join(vins_in_photos) if vins_in_photos else "N/A")
+        v_est=(vin_est_c or "N/A"),
+        v_ph=(", ".join(photo_vins) if photo_vins else "N/A")
     )
     summary_full = vin_block + "\n" + summary_full
 
     safe = {
         "file_number": file_number,
         "request_type": req_label,
-        "claim_number": data.get("claim_number") or pre["claim_number"],
+        "claim_number": data.get("claim_number") or pre_claim,
         "vin": vin_display,
         "vin_verification": vin_verify,
-        "vehicle": data.get("vehicle") or pre["vehicle"],
-        "odometer_estimate_only": data.get("odometer_estimate_only") or pre["odometer_estimate_only"],
+        "vehicle": data.get("vehicle") or pre_vehicle,
+        "odometer_estimate_only": data.get("odometer_estimate_only") or pre_odo,
         "compliance_score": data.get("compliance_score") if isinstance(data.get("compliance_score"), int) else 100,
         "summary_brief": summary_brief,
         "summary_markdown": summary_full
@@ -497,9 +442,7 @@ AI-4-IA Review Summary
             smtp.login("info@nspxn.com", "grr2025GRR")
             smtp.send_message(msg)
     except Exception as e:
-        log.error(f"Email error: {e}"
-
-)
+        log.error(f"Email error: {e}")
 
     return {
         "file_number": file_number,
@@ -514,8 +457,8 @@ AI-4-IA Review Summary
         "summary_markdown": safe["summary_markdown"],
         "web_summary": safe["summary_brief"],   # alias for older UI
         "gpt_output": safe["summary_markdown"], # alias for older UI
-        "pdf_url": f"/download-pdf?file_number={_safe_name(file_number)}",
-        "pdf_filename": f"{_safe_name(file_number)}.pdf"
+        "pdf_url": f"/download-pdf?file_number={safe_file}",
+        "pdf_filename": f"{safe_file}.pdf"
     }
 
 @app.get("/download-pdf")
