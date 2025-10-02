@@ -1,242 +1,285 @@
+
 from fastapi import FastAPI, File, UploadFile, Form
 from fastapi.responses import JSONResponse, FileResponse
 from fastapi.middleware.cors import CORSMiddleware
-from typing import List, Tuple, Optional
-import os, io, re, time, base64, zipfile, smtplib, json, logging
-
+from typing import List, Optional, Dict, Any
+from difflib import SequenceMatcher
+import os, re, io, base64, json, logging, smtplib
 from email.message import EmailMessage
+
 from fpdf import FPDF
-import PyPDF2
+from docx import Document
 from pdf2image import convert_from_bytes
 import pytesseract
 from PIL import Image, ImageEnhance, ImageOps, ImageFilter
 
 from openai import OpenAI
 
-# ======================= Config & Logging =======================
-PDF_DIR = os.getenv("PDF_DIR", "/tmp"); os.makedirs(PDF_DIR, exist_ok=True)
+# ==========================
+# Config
+# ==========================
+PDF_DIR = os.getenv("PDF_DIR", "/tmp")
+os.makedirs(PDF_DIR, exist_ok=True)
 
-OPENAI_MODEL = os.getenv("OAI_MODEL", "gpt-4o-mini")
-OPENAI_FALLBACK = "gpt-3.5-turbo"
-
-SMTP_HOST = os.getenv("SMTP_HOST", "mail.tierra.net")
-SMTP_PORT = int(os.getenv("SMTP_PORT", "465"))
-SMTP_USER = os.getenv("SMTP_USER", "info@nspxn.com")
-SMTP_PASS = os.getenv("SMTP_PASS", "grr2025GRR")
-SMTP_FROM = os.getenv("SMTP_FROM", SMTP_USER)  # default From = authenticated user
-SMTP_TO = os.getenv("SMTP_TO", "info@nspxn.com")  # comma-separated
-SEND_EMAIL = os.getenv("SEND_EMAIL", "1")
-
-logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
+logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s")
 log = logging.getLogger("ai4ia")
 
-api_key = os.environ.get("OPENAI_API_KEY", "")
-if not api_key:
-    raise RuntimeError("OPENAI_API_KEY not set")
-client = OpenAI(api_key=api_key)
+MODEL = os.getenv("OAI_MODEL", "gpt-4o")
+if "OPENAI_API_KEY" not in os.environ or not os.environ["OPENAI_API_KEY"]:
+    raise RuntimeError("❌ OPENAI_API_KEY is not set")
+client = OpenAI(api_key=os.environ["OPENAI_API_KEY"])
 
-INTENTS = {
-    "guidelines_only": "Guidelines → Estimate (no photos)",
-    "comprehensive": "Comprehensive: Guidelines + Estimate + Photos (with VIN check)",
-    "photos_only": "Photos Only: Compare to Estimate",
-    "invoices_with_photos": "Supplement ↔ Invoices (+ Photos)",
-    "docs_checklist": "Documentation Checklist",
-}
+def _safe_name(s: str) -> str:
+    import re as _re
+    return _re.sub(r"[^\w.\-]+", "-", (s or "").strip()).strip("-_.")
 
-# ======================= App =======================
+# ==========================
+# App + CORS
+# ==========================
 app = FastAPI()
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],
+    allow_origins=[
+        "https://nspxn.com","https://www.nspxn.com","http://nspxn.com","http://www.nspxn.com",
+        "https://nspxn.onrender.com"
+    ],
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
 )
 
-# ======================= Utilities =======================
-def _pp(img):
+# ==========================
+# Minimal OCR helpers
+# ==========================
+def _pp(img: Image.Image) -> Image.Image:
     img = img.convert("L")
-    img = ImageEnhance.Contrast(img).enhance(1.85)
+    img = ImageEnhance.Contrast(img).enhance(2.0)
     img = ImageOps.autocontrast(img)
     img = img.filter(ImageFilter.MedianFilter(3))
     return img
 
-def sanitize_latin1(s: str) -> str:
-    if not s: return ""
-    repl = {
-        "\u2018":"'","\u2019":"'","\u201C":'"',"\u201D":'"',
-        "\u2013":"-","\u2014":"-","\u2022":"-","\u2026":"...",
-        "\u2192":"->","\u2194":"<->","\u00A0":" "
-    }
-    for k,v in repl.items():
-        s = s.replace(k,v)
-    return s.encode("latin-1","ignore").decode("latin-1","ignore")
-
-def safe_filename(s: str) -> str:
-    s = (s or "").strip()
-    s = re.sub(r"[^\w.\-]+","-", s)
-    return s.strip("-_.") or f"report-{int(time.time())}"
-
-def pdf_text(pdf_bytes: bytes, limit_pages: int = 12) -> str:
-    out = []
+def pdf_text_ocr(pdf_bytes: bytes, dpi: int = 200, max_pages: int = 12) -> str:
     try:
-        rdr = PyPDF2.PdfReader(io.BytesIO(pdf_bytes))
-        for i, pg in enumerate(rdr.pages[:limit_pages], 1):
-            t = pg.extract_text() or ""
-            if t.strip():
-                out.append(f"[Page {i}]\\n{t}")
+        pages = convert_from_bytes(pdf_bytes, dpi=dpi)[:max_pages]
     except Exception as e:
-        log.info(f"PyPDF2 read fail: {e}")
-    return "\\n\\n".join(out)
-
-def ocr_head(pdf_bytes: bytes, pages: int = 2, dpi: int = 250) -> str:
-    try:
-        imgs = convert_from_bytes(pdf_bytes, dpi=dpi)[:pages]
-    except Exception as e:
-        log.info(f"pdf2image fail: {e}"); return ""
+        log.warning(f"pdf->image failed: {e}")
+        return ""
     out = []
-    for i, im in enumerate(imgs, 1):
+    for i, pg in enumerate(pages, 1):
         try:
-            out.append(f"[OCR {i}]\\n" + pytesseract.image_to_string(_pp(im), lang="eng", config="--psm 6"))
+            txt = pytesseract.image_to_string(_pp(pg), lang="eng", config="--psm 6")
+            if txt.strip():
+                out.append(f"[Page {i}]\n{txt}")
         except Exception as e:
-            log.info(f"OCR p{i} fail: {e}")
-    return "\\n".join(out)
+            log.warning(f"OCR page {i} failed: {e}")
+    return "\n\n".join(out)
 
-# ---------- VIN / Claim / Vehicle ----------
+def docx_text(blob: bytes) -> str:
+    try:
+        d = Document(io.BytesIO(blob))
+        return "\n".join(p.text for p in d.paragraphs if p.text.strip())
+    except Exception as e:
+        log.warning(f"docx read error: {e}")
+        return ""
+
+# =========================================
+# Robust Client Rules endpoint (exact .docx with smart matching)
+# =========================================
+def _norm(s: str) -> str:
+    return re.sub(r"[^a-z0-9]+", "", (s or "").lower())
+
+@app.get("/client-rules/{client_name}")
+async def get_client_rules(client_name: str):
+    """
+    Loads the exact client rule .docx for the selected carrier.
+    - Looks in CLIENT_RULES_DIR (default 'client_rules') recursively for *.docx
+    - Tries exact normalized match first, then prefix/contains, then best similarity
+    - Returns JSON: {"text": "...", "file": "relative/path.docx"}
+    - If not found, returns 404 with a short list of available basenames
+    """
+    rules_dir = os.getenv("CLIENT_RULES_DIR", "client_rules")
+    if not os.path.isdir(rules_dir):
+        return JSONResponse(status_code=404, content={"error": "Rules directory not found.", "dir": rules_dir})
+
+    # Collect candidates
+    cands = []  # (norm_name, base, fullpath)
+    for root, _, files in os.walk(rules_dir):
+        for fn in files:
+            if fn.lower().endswith(".docx"):
+                full = os.path.join(root, fn)
+                base = os.path.splitext(fn)[0]
+                cands.append((_norm(base), base, full))
+
+    if not cands:
+        return JSONResponse(status_code=404, content={"error": "No .docx rules found in directory.", "dir": rules_dir})
+
+    key = _norm(client_name)
+
+    # 1) exact normalized match
+    for n, base, full in cands:
+        if n == key:
+            try:
+                doc = Document(full)
+                text = "\n".join([p.text for p in doc.paragraphs if p.text.strip()])
+                return {"text": text, "file": os.path.relpath(full, rules_dir)}
+            except Exception as e:
+                return JSONResponse(status_code=500, content={"error": f"Unable to read rules: {e}", "file": full})
+
+    # 2) startswith / contains
+    for n, base, full in cands:
+        if n.startswith(key) or key.startswith(n):
+            try:
+                doc = Document(full)
+                text = "\n".join([p.text for p in doc.paragraphs if p.text.strip()])
+                return {"text": text, "file": os.path.relpath(full, rules_dir)}
+            except Exception as e:
+                return JSONResponse(status_code=500, content={"error": f"Unable to read rules: {e}", "file": full})
+
+    # 3) best similarity
+    scored = sorted([(SequenceMatcher(None, key, n).ratio(), base, full) for n, base, full in cands], reverse=True)
+    if scored and scored[0][0] >= 0.6:
+        _, base, full = scored[0]
+        try:
+            doc = Document(full)
+            text = "\n".join([p.text for p in doc.paragraphs if p.text.strip()])
+            return {"text": text, "file": os.path.relpath(full, rules_dir)}
+        except Exception as e:
+            return JSONResponse(status_code=500, content={"error": f"Unable to read rules: {e}", "file": full})
+
+    # Not found
+    avail = [base for _, base, _ in cands]
+    return JSONResponse(status_code=404, content={"error":"Rules not found for this client.", "tried": client_name, "available": avail[:30]})
+
+# =========================================
+# Deterministic pre-extraction + VIN compare (strict MATCH/MISMATCH)
+# =========================================
+def _clean(s: str) -> str:
+    return (s or "").replace("\r", "")
+
+def extract_claim_number(text: str) -> Optional[str]:
+    t = _clean(text)
+    pats = [
+        r"Claim\s*(?:No\.?|Number|#)?\s*[:\-]?\s*([A-Za-z0-9][A-Za-z0-9\-_\/]+)",
+        r"Assignment\s*(?:No\.?|Number|#)?\s*[:\-]?\s*([A-Za-z0-9][A-Za-z0-9\-_\/]+)",
+        r"Reference\s*(?:No\.?|Number|#)?\s*[:\-]?\s*([A-Za-z0-9][A-Za-z0-9\-_\/]+)",
+        r"Claim\s*(?:No\.?|Number|#)?\s*[:\-]?\s*\n\s*([A-Za-z0-9][A-Za-z0-9\-_\/]+)",
+    ]
+    for p in pats:
+        m = re.search(p, t, re.IGNORECASE)
+        if m:
+            return m.group(1).strip().rstrip(".,;")
+    return None
+
+# VIN helpers with checksum + OCR-ambiguity repair
 VIN_ALLOWED = set("0123456789ABCDEFGHJKLMNPRSTUVWXYZ")
-VIN_TIGHT = re.compile(r"\\b([A-HJ-NPR-Z0-9]{17})\\b")
-VIN_RELAX = re.compile(
-    r"(?:V\\.?I\\.?N\\.?|Vehicle\\s+Identification\\s+Number|VIN)\\b[^A-Z0-9]{0,40}((?:[A-HJ-NPR-Z0-9][\\s\\-]*){17})",
-    re.IGNORECASE,
-)
 _trans = {**{str(i): i for i in range(10)},
           **dict(A=1,B=2,C=3,D=4,E=5,F=6,G=7,H=8,J=1,K=2,L=3,M=4,N=5,P=7,R=9,S=2,T=3,U=4,V=5,W=6,X=7,Y=8,Z=9)}
 _w = [8,7,6,5,4,3,2,10,0,9,8,7,6,5,4,3,2]
 
-def _norm_vin(s: str) -> Optional[str]:
-    s = (s or "").upper()
-    s = re.sub(r"[^A-HJ-NPR-Z0-9]","", s).replace("O","0").replace("I","1").replace("Q","0")
-    if len(s)!=17 or any(ch not in VIN_ALLOWED for ch in s): return None
-    return s
-
-def _vin_ok(v: str) -> bool:
+def _vin_checksum_ok(v: str) -> bool:
     try:
-        tot = sum(_trans[ch]*_w[i] for i,ch in enumerate(v))
+        tot = sum(_trans[ch] * _w[i] for i, ch in enumerate(v))
         chk = tot % 11
-        return v[8] == ("X" if chk==10 else str(chk))
+        return v[8] == ("X" if chk == 10 else str(chk))
     except Exception:
         return False
 
-def vin_from_text(text: str) -> Optional[str]:
-    cands = [m.group(1) for m in VIN_RELAX.finditer(text or "")] + VIN_TIGHT.findall(text or "")
-    uniq, seen = [], set()
-    for c in cands:
-        v = _norm_vin(c)
-        if v and v not in seen: uniq.append(v); seen.add(v)
-    for v in uniq:
-        if _vin_ok(v): return v
-    return uniq[0] if uniq else None
-
-def scan_estimate_for_vin(pdf_bytes: bytes) -> Optional[str]:
-    text = pdf_text(pdf_bytes, limit_pages=12)
-    v = vin_from_text(text)
-    if v: return v
-    head = ocr_head(pdf_bytes, pages=2, dpi=250)
-    v = vin_from_text(text + "\\n" + head)
-    if v: return v
-    return None
-
-def claim_from_text(text: str) -> Optional[str]:
-    if not text: return None
-    m = re.search(r"(?is)(Claim\\s*(?:No\\.?|Number|#)?\\s*[:\\-])\\s*([A-Za-z0-9][A-Za-z0-9\\-_/\\s]*\\d[A-Za-z0-9\\-_/\\s]*)", text)
-    if m:
-        cand = m.group(2).strip()
-        if len(re.findall(r"\\d", cand))>=2 and 5<=len(re.sub(r"\\s+","", cand))<=40:
-            return cand.rstrip(" .:,;")
-    m2 = re.search(r"(?is)(Claim\\s*(?:No\\.?|Number|#)?\\s*[:\\-])\\s*\\n\\s*([A-Za-z0-9][A-Za-z0-9\\-_/\\s]*\\d[A-Za-z0-9\\-_/\\s]*)", text)
-    if m2:
-        cand = m2.group(2).strip()
-        if len(re.findall(r"\\d", cand))>=2 and 5<=len(re.sub(r"\\s+","", cand))<=40:
-            return cand.rstrip(" .:,;")
-    flat = re.sub(r"[\\r\\n]+", " ", text)
-    for mm in re.finditer(r"\\b\\d{4,}-\\d{5,}\\b", flat):
-        s,e = mm.start(), mm.end()
-        win = flat[max(0, s-120):min(len(flat), e+120)]
-        if re.search(r"\\b(Claim|Assignment|Reference|File|RO|Work\\s*Order|Loss)\\b", win, re.I):
-            return mm.group(0)
-    return None
-
-MAKE_MAP = {"NISSAN":"Nissan","CHEV":"Chevrolet","CHEVY":"Chevrolet","TOYOTA":"Toyota","FORD":"Ford","HONDA":"Honda",
-            "HYUNDAI":"Hyundai","KIA":"Kia","BMW":"BMW","MERCEDES":"Mercedes-Benz","MB":"Mercedes-Benz",
-            "VW":"Volkswagen","VOLKS":"Volkswagen","SUBARU":"Subaru","MAZDA":"Mazda","DODGE":"Dodge","RAM":"Ram","JEEP":"Jeep"}
-STOP = {"GASOLINE","DIESEL","HYBRID","ELECTRIC","BLACK","WHITE","BLUE","RED","SILVER","GRAY","GREY",
-        "4D","2D","SED","SDN","SUV","COUPE","HATCH","TRUCK","WAGON","AWD","FWD","RWD","L","GDI","TURBO","PAINT","CLEAR","COAT","COLOR"}
-
-def vehicle_from_text(text: str) -> Optional[str]:
-    for ln in (text or "").splitlines():
-        ln = re.sub(r"\\s{2,}"," ", ln.strip())
-        if re.match(r"^\\s*(19|20)\\d{2}\\b", ln) and not re.search(r"\\b(AM|PM)\\b", ln):
-            parts = ln.split()
-            year = parts[0]; tail = parts[1:]
-            keep = []
-            for t in tail:
-                raw = re.sub(r"[^\\w\\-]","", t).upper()
-                if raw in STOP or raw in ("A/M","OEM"): break
-                keep.append(t)
-                if len(keep)>=4: break
-            if keep:
-                mk = MAKE_MAP.get(keep[0].upper(), keep[0].capitalize())
-                return " ".join([year, mk] + keep[1:])
-    return None
-
-def final_percent(narr: str) -> Optional[int]:
-    m = re.search(r"(final\\s*(evaluation|score|compliance)\\s*[:\\-]?\\s*)(\\d{1,3})\\s*%", narr or "", re.IGNORECASE)
-    if m:
-        try:
-            v = int(m.group(3)); return v if 0<=v<=100 else None
-        except Exception: return None
-    return None
-
-def openai_chat(messages, max_tokens=900):
-    for attempt in range(2):
-        try:
-            return client.chat.completions.create(
-                model=OPENAI_MODEL, messages=messages, max_tokens=max_tokens, temperature=0,
-            )
-        except Exception as e:
-            if "429" in str(e) or "timeout" in str(e).lower():
-                time.sleep(1.2 * (attempt+1)); continue
-            break
-    try:
-        return client.chat.completions.create(
-            model=OPENAI_FALLBACK, messages=messages, max_tokens=max_tokens, temperature=0,
-        )
-    except Exception as e:
-        log.warning(f"fallback model failed: {e}")
+def _normalize_vin_basic(s: str) -> Optional[str]:
+    s = (s or "").upper().replace(" ", "")
+    s = s.replace("O","0").replace("I","1").replace("Q","0")
+    if len(s) != 17 or any(ch not in VIN_ALLOWED for ch in s):
         return None
+    return s
 
-def detect_valuations(pdfs: List[Tuple[str, bytes]], est_pdf_name: Optional[str]) -> Tuple[bool, list, str]:
-    VAL_KEYS = [("Kelley Blue Book","KBB"),("KBB.com","KBB"),("NADA","NADA/J.D. Power"),("J.D. Power","NADA/J.D. Power"),
-                ("Black Book","Black Book"),("Edmunds","Edmunds")]
-    GENERIC_PAT = re.compile(r"(Average Price|Estimated Trade-?In Value|Clean Retail Value|Vehicle Valuation)", re.I)
-    sources = []; snippet = ""
-    for nm, blob in pdfs:
-        if est_pdf_name and nm == est_pdf_name: continue
+def _vin_ambiguous_variants(v: str):
+    swaps = {'S':['S','5'], '5':['5','S'], 'B':['B','8'], '8':['8','B'], 'Z':['Z','2'], '2':['2','Z']}
+    cands = ['']
+    for ch in v:
+        opts = swaps.get(ch, [ch])
+        cands = [p + o for p in cands for o in opts]
+        if len(cands) > 64:
+            cands = cands[:64]
+    return cands
+
+def _vin_candidates_from_text(t: str) -> list:
+    t = (t or "").upper()
+    cands = []
+    labeled = re.findall(r"\bVIN\s*[:#\-]?\s*([A-HJ-NPR-Z0-9]{10,20})", t, re.IGNORECASE)
+    cands.extend(labeled)
+    cands.extend(re.findall(r"\b([A-HJ-NPR-Z0-9]{17})\b", t, re.IGNORECASE))
+    out = []
+    for raw in cands:
+        base = _normalize_vin_basic(raw)
+        if not base: 
+            continue
+        if _vin_checksum_ok(base):
+            out.append(base)
+            continue
+        for var in _vin_ambiguous_variants(base):
+            if len(var) == 17 and all(ch in VIN_ALLOWED for ch in var) and _vin_checksum_ok(var):
+                out.append(var); break
+    seen = set(); uniq = []
+    for v in out:
+        if v not in seen:
+            seen.add(v); uniq.append(v)
+    return uniq
+
+def extract_vin(text: str) -> Optional[str]:
+    vins = _vin_candidates_from_text(text)
+    return vins[0] if vins else None
+
+def extract_all_vins(text: str) -> list:
+    return _vin_candidates_from_text(text)
+
+def extract_vehicle(text: str) -> Optional[str]:
+    t = _clean(text)
+    m = re.search(r"Vehicle\s*[:\-]\s*(.+)", t, re.IGNORECASE)
+    if m:
+        val = m.group(1).strip()
+        if 2 < len(val) < 120: return val
+    best = None
+    for ln in t.splitlines():
+        ln = ln.strip()
+        m2 = re.match(r"^(19|20)\d{2}\s+([A-Za-z]{3,})\s+(.+)$", ln)
+        if m2:
+            if best is None or len(ln) > len(best): best = ln
+    if best:
+        parts = best.split()
+        year = parts[0]
+        mk = parts[1].capitalize()
+        model = " ".join(parts[2:]).strip()
+        return f"{year} {mk} {model}"
+    return None
+
+def extract_odometer_estimate(text: str) -> Optional[str]:
+    t = _clean(text)
+    lab = re.search(r"Odometer\s*(?:Reading|)\s*[:\-]?\s*([\d,]{2,7})\s*(?:mi|miles|km)?", t, re.IGNORECASE)
+    if lab:
+        return lab.group(1)
+    m = re.search(r"Mileage\s*[:\-]?\s*([\d,]{2,7})", t, re.IGNORECASE)
+    if m:
+        return m.group(1)
+    return None
+
+def _ocr_image_to_texts(im: Image.Image) -> list:
+    texts = []
+    for angle in (0, 90):
         try:
-            txt = (ocr_head(blob, pages=1) + "\\n" + pdf_text(blob, limit_pages=1))
+            rim = im.rotate(angle, expand=True) if angle else im
+            txt = pytesseract.image_to_string(_pp(rim), lang="eng", config="--psm 6")
+            if txt.strip():
+                texts.append(txt)
         except Exception:
-            txt = ""
-        up = txt.upper(); hit = None
-        for key, lab in VAL_KEYS:
-            if key.upper() in up: hit = lab; break
-        if hit is None and GENERIC_PAT.search(up): hit = "Generic Valuation"
-        if hit:
-            sources.append(hit)
-            if not snippet: snippet = txt[:600]
-    sources = list(dict.fromkeys(sources))
-    return (len(sources) > 0), sources, snippet
+            pass
+    return texts
 
-# ======================= API =======================
+# ==========================
+# Routes
+# ==========================
+@app.get("/")
+async def ok():
+    return {"ok": True}
+
 @app.post("/vision-review")
 async def vision_review(
     files: List[UploadFile] = File(...),
@@ -244,235 +287,245 @@ async def vision_review(
     file_number: str = Form(...),
     ia_company: str = Form(""),
     appraiser_id: str = Form(""),
-    ai_intent: str = Form("guidelines_only")
+    ai_intent: str = Form("comprehensive")
 ):
-    intent = ai_intent if ai_intent in INTENTS else "guidelines_only"
-    request_type_label = INTENTS[intent]
-    file_number = safe_filename(file_number)
+    texts: List[str] = []
+    photo_texts: List[str] = []
+    images_b64: List[Dict[str, Any]] = []
+    max_imgs = {"invoices_with_photos":2, "supplement":2, "photos_only":6, "comprehensive":6}.get(ai_intent, 0)
 
-    # --- Collect files (no photo scraping from PDFs) ---
-    pdfs: List[Tuple[str,bytes]] = []
-    images: List[Tuple[str,bytes]] = []
     for f in files:
         raw = await f.read()
         name = (f.filename or "upload").lower()
         if name.endswith(".pdf"):
-            pdfs.append((name, raw))
-        elif name.endswith((".jpg",".jpeg",".png",".webp",".tif",".tiff")):
-            images.append((name, raw))
-        elif name.endswith(".zip"):
+            texts.append(pdf_text_ocr(raw))
+        elif name.endswith(".docx"):
+            texts.append(docx_text(raw))
+        elif name.endswith((".jpg",".jpeg",".png",".webp")) and max_imgs>0:
             try:
-                with zipfile.ZipFile(io.BytesIO(raw)) as z:
-                    for zi in z.infolist():
-                        if zi.is_dir(): continue
-                        zname = zi.filename.lower()
-                        zdata = z.read(zi)
-                        if zname.endswith(".pdf"):
-                            pdfs.append((zname, zdata))
-                        elif zname.endswith((".jpg",".jpeg",".png",".webp",".tif",".tiff")):
-                            images.append((zname, zdata))
-            except Exception as e:
-                log.info(f"zip read error: {e}")
+                im = Image.open(io.BytesIO(raw)).convert("RGB")
+                im.thumbnail((1280,1280))
+                for t in _ocr_image_to_texts(im):
+                    photo_texts.append(t)
+                b = io.BytesIO()
+                im.save(b, format="JPEG", quality=72, optimize=True)
+                b64 = base64.b64encode(b.getvalue()).decode("utf-8")
+            except Exception:
+                b64 = base64.b64encode(raw).decode("utf-8")
+            images_b64.append({"type":"image_url","image_url":{"url":"data:image/jpeg;base64,"+b64}})
+            if len(images_b64) >= max_imgs:
+                pass
+        elif name.endswith(".txt"):
+            texts.append(raw.decode("utf-8","ignore"))
 
-    # Identify estimate
-    est_pdf = None
-    for nm, blob in pdfs:
-        if "est" in nm or "estimate" in nm:
-            est_pdf = (nm, blob); break
-    if est_pdf is None and pdfs: est_pdf = pdfs[0]
+    combined_text = "\n".join(texts)[:8000]
+    photos_text = "\n".join(photo_texts)[:4000]
 
-    photos_present = len(images) > 0
-
-    # Estimate text + small OCR
-    est_text = ""
-    if est_pdf:
-        est_text = pdf_text(est_pdf[1], limit_pages=12)
-        est_text += "\\n\\n" + ocr_head(est_pdf[1], pages=2, dpi=250)
-
-    # Other PDFs (for valuations/invoices grounding)
-    all_text = est_text
-    for nm, blob in pdfs:
-        if not est_pdf or nm != est_pdf[0]:
-            all_text += "\\n\\n" + ocr_head(blob, pages=1, dpi=250)
-
-    # Header fields
-    vin = scan_estimate_for_vin(est_pdf[1]) if est_pdf else None
-    if not vin:
-        vin = vin_from_text(est_text) or vin_from_text(all_text) or "N/A"
-    claim = claim_from_text(est_text) or claim_from_text(all_text) or "N/A"
-    vehicle = vehicle_from_text(est_text) or vehicle_from_text(all_text) or "N/A"
-
-    # VIN verification (images only)
-    if photos_present:
-        vin_ver = "NOT VERIFIED"  # fast path; upgrade later if needed
-    else:
-        vin_ver = "PHOTOS NOT PROVIDED"
-
-    # Valuation check (KBB/NADA/etc.) outside estimate
-    est_name = est_pdf[0] if est_pdf else None
-    valuation_present, valuation_sources, valuation_snippet = detect_valuations(pdfs, est_name)
-
-    rules_text = (client_rules or "").strip()
-    rules_present = len(rules_text) > 0
-
-    # ======= GPT =======
-    header_hint = {
-        "intent": intent, "photos_present": photos_present,
-        "valuation_present": valuation_present, "valuation_sources": valuation_sources,
-        "vin_estimate": vin if vin!="N/A" else "", "claim": claim if claim!="N/A" else "",
-        "vehicle": vehicle, "rules_present": rules_present
+    pre = {
+        "claim_number": extract_claim_number(combined_text) or "N/A",
+        "vin": extract_vin(combined_text) or "N/A",
+        "vehicle": extract_vehicle(combined_text) or "N/A",
+        "odometer_estimate_only": extract_odometer_estimate(combined_text) or "N/A",
     }
 
-    sys_common = (
-        "You are an auto-claims appraisal assistant. Use ONLY the provided estimate text, uploaded photos, and pasted client rules.\\n"
-        "- If photos_present==false: you MUST write 'No photos were provided.' in any photo section and avoid claiming any photo types were present.\\n"
-        "- If valuation_present==false: do NOT claim NADA/KBB/valuation was included.\\n"
-        "- Never assert a document/photo exists unless you can quote it from the provided texts; include a short 3–12 word quote for every 'present' claim.\\n"
-        "- Do NOT discuss salvage bids unless the estimate explicitly declares total loss.\\n"
-        "- For supplements (invoices_with_photos) do NOT require VIN/registration/odometer photos.\\n"
-        "Always end with exactly one line: Final Evaluation: NN%."
-    )
-    messages = [{"role":"system","content": sys_common + "\\nParsed header: " + json.dumps(header_hint)}]
-
-    def img_payload(max_imgs=12):
-        out = []
-        for _, blob in images[:max_imgs]:
-            b64 = base64.b64encode(blob).decode("utf-8")
-            out.append({"type":"image_url","image_url":{"url": f"data:image/jpeg;base64,{b64}"}})
-        return out
-
-    if intent == "guidelines_only":
-        sys2 = ("Compare client guidelines to the ESTIMATE only.\\n"
-                "Sections:\\n"
-                "• Estimate Snapshot (year/make/model if quoted, total if quoted)\\n"
-                "• Compliance vs Guidelines (Compliant/Non-compliant/Not found WITH short quote from ESTIMATE TEXT)\\n"
-                "• Missing Documents & Risks\\n"
-                "• Next Steps (1–3 bullets)")
-        user = [{"type":"text","text": "CLIENT GUIDELINES:\\n" + (rules_text if rules_present else "")[:9000]},
-                {"type":"text","text": "\\n\\nESTIMATE TEXT:\\n" + (est_text or "")[:12000]}]
-        if valuation_present: user.append({"type":"text","text": "\\n\\nVALUATION TEXT SNIPPET:\\n" + valuation_snippet})
-        messages.append({"role":"system","content": sys2}); messages.append({"role":"user","content": user})
-        rsp = openai_chat(messages, max_tokens=900)
-
-    elif intent == "comprehensive":
-        sys2 = ("Comprehensive audit: guidelines ↔ estimate AND estimate ↔ photos.\\n"
-                "VIN Verification must be exactly one of: MATCH / MISMATCH / NOT VERIFIED / PHOTOS NOT PROVIDED.\\n"
-                "Sections:\\n"
-                "• Estimate Snapshot (quote VIN/vehicle/mileage/total only if visible in ESTIMATE TEXT; include short quotes)\\n"
-                "• VIN Verification: <...>\\n"
-                "• Compliance vs Guidelines (if rules_present; each 'present' must include a short quote)\\n"
-                "• Estimate ↔ Photos (damage area by side/panels; discrepancies; missing angles/measurements)\\n"
-                "• Missing Documents & Risks\\n"
-                "• Next Steps (1–3 bullets)")
-        user = [{"type":"text","text": "CLIENT GUIDELINES:\\n" + (rules_text if rules_present else "")[:8000]},
-                {"type":"text","text": "\\n\\nESTIMATE TEXT:\\n" + (est_text or "")[:12000]}]
-        if valuation_present: user.append({"type":"text","text": "\\n\\nVALUATION TEXT SNIPPET:\\n" + valuation_snippet})
-        if photos_present: user += img_payload()
-        messages.append({"role":"system","content": sys2}); messages.append({"role":"user","content": user})
-        rsp = openai_chat(messages, max_tokens=1200)
-
-    elif intent == "photos_only":
-        if not photos_present:
-            rsp = None; gpt_output = "No photos were provided.\\n\\nFinal Evaluation: 0%"
+    vins_in_photos = extract_all_vins(photos_text)
+    vin_est = pre["vin"] if pre["vin"] != "N/A" else None
+    if vin_est:
+        if vins_in_photos:
+            vin_verify = "MATCH" if vin_est in vins_in_photos else "MISMATCH"
         else:
-            sys2 = ("Compare photos to estimate. Sections: Photo Coverage; Visible Damage vs Estimate; Discrepancies; Summary.")
-            user = [{"type":"text","text": "ESTIMATE TEXT:\\n" + (est_text or "")[:9000]}] + img_payload()
-            messages.append({"role":"system","content": sys2}); messages.append({"role":"user","content": user})
-            rsp = openai_chat(messages, max_tokens=900)
-
-    elif intent == "invoices_with_photos":
-        sys2 = ("Supplement/invoices vs estimate (and photos if provided). Only use text provided; never infer. If no invoices detected, say so plainly.")
-        user = [{"type":"text","text": "ESTIMATE TEXT:\\n" + (est_text or "")[:9000]}] + (img_payload() if photos_present else [])
-        messages.append({"role":"system","content": sys2}); messages.append({"role":"user","content": user})
-        rsp = openai_chat(messages, max_tokens=900)
-
+            vin_verify = "MISMATCH"
     else:
-        sys2 = ("Documentation checklist based on available materials. Mark Present/Missing/Not found with short quotes when present.")
-        user = [{"type":"text","text": "CLIENT GUIDELINES:\\n" + (rules_text if rules_present else "")[:6000]},
-                {"type":"text","text": "\\n\\nESTIMATE TEXT:\\n" + (est_text or "")[:8000]}] + (img_payload(6) if photos_present else [])
-        messages.append({"role":"system","content": sys2}); messages.append({"role":"user","content": user})
-        rsp = openai_chat(messages, max_tokens=800)
+        vin_verify = "MISMATCH"
 
-    gpt_output = (rsp.choices[0].message.content if rsp else locals().get("gpt_output","")).strip() or "Automated narrative unavailable."
-    comp = final_percent(gpt_output)
+    # Choose the VIN to DISPLAY: prefer validated estimate VIN; else first photo VIN; else N/A
+    vin_display = pre["vin"] if pre["vin"] != "N/A" else (vins_in_photos[0] if vins_in_photos else "N/A")
 
-    # ======================= PDF =======================
-    pdf = FPDF(); pdf.add_page(); pdf.set_font("Arial", size=11)
-    pdf.cell(200, 10, sanitize_latin1("NSPXN.com AI Review Report"), ln=True, align="C")
-    pdf.ln(4); pdf.set_font_size(10)
-    pdf.multi_cell(0,6, sanitize_latin1(f"File Number: {file_number}"))
-    pdf.multi_cell(0,6, sanitize_latin1(f"IA Company: {ia_company}"))
-    pdf.multi_cell(0,6, sanitize_latin1(f"Request Type: {request_type_label}"))
-    pdf.multi_cell(0,6, sanitize_latin1(f"Appraiser ID #: {appraiser_id}"))
-    pdf.ln(2)
-    pdf.multi_cell(0,6, sanitize_latin1(f"Claim #: {claim or 'N/A'}"))
-    pdf.multi_cell(0,6, sanitize_latin1(f"VIN (from estimate): {vin}"))
-    pdf.multi_cell(0,6, sanitize_latin1(f"VIN verification (estimate vs photo): {vin_ver}"))
-    pdf.multi_cell(0,6, sanitize_latin1(f"Vehicle: {vehicle}"))
-    pdf.multi_cell(0,6, sanitize_latin1(f"Compliance Score: {comp if comp is not None else 'N/A'}%"))
-    pdf.ln(3); pdf.set_font_size(12); pdf.cell(0,8, sanitize_latin1("AI-4-IA Review Summary"), ln=True)
-    pdf.set_font_size(10); pdf.multi_cell(0,6, sanitize_latin1(gpt_output))
+    intent_labels = {
+        "guidelines_only": "Guidelines → Estimate (no photos)",
+        "comprehensive": "Comprehensive: Guidelines + Estimate + Photos (with VIN check)",
+        "photos_only": "Photos Only: Compare to Estimate",
+        "invoices_with_photos": "Supplement ↔ Invoices (+ Photos)",
+        "supplement": "Supplement ↔ Invoices (+ Photos)",
+        "docs_checklist": "Documentation Checklist"
+    }
+    req_label = intent_labels.get(ai_intent, intent_labels["comprehensive"])
 
-    pdf_bytes = pdf.output(dest="S").encode("latin-1","ignore")
-    pdf_path = os.path.join(PDF_DIR, f"{file_number}.pdf")
-    with open(pdf_path, "wb") as f: f.write(pdf_bytes)
-    pdf_url = f"/download-pdf?file_number={file_number}"
-    pdf_b64 = base64.b64encode(pdf_bytes).decode("utf-8")
+    SYSTEM = (
+        "You are an auto-claims appraisal assistant. "
+        "Return ONLY valid JSON. Do not include markdown fences."
+    )
 
-    # ======================= Email =======================
+    MODE_DETAILS = {
+        "guidelines_only": (
+            "### Overview\n### Guidelines Compliance\n### Missing or Issues\nEnd with: Final Evaluation: NN%"
+        ),
+        "photos_only": (
+            "### Overview\n### Damage Consistency vs Estimate\n### Required Photos Check\nEnd with: Final Evaluation: NN%"
+        ),
+        "comprehensive": (
+            "### Overview\n### Estimate Integrity\n### Photo Evidence Mapping\n### VIN Verification\n### Missing or Issues\nEnd with: Final Evaluation: NN%"
+        ),
+        "invoices_with_photos": (
+            "### Supplement Overview\n### Invoice vs Estimate — Line-Item Deltas\n### Photo Evidence Mapping\n### Missing or Unclear Evidence\nEnd with: Final Evaluation: NN%"
+        ),
+        "supplement": (
+            "### Supplement Overview\n### Invoice vs Estimate — Line-Item Deltas\n### Photo Evidence Mapping\n### Missing or Unclear Evidence\nEnd with: Final Evaluation: NN%"
+        ),
+        "docs_checklist": (
+            "### Documentation Checklist\n### Missing Items\nEnd with: Final Evaluation: NN%"
+        )
+    }
+
+    JSON_KEYS = ["file_number","request_type","claim_number","vin","vin_verification","vehicle","odometer_estimate_only","compliance_score","summary_brief","summary_markdown"]
+
+    mode_detail = MODE_DETAILS.get(ai_intent, MODE_DETAILS["comprehensive"])
+    preface = (
+        f"Mode: {ai_intent}. {mode_detail}\n"
+        f"Return JSON with keys exactly: {JSON_KEYS}.\n"
+        "Rules: VIN verification is already determined outside the model; DO NOT change it. Compliance Score integer 0-100.\n"
+        "Provide summary_brief (<=280 chars, plain text). Provide summary_markdown (full detail).\n\n"
+        f"REQUEST TYPE: {req_label}\n\nCLIENT RULES (if provided):\n{client_rules[:2500]}\n\n"
+        f"PRE-EXTRACTED: {{'claim_number': '{pre['claim_number']}', 'vin': '{pre['vin']}', 'vehicle': '{pre['vehicle']}', 'odometer_estimate_only': '{pre['odometer_estimate_only']}', 'vin_verification': '{vin_verify}'}}\n\n"
+        f"ESTIMATE/CONTENT (OCR):\n{combined_text}\n\n"
+        f"PHOTO OCR:\n{photos_text}\n\n"
+        f"NOTE: The next {len(images_b64)} images are Photo 1..{len(images_b64)}."
+    )
+
+    user_parts = [{"type":"text","text": preface}]
+    if images_b64:
+        user_parts.extend(images_b64)
+
     try:
-        if SEND_EMAIL == "1":
-            msg = EmailMessage()
-            msg["Subject"] = f"AI-4-IA Review: {claim or 'N/A'}"
-            msg["From"] = SMTP_FROM
-            msg["To"] = SMTP_TO
-            msg["Reply-To"] = SMTP_USER
-            body = f"""NSPXN.com AI4IA Review Report
+        rsp = client.chat.completions.create(
+            model=MODEL,
+            messages=[{"role":"system","content": SYSTEM},{"role":"user","content": user_parts}],
+            max_tokens=800 if ai_intent in ("invoices_with_photos","supplement","comprehensive") else 550,
+            temperature=0
+        )
+        raw = (rsp.choices[0].message.content or "").strip()
+        raw = raw.strip().removeprefix("```json").removesuffix("```").strip()
+        data = json.loads(raw)
+    except Exception as e:
+        log.error(f"OpenAI error or JSON parse error: {e}")
+        data = {}
+
+    # Build summaries with consistent VIN verification block and prevent contradictions
+    summary_brief = data.get("summary_brief") or "Summary unavailable."
+    summary_full = data.get("summary_markdown") or "AI analysis unavailable."
+    # Remove any existing "### VIN Verification" section to avoid conflict
+    summary_full = re.sub(r"###\s*VIN Verification.*?(?=\n### |\Z)", "", summary_full, flags=re.IGNORECASE | re.DOTALL).strip()
+    vin_block = "### VIN Verification\n- Result: {res}\n- Estimate VIN: {v_est}\n- Photo VIN(s): {v_ph}\n".format(
+        res=vin_verify,
+        v_est=(vin_est or "N/A"),
+        v_ph=(", ".join(vins_in_photos) if vins_in_photos else "N/A")
+    )
+    summary_full = vin_block + "\n" + summary_full
+
+    safe = {
+        "file_number": file_number,
+        "request_type": req_label,
+        "claim_number": data.get("claim_number") or pre["claim_number"],
+        "vin": vin_display,
+        "vin_verification": vin_verify,
+        "vehicle": data.get("vehicle") or pre["vehicle"],
+        "odometer_estimate_only": data.get("odometer_estimate_only") or pre["odometer_estimate_only"],
+        "compliance_score": data.get("compliance_score") if isinstance(data.get("compliance_score"), int) else 100,
+        "summary_brief": summary_brief,
+        "summary_markdown": summary_full
+    }
+
+    # Build PDF
+    pdf = FPDF()
+    pdf.add_page()
+    try:
+        pdf.add_font("DejaVu", "", "DejaVuSans.ttf", uni=True); pdf.set_font("DejaVu", size=11)
+    except Exception:
+        pdf.set_font("Arial", size=11)
+
+    pdf.cell(0, 10, "NSPXN.com AI Review Report", ln=True, align="C")
+    pdf.set_font_size(10); pdf.ln(3)
+    def mc(s: str): pdf.multi_cell(0,6,s)
+
+    mc(f"File Number: {file_number}")
+    mc(f"IA Company: {ia_company}")
+    mc(f"Appraiser ID #: {appraiser_id}")
+    mc(f"Request Type: {req_label}")
+    mc(f"Claim #: {safe['claim_number']}")
+    mc(f"VIN (from estimate/photos): {safe['vin']}")
+    mc(f"VIN verification (estimate vs photo): {safe['vin_verification']}")
+    mc(f"Vehicle: {safe['vehicle']}")
+    mc(f"Odometer (from estimate): {safe['odometer_estimate_only']}")
+    mc(f"Compliance Score: {safe['compliance_score']}%")
+
+    pdf.ln(3)
+    mc("AI-4-IA Review Summary")
+    mc((safe["summary_markdown"] or "No summary.").strip())
+
+    # Save with sanitized name
+    safe_file = _safe_name(file_number)
+    pdf_path = os.path.join(PDF_DIR, f"{safe_file}.pdf")
+    try:
+        pdf_bytes = pdf.output(dest="S").encode("latin-1","ignore")
+        with open(pdf_path, "wb") as f: f.write(pdf_bytes)
+    except Exception as e:
+        log.warning(f"PDF write error: {e}")
+
+    # Email
+    try:
+        msg = EmailMessage()
+        msg["Subject"] = f"AI-4-IA Review: {safe['claim_number']}"
+        msg["From"] = "info@nspxn.com"
+        msg["To"] = "info@nspxn.com"
+        msg.set_content(f"""NSPXN.com AI Review Report
 
 File Number: {file_number}
 IA Company: {ia_company}
 Appraiser ID #: {appraiser_id}
-Request Type: {request_type_label}
+Request Type: {req_label}
+Claim #: {safe['claim_number']}
+VIN (from estimate/photos): {safe['vin']}
+VIN verification (estimate vs photo): {safe['vin_verification']}
+Vehicle: {safe['vehicle']}
+Odometer (from estimate): {safe['odometer_estimate_only']}
+Compliance Score: {safe['compliance_score']}%
 
-Claim #: {claim or 'N/A'}
-VIN (from estimate): {vin}
-VIN verification (estimate vs photo): {vin_ver}
-Vehicle: {vehicle}
-
-Compliance Score: {(str(comp)+'%') if comp is not None else 'N/A'}
-
-Summary:
-{gpt_output}
-"""
-            msg.set_content(body)
-            msg.add_attachment(pdf_bytes, maintype="application", subtype="pdf", filename=f"{file_number}.pdf")
-            with smtplib.SMTP_SSL(SMTP_HOST, SMTP_PORT) as smtp:
-                smtp.login(SMTP_USER, SMTP_PASS)
-                tos = [t.strip() for t in SMTP_TO.split(",") if t.strip()]
-                if tos: msg["To"] = ", ".join(tos)
-                smtp.send_message(msg)
+AI-4-IA Review Summary
+{safe['summary_markdown']}
+""")
+        with smtplib.SMTP_SSL("mail.tierra.net", 465) as smtp:
+            smtp.login("info@nspxn.com", "grr2025GRR")
+            smtp.send_message(msg)
     except Exception as e:
-        log.info(f"email send failed: {e}")
+        log.error(f"Email error: {e}"
+
+)
 
     return {
-        "request_type": request_type_label,
-        "pdf_url": pdf_url,
-        "pdf_filename": f"{file_number}.pdf",
-        "pdf_b64": pdf_b64,
-        "gpt_output": gpt_output,
         "file_number": file_number,
-        "claim_number": claim or "N/A",
-        "vehicle": vehicle,
-        "vin_estimate": vin,
-        "vin_verification": vin_ver,
-        "compliance_score": comp if comp is not None else "N/A",
-        "photos_present": photos_present
+        "request_type": req_label,
+        "claim_number": safe["claim_number"],
+        "vin": safe["vin"],
+        "vin_verification": safe["vin_verification"],
+        "vehicle": safe["vehicle"],
+        "odometer_estimate_only": safe["odometer_estimate_only"],
+        "compliance_score": safe["compliance_score"],
+        "summary_brief": safe["summary_brief"],
+        "summary_markdown": safe["summary_markdown"],
+        "web_summary": safe["summary_brief"],   # alias for older UI
+        "gpt_output": safe["summary_markdown"], # alias for older UI
+        "pdf_url": f"/download-pdf?file_number={_safe_name(file_number)}",
+        "pdf_filename": f"{_safe_name(file_number)}.pdf"
     }
 
 @app.get("/download-pdf")
 async def download_pdf(file_number: str):
-    safe = re.sub(r"[^\w.\-]+","-", file_number).strip("-_.")
+    safe = _safe_name(file_number)
     path = os.path.join(PDF_DIR, f"{safe}.pdf")
     if os.path.exists(path):
         return FileResponse(path=path, media_type="application/pdf", filename=f"{safe}.pdf")
+    # backward compatibility: try raw name if exists
+    raw_path = os.path.join(PDF_DIR, f"{file_number}.pdf")
+    if os.path.exists(raw_path):
+        return FileResponse(path=raw_path, media_type="application/pdf", filename=f"{file_number}.pdf")
     return JSONResponse(status_code=404, content={"detail":"Not Found"})
