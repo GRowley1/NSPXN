@@ -48,57 +48,77 @@ app.add_middleware(
 )
 
 # ==========================
-# Client Rules endpoints (restore "Paste Client Rules" support)
+# Client Rules endpoints (load exact .docx for selected carrier)
 # ==========================
-def _norm_company(name: str) -> str:
-    return (name or "").strip().lower()
+def _slug_company(name: str) -> str:
+    n = (name or "").lower().strip()
+    # common normalizations
+    n = n.replace("&", "and")
+    # collapse punctuation/whitespace to hyphens
+    n = re.sub(r"[^a-z0-9]+", "-", n).strip("-")
+    return n
 
-DEFAULT_CLIENT_RULES = {
-    "_default": (
-        "Standard Client Rules:\n"
-        "- Use prevailing labor rates as provided in the estimate.\n"
-        "- Apply sales tax to taxable parts and materials per state/local law.\n"
-        "- Require 4-corner photos, VIN, license plate, and odometer when photos are requested.\n"
-        "- Sublet and fees must include itemized descriptions.\n"
-        "- OEM procedures must be followed where applicable."
-    ),
-    "progressive": (
-        "Progressive Client Rules:\n"
-        "- Use market labor rates; verify refinish overlap per CCC logic.\n"
-        "- Apply tax to parts/materials when applicable; document exemptions.\n"
-        "- Prior damage and unrelated damage must be excluded.\n"
-        "- Require photos: 4-corners, VIN, plate, odometer when photos requested."
-    ),
-    "state farm": (
-        "State Farm Client Rules:\n"
-        "- Labor rates and operations per region; verify corrosion protection.\n"
-        "- Tax per jurisdiction; document materials.\n"
-        "- LKQ and aftermarket parts must be equivalent quality and documented.\n"
-        "- Standard photo set when applicable."
-    ),
-    "geico": (
-        "GEICO Client Rules:\n"
-        "- Follow OEM position statements for ADAS/calibration.\n"
-        "- Verify paint materials cap and body/paint labor rates.\n"
-        "- Sales tax on taxable items; itemize sublet.\n"
-        "- Required photos if photo review selected."
-    ),
-}
+def _candidate_rule_filenames(company: str):
+    slug = _slug_company(company)
+    cands = []
+    if slug:
+        bases = [slug, slug.replace("-", "_"), slug.replace("-", ""), slug.replace("_","")]
+        for b in bases:
+            cands += [f"{b}.docx", f"{b}.DOCX"]
+    # final fallbacks
+    cands += ["default.docx", "Default.docx", "client-rules.docx", "Client-Rules.docx"]
+    # de-duplicate preserving order
+    seen, out = set(), []
+    for x in cands:
+        if x not in seen:
+            seen.add(x); out.append(x)
+    return out
+
+def _rule_search_paths():
+    # search common paths used in different deployments
+    return [
+        "/app/rules",
+        "/rules",
+        "/workspace/rules",
+        "/opt/render/project/src/rules",
+        "/mnt/data/rules",
+    ]
+
+def _load_rules_docx(company: str) -> str:
+    from docx import Document as _Doc
+    for base in _rule_search_paths():
+        for fn in _candidate_rule_filenames(company):
+            full = Path(base) / fn
+            if full.exists():
+                try:
+                    d = _Doc(full)
+                    txt = "\n".join(p.text for p in d.paragraphs)
+                    txt = txt.strip() or "(Rule document contains no text paragraphs.)"
+                    return f"{txt}\n\n(Source: {full})"
+                except Exception as e:
+                    return f"(Error reading {full}: {e})"
+    return ""
+
+def _rules_from_query(ia_company: str = "", carrier: str = "", company: str = "") -> str:
+    key = ia_company or carrier or company
+    return _load_rules_docx(key)
 
 @app.get("/client-rules", response_class=PlainTextResponse)
-async def get_client_rules(ia_company: str = ""):
-    key = _norm_company(ia_company)
-    rules = DEFAULT_CLIENT_RULES.get(key, DEFAULT_CLIENT_RULES["_default"])
-    return rules
+async def get_client_rules(ia_company: str = "", carrier: str = "", company: str = ""):
+    txt = _rules_from_query(ia_company, carrier, company)
+    if not txt:
+        # Explicit plain-text not found; keep compatibility with existing UI that expects 200
+        return PlainTextResponse(f"Rules not found for: {ia_company or carrier or company}", status_code=200)
+    return PlainTextResponse(txt, status_code=200)
 
 # Backward-compat aliases some frontends use
 @app.get("/rules", response_class=PlainTextResponse)
-async def get_rules_alias(ia_company: str = ""):
-    return await get_client_rules(ia_company)
+async def get_rules_alias(ia_company: str = "", carrier: str = "", company: str = ""):
+    return await get_client_rules(ia_company, carrier, company)
 
 @app.get("/guidelines", response_class=PlainTextResponse)
-async def get_guidelines_alias(ia_company: str = ""):
-    return await get_client_rules(ia_company)
+async def get_guidelines_alias(ia_company: str = "", carrier: str = "", company: str = ""):
+    return await get_client_rules(ia_company, carrier, company)
 
 
 # ==========================
