@@ -273,6 +273,64 @@ def check_required_photos(images: List[Tuple[str, bytes]], ocr_text: str) -> Lis
 # ==========================
 # Labor/Tax heuristics
 # ==========================
+
+# ==========================
+# Supplement parsing (deterministic, fast)
+# ==========================
+def _money_find_all(s: str):
+    vals = []
+    for m in re.finditer(r"\$?\s*([\-]?\d{1,3}(?:,\d{3})*(?:\.\d{2})|\-?\d+(?:\.\d{2})?)", s):
+        try:
+            vals.append(float(m.group(1).replace(",","")))
+        except Exception:
+            pass
+    return vals
+
+def parse_supplement_changes(text: str) -> Dict[str, any]:
+    """
+    Heuristic parser to summarize supplement adds/deletes by category.
+    Works on CCC-like lines containing ADD/DELETE/REPLACE indicators with dollar amounts.
+    """
+    out = {
+        "added_items": [],
+        "deleted_items": [],
+        "totals": { "Parts":0.0, "Body Labor":0.0, "Paint Labor":0.0, "Mechanical Labor":0.0,
+                    "Structural Labor":0.0, "Materials":0.0, "Sublet":0.0, "Fees":0.0, "Tax":0.0 },
+        "net_change": 0.0
+    }
+    if not text:
+        return out
+    lines = [ln.strip() for ln in text.splitlines() if ln.strip()]
+    def cat_for(line: str):
+        l = line.lower()
+        if "paint labor" in l or ("labor" in l and "paint" in l): return "Paint Labor"
+        if "body labor" in l or ("labor" in l and "body" in l): return "Body Labor"
+        if "mech" in l and "labor" in l: return "Mechanical Labor"
+        if "struct" in l and "labor" in l or "frame" in l: return "Structural Labor"
+        if "material" in l or "suppl" in l or "refinish" in l: return "Materials"
+        if "sublet" in l: return "Sublet"
+        if "tax" in l: return "Tax"
+        if any(k in l for k in ["oem","am ","lkq","part","replace","repl ","panel","bumper","fender","radiator","condenser","deflector","bracket","hood","support","lamp","grille","mirror","wheel","tire","door","glass"]): return "Parts"
+        return "Parts"
+    for ln in lines:
+        low = ln.lower()
+        is_add = any(t in low for t in [" add:", " added", " add ", "+ ", "replace", "repl "])
+        is_del = any(t in low for t in [" delete", " deleted", " remove", " removed", " less "])
+        if not (is_add or is_del):
+            continue
+        amts = _money_find_all(ln)
+        amt = amts[-1] if amts else 0.0
+        cat = cat_for(ln)
+        desc = re.sub(r"\s{2,}", " ", re.sub(r"\$[\d,\.]+", "", ln)).strip()
+        if is_add:
+            out["added_items"].append((desc, amt, cat))
+            out["totals"][cat] = out["totals"].get(cat, 0.0) + amt
+            out["net_change"] += amt
+        elif is_del:
+            out["deleted_items"].append((desc, -abs(amt), cat))
+            out["totals"][cat] = out["totals"].get(cat, 0.0) - abs(amt)
+            out["net_change"] -= abs(amt)
+    return out
 def check_labor_and_tax_score(text: str, client_rules: str) -> int:
     adj = 0
     def has_rate(label: str) -> bool:
@@ -344,9 +402,9 @@ async def vision_review(
         vin_verify = "PHOTOS NOT PROVIDED" if not images else "NOT VERIFIED"
 
     # Build user content with performance caps
-    combined_text = combined_text[:6000]
+    combined_text = combined_text[:3500]
     MAX_IMAGES_SUPP, MAX_IMAGES_OTHER = 4, 8
-    max_imgs = MAX_IMAGES_SUPP if supplement_mode else MAX_IMAGES_OTHER
+    max_imgs = (2 if supplement_mode else MAX_IMAGES_OTHER)
     def priority(name):
         n = name.lower()
         return (0 if "imgrep" in n else (1 if "corner" in n else 2), len(n))
@@ -378,7 +436,7 @@ async def vision_review(
         rsp = client.chat.completions.create(
             model=MODEL,
             messages=[{"role":"system","content": sys},{"role":"user","content": user_parts}],
-            max_tokens=700,
+            max_tokens=300,
             temperature=0
         )
         gpt_out = (rsp.choices[0].message.content or "").strip()
@@ -415,6 +473,31 @@ async def vision_review(
         gpt_out
     ).strip()
 
+    # Deterministic Supplement Breakdown (fast, no AI)
+    supplement_breakdown_text = ""
+    if supplement_mode:
+        supp = parse_supplement_changes(combined_text)
+        lines_sb = []
+        if supp["added_items"] or supp["deleted_items"]:
+            lines_sb.append("Supplement Breakdown (Deterministic)")
+            lines_sb.append("Totals by Category:")
+            for k in ["Parts","Body Labor","Paint Labor","Mechanical Labor","Structural Labor","Materials","Sublet","Fees","Tax"]:
+                v = supp["totals"].get(k, 0.0)
+                lines_sb.append(f" - {k}: ${v:,.2f}")
+            lines_sb.append(f"Net Supplement Change: ${supp['net_change']:,.2f}")
+            def fmt(items, head):
+                lines_sb.append(head)
+                for desc, amt, cat in items[:15]:
+                    sign = "+" if amt>=0 else ""
+                    lines_sb.append(f"   {sign}${amt:,.2f} [{cat}] — {desc[:120]}")
+            if supp["added_items"]:
+                fmt(supp["added_items"], "Added Items:")
+            if supp["deleted_items"]:
+                fmt(supp["deleted_items"], "Deleted/Removed Items:")
+        else:
+            lines_sb.append("Supplement Breakdown (Deterministic): No explicit ADD/DELETE lines detected.")
+        supplement_breakdown_text = "\n".join(lines_sb)
+
     # PDF
     pdf = FPDF()
     pdf.add_page()
@@ -449,6 +532,8 @@ async def vision_review(
     pdf.ln(3)
     pdf.multi_cell(0,6,"AI-4-IA Review Summary")
     pdf.multi_cell(0,6, gpt_output_clean or "No narrative.")
+    pdf.ln(2)
+    pdf.multi_cell(0,6, supplement_breakdown_text or "")
 
     pdf_path = os.path.join(PDF_DIR, f"{file_number}.pdf")
     try:
@@ -493,6 +578,7 @@ AI Summary:
         "compliance_score": authoritative_score,
         "missing_photos": missing_photos,
         "gpt_output": gpt_output_clean,
+        "supplement_breakdown": supplement_breakdown_text,
         "pdf_url": f"/download-pdf?file_number={file_number}",
         "pdf_filename": f"{file_number}.pdf"
     }
