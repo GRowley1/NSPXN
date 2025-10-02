@@ -20,7 +20,7 @@ PDF_DIR = os.getenv("PDF_DIR", "/tmp"); os.makedirs(PDF_DIR, exist_ok=True)
 CLIENT_RULES_DIR = os.getenv("CLIENT_RULES_DIR", "client_rules")
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s")
-log = logging.getLogger("nspxn-min")
+log = logging.getLogger("nspxn-min-promptfix")
 
 MODEL = os.getenv("OAI_MODEL", "gpt-4o")
 if not os.getenv("OPENAI_API_KEY"):
@@ -65,7 +65,7 @@ async def get_client_rules(client_name: str):
 
 # -----------------------
 # Vision Review — GPT does EVERYTHING.
-# No VIN checks, no coercions, no sanitizing. We just relay inputs and render outputs.
+# No VIN checks, no coercions. We just relay inputs and render outputs.
 # -----------------------
 @app.post("/vision-review")
 async def vision_review(
@@ -76,19 +76,20 @@ async def vision_review(
     appraiser_id: str = Form(""),
     ai_intent: str = Form("comprehensive")
 ):
-    # Collect content with minimal processing: turn PDFs to images; pass photos as images.
     parts: List[Dict[str, Any]] = []
-    MAX_IMAGES = 12  # cap to keep requests reasonable
+    files_seen: List[str] = []
+    MAX_IMAGES = 12  # cap request size
     used = 0
 
-    text_concat = []  # if .txt or .docx present, include their text as a text block
-
+    # Gather inputs: PDFs -> images, images unchanged, docx/txt -> text
     for f in files:
         raw = await f.read()
-        fname = (f.filename or "upload").lower()
-        if fname.endswith(".pdf") and used < MAX_IMAGES:
+        fname = f.filename or "upload"
+        low = fname.lower()
+        if low.endswith(".pdf") and used < MAX_IMAGES:
             try:
                 pages = convert_from_bytes(raw, dpi=150)
+                files_seen.append(f"{fname} (pdf, {len(pages)} page(s))")
                 for im in pages[:MAX_IMAGES - used]:
                     b = io.BytesIO()
                     im.save(b, format="JPEG", quality=70, optimize=True)
@@ -97,7 +98,8 @@ async def vision_review(
                     used += 1
             except Exception as e:
                 log.warning(f"pdf2image failed: {e}")
-        elif fname.endswith((".jpg",".jpeg",".png",".webp")) and used < MAX_IMAGES:
+                files_seen.append(f"{fname} (pdf, could not be converted)")
+        elif low.endswith((".jpg",".jpeg",".png",".webp")) and used < MAX_IMAGES:
             try:
                 im = Image.open(io.BytesIO(raw)).convert("RGB")
                 im.thumbnail((1400,1400))
@@ -108,21 +110,31 @@ async def vision_review(
             b64 = base64.b64encode(raw).decode("utf-8")
             parts.append({"type":"image_url","image_url":{"url":"data:image/jpeg;base64,"+b64}})
             used += 1
-        elif fname.endswith(".docx"):
+            files_seen.append(f"{fname} (photo)")
+        elif low.endswith(".docx"):
             try:
                 text = "\n".join([p.text for p in Document(io.BytesIO(raw)).paragraphs if p.text.strip()])
-                if text.strip(): text_concat.append(text[:8000])
             except Exception:
-                pass
-        elif fname.endswith(".txt"):
+                text = ""
+            if text.strip():
+                parts.insert(0, {"type":"text","text": text[:8000]})
+                files_seen.append(f"{fname} (docx text included)")
+            else:
+                files_seen.append(f"{fname} (docx, no readable text)")
+        elif low.endswith(".txt"):
             try:
-                text_concat.append(raw.decode("utf-8","ignore")[:8000])
+                txt = raw.decode("utf-8","ignore")[:8000]
             except Exception:
-                pass
+                txt = ""
+            if txt.strip():
+                parts.insert(0, {"type":"text","text": txt})
+                files_seen.append(f"{fname} (txt included)")
+            else:
+                files_seen.append(f"{fname} (txt, empty)")
+        else:
+            files_seen.append(f"{fname} (unsupported type)")
 
-    if text_concat:
-        parts.insert(0, {"type":"text","text":"\n\n".join(text_concat)})
-
+    # System + Prompt (tighten sourcing to stop make/model hallucinations)
     SYSTEM = (
         "You are an auto-claims appraisal assistant. Return ONLY valid JSON (no code fences). "
         "Populate these exact keys: "
@@ -183,18 +195,22 @@ async def vision_review(
 
     prompt_text = (
         f"REQUEST TYPE: {ai_intent} — Use request_type='{req_label}'.\n\n"
+        "FILES SEEN (inputs provided by the user):\n- " + ("\n- ".join(files_seen) if files_seen else "none") + "\n\n"
         "CLIENT RULES (verbatim text if provided by the UI):\n" + (client_rules[:2500] if client_rules else "") + "\n\n"
-        "IMPORTANT:\n"
-        "- Use the images and any provided text to extract values.\n"
-        "- compliance_score may be a number like 95 or a string like '95%'; do not include extra keys.\n"
-        "- summary_brief <= 280 chars (plain text). summary_markdown = full write-up using the template below.\n\n"
+        "CRITICAL FIELD-SOURCING RULES (no guessing):\n"
+        "1) Vehicle year/make/model MUST come from the estimate text or a clearly legible VIN decode/badge text. "
+        "Do NOT infer make/model from paint color, body style, or vague visuals. If uncertain, set 'vehicle' to 'N/A'.\n"
+        "2) vin_verification: you decide the label; MATCH/MISMATCH/NOT VERIFIED are allowed here since the backend does not enforce it.\n"
+        "3) If any field cannot be supported by what you actually see/read, set it to 'N/A' rather than guessing.\n"
+        "4) Do NOT output a generic numbered list of photos. Only reference Photo # when it supports a specific claim in a table or paragraph.\n\n"
         "DETAIL LAYOUT:\n" + DETAIL_TEMPLATES.get(ai_intent, DETAIL_TEMPLATES["comprehensive"]) + "\n"
+        "summary_brief (<=280 chars, plain text). summary_markdown = full write-up using the layout above.\n"
     )
 
     user_parts: List[Dict[str,Any]] = [{"type":"text","text": prompt_text}]
     if parts: user_parts.extend(parts)
 
-    # Call GPT and trust the output
+    # Call GPT and relay output as-is
     try:
         rsp = client.chat.completions.create(
             model=MODEL,
@@ -228,7 +244,7 @@ async def vision_review(
         "summary_markdown": _get("summary_markdown"),
     }
 
-    # PDF — print values exactly as GPT returned (no % added, no edits)
+    # PDF — print values exactly as GPT returned
     pdf = FPDF(); pdf.add_page()
     try:
         pdf.add_font("DejaVu","", "DejaVuSans.ttf", uni=True); pdf.set_font("DejaVu", size=11)
@@ -247,7 +263,7 @@ async def vision_review(
     mc(f"Vehicle: {result['vehicle']}")
     mc(f"Odometer (from estimate): {result['odometer_estimate_only']}")
     mc(f"Compliance Score: {result['compliance_score']}")
-    pdf.ln(3); mc("AI-4-IA Review Summary"); mc((result["summary_markdown"] or "").strip())
+    pdf.ln(3); mc("AI-4-IA Review Summary"); mc((result["summary_markdown"] or '').strip())
 
     safe_file = _safe(file_number); pdf_path = os.path.join(PDF_DIR, f"{safe_file}.pdf")
     try:
@@ -256,7 +272,7 @@ async def vision_review(
     except Exception as e:
         log.warning(f"PDF write error: {e}")
 
-    # Email (Tierra.net SMTP) — same exact values
+    # Email — same exact values
     try:
         msg = EmailMessage()
         msg["Subject"] = f"AI-4-IA Review: {result['claim_number'] or file_number}"
