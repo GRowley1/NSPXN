@@ -1,6 +1,6 @@
 
 from fastapi import FastAPI, File, UploadFile, Form
-from fastapi.responses import JSONResponse, FileResponse, PlainTextResponse
+from fastapi.responses import JSONResponse, FileResponse
 from fastapi.middleware.cors import CORSMiddleware
 from typing import List, Tuple, Optional, Dict, Any
 import os, re, io, base64, json, logging, smtplib
@@ -46,100 +46,6 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
-# ==========================
-# Client Rules endpoints — load exact .docx for selected carrier
-# ==========================
-def _slug(s: str) -> str:
-    s = (s or "").lower().strip()
-    s = s.replace("&","and")
-    s = re.sub(r"[^a-z0-9]+","-", s).strip("-")
-    return s
-
-def _rule_search_roots():
-    return [
-        "/app/rules", "/app/Rules", "/app/CLIENT_RULES", "/app/client_rules", "/app",
-        "/rules", "/workspace/rules",
-        "/opt/render/project/src/rules",
-        "/mnt/data/rules", "/mnt/data"
-    ]
-
-def _all_docx_under(root):
-    out = []
-    try:
-        for dirpath, dirnames, filenames in os.walk(root):
-            for fn in filenames:
-                if fn.lower().endswith(".docx"):
-                    out.append(os.path.join(dirpath, fn))
-    except Exception:
-        pass
-    return out
-
-def _score_match(target_slug: str, candidate_path: str) -> int:
-    base = os.path.basename(candidate_path).lower().replace(".docx","")
-    base_slug = _slug(base)
-    score = 0
-    if base_slug == target_slug: score += 100
-    if base_slug.startswith(target_slug): score += 50
-    if target_slug in base_slug: score += 25
-    if "/rules" in candidate_path.lower(): score += 5
-    return score
-
-def _load_rules_docx(company: str) -> str:
-    from docx import Document as _Doc
-    target_slug = _slug(company)
-    best_file, best_score = None, -1
-    for root in _rule_search_roots():
-        for path in _all_docx_under(root):
-            sc = _score_match(target_slug, path) if target_slug else (1 if "default" in os.path.basename(path).lower() else 0)
-            if sc > best_score:
-                best_score, best_file = sc, path
-    if not best_file:
-        return ""
-    try:
-        d = _Doc(best_file)
-        txt = "\n".join(p.text for p in d.paragraphs)
-        return txt.strip() or "(Rule document contains no text paragraphs.)"
-    except Exception as e:
-        return f"(Error reading {best_file}: {e})"
-
-def _pick_name(ia_company: str = "", carrier: str = "", company: str = "", name: str = "") -> str:
-    for x in (ia_company, carrier, company, name):
-        if x and x.strip():
-            return x
-    return ""
-
-def _rules_plaintext_for(ia_company: str = "", carrier: str = "", company: str = "", name: str = "") -> str:
-    key = _pick_name(ia_company, carrier, company, name)
-    return _load_rules_docx(key)
-
-@app.get("/client-rules", response_class=PlainTextResponse)
-@app.get("/client_rules", response_class=PlainTextResponse)
-@app.get("/client-rules/{name}", response_class=PlainTextResponse)
-async def get_client_rules(name: str = "", ia_company: str = "", carrier: str = "", company: str = ""):
-    txt = _rules_plaintext_for(ia_company, carrier, company, name)
-    if not txt:
-        return PlainTextResponse("Rules not found", status_code=200)
-    return PlainTextResponse(txt, status_code=200)
-
-@app.post("/client-rules", response_class=PlainTextResponse)
-@app.post("/client_rules", response_class=PlainTextResponse)
-async def post_client_rules(payload: dict = None):
-    payload = payload or {}
-    txt = _rules_plaintext_for(
-        payload.get("ia_company",""),
-        payload.get("carrier",""),
-        payload.get("company",""),
-        payload.get("name","")
-    )
-    if not txt:
-        return PlainTextResponse("Rules not found", status_code=200)
-    return PlainTextResponse(txt, status_code=200)
-
-@app.get("/rules", response_class=PlainTextResponse)
-@app.get("/guidelines", response_class=PlainTextResponse)
-async def get_rules_alias(ia_company: str = "", carrier: str = "", company: str = "", name: str = ""):
-    return await get_client_rules(name, ia_company, carrier, company)
-
 
 # ==========================
 # Minimal OCR helpers
@@ -367,6 +273,29 @@ AI-4-IA Review Summary
         "pdf_url": f"/download-pdf?file_number={safe_file}",
         "pdf_filename": f"{safe_file}.pdf"
     }
+
+
+
+# =========================================
+# Client Rules endpoint (exact legacy behavior)
+# =========================================
+@app.get("/client-rules/{client_name}")
+async def get_client_rules(client_name: str):
+    rules_dir = "client_rules"
+    file_name = f"{client_name}.docx"
+    file_path = os.path.join(rules_dir, file_name)
+    if os.path.exists(file_path):
+        try:
+            doc = Document(file_path)
+            text = "\n".join([p.text for p in doc.paragraphs if p.text.strip()])
+            log.debug(f"Client rules for {client_name}: {text[:500]}...")
+            return {"text": text}
+        except Exception as e:
+            log.error(f"Client rules error: {str(e)}")
+            return JSONResponse(status_code=500, content={"error": str(e)})
+    else:
+        log.error(f"Rules not found for client: {client_name}")
+        return JSONResponse(status_code=404, content={"error": "Rules not found for this client."})
 
 @app.get("/download-pdf")
 async def download_pdf(file_number: str):
