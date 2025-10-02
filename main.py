@@ -46,79 +46,99 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
-
 # ==========================
-# Client Rules endpoints (load exact .docx for selected carrier)
+# Client Rules endpoints — load exact .docx for selected carrier
 # ==========================
-def _slug_company(name: str) -> str:
-    n = (name or "").lower().strip()
-    # common normalizations
-    n = n.replace("&", "and")
-    # collapse punctuation/whitespace to hyphens
-    n = re.sub(r"[^a-z0-9]+", "-", n).strip("-")
-    return n
+def _slug(s: str) -> str:
+    s = (s or "").lower().strip()
+    s = s.replace("&","and")
+    s = re.sub(r"[^a-z0-9]+","-", s).strip("-")
+    return s
 
-def _candidate_rule_filenames(company: str):
-    slug = _slug_company(company)
-    cands = []
-    if slug:
-        bases = [slug, slug.replace("-", "_"), slug.replace("-", ""), slug.replace("_","")]
-        for b in bases:
-            cands += [f"{b}.docx", f"{b}.DOCX"]
-    # final fallbacks
-    cands += ["default.docx", "Default.docx", "client-rules.docx", "Client-Rules.docx"]
-    # de-duplicate preserving order
-    seen, out = set(), []
-    for x in cands:
-        if x not in seen:
-            seen.add(x); out.append(x)
+def _rule_search_roots():
+    return [
+        "/app/rules", "/app/Rules", "/app/CLIENT_RULES", "/app/client_rules", "/app",
+        "/rules", "/workspace/rules",
+        "/opt/render/project/src/rules",
+        "/mnt/data/rules", "/mnt/data"
+    ]
+
+def _all_docx_under(root):
+    out = []
+    try:
+        for dirpath, dirnames, filenames in os.walk(root):
+            for fn in filenames:
+                if fn.lower().endswith(".docx"):
+                    out.append(os.path.join(dirpath, fn))
+    except Exception:
+        pass
     return out
 
-def _rule_search_paths():
-    # search common paths used in different deployments
-    return [
-        "/app/rules",
-        "/rules",
-        "/workspace/rules",
-        "/opt/render/project/src/rules",
-        "/mnt/data/rules",
-    ]
+def _score_match(target_slug: str, candidate_path: str) -> int:
+    base = os.path.basename(candidate_path).lower().replace(".docx","")
+    base_slug = _slug(base)
+    score = 0
+    if base_slug == target_slug: score += 100
+    if base_slug.startswith(target_slug): score += 50
+    if target_slug in base_slug: score += 25
+    if "/rules" in candidate_path.lower(): score += 5
+    return score
 
 def _load_rules_docx(company: str) -> str:
     from docx import Document as _Doc
-    for base in _rule_search_paths():
-        for fn in _candidate_rule_filenames(company):
-            full = Path(base) / fn
-            if full.exists():
-                try:
-                    d = _Doc(full)
-                    txt = "\n".join(p.text for p in d.paragraphs)
-                    txt = txt.strip() or "(Rule document contains no text paragraphs.)"
-                    return f"{txt}\n\n(Source: {full})"
-                except Exception as e:
-                    return f"(Error reading {full}: {e})"
+    target_slug = _slug(company)
+    best_file, best_score = None, -1
+    for root in _rule_search_roots():
+        for path in _all_docx_under(root):
+            sc = _score_match(target_slug, path) if target_slug else (1 if "default" in os.path.basename(path).lower() else 0)
+            if sc > best_score:
+                best_score, best_file = sc, path
+    if not best_file:
+        return ""
+    try:
+        d = _Doc(best_file)
+        txt = "\n".join(p.text for p in d.paragraphs)
+        return txt.strip() or "(Rule document contains no text paragraphs.)"
+    except Exception as e:
+        return f"(Error reading {best_file}: {e})"
+
+def _pick_name(ia_company: str = "", carrier: str = "", company: str = "", name: str = "") -> str:
+    for x in (ia_company, carrier, company, name):
+        if x and x.strip():
+            return x
     return ""
 
-def _rules_from_query(ia_company: str = "", carrier: str = "", company: str = "") -> str:
-    key = ia_company or carrier or company
+def _rules_plaintext_for(ia_company: str = "", carrier: str = "", company: str = "", name: str = "") -> str:
+    key = _pick_name(ia_company, carrier, company, name)
     return _load_rules_docx(key)
 
 @app.get("/client-rules", response_class=PlainTextResponse)
-async def get_client_rules(ia_company: str = "", carrier: str = "", company: str = ""):
-    txt = _rules_from_query(ia_company, carrier, company)
+@app.get("/client_rules", response_class=PlainTextResponse)
+@app.get("/client-rules/{name}", response_class=PlainTextResponse)
+async def get_client_rules(name: str = "", ia_company: str = "", carrier: str = "", company: str = ""):
+    txt = _rules_plaintext_for(ia_company, carrier, company, name)
     if not txt:
-        # Explicit plain-text not found; keep compatibility with existing UI that expects 200
-        return PlainTextResponse(f"Rules not found for: {ia_company or carrier or company}", status_code=200)
+        return PlainTextResponse("Rules not found", status_code=200)
     return PlainTextResponse(txt, status_code=200)
 
-# Backward-compat aliases some frontends use
-@app.get("/rules", response_class=PlainTextResponse)
-async def get_rules_alias(ia_company: str = "", carrier: str = "", company: str = ""):
-    return await get_client_rules(ia_company, carrier, company)
+@app.post("/client-rules", response_class=PlainTextResponse)
+@app.post("/client_rules", response_class=PlainTextResponse)
+async def post_client_rules(payload: dict = None):
+    payload = payload or {}
+    txt = _rules_plaintext_for(
+        payload.get("ia_company",""),
+        payload.get("carrier",""),
+        payload.get("company",""),
+        payload.get("name","")
+    )
+    if not txt:
+        return PlainTextResponse("Rules not found", status_code=200)
+    return PlainTextResponse(txt, status_code=200)
 
+@app.get("/rules", response_class=PlainTextResponse)
 @app.get("/guidelines", response_class=PlainTextResponse)
-async def get_guidelines_alias(ia_company: str = "", carrier: str = "", company: str = ""):
-    return await get_client_rules(ia_company, carrier, company)
+async def get_rules_alias(ia_company: str = "", carrier: str = "", company: str = "", name: str = ""):
+    return await get_client_rules(name, ia_company, carrier, company)
 
 
 # ==========================
