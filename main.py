@@ -2,7 +2,7 @@ from fastapi import FastAPI, File, UploadFile, Form
 from fastapi.responses import JSONResponse, FileResponse
 from fastapi.middleware.cors import CORSMiddleware
 from typing import List, Dict, Any
-import os, io, re, json, base64, logging, smtplib
+import os, io, re, json, base64, logging, smtplib, zipfile
 from email.message import EmailMessage
 
 from fpdf import FPDF
@@ -26,7 +26,7 @@ PDF_DIR = os.getenv("PDF_DIR", "/tmp"); os.makedirs(PDF_DIR, exist_ok=True)
 CLIENT_RULES_DIR = os.getenv("CLIENT_RULES_DIR", "client_rules")
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s")
-log = logging.getLogger("nspxn-nologic")
+log = logging.getLogger("nspxn-zip")
 
 MODEL = os.getenv("OAI_MODEL", "gpt-4o")
 if not os.getenv("OPENAI_API_KEY"):
@@ -177,9 +177,70 @@ GLOBAL_RULES = (
     "- summary_brief must be ≤ 280 chars, plain text. The full report goes in summary_markdown.\n"
 )
 
+SUPPORTED_IMAGE_EXTS = (".jpg",".jpeg",".png",".webp",".heic",".heif")
+SUPPORTED_TEXT_EXTS = (".txt",)
+SUPPORTED_DOCX_EXTS = (".docx",)
+SUPPORTED_PDF_EXTS = (".pdf",)
 
 # -----------------------
-# Vision Review — GPT does EVERYTHING (we just relay + render)
+# Helpers to add parts from bytes
+# -----------------------
+def _image_part_from_bytes(raw: bytes) -> Dict[str, Any]:
+    b64 = base64.b64encode(raw).decode("utf-8")
+    return {"type": "image_url", "image_url": {"url": "data:image/jpeg;base64," + b64}}
+
+def _add_bytes(parts: List[Dict[str,Any]], files_seen: List[str], raw: bytes, fname: str, used: int, max_images: int) -> int:
+    low = fname.lower()
+    if low.endswith(SUPPORTED_PDF_EXTS) and used < max_images:
+        try:
+            pages = convert_from_bytes(raw, dpi=120)
+            files_seen.append(f"{fname} (pdf, {len(pages)} page(s))")
+            for im in pages[:max_images - used]:
+                b = io.BytesIO()
+                im.save(b, format="JPEG", quality=65, optimize=True)
+                parts.append(_image_part_from_bytes(b.getvalue()))
+                used += 1
+        except Exception as e:
+            log.warning(f"pdf2image failed for {fname}: {e}")
+            files_seen.append(f"{fname} (pdf, could not be converted)")
+    elif low.endswith(SUPPORTED_IMAGE_EXTS) and used < max_images:
+        try:
+            im = Image.open(io.BytesIO(raw)).convert("RGB")
+            im.thumbnail((1400,1400))
+            b = io.BytesIO(); im.save(b, format="JPEG", quality=70, optimize=True)
+            raw = b.getvalue()
+        except Exception:
+            pass
+        parts.append(_image_part_from_bytes(raw))
+        used += 1
+        files_seen.append(f"{fname} (photo)")
+    elif low.endswith(SUPPORTED_DOCX_EXTS):
+        try:
+            text = "\n".join([p.text for p in Document(io.BytesIO(raw)).paragraphs if p.text.strip()])
+        except Exception:
+            text = ""
+        if text.strip():
+            parts.insert(0, {"type":"text","text": text[:10000]})
+            files_seen.append(f"{fname} (docx text included)")
+        else:
+            files_seen.append(f"{fname} (docx, no readable text)")
+    elif low.endswith(SUPPORTED_TEXT_EXTS):
+        try:
+            text = raw.decode("utf-8","ignore")[:10000]
+        except Exception:
+            text = ""
+        if text.strip():
+            parts.insert(0, {"type":"text","text": text})
+            files_seen.append(f"{fname} (txt included)")
+        else:
+            files_seen.append(f"{fname} (txt, empty)")
+    else:
+        files_seen.append(f"{fname} (unsupported type)")
+    return used
+
+# -----------------------
+# Vision Review — GPT does EVERYTHING.
+# Now supports ZIP files (server unzips for GPT).
 # -----------------------
 @app.post("/vision-review")
 async def vision_review(
@@ -195,59 +256,44 @@ async def vision_review(
     MAX_IMAGES = 24
     used = 0
 
-    # Gather inputs: PDFs -> images; images unchanged; docx/txt -> text
+    # Anti-zipbomb guardrails
+    MAX_ZIP_FILES = 100          # total entries allowed
+    MAX_ENTRY_SIZE = 15 * 1024 * 1024  # 15 MB per entry
+
+    # Gather inputs: PDFs -> images; images unchanged; docx/txt -> text; zip -> unpack loop
     for f in files:
         raw = await f.read()
         fname = f.filename or "upload"
         low = fname.lower()
 
-        if low.endswith(".pdf"):
+        if low.endswith(".zip"):
             try:
-                pages = convert_from_bytes(raw, dpi=120)  # speed-friendly
-                files_seen.append(f"{fname} (pdf, {len(pages)} page(s))")
-                for im in pages[:MAX_IMAGES - used]:
-                    b = io.BytesIO()
-                    im.save(b, format="JPEG", quality=65, optimize=True)
-                    b64 = base64.b64encode(b.getvalue()).decode("utf-8")
-                    parts.append({"type":"image_url","image_url":{"url":"data:image/jpeg;base64,"+b64}})
-                    used += 1
+                zf = zipfile.ZipFile(io.BytesIO(raw))
             except Exception as e:
-                log.warning(f"pdf2image failed: {e}")
-                files_seen.append(f"{fname} (pdf, could not be converted)")
+                files_seen.append(f"{fname} (zip, unreadable: {e})")
+                continue
 
-        elif low.endswith((".jpg",".jpeg",".png",".webp",".heic",".heif")) and used < MAX_IMAGES:
-            try:
-                im = Image.open(io.BytesIO(raw)).convert("RGB")
-                im.thumbnail((1400,1400))
-                b = io.BytesIO(); im.save(b, format="JPEG", quality=70, optimize=True)
-                raw = b.getvalue()
-            except Exception:
-                pass
-            b64 = base64.b64encode(raw).decode("utf-8")
-            parts.append({"type":"image_url","image_url":{"url":"data:image/jpeg;base64,"+b64}})
-            used += 1
-            files_seen.append(f"{fname} (photo)")
+            members = [zi for zi in zf.infolist() if not zi.is_dir()]
+            if len(members) > MAX_ZIP_FILES:
+                files_seen.append(f"{fname} (zip, too many entries: {len(members)})")
+                members = members[:MAX_ZIP_FILES]
 
-        elif low.endswith(".docx"):
-            try:
-                text = "\n".join([p.text for p in Document(io.BytesIO(raw)).paragraphs if p.text.strip()])
-            except Exception:
-                text = ""
-            if text.strip():
-                parts.insert(0, {"type":"text","text": text[:10000]})
-                files_seen.append(f"{fname} (docx text included)")
-            else:
-                files_seen.append(f"{fname} (docx, no readable text)")
-
-        elif low.endswith(".txt"):
-            try:
-                text = raw.decode("utf-8","ignore")[:10000]
-                parts.insert(0, {"type":"text","text": text})
-                files_seen.append(f"{fname} (txt included)")
-            except Exception:
-                files_seen.append(f"{fname} (txt, read error)")
+            for zi in members:
+                inner_name = zi.filename
+                if ".." in inner_name or inner_name.startswith(("/", "\\")):
+                    files_seen.append(f"{fname}::{inner_name} (skipped unsafe path)")
+                    continue
+                if zi.file_size > MAX_ENTRY_SIZE:
+                    files_seen.append(f"{fname}::{inner_name} (skipped >15MB)")
+                    continue
+                try:
+                    data = zf.read(zi)
+                except Exception as e:
+                    files_seen.append(f"{fname}::{inner_name} (read error: {e})")
+                    continue
+                used = _add_bytes(parts, files_seen, data, f"{fname}::{inner_name}", used, MAX_IMAGES)
         else:
-            files_seen.append(f"{fname} (unsupported type)")
+            used = _add_bytes(parts, files_seen, raw, fname, used, MAX_IMAGES)
 
     SYSTEM = (
         "You are an auto-claims appraisal assistant. Return ONLY valid JSON (no code fences). "
@@ -394,3 +440,4 @@ async def download_pdf(file_number: str):
     if os.path.exists(raw_path):
         return FileResponse(path=raw_path, media_type="application/pdf", filename=f"{file_number}.pdf")
     return JSONResponse(status_code=404, content={"detail":"Not Found"})
+
