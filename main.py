@@ -26,7 +26,7 @@ PDF_DIR = os.getenv("PDF_DIR", "/tmp"); os.makedirs(PDF_DIR, exist_ok=True)
 CLIENT_RULES_DIR = os.getenv("CLIENT_RULES_DIR", "client_rules")
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s")
-log = logging.getLogger("nspxn-zip")
+log = logging.getLogger("nspxn-zip-fraud")
 
 MODEL = os.getenv("OAI_MODEL", "gpt-4o")
 if not os.getenv("OPENAI_API_KEY"):
@@ -35,7 +35,6 @@ client = OpenAI(api_key=os.environ["OPENAI_API_KEY"])
 
 def _safe(s: str) -> str:
     return re.sub(r"[^\w.\-]+", "-", (s or "").strip()).strip("-_.")
-
 
 # -----------------------
 # App + CORS
@@ -69,7 +68,6 @@ async def get_client_rules(client_name: str):
         return {"text": text}
     except Exception as e:
         return JSONResponse(status_code=500, content={"error": f"Unable to read rules: {e}"})
-
 
 # -----------------------
 # Prompt steering only (no backend logic)
@@ -153,19 +151,10 @@ DETAIL_TEMPLATES = {
         "## Final Evaluation\n"
         "- Net Δ total and recommendation."
     ),
-    "docs_checklist": (
-        "## Inputs Used\n"
-        "- List all files and pages that were checked.\n\n"
-        "## Documentation Checklist\n"
-        "| Item | Present? | Evidence (file/page or Photo #) | Notes |\n"
-        "|---|:--:|---|---|\n"
-        "Estimate, invoices, VIN/plate/odometer photos, 4 corners, close-ups, OEM procedures, sublet docs, registration.\n\n"
-        "## Missing Items\n"
-        "- Enumerate with the exact artifact needed and purpose.\n\n"
-        "## Final Evaluation\n"
-        "- Readiness: Ready / Needs Addl Docs — plus next steps."
-    ),
 }
+
+# Removed docs_checklist from dropdowns; keep a soft redirect if it arrives from older UI
+REMOVED_INTENTS = {"docs_checklist"}
 
 GLOBAL_RULES = (
     "WRITING & SOURCING RULES:\n"
@@ -177,6 +166,17 @@ GLOBAL_RULES = (
     "- summary_brief must be ≤ 280 chars, plain text. The full report goes in summary_markdown.\n"
 )
 
+FRAUD_GUIDE = (
+    "FRAUD DETECTION TASK:\n"
+    "- Provide a separate markdown section named 'Fraud Detection'.\n"
+    "- Screen for red flags: reused/stock photos, metadata/date inconsistencies, VIN/odometer mismatches, image tampering indicators (warping, cloning, odd EXIF if visible), invoice anomalies (duplicate items, math errors, tax/markup misuse), unrealistic labor times, part source misrepresentation (OEM vs aftermarket), mismatched vehicle attributes across evidence.\n"
+    "- For each signal: list **Signal**, **Evidence (file/page or Photo #)**, **Impact**, **Confidence (Low/Med/High)**, and **Next Step**.\n"
+    "- If nothing material is found, state: 'No material fraud signals detected based on provided inputs.'\n"
+)
+
+# -----------------------
+# Supported file types
+# -----------------------
 SUPPORTED_IMAGE_EXTS = (".jpg",".jpeg",".png",".webp",".heic",".heif")
 SUPPORTED_TEXT_EXTS = (".txt",)
 SUPPORTED_DOCX_EXTS = (".docx",)
@@ -201,7 +201,7 @@ def _add_bytes(parts: List[Dict[str,Any]], files_seen: List[str], raw: bytes, fn
                 parts.append(_image_part_from_bytes(b.getvalue()))
                 used += 1
         except Exception as e:
-            log.warning(f"pdf2image failed for {fname}: {e}")
+            logging.warning(f"pdf2image failed for {fname}: {e}")
             files_seen.append(f"{fname} (pdf, could not be converted)")
     elif low.endswith(SUPPORTED_IMAGE_EXTS) and used < max_images:
         try:
@@ -240,7 +240,7 @@ def _add_bytes(parts: List[Dict[str,Any]], files_seen: List[str], raw: bytes, fn
 
 # -----------------------
 # Vision Review — GPT does EVERYTHING.
-# Now supports ZIP files (server unzips for GPT).
+# ZIP supported. Fraud section required.
 # -----------------------
 @app.post("/vision-review")
 async def vision_review(
@@ -295,12 +295,17 @@ async def vision_review(
         else:
             used = _add_bytes(parts, files_seen, raw, fname, used, MAX_IMAGES)
 
+    # Back-compat: if old UI still sends docs_checklist, treat as comprehensive
+    if ai_intent in REMOVED_INTENTS:
+        ai_intent = "comprehensive"
+
     SYSTEM = (
         "You are an auto-claims appraisal assistant. Return ONLY valid JSON (no code fences). "
         "Populate exactly these keys: "
-        "['file_number','request_type','claim_number','vin','vin_verification','vehicle','odometer_estimate_only','compliance_score','summary_brief','summary_markdown'] . "
+        "['file_number','request_type','claim_number','vin','vin_verification','vehicle','odometer_estimate_only','compliance_score','summary_brief','summary_markdown','fraud_markdown'] . "
         "Do NOT invent fields. Keep header values and summary consistent. "
         "Write a rich, detailed 'summary_markdown' tailored to the request type. "
+        "Place ALL fraud signals ONLY in 'fraud_markdown' using the fraud guide. "
         "If you cannot determine a field from inputs, set it to 'N/A' rather than guessing."
     )
 
@@ -309,21 +314,22 @@ async def vision_review(
         "comprehensive": "Comprehensive: Guidelines + Estimate + Photos (with VIN check)",
         "photos_only": "Photos Only: Compare to Estimate",
         "invoices_with_photos": "Supplement ↔ Invoices (+ Photos)",
-        "supplement": "Supplement ↔ Invoices (+ Photos)",
-        "docs_checklist": "Documentation Checklist"
+        "supplement": "Supplement ↔ Invoices (+ Photos)"
     }
     req_label = REQ_LABELS.get(ai_intent, "Comprehensive: Guidelines + Estimate + Photos (with VIN check)")
 
-    # Force the "Inputs Used" echo so we can see what GPT actually referenced
+    # Prompt that forces "Inputs Used" echo and adds fraud task
     prompt_text = (
         f"REQUEST TYPE: {ai_intent} — Use request_type='{req_label}'.\n\n"
         "FILES SEEN (include this list verbatim in your '## Inputs Used' section):\n- "
         + ("\n- ".join(files_seen) if files_seen else "none") + "\n\n"
         "CLIENT RULES (verbatim text if provided by the UI):\n" + (client_rules[:2500] if client_rules else "") + "\n\n"
         "DETAIL LAYOUT:\n" + DETAIL_TEMPLATES.get(ai_intent, DETAIL_TEMPLATES["comprehensive"]) + "\n\n"
-        + GLOBAL_RULES +
+        + GLOBAL_RULES + "\n\n"
+        + FRAUD_GUIDE +
         "Return JSON with the exact keys listed above. "
-        "summary_brief must be <= 280 chars (plain text). summary_markdown = full write-up using the layout."
+        "summary_brief must be <= 280 chars (plain text). summary_markdown = full write-up using the layout. "
+        "fraud_markdown = the separate Fraud Detection section described above."
     )
 
     user_parts: List[Dict[str,Any]] = [{"type":"text","text": prompt_text}]
@@ -335,7 +341,7 @@ async def vision_review(
             model=MODEL,
             messages=[{"role":"system","content": SYSTEM},
                       {"role":"user","content": user_parts}],
-            max_tokens=1400,
+            max_tokens=1500,
             temperature=0
         )
         raw = (rsp.choices[0].message.content or "").strip()
@@ -361,6 +367,7 @@ async def vision_review(
         "compliance_score": _get("compliance_score"),
         "summary_brief": _get("summary_brief"),
         "summary_markdown": _get("summary_markdown"),
+        "fraud_markdown": _get("fraud_markdown"),
     }
 
     # PDF — print values exactly as GPT returned
@@ -383,15 +390,16 @@ async def vision_review(
     mc(f"Odometer (from estimate): {result['odometer_estimate_only']}")
     mc(f"Compliance Score: {result['compliance_score']}")
     pdf.ln(3); mc("AI-4-IA Review Summary"); mc((result["summary_markdown"] or '').strip())
+    pdf.ln(3); mc("Fraud Detection"); mc((result["fraud_markdown"] or 'N/A').strip())
 
     safe_file = _safe(file_number); pdf_path = os.path.join(PDF_DIR, f"{safe_file}.pdf")
     try:
         data_bytes = pdf.output(dest="S").encode("latin-1","ignore")
         with open(pdf_path,"wb") as f: f.write(data_bytes)
     except Exception as e:
-        log.warning(f"PDF write error: {e}")
+        logging.warning(f"PDF write error: {e}")
 
-    # Email — same exact values
+    # Email — include Fraud Detection as well
     try:
         msg = EmailMessage()
         msg["Subject"] = f"AI-4-IA Review: {result['claim_number'] or file_number}"
@@ -412,12 +420,15 @@ Compliance Score: {result['compliance_score']}
 
 AI-4-IA Review Summary
 {result['summary_markdown']}
+
+Fraud Detection
+{result['fraud_markdown']}
 """)
         with smtplib.SMTP_SSL("mail.tierra.net", 465) as smtp:
             smtp.login("info@nspxn.com", "grr2025GRR")
             smtp.send_message(msg)
     except Exception as e:
-        log.error(f"Email error: {e}" )
+        logging.error(f"Email error: {e}" )
 
     return {
         **result,
