@@ -193,7 +193,7 @@ def _add_bytes(parts: List[Dict[str,Any]], files_seen: List[str], raw: bytes, fn
     low = fname.lower()
     if low.endswith(SUPPORTED_PDF_EXTS) and used < max_images:
         try:
-            pages = convert_from_bytes(raw, dpi=200)
+            pages = convert_from_bytes(raw, dpi=220)
             files_seen.append(f"{fname} (pdf, {len(pages)} page(s))")
             for im in pages[:max_images - used]:
                 b = io.BytesIO()
