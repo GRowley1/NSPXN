@@ -9,3 +9,6 @@ pillow==10.3.0
 pytesseract==0.3.10
 fpdf==1.7.2
 python-docx==1.1.0
+presidio-analyzer
+presidio-anonymizer
+spacy
