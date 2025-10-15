@@ -1,7 +1,7 @@
 from fastapi import FastAPI, File, UploadFile, Form
 from fastapi.responses import JSONResponse, FileResponse
 from fastapi.middleware.cors import CORSMiddleware
-from typing import List, Dict, Any
+from typing import List, Dict, Any, Optional
 import os, io, re, json, base64, logging, smtplib, zipfile
 from email.message import EmailMessage
 
@@ -26,7 +26,7 @@ PDF_DIR = os.getenv("PDF_DIR", "/tmp"); os.makedirs(PDF_DIR, exist_ok=True)
 CLIENT_RULES_DIR = os.getenv("CLIENT_RULES_DIR", "client_rules")
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s")
-log = logging.getLogger("nspxn-zip-fraud")
+log = logging.getLogger("nspxn")
 
 MODEL = os.getenv("OAI_MODEL", "gpt-4o")
 if not os.getenv("OPENAI_API_KEY"):
@@ -70,7 +70,7 @@ async def get_client_rules(client_name: str):
         return JSONResponse(status_code=500, content={"error": f"Unable to read rules: {e}"})
 
 # -----------------------
-# Prompt steering only (no backend logic)
+# GPT prompt steering (ONLY 3 intents)
 # -----------------------
 DETAIL_TEMPLATES = {
     "guidelines_only": (
@@ -87,19 +87,6 @@ DETAIL_TEMPLATES = {
         "## Final Evaluation\n"
         "- Compliance Score: NN%\n"
         "- One-sentence justification."
-    ),
-    "photos_only": (
-        "## Inputs Used\n"
-        "- State exact photos referenced (Photo #) and any text files.\n\n"
-        "## Executive Summary\n"
-        "- Coverage sufficiency + biggest gaps.\n\n"
-        "## Damage Consistency vs Estimate\n"
-        "| Area / Part | Observed Damage (Photo #) | Likely Operation | Consistent? | Notes |\n"
-        "|---|---|---|:--:|---|\n\n"
-        "## Required Photos Check\n"
-        "- VIN, plate, odometer, 4 corners, damage close-ups; mark **Present / Missing / Unclear**.\n\n"
-        "## Final Evaluation\n"
-        "- Coverage Adequacy: Low/Med/High and 1–2 action items."
     ),
     "comprehensive": (
         "## Inputs Used\n"
@@ -122,56 +109,49 @@ DETAIL_TEMPLATES = {
         "## Final Evaluation\n"
         "- Compliance Score: NN% with one-sentence rationale."
     ),
-    "supplement": (
+    "damage_report_from_photos": (
+        "# AI-4-IA Damage Report\n"
+        "Create a concise, professional damage report **based only on the provided photos (and any optional text)**. Follow the provided sample style exactly.\n\n"
         "## Inputs Used\n"
-        "- List invoices, estimate pages, and Photo # used as evidence.\n\n"
-        "## Supplement Overview\n"
-        "- What changed vs original estimate and why (diagnostics, teardown, hidden damage, OEM reqs).\n\n"
-        "## Invoice vs Estimate — Deltas\n"
-        "| Part / Operation | Qty | $Estimate | $Invoice | Δ (±) | Evidence (Photo/Doc) | Rationale | Disposition |\n"
-        "|---|---:|---:|---:|---:|---|---|---|\n"
-        "Use **Photo #** and file names where applicable. Disposition = Approve / Question / Reject.\n\n"
-        "## Pricing & Labor Reasonableness\n"
-        "- Labor rates, blend/refinish logic, materials, markups, taxes — cite where seen.\n\n"
-        "## Missing or Unclear Evidence\n"
-        "- List exact proof needed (photo of XYZ, line-level invoice, OEM procedure page).\n\n"
-        "## Final Evaluation\n"
-        "- Net Δ total (sum of line deltas). Decision summary in 1–2 sentences."
-    ),
-    "invoices_with_photos": (
-        "## Inputs Used\n"
-        "- Enumerate invoices and Photo # referenced.\n\n"
-        "## Supplement Overview\n"
-        "- Brief rationale for invoice items vs estimate scope.\n\n"
-        "## Invoice vs Estimate — Deltas\n"
-        "| Part / Operation | Qty | $Estimate | $Invoice | Δ (±) | Evidence (Photo/Doc) | Rationale | Disposition |\n"
-        "|---|---:|---:|---:|---:|---|---|---|\n\n"
-        "## Missing or Unclear Evidence\n"
-        "- Exactly what proof is missing.\n\n"
-        "## Final Evaluation\n"
-        "- Net Δ total and recommendation."
+        "- List exact Photo #s and any text used.\n\n"
+        "## Quick Stats\n"
+        "- Claim # (if visible): <value or N/A>\n"
+        "- File # (echo from request): <value or N/A>\n"
+        "- Odometer (if visible): <value or N/A>\n"
+        "- Primary Impact: <area(s)>\n"
+        "- Secondary Impact: <area(s) or 'None observed'>\n\n"
+        "## Damage Summary\n"
+        "- 6–12 bullets: **panel/part** + **condition** (dent/crease/scrape/misalignment) + **suggested op** (repair/replace/refinish/blend). Always reference **Photo #** when applicable.\n\n"
+        "## Estimated Repair Costs\n"
+        "  - Body Labor: <hrs> hr @ $<rate>/hr .......... $<amount>\n"
+        "  - Paint Labor: <hrs> hr @ $<rate>/hr .......... $<amount>\n"
+        "  - Paint Materials: <hrs> hr @ $<rate>/hr ...... $<amount>\n"
+        "  - Parts: <brief list> .... $<amount>\n"
+        "  - Subtotal ........................................ $<amount>\n"
+        "  - Sales Tax (<rate>%) ............................... $<amount>\n"
+        "  - Total Estimated Cost ...................... $<amount> ±<variance>%\n\n"
+        "## Fraud & Authenticity Check\n"
+        "- Summarize any inconsistencies between photos, timestamps, or visible identifiers (VIN/badges). If none, say so.\n\n"
+        "## Conclusion\n"
+        "- 1–2 sentences summarizing repairability and scope.\n"
     ),
 }
 
-# Removed docs_checklist from dropdowns; keep a soft redirect if it arrives from older UI
-REMOVED_INTENTS = {"docs_checklist"}
+ALLOWED_INTENTS = {"guidelines_only","comprehensive","damage_report_from_photos"}
 
 GLOBAL_RULES = (
     "WRITING & SOURCING RULES:\n"
-    "- Do NOT guess vehicle make/model; only state it when clearly supported by estimate text or a legible VIN/badge. Otherwise use 'N/A'.\n"
-    "- Never dump a generic list of photos. Only cite Photo # when it backs a specific claim or line item.\n"
-    "- If a value cannot be confirmed from inputs, set it to 'N/A' and say why.\n"
-    "- Keep currency with $ and thousands separators when you report amounts. Show Δ as Invoice - Estimate with sign.\n"
-    "- Keep tables compact and only include rows that have evidence.\n"
+    "- Use ONLY what is visible/legible in provided inputs.\n"
+    "- If a value cannot be confirmed, set it to 'N/A' and say why.\n"
+    "- For the Damage Report mode, do NOT include estimate compliance boilerplate.\n"
     "- summary_brief must be ≤ 280 chars, plain text. The full report goes in summary_markdown.\n"
 )
 
 FRAUD_GUIDE = (
     "FRAUD DETECTION TASK:\n"
-    "- Provide a separate markdown section named 'Fraud Detection'.\n"
-    "- Screen for red flags: reused/stock photos, metadata/date inconsistencies, VIN/odometer mismatches, image tampering indicators (warping, cloning, odd EXIF if visible), invoice anomalies (duplicate items, math errors, tax/markup misuse), unrealistic labor times, part source misrepresentation (OEM vs aftermarket), mismatched vehicle attributes across evidence.\n"
-    "- For each signal: list **Signal**, **Evidence (file/page or Photo #)**, **Impact**, **Confidence (Low/Med/High)**, and **Next Step**.\n"
-    "- If nothing material is found, state: 'No material fraud signals detected based on provided inputs.'\n"
+    "- Provide a section named 'Fraud & Authenticity Check' for Damage Report mode and 'Fraud Detection' for others.\n"
+    "- Screen for reused/stock photos, metadata/date inconsistencies, VIN/odometer mismatches, image tampering clues, mismatched badges/colors.\n"
+    "- If nothing material is found, say so.\n"
 )
 
 # -----------------------
@@ -193,7 +173,7 @@ def _add_bytes(parts: List[Dict[str,Any]], files_seen: List[str], raw: bytes, fn
     low = fname.lower()
     if low.endswith(SUPPORTED_PDF_EXTS) and used < max_images:
         try:
-            pages = convert_from_bytes(raw, dpi=250)
+            pages = convert_from_bytes(raw, dpi=220)
             files_seen.append(f"{fname} (pdf, {len(pages)} page(s))")
             for im in pages[:max_images - used]:
                 b = io.BytesIO()
@@ -239,8 +219,7 @@ def _add_bytes(parts: List[Dict[str,Any]], files_seen: List[str], raw: bytes, fn
     return used
 
 # -----------------------
-# Vision Review — GPT does EVERYTHING.
-# ZIP supported. Fraud section required.
+# Vision Review — GPT does EVERYTHING (ZIP supported)
 # -----------------------
 @app.post("/vision-review")
 async def vision_review(
@@ -257,10 +236,9 @@ async def vision_review(
     used = 0
 
     # Anti-zipbomb guardrails
-    MAX_ZIP_FILES = 100          # total entries allowed
-    MAX_ENTRY_SIZE = 15 * 1024 * 1024  # 15 MB per entry
+    MAX_ZIP_FILES = 100
+    MAX_ENTRY_SIZE = 15 * 1024 * 1024  # 15 MB
 
-    # Gather inputs: PDFs -> images; images unchanged; docx/txt -> text; zip -> unpack loop
     for f in files:
         raw = await f.read()
         fname = f.filename or "upload"
@@ -272,76 +250,73 @@ async def vision_review(
             except Exception as e:
                 files_seen.append(f"{fname} (zip, unreadable: {e})")
                 continue
-
             members = [zi for zi in zf.infolist() if not zi.is_dir()]
             if len(members) > MAX_ZIP_FILES:
                 files_seen.append(f"{fname} (zip, too many entries: {len(members)})")
                 members = members[:MAX_ZIP_FILES]
-
             for zi in members:
                 inner_name = zi.filename
                 if ".." in inner_name or inner_name.startswith(("/", "\\")):
-                    files_seen.append(f"{fname}::{inner_name} (skipped unsafe path)")
-                    continue
+                    files_seen.append(f"{fname}::{inner_name} (skipped unsafe path)"); continue
                 if zi.file_size > MAX_ENTRY_SIZE:
-                    files_seen.append(f"{fname}::{inner_name} (skipped >15MB)")
-                    continue
+                    files_seen.append(f"{fname}::{inner_name} (skipped >15MB)"); continue
                 try:
                     data = zf.read(zi)
                 except Exception as e:
-                    files_seen.append(f"{fname}::{inner_name} (read error: {e})")
-                    continue
+                    files_seen.append(f"{fname}::{inner_name} (read error: {e})"); continue
                 used = _add_bytes(parts, files_seen, data, f"{fname}::{inner_name}", used, MAX_IMAGES)
         else:
             used = _add_bytes(parts, files_seen, raw, fname, used, MAX_IMAGES)
 
-    # Back-compat: if old UI still sends docs_checklist, treat as comprehensive
-    if ai_intent in REMOVED_INTENTS:
+    # Lock to 3 intents only
+    if ai_intent not in ALLOWED_INTENTS:
         ai_intent = "comprehensive"
 
-    SYSTEM = (
-        "You are an auto-claims appraisal assistant. Return ONLY valid JSON (no code fences). "
-        "Populate exactly these keys: "
-        "['file_number','request_type','claim_number','vin','vin_verification','vehicle','odometer_estimate_only','compliance_score','summary_brief','summary_markdown','fraud_markdown'] . "
-        "Do NOT invent fields. Keep header values and summary consistent. "
-        "Write a rich, detailed 'summary_markdown' tailored to the request type. "
-        "Place ALL fraud signals ONLY in 'fraud_markdown' using the fraud guide. "
-        "If you cannot determine a field from inputs, set it to 'N/A' rather than guessing."
-    )
-
+    # Labels to freeze request_type exactly as dropdown
     REQ_LABELS = {
         "guidelines_only": "Guidelines → Estimate (no photos)",
         "comprehensive": "Comprehensive: Guidelines + Estimate + Photos (with VIN check)",
-        "photos_only": "Photos Only: Compare to Estimate",
-        "invoices_with_photos": "Supplement ↔ Invoices (+ Photos)",
-        "supplement": "Supplement ↔ Invoices (+ Photos)"
+        "damage_report_from_photos": "Create a Damage Report from Photos",
     }
     req_label = REQ_LABELS.get(ai_intent, "Comprehensive: Guidelines + Estimate + Photos (with VIN check)")
+    log.info(f"ai_intent received: {ai_intent} -> using label: {req_label}")
 
-    # Prompt that forces "Inputs Used" echo and adds fraud task
+    # Keys expected back
+    KEYS = [
+        "file_number","request_type","claim_number","vin","vin_verification","vehicle",
+        "odometer_estimate_only","compliance_score","summary_brief","summary_markdown",
+        "fraud_markdown","primary_impact","secondary_impact","estimated_costs_markdown","conclusion"
+    ]
+
+    SYSTEM = (
+        "You are an auto-claims appraisal assistant. Return ONLY valid JSON (no code fences). "
+        f"Populate exactly these keys (always include all, use 'N/A' when not applicable): {KEYS}. "
+        "Use evidence only from inputs. Avoid guessing.\n"
+        "If request_type is 'Create a Damage Report from Photos', ignore estimate/compliance details; "
+        "focus ONLY on the Damage Report sections (Quick Stats, Damage Summary, Estimated Repair Costs, Fraud & Authenticity Check, Conclusion). "
+        "For other request types, write a standard narrative under summary_markdown.\n"
+        "summary_brief must be <= 280 chars (plain text)."
+    )
+
     prompt_text = (
-        f"REQUEST TYPE: {ai_intent} — Use request_type='{req_label}'.\n\n"
-        "FILES SEEN (include this list verbatim in your '## Inputs Used' section):\n- "
+        f"REQUEST TYPE SELECTED (exact): '{req_label}'. Use this exact string in 'request_type'.\n\n"
+        "FILES SEEN (echo verbatim in '## Inputs Used'):\n- "
         + ("\n- ".join(files_seen) if files_seen else "none") + "\n\n"
-        "CLIENT RULES (verbatim text if provided by the UI):\n" + (client_rules[:2500] if client_rules else "") + "\n\n"
+        "CLIENT RULES (if provided; else blank):\n" + (client_rules[:2000] if client_rules else "") + "\n\n"
         "DETAIL LAYOUT:\n" + DETAIL_TEMPLATES.get(ai_intent, DETAIL_TEMPLATES["comprehensive"]) + "\n\n"
-        + GLOBAL_RULES + "\n\n"
-        + FRAUD_GUIDE +
-        "Return JSON with the exact keys listed above. "
-        "summary_brief must be <= 280 chars (plain text). summary_markdown = full write-up using the layout. "
-        "fraud_markdown = the separate Fraud Detection section described above."
+        + GLOBAL_RULES + "\n\n" + FRAUD_GUIDE
     )
 
     user_parts: List[Dict[str,Any]] = [{"type":"text","text": prompt_text}]
     if parts: user_parts.extend(parts)
 
-    # Call GPT and relay output as-is
+    # Call GPT and parse JSON
     try:
         rsp = client.chat.completions.create(
             model=MODEL,
             messages=[{"role":"system","content": SYSTEM},
                       {"role":"user","content": user_parts}],
-            max_tokens=1500,
+            max_tokens=1700,
             temperature=0
         )
         raw = (rsp.choices[0].message.content or "").strip()
@@ -351,14 +326,14 @@ async def vision_review(
         log.error(f"LLM failure or JSON parse error: {e}")
         return JSONResponse(status_code=500, content={"error":"Model output could not be parsed as JSON."})
 
-    # Build final result — NO transformations; just defaults if missing
     def _get(k):
         v = data.get(k)
         return "" if v is None else str(v)
 
+    # Freeze request_type to the dropdown label
     result = {
         "file_number": file_number,
-        "request_type": _get("request_type"),
+        "request_type": req_label,
         "claim_number": _get("claim_number"),
         "vin": _get("vin"),
         "vin_verification": _get("vin_verification"),
@@ -368,44 +343,96 @@ async def vision_review(
         "summary_brief": _get("summary_brief"),
         "summary_markdown": _get("summary_markdown"),
         "fraud_markdown": _get("fraud_markdown"),
+        "primary_impact": _get("primary_impact"),
+        "secondary_impact": _get("secondary_impact"),
+        "estimated_costs_markdown": _get("estimated_costs_markdown"),
+        "conclusion": _get("conclusion"),
     }
 
-    # PDF — print values exactly as GPT returned
+    # -----------------------
+    # PDF — separate file for Damage Report, classic for others
+    # -----------------------
     pdf = FPDF(); pdf.add_page()
     try:
         pdf.add_font("DejaVu","", "DejaVuSans.ttf", uni=True); pdf.set_font("DejaVu", size=11)
     except Exception:
         pdf.set_font("Arial", size=11)
-    pdf.cell(0,10,"NSPXN.com AI Review Report", ln=True, align="C")
-    pdf.set_font_size(10); pdf.ln(3)
-    def mc(s): pdf.multi_cell(0,6,s)
-    mc(f"File Number: {file_number}")
-    mc(f"IA Company: {ia_company}")
-    mc(f"Appraiser ID #: {appraiser_id}")
-    mc(f"Request Type: {result['request_type']}")
-    mc(f"Claim #: {result['claim_number']}")
-    mc(f"VIN (from estimate/photos): {result['vin']}")
-    mc(f"VIN verification (estimate vs photo): {result['vin_verification']}")
-    mc(f"Vehicle: {result['vehicle']}")
-    mc(f"Odometer (from estimate): {result['odometer_estimate_only']}")
-    mc(f"Compliance Score: {result['compliance_score']}")
-    pdf.ln(3); mc("AI-4-IA Review Summary"); mc((result["summary_markdown"] or '').strip())
-    pdf.ln(3); mc("Fraud Detection"); mc((result["fraud_markdown"] or 'N/A').strip())
 
-    safe_file = _safe(file_number); pdf_path = os.path.join(PDF_DIR, f"{safe_file}.pdf")
+    def mc(s): pdf.multi_cell(0,6,s)
+
+    if ai_intent == "damage_report_from_photos":
+        # Title only; sample-style layout
+        pdf.cell(0,10,"AI-4-IA Damage Report", ln=True, align="C")
+        pdf.set_font_size(10); pdf.ln(3)
+
+        mc(f"Claim #: {result['claim_number'] or 'N/A'}    File #: {file_number or 'N/A'}")
+        if result["odometer_estimate_only"] or result["primary_impact"]:
+            mc(f"Odometer: {result['odometer_estimate_only'] or 'N/A'}    Primary Impact: {result['primary_impact'] or 'N/A'}")
+        if result["secondary_impact"]:
+            mc(f"Secondary Impact: {result['secondary_impact']}")
+
+        pdf.ln(2); mc("Damage Summary"); mc((result["summary_markdown"] or "N/A").strip())
+        pdf.ln(2); mc("Estimated Repair Costs"); mc((result["estimated_costs_markdown"] or "N/A").strip())
+        pdf.ln(2); mc("Fraud & Authenticity Check"); mc((result["fraud_markdown"] or 'N/A').strip())
+        pdf.ln(2); mc("Conclusion"); mc((result["conclusion"] or 'N/A').strip())
+
+        safe_file = _safe(file_number)
+        pdf_filename = f"AI_Damage_Report_{safe_file}.pdf"
+    else:
+        # Classic NSPXN header
+        pdf.cell(0,10,"NSPXN.com AI Review Report", ln=True, align="C")
+        pdf.set_font_size(10); pdf.ln(3)
+        mc(f"File Number: {file_number}")
+        mc(f"IA Company: {ia_company}")
+        mc(f"Appraiser ID #: {appraiser_id}")
+        mc(f"Request Type: {result['request_type']}")
+        mc(f"Claim #: {result['claim_number']}")
+        mc(f"VIN (from estimate/photos): {result['vin']}")
+        mc(f"VIN verification (estimate vs photo): {result['vin_verification']}")
+        mc(f"Vehicle: {result['vehicle']}")
+        mc(f"Odometer (from estimate): {result['odometer_estimate_only']}")
+        mc(f"Compliance Score: {result['compliance_score']}")
+        pdf.ln(3); mc("AI-4-IA Review Summary"); mc((result["summary_markdown"] or '').strip())
+        pdf.ln(3); mc("Fraud Detection"); mc((result["fraud_markdown"] or 'N/A').strip())
+
+        safe_file = _safe(file_number)
+        pdf_filename = f"{safe_file}.pdf"
+
+    pdf_path = os.path.join(PDF_DIR, pdf_filename)
     try:
         data_bytes = pdf.output(dest="S").encode("latin-1","ignore")
         with open(pdf_path,"wb") as f: f.write(data_bytes)
     except Exception as e:
         logging.warning(f"PDF write error: {e}")
 
-    # Email — include Fraud Detection as well
+    # -----------------------
+    # Email — minimal mirror
+    # -----------------------
     try:
         msg = EmailMessage()
-        msg["Subject"] = f"AI-4-IA Review: {result['claim_number'] or file_number}"
-        msg["From"] = "info@nspxn.com"
-        msg["To"] = "info@nspxn.com"
-        msg.set_content(f"""NSPXN.com AI Review Report
+        if ai_intent == "damage_report_from_photos":
+            subj = f"AI Damage Report: {file_number or ''} {result['claim_number'] or ''}".strip()
+            msg.set_content(f"""AI-4-IA Damage Report
+
+Claim #: {result['claim_number'] or 'N/A'}    File #: {file_number or 'N/A'}
+Odometer: {result['odometer_estimate_only'] or 'N/A'}    Primary Impact: {result['primary_impact'] or 'N/A'}
+Secondary Impact: {result['secondary_impact'] or 'N/A'}
+
+Damage Summary
+{result['summary_markdown'] or 'N/A'}
+
+Estimated Repair Costs
+{result['estimated_costs_markdown'] or 'N/A'}
+
+Fraud & Authenticity Check
+{result['fraud_markdown'] or 'N/A'}
+
+Conclusion
+{result['conclusion'] or 'N/A'}
+""")
+        else:
+            subj = f"AI-4-IA Review: {result['claim_number'] or file_number}"
+            msg.set_content(f"""NSPXN.com AI Review Report
 
 File Number: {file_number}
 IA Company: {ia_company}
@@ -424,25 +451,42 @@ AI-4-IA Review Summary
 Fraud Detection
 {result['fraud_markdown']}
 """)
+        msg["Subject"] = subj
+        msg["From"] = "info@nspxn.com"
+        msg["To"] = "info@nspxn.com"
         with smtplib.SMTP_SSL("mail.tierra.net", 465) as smtp:
             smtp.login("info@nspxn.com", "grr2025GRR")
             smtp.send_message(msg)
     except Exception as e:
         logging.error(f"Email error: {e}" )
 
+    # Provide direct URL (filename for damage-report, file_number for others)
+    if ai_intent == "damage_report_from_photos":
+        pdf_url = f"/download-pdf?filename={pdf_filename}"
+    else:
+        pdf_url = f"/download-pdf?file_number={safe_file}"
+
     return {
         **result,
         "web_summary": result["summary_brief"],
         "gpt_output": result["summary_markdown"],
-        "pdf_url": f"/download-pdf?file_number={safe_file}",
-        "pdf_filename": f"{safe_file}.pdf"
+        "pdf_url": pdf_url,
+        "pdf_filename": pdf_filename
     }
 
 # -----------------------
-# PDF download
+# PDF download (supports explicit filename for damage report)
 # -----------------------
 @app.get("/download-pdf")
-async def download_pdf(file_number: str):
+async def download_pdf(file_number: Optional[str] = None, filename: Optional[str] = None):
+    if filename:
+        safe = _safe(filename)
+        path = os.path.join(PDF_DIR, safe)
+        if os.path.exists(path):
+            return FileResponse(path=path, media_type="application/pdf", filename=safe)
+        return JSONResponse(status_code=404, content={"detail":"Not Found"})
+    if not file_number:
+        return JSONResponse(status_code=400, content={"detail":"Missing query param 'filename' or 'file_number'"})
     safe = _safe(file_number)
     path = os.path.join(PDF_DIR, f"{safe}.pdf")
     if os.path.exists(path):
@@ -451,4 +495,5 @@ async def download_pdf(file_number: str):
     if os.path.exists(raw_path):
         return FileResponse(path=raw_path, media_type="application/pdf", filename=f"{file_number}.pdf")
     return JSONResponse(status_code=404, content={"detail":"Not Found"})
+
 
