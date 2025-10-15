@@ -5,3 +5,6 @@ services:
     plan: starter
     autoDeploy: true
     healthCheckPath: /
+    pip install -r requirements.txt
+    pip install -r requirements-presidio.txt
+    python -m spacy download en_core_web_lg
