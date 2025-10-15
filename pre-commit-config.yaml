@@ -1,0 +1,13 @@
+repos:
+  - repo: https://github.com/pre-commit/mirrors-autopep8
+    rev: v2.0.4
+    hooks:
+      - id: autopep8
+  - repo: local
+    hooks:
+      - id: presidio-scan
+        name: Presidio PII scan
+        entry: python scripts/pii_scan.py
+        language: system
+        pass_filenames: true
+        files: "\\.(py|md|txt|json|yaml|yml|csv)$"

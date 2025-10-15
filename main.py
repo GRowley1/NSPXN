@@ -19,6 +19,10 @@ except Exception:
 
 from openai import OpenAI
 
+# --- PII Redaction (Presidio) ---
+from presidio_analyzer import AnalyzerEngine, Pattern, PatternRecognizer, RecognizerResult
+from presidio_anonymizer import AnonymizerEngine
+
 # -----------------------
 # Minimal setup
 # -----------------------
@@ -32,6 +36,50 @@ MODEL = os.getenv("OAI_MODEL", "gpt-4o")
 if not os.getenv("OPENAI_API_KEY"):
     raise RuntimeError("OPENAI_API_KEY missing")
 client = OpenAI(api_key=os.environ["OPENAI_API_KEY"])
+
+# --------------------------------
+# Presidio: Analyzer/Anonymizer (preserve VIN & Claim #)
+# --------------------------------
+analyzer = AnalyzerEngine()
+anonymizer = AnonymizerEngine()
+
+VIN_PATTERN = r"\b([A-HJ-NPR-Z0-9]{17})\b"
+vin_recognizer = PatternRecognizer(
+    supported_entity="VIN",
+    patterns=[Pattern(name="vin-17", regex=VIN_PATTERN, score=0.8)],
+)
+
+CLAIM_PATTERN = r"\b(?:(?:Claim|CLM|Clm)\s*#?\s*[:\-]?\s*)?([A-Z0-9]{5,}[A-Z0-9\-]{0,})\b"
+claim_recognizer = PatternRecognizer(
+    supported_entity="CLAIM_NUMBER",
+    patterns=[Pattern(name="claim-generic", regex=CLAIM_PATTERN, score=0.6)],
+)
+
+analyzer.registry.add_recognizer(vin_recognizer)
+analyzer.registry.add_recognizer(claim_recognizer)
+
+REDACT_ENTITY_TYPES = {
+    "PERSON", "PHONE_NUMBER", "EMAIL_ADDRESS", "US_SSN",
+    "CREDIT_CARD", "IBAN_CODE", "LOCATION", "NRP", "ORGANIZATION",
+    "DATE_TIME", "IP_ADDRESS", "CRYPTO", "MEDICAL_LICENSE", "URL"
+}
+
+def _filter_results(results: list[RecognizerResult]) -> list[RecognizerResult]:
+    return [r for r in results if r.entity_type in REDACT_ENTITY_TYPES]
+
+def redact_text_preserve_vin_claim(text: str) -> str:
+    if not text:
+        return text
+    results = analyzer.analyze(text=text, language="en")
+    to_mask = _filter_results(results)
+    if not to_mask:
+        return text
+    redacted = anonymizer.anonymize(
+        text=text,
+        analyzer_results=to_mask,
+        operators={"DEFAULT": {"type": "replace", "new_value": "[REDACTED]"}}
+    ).text
+    return redacted
 
 def _safe(s: str) -> str:
     return re.sub(r"[^\w.\-]+", "-", (s or "").strip()).strip("-_.")
@@ -70,7 +118,7 @@ async def get_client_rules(client_name: str):
         return JSONResponse(status_code=500, content={"error": f"Unable to read rules: {e}"})
 
 # -----------------------
-# GPT prompt steering (ONLY 3 intents)
+# GPT prompt steering (ONLY 3 intents)  **(kept exactly as your current file)**
 # -----------------------
 DETAIL_TEMPLATES = {
     "guidelines_only": (
@@ -307,15 +355,22 @@ async def vision_review(
         + GLOBAL_RULES + "\n\n" + FRAUD_GUIDE
     )
 
-    user_parts: List[Dict[str,Any]] = [{"type":"text","text": prompt_text}]
-    if parts: user_parts.extend(parts)
+    # Build user parts (redact PII in any free text, but keep VIN/Claim #)
+    safe_user_parts: List[Dict[str,Any]] = []
+    safe_user_parts.append({"type": "text", "text": redact_text_preserve_vin_claim(prompt_text)})
+    if parts:
+        for p in parts:
+            if p.get("type") == "text" and isinstance(p.get("text"), str):
+                safe_user_parts.append({"type": "text", "text": redact_text_preserve_vin_claim(p["text"])})
+            else:
+                safe_user_parts.append(p)
 
     # Call GPT and parse JSON
     try:
         rsp = client.chat.completions.create(
             model=MODEL,
             messages=[{"role":"system","content": SYSTEM},
-                      {"role":"user","content": user_parts}],
+                      {"role":"user","content": safe_user_parts}],
             max_tokens=1700,
             temperature=0
         )
