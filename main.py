@@ -479,21 +479,34 @@ Fraud Detection
 # -----------------------
 @app.get("/download-pdf")
 async def download_pdf(file_number: Optional[str] = None, filename: Optional[str] = None):
+    # If an explicit filename is provided, serve it verbatim
     if filename:
         safe = _safe(filename)
         path = os.path.join(PDF_DIR, safe)
         if os.path.exists(path):
             return FileResponse(path=path, media_type="application/pdf", filename=safe)
-        return JSONResponse(status_code=404, content={"detail":"Not Found"})
+        return JSONResponse(status_code=404, content={"detail": "Not Found"})
+
+    # Back-compat: file_number param (classic behavior)
     if not file_number:
-        return JSONResponse(status_code=400, content={"detail":"Missing query param 'filename' or 'file_number'"})
-    safe = _safe(file_number)
-    path = os.path.join(PDF_DIR, f"{safe}.pdf")
-    if os.path.exists(path):
-        return FileResponse(path=path, media_type="application/pdf", filename=f"{safe}.pdf")
+        return JSONResponse(status_code=400, content={"detail": "Missing query param 'filename' or 'file_number'"})
+
+    safe_num = _safe(file_number)
+
+    # 1) Classic report name: <FileNumber>.pdf
+    classic_path = os.path.join(PDF_DIR, f"{safe_num}.pdf")
+    if os.path.exists(classic_path):
+        return FileResponse(path=classic_path, media_type="application/pdf", filename=f"{safe_num}.pdf")
+
+    # 2) Damage Report name: AI_Damage_Report_<FileNumber>.pdf
+    dmg_name = f"AI_Damage_Report_{safe_num}.pdf"
+    dmg_path = os.path.join(PDF_DIR, dmg_name)
+    if os.path.exists(dmg_path):
+        return FileResponse(path=dmg_path, media_type="application/pdf", filename=dmg_name)
+
+    # 3) As last resort, try raw (unsanitized) number for legacy writes
     raw_path = os.path.join(PDF_DIR, f"{file_number}.pdf")
     if os.path.exists(raw_path):
         return FileResponse(path=raw_path, media_type="application/pdf", filename=f"{file_number}.pdf")
-    return JSONResponse(status_code=404, content={"detail":"Not Found"})
 
-
+    return JSONResponse(status_code=404, content={"detail": "Not Found"})
