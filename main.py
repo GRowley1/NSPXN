@@ -33,7 +33,7 @@ CLIENT_RULES_DIR = os.getenv("CLIENT_RULES_DIR", "client_rules")
 logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s")
 log = logging.getLogger("nspxn")
 
-MODEL = os.getenv("OAI_MODEL", "gpt-4o")
+MODEL = os.getenv("OAI_MODEL", "gpt-4.1")
 if not os.getenv("OPENAI_API_KEY"):
     raise RuntimeError("OPENAI_API_KEY missing")
 client = OpenAI(api_key=os.environ["OPENAI_API_KEY"])
