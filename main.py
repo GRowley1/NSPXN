@@ -154,6 +154,11 @@ DETAIL_TEMPLATES = {
         "## Photo ↔ Estimate Crosswalk\n"
         "| Line / Part | Photo # | What the photo shows | Consistent with estimate? | Notes |\n"
         "|---|---|---|:--:|---|\n\n"
+        "## Required Evidence Presence\n"
+        "| Item | Status |\n"
+        "|---|---|\n"
+        "| Odometer Photo | <Present / Present — not clearly legible / Missing> |\n"
+        "| Registration Photo | <Present / Present — not clearly legible / Missing> |\n\n"
         "## VIN & Identifiers Verification\n"
         "- State one of **MATCH / MISMATCH / NOT VERIFIED** and explicitly list: estimate VIN vs photo VIN(s). If any piece is unreadable, say so.\n\n"
         "## Missing Evidence & Documentation\n"
@@ -226,7 +231,7 @@ def _add_bytes(parts: List[Dict[str,Any]], files_seen: List[str], raw: bytes, fn
     low = fname.lower()
     if low.endswith(SUPPORTED_PDF_EXTS) and used < max_images:
         try:
-            pages = convert_from_bytes(raw, dpi=200)
+            pages = convert_from_bytes(raw, dpi=220)
             files_seen.append(f"{fname} (pdf, {len(pages)} page(s))")
             for im in pages[:max_images - used]:
                 b = io.BytesIO()
@@ -285,7 +290,7 @@ async def vision_review(
 ):
     parts: List[Dict[str, Any]] = []
     files_seen: List[str] = []
-    MAX_IMAGES = 24
+    MAX_IMAGES = 32
     used = 0
 
     # Anti-zipbomb guardrails
@@ -359,6 +364,8 @@ async def vision_review(
         "- When client_rules text is provided, quote a short snippet (<=20 words) for each guideline checked.\n"
         "- Always cite Estimate page/line and Photo # where relevant; if unknown, use 'N/A'.\n"
         "- Keep tables concise and readable; no more than ~12 rows per table unless necessary.\n"
+        "- Do not mark 'Missing' if there is any plausible visual/text cue; prefer 'Present — not clearly legible'.\n"
+        "- Re-scan every PDF page and all photos before concluding 'Missing'.\n"
     )
     SYSTEM_OTHER_EXTRA = (
         "\nIf request_type is 'Create a Damage Report from Photos', ignore estimate/compliance details; "
@@ -380,7 +387,7 @@ async def vision_review(
 
     # Extra nudge for Comprehensive
     if ai_intent == "comprehensive":
-        prompt_text += (
+        prompt_text += "\n\nUploader note: Odometer and Registration photos were provided. If you cannot clearly read them, report 'Present — not clearly legible' rather than 'Missing'."
             "\n\n### Extra detail requirements for Comprehensive\n"
             "- In 'estimated_costs_markdown', break out Body Labor, Paint Labor, Paint Materials, Parts, Sublet, Tax, and show 1–2 sentence rationale.\n"
             "- In 'fraud_markdown', list any inconsistencies as bullets with the evidence reference (Photo # / Estimate page/line). If none, state 'No material inconsistencies found.'\n"
