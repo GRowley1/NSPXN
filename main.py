@@ -22,18 +22,7 @@ from openai import OpenAI
 # --- PII Redaction (Presidio) ---
 from presidio_analyzer import AnalyzerEngine, Pattern, PatternRecognizer, RecognizerResult
 from presidio_anonymizer import AnonymizerEngine
-from presidio_anonymizer.entities import OperatorConfig
-
-# Only redact these entity types (we PRESERVE VIN & CLAIM_NUMBER)
-REDACT_ENTITY_TYPES = {
-    "PERSON","PHONE_NUMBER","EMAIL_ADDRESS","US_SSN","CREDIT_CARD",
-    "IBAN_CODE","LOCATION","NRP","ORGANIZATION","DATE_TIME","IP_ADDRESS",
-    "CRYPTO","MEDICAL_LICENSE","URL"
-}
-
-def _filter_results(results):
-    # Keep only the entities we actually want to mask
-    return [r for r in results if r.entity_type in REDACT_ENTITY_TYPES]
+from presidio_anonymizer.entities import OperatorConfig  # important for anonymizer API
 
 # -----------------------
 # Minimal setup
@@ -70,13 +59,18 @@ claim_recognizer = PatternRecognizer(
 analyzer.registry.add_recognizer(vin_recognizer)
 analyzer.registry.add_recognizer(claim_recognizer)
 
+# Only redact these entity types (we PRESERVE VIN & CLAIM_NUMBER)
 REDACT_ENTITY_TYPES = {
     "PERSON", "PHONE_NUMBER", "EMAIL_ADDRESS", "US_SSN",
     "CREDIT_CARD", "IBAN_CODE", "LOCATION", "NRP", "ORGANIZATION",
     "DATE_TIME", "IP_ADDRESS", "CRYPTO", "MEDICAL_LICENSE", "URL"
 }
 
+def _filter_results(results):
+    return [r for r in results if r.entity_type in REDACT_ENTITY_TYPES]
+
 def redact_text_preserve_vin_claim(text: str) -> str:
+    """Mask PII while keeping VIN and Claim # intact. Fail-open to avoid 500s."""
     if not text:
         return text
     results = analyzer.analyze(text=text, language="en")
@@ -90,7 +84,6 @@ def redact_text_preserve_vin_claim(text: str) -> str:
             operators={"DEFAULT": OperatorConfig("replace", {"new_value": "[REDACTED]"})}
         ).text
     except Exception as e:
-        # fail open (no redaction) rather than crash the request
         log.warning(f"Presidio anonymizer failed, passing text through. Error: {e}")
         return text
 
@@ -370,13 +363,32 @@ async def vision_review(
 
     # Build user parts (redact PII in any free text, but keep VIN/Claim #)
     safe_user_parts: List[Dict[str,Any]] = []
-    safe_user_parts.append({"type": "text", "text": redact_text_preserve_vin_claim(prompt_text)})
+    redaction_success = False
+
+    try:
+        red_prompt = redact_text_preserve_vin_claim(prompt_text)
+        redaction_success = True
+    except Exception as e:
+        log.warning(f"Redaction failed on prompt_text: {e}")
+        red_prompt = prompt_text
+
+    safe_user_parts.append({"type": "text", "text": red_prompt})
+
     if parts:
         for p in parts:
             if p.get("type") == "text" and isinstance(p.get("text"), str):
-                safe_user_parts.append({"type": "text", "text": redact_text_preserve_vin_claim(p["text"])})
+                try:
+                    red_txt = redact_text_preserve_vin_claim(p["text"])
+                    redaction_success = True
+                except Exception as e:
+                    log.warning(f"Redaction failed on a text part: {e}")
+                    red_txt = p["text"]
+                safe_user_parts.append({"type": "text", "text": red_txt})
             else:
                 safe_user_parts.append(p)
+
+    # Simple status string for PDF/JSON
+    redaction_status = "Redacted Info: Successful ✅" if redaction_success else "Redacted Info: Not Applied"
 
     # Call GPT and parse JSON
     try:
@@ -415,6 +427,7 @@ async def vision_review(
         "secondary_impact": _get("secondary_impact"),
         "estimated_costs_markdown": _get("estimated_costs_markdown"),
         "conclusion": _get("conclusion"),
+        "redaction_status": redaction_status,   # <<< added to JSON
     }
 
     # -----------------------
@@ -439,6 +452,9 @@ async def vision_review(
         if result["secondary_impact"]:
             mc(f"Secondary Impact: {result['secondary_impact']}")
 
+        # Simple confirmation line
+        mc(result["redaction_status"])
+
         pdf.ln(2); mc("Damage Summary"); mc((result["summary_markdown"] or "N/A").strip())
         pdf.ln(2); mc("Estimated Repair Costs"); mc((result["estimated_costs_markdown"] or "N/A").strip())
         pdf.ln(2); mc("Fraud & Authenticity Check"); mc((result["fraud_markdown"] or 'N/A').strip())
@@ -460,6 +476,10 @@ async def vision_review(
         mc(f"Vehicle: {result['vehicle']}")
         mc(f"Odometer (from estimate): {result['odometer_estimate_only']}")
         mc(f"Compliance Score: {result['compliance_score']}")
+
+        # Simple confirmation line in classic report
+        mc(result["redaction_status"])
+
         pdf.ln(3); mc("AI-4-IA Review Summary"); mc((result["summary_markdown"] or '').strip())
         pdf.ln(3); mc("Fraud Detection"); mc((result["fraud_markdown"] or 'N/A').strip())
 
@@ -485,6 +505,8 @@ async def vision_review(
 Claim #: {result['claim_number'] or 'N/A'}    File #: {file_number or 'N/A'}
 Odometer: {result['odometer_estimate_only'] or 'N/A'}    Primary Impact: {result['primary_impact'] or 'N/A'}
 Secondary Impact: {result['secondary_impact'] or 'N/A'}
+
+{result['redaction_status']}
 
 Damage Summary
 {result['summary_markdown'] or 'N/A'}
@@ -512,6 +534,8 @@ VIN verification (estimate vs photo): {result['vin_verification']}
 Vehicle: {result['vehicle']}
 Odometer (from estimate): {result['odometer_estimate_only']}
 Compliance Score: {result['compliance_score']}
+
+{result['redaction_status']}
 
 AI-4-IA Review Summary
 {result['summary_markdown']}
@@ -566,7 +590,7 @@ async def download_pdf(file_number: Optional[str] = None, filename: Optional[str
     if os.path.exists(classic_path):
         return FileResponse(path=classic_path, media_type="application/pdf", filename=f"{safe_num}.pdf")
 
-    # 2) Damage Report name: AI_Damage_Report_<FileNumber>.pdf
+    # 2) Damage Report name: AI_Damage_Report_{safe_num}.pdf
     dmg_name = f"AI_Damage_Report_{safe_num}.pdf"
     dmg_path = os.path.join(PDF_DIR, dmg_name)
     if os.path.exists(dmg_path):
@@ -578,3 +602,4 @@ async def download_pdf(file_number: Optional[str] = None, filename: Optional[str
         return FileResponse(path=raw_path, media_type="application/pdf", filename=f"{file_number}.pdf")
 
     return JSONResponse(status_code=404, content={"detail": "Not Found"})
+
