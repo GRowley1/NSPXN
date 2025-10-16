@@ -387,14 +387,16 @@ async def vision_review(
 
     # Extra nudge for Comprehensive
     if ai_intent == "comprehensive":
-    prompt_text += (
-        "\n\nUploader note: Odometer and Registration photos were provided. "
-        "If you cannot clearly read them, report 'Present — not clearly legible' rather than 'Missing'."
-        "\n\n### Extra detail requirements for Comprehensive\n"
-        "- In 'estimated_costs_markdown', break out Body Labor, Paint Labor, Paint Materials, Parts, Sublet, Tax, and show 1–2 sentence rationale.\n"
-        "- In 'fraud_markdown', list any inconsistencies as bullets with the evidence reference (Photo # / Estimate page/line). "
-        "If none, state 'No material inconsistencies found.'\n"
+        prompt_text += (
+            "\n\nUploader note: Odometer and Registration photos were provided. "
+            "If you cannot clearly read them, report 'Present — not clearly legible' rather than 'Missing'."
+            "\n\n### Extra detail requirements for Comprehensive\n"
+            "- In 'estimated_costs_markdown', break out Body Labor, Paint Labor, Paint Materials, Parts, Sublet, Tax, "
+            "and show 1–2 sentence rationale.\n"
+            "- In 'fraud_markdown', list any inconsistencies as bullets with the evidence reference (Photo # / Estimate page/line). "
+            "If none, state 'No material inconsistencies found.'\n"
     )
+
 
     # Build user parts (redact PII in any free text, but keep VIN/Claim #)
     safe_user_parts: List[Dict[str,Any]] = []
