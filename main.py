@@ -417,9 +417,9 @@ async def vision_review(
 
     # Token budget by intent
     MAX_TOKENS_BY_INTENT = {
-        "comprehensive": 2600,
-        "guidelines_only": 2200,
-        "damage_report_from_photos": 1700
+        "comprehensive": 1800,
+        "guidelines_only": 1500,
+        "damage_report_from_photos": 1300
     }
     max_tokens = MAX_TOKENS_BY_INTENT.get(ai_intent, 1700)
 
