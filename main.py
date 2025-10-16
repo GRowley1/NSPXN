@@ -388,7 +388,7 @@ async def vision_review(
                 safe_user_parts.append(p)
 
     # Simple status string for PDF/JSON
-    redaction_status = "Redacted Info: Successful ✅" if redaction_success else "Redacted Info: Not Applied"
+    redaction_status = "Redacted PII: Successful ✅" if redaction_success else "Redacted PII: Not Applied"
 
     # Call GPT and parse JSON
     try:
