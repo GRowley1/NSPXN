@@ -24,6 +24,17 @@ from presidio_analyzer import AnalyzerEngine, Pattern, PatternRecognizer, Recogn
 from presidio_anonymizer import AnonymizerEngine
 from presidio_anonymizer.entities import OperatorConfig
 
+# Only redact these entity types (we PRESERVE VIN & CLAIM_NUMBER)
+REDACT_ENTITY_TYPES = {
+    "PERSON","PHONE_NUMBER","EMAIL_ADDRESS","US_SSN","CREDIT_CARD",
+    "IBAN_CODE","LOCATION","NRP","ORGANIZATION","DATE_TIME","IP_ADDRESS",
+    "CRYPTO","MEDICAL_LICENSE","URL"
+}
+
+def _filter_results(results):
+    # Keep only the entities we actually want to mask
+    return [r for r in results if r.entity_type in REDACT_ENTITY_TYPES]
+
 # -----------------------
 # Minimal setup
 # -----------------------
