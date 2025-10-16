@@ -22,6 +22,7 @@ from openai import OpenAI
 # --- PII Redaction (Presidio) ---
 from presidio_analyzer import AnalyzerEngine, Pattern, PatternRecognizer, RecognizerResult
 from presidio_anonymizer import AnonymizerEngine
+from presidio_anonymizer.entities import OperatorConfig
 
 # -----------------------
 # Minimal setup
@@ -64,9 +65,6 @@ REDACT_ENTITY_TYPES = {
     "DATE_TIME", "IP_ADDRESS", "CRYPTO", "MEDICAL_LICENSE", "URL"
 }
 
-def _filter_results(results: list[RecognizerResult]) -> list[RecognizerResult]:
-    return [r for r in results if r.entity_type in REDACT_ENTITY_TYPES]
-
 def redact_text_preserve_vin_claim(text: str) -> str:
     if not text:
         return text
@@ -74,12 +72,16 @@ def redact_text_preserve_vin_claim(text: str) -> str:
     to_mask = _filter_results(results)
     if not to_mask:
         return text
-    redacted = anonymizer.anonymize(
-        text=text,
-        analyzer_results=to_mask,
-        operators={"DEFAULT": {"type": "replace", "new_value": "[REDACTED]"}}
-    ).text
-    return redacted
+    try:
+        return anonymizer.anonymize(
+            text=text,
+            analyzer_results=to_mask,
+            operators={"DEFAULT": OperatorConfig("replace", {"new_value": "[REDACTED]"})}
+        ).text
+    except Exception as e:
+        # fail open (no redaction) rather than crash the request
+        log.warning(f"Presidio anonymizer failed, passing text through. Error: {e}")
+        return text
 
 def _safe(s: str) -> str:
     return re.sub(r"[^\w.\-]+", "-", (s or "").strip()).strip("-_.")
