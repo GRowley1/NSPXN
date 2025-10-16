@@ -66,7 +66,7 @@ REDACT_ENTITY_TYPES = {
     "DATE_TIME", "IP_ADDRESS", "CRYPTO", "MEDICAL_LICENSE", "URL"
 }
 
-def _filter_results(results):
+def _filter_results(results: list[RecognizerResult]) -> list[RecognizerResult]:
     return [r for r in results if r.entity_type in REDACT_ENTITY_TYPES]
 
 def redact_text_preserve_vin_claim(text: str) -> str:
@@ -124,7 +124,7 @@ async def get_client_rules(client_name: str):
         return JSONResponse(status_code=500, content={"error": f"Unable to read rules: {e}"})
 
 # -----------------------
-# GPT prompt steering (ONLY 3 intents)  **(kept exactly as your current file)**
+# GPT prompt steering (ONLY 3 intents)
 # -----------------------
 DETAIL_TEMPLATES = {
     "guidelines_only": (
@@ -144,24 +144,23 @@ DETAIL_TEMPLATES = {
     ),
     "comprehensive": (
         "## Inputs Used\n"
-        "- Enumerate files seen; reference estimate pages and Photo # where applicable.\n\n"
+        "- Enumerate files seen; reference **Estimate page/line** and **Photo #** where applicable.\n\n"
         "## Executive Summary\n"
-        "- 2–4 bullets: overall integrity, major deltas, risk items.\n\n"
-        "## Key Identifiers\n"
-        "- Claim #, VIN(s) seen, Year/Make/Model (only if clearly supported; else N/A).\n\n"
-        "## Estimate Integrity\n"
-        "| Topic | Evidence (estimate page/section) | Finding | Impact |\n"
-        "|---|---|---|---|\n"
-        "Labor & materials, refinish overlap, sublet, OEM procedures, tax/markup.\n\n"
-        "## Photo Evidence Mapping\n"
-        "| Line / Part | Photo # | What the photo shows | Consistent? | Notes |\n"
+        "- 3–6 bullets: integrity of estimate, major deviations vs client rules, and any photo mismatches.\n\n"
+        "## Client Guidelines Cross-Check\n"
+        "| Guideline | Source snippet (from Client Rules) | Estimate evidence (page/line) | Photo corroboration (Photo #) | Status | Impact | Fix |\n"
+        "|---|---|---|---|:--:|---|---|\n"
+        "- Cover **Labor rates**, **Refinish/overlap**, **Materials**, **OEM procedures**, **Sublet**, **Tax/markup**, and any client-specific caps. If rules provided, quote brief snippets (≤20 words).\n\n"
+        "## Photo ↔ Estimate Crosswalk\n"
+        "| Line / Part | Photo # | What the photo shows | Consistent with estimate? | Notes |\n"
         "|---|---|---|:--:|---|\n\n"
-        "## VIN Verification\n"
-        "- Label one of **MATCH / MISMATCH / NOT VERIFIED** and explicitly list: estimate VIN vs photo VIN(s). If any piece is unreadable, say so.\n\n"
-        "## Missing / Issues\n"
-        "- High/Med/Low with recommended fix.\n\n"
+        "## VIN & Identifiers Verification\n"
+        "- State one of **MATCH / MISMATCH / NOT VERIFIED** and explicitly list: estimate VIN vs photo VIN(s). If any piece is unreadable, say so.\n\n"
+        "## Missing Evidence & Documentation\n"
+        "- High / Medium / Low severity with one-line remediation (e.g., missing OEM doc, unclear photo of part).\n\n"
         "## Final Evaluation\n"
-        "- Compliance Score: NN% with one-sentence rationale."
+        "- **Compliance Score: NN%** and a one-sentence rationale.\n"
+        "- **Next Actions:** 1–3 succinct steps to resolve gaps (e.g., request clearer photo of LH rail, attach OEM doc page X)."
     ),
     "damage_report_from_photos": (
         "# AI-4-IA Damage Report\n"
@@ -227,7 +226,7 @@ def _add_bytes(parts: List[Dict[str,Any]], files_seen: List[str], raw: bytes, fn
     low = fname.lower()
     if low.endswith(SUPPORTED_PDF_EXTS) and used < max_images:
         try:
-            pages = convert_from_bytes(raw, dpi=200)
+            pages = convert_from_bytes(raw, dpi=180)
             files_seen.append(f"{fname} (pdf, {len(pages)} page(s))")
             for im in pages[:max_images - used]:
                 b = io.BytesIO()
@@ -342,15 +341,33 @@ async def vision_review(
         "fraud_markdown","primary_impact","secondary_impact","estimated_costs_markdown","conclusion"
     ]
 
-    SYSTEM = (
+    # ---- Intent-aware SYSTEM prompt ----
+    SYSTEM_BASE = (
         "You are an auto-claims appraisal assistant. Return ONLY valid JSON (no code fences). "
-        f"Populate exactly these keys (always include all, use 'N/A' when not applicable): {KEYS}. "
-        "Use evidence only from inputs. Avoid guessing.\n"
-        "If request_type is 'Create a Damage Report from Photos', ignore estimate/compliance details; "
-        "focus ONLY on the Damage Report sections (Quick Stats, Damage Summary, Estimated Repair Costs, Fraud & Authenticity Check, Conclusion). "
-        "For other request types, write a standard narrative under summary_markdown.\n"
+        "Populate exactly these keys (always include all, use 'N/A' when not applicable): "
+        "['file_number','request_type','claim_number','vin','vin_verification','vehicle',"
+        "'odometer_estimate_only','compliance_score','summary_brief','summary_markdown',"
+        "'fraud_markdown','primary_impact','secondary_impact','estimated_costs_markdown','conclusion']. "
+        "Use evidence only from inputs. Avoid guessing. "
         "summary_brief must be <= 280 chars (plain text)."
     )
+    SYSTEM_COMPREHENSIVE_EXTRA = (
+        "\nEXTRA RULES FOR COMPREHENSIVE:\n"
+        "- In summary_markdown, include ALL sections defined by the Comprehensive template, "
+        "with the two tables (**Client Guidelines Cross-Check** and **Photo ↔ Estimate Crosswalk**) "
+        "rendered as Markdown tables.\n"
+        "- When client_rules text is provided, quote a short snippet (<=20 words) for each guideline checked.\n"
+        "- Always cite Estimate page/line and Photo # where relevant; if unknown, use 'N/A'.\n"
+        "- Keep tables concise and readable; no more than ~12 rows per table unless necessary.\n"
+    )
+    SYSTEM_OTHER_EXTRA = (
+        "\nIf request_type is 'Create a Damage Report from Photos', ignore estimate/compliance details; "
+        "focus ONLY on the Damage Report sections (Quick Stats, Damage Summary, Estimated Repair Costs, "
+        "Fraud & Authenticity Check, Conclusion). For other request types, write a standard narrative "
+        "under summary_markdown."
+    )
+
+    SYSTEM = SYSTEM_BASE + (SYSTEM_COMPREHENSIVE_EXTRA if ai_intent == "comprehensive" else "") + SYSTEM_OTHER_EXTRA
 
     prompt_text = (
         f"REQUEST TYPE SELECTED (exact): '{req_label}'. Use this exact string in 'request_type'.\n\n"
@@ -360,6 +377,14 @@ async def vision_review(
         "DETAIL LAYOUT:\n" + DETAIL_TEMPLATES.get(ai_intent, DETAIL_TEMPLATES["comprehensive"]) + "\n\n"
         + GLOBAL_RULES + "\n\n" + FRAUD_GUIDE
     )
+
+    # Extra nudge for Comprehensive
+    if ai_intent == "comprehensive":
+        prompt_text += (
+            "\n\n### Extra detail requirements for Comprehensive\n"
+            "- In 'estimated_costs_markdown', break out Body Labor, Paint Labor, Paint Materials, Parts, Sublet, Tax, and show 1–2 sentence rationale.\n"
+            "- In 'fraud_markdown', list any inconsistencies as bullets with the evidence reference (Photo # / Estimate page/line). If none, state 'No material inconsistencies found.'\n"
+        )
 
     # Build user parts (redact PII in any free text, but keep VIN/Claim #)
     safe_user_parts: List[Dict[str,Any]] = []
@@ -390,17 +415,25 @@ async def vision_review(
     # Simple status string for PDF/JSON
     redaction_status = "Redacted PII: Successful ✅" if redaction_success else "Redacted PII: Not Applied"
 
+    # Token budget by intent
+    MAX_TOKENS_BY_INTENT = {
+        "comprehensive": 2600,
+        "guidelines_only": 2200,
+        "damage_report_from_photos": 1700
+    }
+    max_tokens = MAX_TOKENS_BY_INTENT.get(ai_intent, 1700)
+
     # Call GPT and parse JSON
     try:
         rsp = client.chat.completions.create(
             model=MODEL,
             messages=[{"role":"system","content": SYSTEM},
                       {"role":"user","content": safe_user_parts}],
-            max_tokens=1700,
+            max_tokens=max_tokens,
             temperature=0
         )
         raw = (rsp.choices[0].message.content or "").strip()
-        raw = raw.strip().removeprefix("```json").removesuffix("```").strip()
+        raw = raw.strip().removesuffix("```").removeprefix("```json").strip()
         data = json.loads(raw)
     except Exception as e:
         log.error(f"LLM failure or JSON parse error: {e}")
@@ -427,7 +460,7 @@ async def vision_review(
         "secondary_impact": _get("secondary_impact"),
         "estimated_costs_markdown": _get("estimated_costs_markdown"),
         "conclusion": _get("conclusion"),
-        "redaction_status": redaction_status,   # <<< added to JSON
+        "redaction_status": redaction_status,
     }
 
     # -----------------------
@@ -602,4 +635,5 @@ async def download_pdf(file_number: Optional[str] = None, filename: Optional[str
         return FileResponse(path=raw_path, media_type="application/pdf", filename=f"{file_number}.pdf")
 
     return JSONResponse(status_code=404, content={"detail": "Not Found"})
+
 
