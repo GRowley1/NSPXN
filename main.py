@@ -22,7 +22,7 @@ from openai import OpenAI
 # --- PII Redaction (Presidio) ---
 from presidio_analyzer import AnalyzerEngine, Pattern, PatternRecognizer, RecognizerResult
 from presidio_anonymizer import AnonymizerEngine
-from presidio_anonymizer.entities import OperatorConfig  # important for anonymizer API
+from presidio_anonymizer.entities import OperatorConfig  # required for anonymizer API
 
 # -----------------------
 # Minimal setup
@@ -33,7 +33,7 @@ CLIENT_RULES_DIR = os.getenv("CLIENT_RULES_DIR", "client_rules")
 logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s")
 log = logging.getLogger("nspxn")
 
-# Use GPT-4.1 everywhere for best OCR + vision reasoning
+# Use GPT-4.1 everywhere
 MODEL = os.getenv("OAI_MODEL", "gpt-4.1")
 if not os.getenv("OPENAI_API_KEY"):
     raise RuntimeError("OPENAI_API_KEY missing")
@@ -125,7 +125,7 @@ async def get_client_rules(client_name: str):
         return JSONResponse(status_code=500, content={"error": f"Unable to read rules: {e}"})
 
 # -----------------------
-# Prompt steering (relaxed, free analysis)
+# Prompt steering (free analysis + detailed narrative)
 # -----------------------
 DETAIL_TEMPLATES = {
     "guidelines_only": (
@@ -133,8 +133,11 @@ DETAIL_TEMPLATES = {
         "- Briefly list which documents, pages, and photos you actually referenced.\n\n"
         "## Executive Summary\n"
         "- 3–5 bullets summarizing overall compliance and key risks.\n\n"
-        "## Holistic Analysis\n"
-        "- Provide a concise narrative assessing the estimate against the provided guidelines; cite page/line and Photo # when relevant.\n\n"
+        "## AI-4-IA Review Summary\n"
+        "- Write a formal, paragraph-style appraisal narrative. Include scope of impact, damage by zone/panel, "
+        "repair vs. replace rationale, parts type (OEM/LKQ/Aftermarket), labor ops, refinish overlap, rate validation, "
+        "tax handling, and estimate integrity. Reference evidence inline (e.g., 'p2/L14', 'Photo 3'). "
+        "Close with compliance stance and final recommendation. Minimum 8–10 sentences.\n\n"
         "## Key Issues & Actions\n"
         "- Bullet list of the highest-impact issues with a one-line recommended action each.\n\n"
         "## Final\n"
@@ -145,11 +148,16 @@ DETAIL_TEMPLATES = {
         "- List the estimate pages/lines and photo numbers you used, plus any rules text (if provided).\n\n"
         "## Executive Summary\n"
         "- 3–6 bullets capturing the big picture: estimate integrity, rule alignment, and photo consistency.\n\n"
-        "## Holistic Analysis\n"
-        "- A freeform, well-structured narrative that synthesizes estimate, guidelines (if provided), and photos. "
-        "Reference evidence inline (e.g., 'p2/L14', 'Photo 3') and keep it factual.\n\n"
+        "## AI-4-IA Review Summary\n"
+        "- Write this section as a **formal, paragraph-style appraisal report** summarizing the entire claim. "
+        "Include: scope of impact, damage by zone/panel, repair vs. replace rationale, parts type (OEM/LKQ/Aftermarket), "
+        "labor operations, refinish/overlap considerations, rate validation, paint materials handling, sublet usage, "
+        "tax/markup accuracy, and overall estimate integrity. Cite photos and estimate lines (e.g., 'Photo 3', 'p2/L14'). "
+        "Close with compliance to any provided client rules and a clear final recommendation (Repairable vs. Total Loss). "
+        "Minimum 8–10 sentences.\n\n"
         "## Brief Damage Descriptions\n"
-        "- 6–12 bullets. Each bullet: **part/panel** + **condition** (dent/crease/scrape/misalignment) + **suggested op** (repair/replace/refinish/blend) + **Photo #**.\n\n"
+        "- 6–12 bullets. Each bullet: **part/panel** + **condition** (dent/crease/scrape/misalignment) + "
+        "**suggested op** (repair/replace/refinish/blend) + **Photo #**.\n\n"
         "## Photo ↔ Estimate Comparison\n"
         "- Note clear matches and any discrepancies (photo shows damage with no estimate line, or estimate line without photo support).\n\n"
         "## Risks / Missing Evidence\n"
@@ -170,6 +178,10 @@ DETAIL_TEMPLATES = {
         "- Secondary Impact: <area(s) or 'None observed'>\n\n"
         "## Damage Summary\n"
         "- 6–12 bullets with **panel/part + condition + suggested op**, citing **Photo #**.\n\n"
+        "## AI-4-IA Review Summary\n"
+        "- Provide a detailed appraisal narrative based on the photos: impact zones, repair/replace reasoning, "
+        "likely parts source (OEM/LKQ/Aftermarket) when inferable, refinish/overlap notes, and cost implications. "
+        "Reference specific Photo #s. Minimum 6–8 sentences.\n\n"
         "## Estimated Repair Costs\n"
         "- Provide a reasonable high-level breakdown and brief rationale.\n\n"
         "## Fraud & Authenticity Check\n"
@@ -318,7 +330,6 @@ async def vision_review(
     req_label = REQ_LABELS.get(ai_intent, "Comprehensive: Guidelines + Estimate + Photos (with VIN check)")
     log.info(f"ai_intent received: {ai_intent} -> using label: {req_label}")
 
-    # Keys expected back
     KEYS = [
         "file_number","request_type","claim_number","vin","vin_verification","vehicle",
         "odometer_estimate_only","compliance_score","summary_brief","summary_markdown",
@@ -361,10 +372,8 @@ async def vision_review(
             else:
                 safe_user_parts.append(p)
 
-    # Simple status string for PDF/JSON
     redaction_status = "Redacted PII: Successful ✅" if redaction_success else "Redacted PII: Not Applied"
 
-    # Token budget (moderate, lets GPT write freely)
     MAX_TOKENS_BY_INTENT = {
         "comprehensive": 2400,
         "guidelines_only": 2000,
@@ -392,7 +401,6 @@ async def vision_review(
         v = data.get(k)
         return "" if v is None else str(v)
 
-    # Freeze request_type to the dropdown label
     result = {
         "file_number": file_number,
         "request_type": req_label,
@@ -413,7 +421,7 @@ async def vision_review(
     }
 
     # -----------------------
-    # PDF — classic layout (damage report still uses same header)
+    # PDF — classic layout
     # -----------------------
     pdf = FPDF(); pdf.add_page()
     try:
@@ -500,7 +508,5 @@ async def download_pdf(file_number: Optional[str] = None, filename: Optional[str
     latest = max(candidates, key=lambda p: os.path.getmtime(p))
     return FileResponse(path=latest, media_type="application/pdf", filename=os.path.basename(latest))
 
-
-    return JSONResponse(status_code=404, content={"detail": "Not Found"})
 
 
