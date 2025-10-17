@@ -19,6 +19,8 @@ COPY requirements.txt /app/requirements.txt
 RUN pip install --no-cache-dir -r requirements.txt \
   && python -m spacy download en_core_web_lg
 
+ARG BUILD_ID=1
+
 # Copy app
 COPY . /app
 
