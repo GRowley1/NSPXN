@@ -1,14 +1,17 @@
-fastapi==0.110.0
-uvicorn[standard]==0.29.0
-python-multipart==0.0.9
-openai==1.40.0
-httpx==0.26.0
-PyPDF2==3.0.1
+fastapi==0.115.0
+uvicorn[standard]==0.30.6
+
+openai>=1.44.0
+
+# Presidio (PII redaction)
+presidio-analyzer==2.2.356
+presidio-anonymizer==2.2.356
+spacy==3.7.5
+
+# PDF/Images/Text
 pdf2image==1.17.0
 pillow==10.3.0
-pytesseract==0.3.10
-fpdf==1.7.2
-python-docx==1.1.0
-presidio-analyzer
-presidio-anonymizer
-spacy
+pillow-heif==0.16.0
+python-docx==1.1.2
+fpdf2==2.7.9
+
