@@ -1,6 +1,5 @@
 fastapi==0.115.0
 uvicorn[standard]==0.30.6
-
 openai>=1.44.0
 
 # Presidio (PII redaction)
@@ -14,4 +13,7 @@ pillow==10.3.0
 pillow-heif==0.16.0
 python-docx==1.1.2
 fpdf2==2.7.9
+
+# <-- required for FastAPI forms/uploads
+python-multipart==0.0.9
 
