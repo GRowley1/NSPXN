@@ -92,39 +92,6 @@ def _safe(s: str) -> str:
     return re.sub(r"[^\w.\-]+", "-", (s or "").strip()).strip("-_.")
 
 # -----------------------
-# App + CORS
-# -----------------------
-app = FastAPI()
-app.add_middleware(
-    CORSMiddleware,
-    allow_origins=[
-        "https://nspxn.com","https://www.nspxn.com","http://nspxn.com","http://www.nspxn.com",
-        "https://nspxn.onrender.com"
-    ],
-    allow_credentials=True,
-    allow_methods=["*"],
-    allow_headers=["*"],
-)
-
-# -----------------------
-# EXACT client rules loader (no fuzz)
-# -----------------------
-@app.get("/client-rules/{client_name}")
-async def get_client_rules(client_name: str):
-    base = client_name.strip()
-    if not base.lower().endswith(".docx"):
-        base = base + ".docx"
-    path = os.path.join(CLIENT_RULES_DIR, base)
-    if not os.path.exists(path):
-        return JSONResponse(status_code=404, content={"error": "Rules not found for this client."})
-    try:
-        doc = Document(path)
-        text = "\n".join([p.text for p in doc.paragraphs if p.text.strip()])
-        return {"text": text}
-    except Exception as e:
-        return JSONResponse(status_code=500, content={"error": f"Unable to read rules: {e}"})
-
-# -----------------------
 # Prompt steering (free analysis + detailed narrative)
 # -----------------------
 DETAIL_TEMPLATES = {
@@ -266,6 +233,21 @@ def _add_bytes(parts: List[Dict[str,Any]], files_seen: List[str], raw: bytes, fn
     else:
         files_seen.append(f"{fname} (unsupported type)")
     return used
+
+# -----------------------
+# App + CORS
+# -----------------------
+app = FastAPI()
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=[
+        "https://nspxn.com","https://www.nspxn.com","http://nspxn.com","http://www.nspxn.com",
+        "https://nspxn.onrender.com"
+    ],
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
 
 # -----------------------
 # Vision Review
@@ -421,22 +403,50 @@ async def vision_review(
     }
 
     # -----------------------
-    # PDF — classic layout
+    # PDF helpers (PATCH 1: sanitizer for FPDF)
+    # -----------------------
+    def _pdf_sanitize(text: str, max_token_len: int = 60) -> str:
+        """Make text safe for FPDF multi_cell: strip non-latin-1 and break long tokens."""
+        if text is None:
+            return ""
+        s = str(text).replace("\r\n", "\n").replace("\r", "\n")
+        # Replace any non-latin-1 chars (e.g., emojis) with a space
+        s = "".join(ch if ord(ch) < 256 else " " for ch in s)
+        # Break long unbreakable tokens
+        def _break(tok: str) -> str:
+            if len(tok) <= max_token_len:
+                return tok
+            return " ".join(tok[i:i+max_token_len] for i in range(0, len(tok), max_token_len))
+        s = " ".join(_break(t) for t in s.split(" "))
+        return s
+
+    # -----------------------
+    # PDF — classic layout (PATCH 2: margins/auto page break) + (PATCH 3: safe mc)
     # -----------------------
     pdf = FPDF(); pdf.add_page()
+    pdf.set_auto_page_break(auto=True, margin=10)
+    pdf.set_left_margin(10); pdf.set_right_margin(10)
+
     try:
         pdf.add_font("DejaVu","", "DejaVuSans.ttf", uni=True); pdf.set_font("DejaVu", size=11)
     except Exception:
         pdf.set_font("Arial", size=11)
 
-    def mc(s): pdf.multi_cell(0,6,s)
+    def mc(s):
+        try:
+            pdf.multi_cell(0, 6, _pdf_sanitize(s))
+        except Exception:
+            safe = _pdf_sanitize(str(s))[:2000] + " …"
+            pdf.multi_cell(0, 6, safe)
 
     if ai_intent == "damage_report_from_photos":
         pdf.cell(0,10,"AI-4-IA Damage Report", ln=True, align="C")
         pdf.set_font_size(10); pdf.ln(3)
 
         mc(f"Claim #: {result['claim_number'] or 'N/A'}    File #: {file_number or 'N/A'}")
-        pdf.ln(2); mc(result["redaction_status"])
+        # Make PDF-safe version of redaction status (✅ -> OK)
+        pdf_status = result["redaction_status"].replace("✅", "OK")
+        pdf.ln(2); mc(pdf_status)
         pdf.ln(2); mc("Damage Summary"); mc((result["summary_markdown"] or "N/A").strip())
         pdf.ln(2); mc("Estimated Repair Costs"); mc((result["estimated_costs_markdown"] or "N/A").strip())
         pdf.ln(2); mc("Fraud & Authenticity Check"); mc((result["fraud_markdown"] or 'N/A').strip())
@@ -457,7 +467,9 @@ async def vision_review(
         mc(f"Vehicle: {result['vehicle']}")
         mc(f"Odometer (from estimate): {result['odometer_estimate_only']}")
         mc(f"Compliance Score: {result['compliance_score']}")
-        mc(result["redaction_status"])
+        # Make PDF-safe version of redaction status (✅ -> OK)
+        pdf_status = result["redaction_status"].replace("✅", "OK")
+        mc(pdf_status)
         pdf.ln(3); mc("AI-4-IA Review Summary"); mc((result["summary_markdown"] or '').strip())
         pdf.ln(3); mc("Fraud Detection"); mc((result["fraud_markdown"] or 'N/A').strip())
 
@@ -507,6 +519,7 @@ async def download_pdf(file_number: Optional[str] = None, filename: Optional[str
 
     latest = max(candidates, key=lambda p: os.path.getmtime(p))
     return FileResponse(path=latest, media_type="application/pdf", filename=os.path.basename(latest))
+
 
 
 
