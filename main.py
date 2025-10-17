@@ -142,14 +142,25 @@ DETAIL_TEMPLATES = {
         "- Compliance Score: NN%\n"
         "- One-sentence justification."
     ),
-    "comprehensive": (
+        "comprehensive": (
         "## Inputs Used\n"
         "- Enumerate files seen; reference **Estimate page/line** and **Photo #** where applicable.\n\n"
+
         "## Executive Summary\n"
-        "- 3–6 bullets: integrity of estimate, major deviations vs client rules, and any photo mismatches.\n\n"
+        "- 3–6 bullets: integrity of estimate, major deviations vs estimate categories below, and any photo mismatches.\n\n"
+
+        "## Brief Damage Descriptions\n"
+        "- 6–12 bullets. Each bullet MUST include: **panel/part** + **condition** (dent/crease/scrape/misalignment) + "
+        "**suggested op** (repair/replace/refinish/blend) + **Photo #**. Keep each bullet ≤ 20 words.\n\n"
+
+        "## Photo ↔ Estimate Crosswalk\n"
+        "Only list parts/lines which appear in the estimate. If a photo shows a part with no matching estimate line, mark 'Not Evidenced'.\n"
+        "| Estimate line / Part | Estimate page/line | Photo # | Consistent with estimate? | Notes |\n"
+        "|---|---|---|:--:|---|\n\n"
+
         "## Estimate Compliance Cross-Check\n"
-        "Evaluate these six standard topics **using only the estimate and photos**, not client_rules. "
-        "Mark 'Compliant', 'Non-compliant', or 'Not Evidenced' based on what the estimate itself shows.\n\n"
+        "Evaluate the six topics **using only the estimate and photos** (do NOT use client_rules here). "
+        "Status must be one of: **Compliant / Non-compliant / Not Evidenced**.\n"
         "| Topic | Estimate Evidence (page/line or value) | Photo Corroboration (Photo # or 'N/A') | Status | Impact | Required Fix |\n"
         "|---|---|---|:--:|:--:|---|\n"
         "| Labor Rates |  |  |  |  |  |\n"
@@ -158,30 +169,18 @@ DETAIL_TEMPLATES = {
         "| OEM Procedures |  |  |  |  |  |\n"
         "| Sublet |  |  |  |  |  |\n"
         "| Tax/Markup |  |  |  |  |  |\n\n"
-        "Guidance:\n"
-        "- **Labor Rates:** Compare all listed rates vs normal regional or carrier-approved rates.\n"
-        "- **Refinish/Overlap:** Identify duplicated refinish ops or missed overlap credits.\n"
-        "- **Paint Materials:** Verify separate line or percentage, typical range 30-40% of paint labor.\n"
-        "- **OEM Procedures:** Note if OEM calibration or ADAS ops are missing or unverified.\n"
-        "- **Sublet:** Check for glass, alignments, or towing sublet entries with proper rates.\n"
-        "- **Tax/Markup:** Confirm taxable items and correct percentage shown.\n\n"
-        "## Photo ↔ Estimate Crosswalk\n"
-        "Only list lines/parts that appear in the estimate; if a photo shows a part with no matching estimate line, mark 'Non-evidenced' and note it.\n\n"
-        "| Line / Part | Photo # | What the photo shows | Consistent with estimate? | Notes |\n"
-        "|---|---|---|:--:|---|\n\n"
-        "## Required Evidence Presence\n"
-        "| Item | Status |\n"
-        "|---|---|\n"
-        "| Odometer Photo | <Present / Present — not clearly legible / Missing> |\n"
-        "| Registration Photo | <Present / Present — not clearly legible / Missing> |\n\n"
+
         "## VIN & Identifiers Verification\n"
         "- State one of **MATCH / MISMATCH / NOT VERIFIED** and explicitly list: estimate VIN vs photo VIN(s). If any piece is unreadable, say so.\n\n"
+
         "## Missing Evidence & Documentation\n"
         "- High / Medium / Low severity with one-line remediation (e.g., missing OEM doc, unclear photo of part).\n\n"
+
         "## Final Evaluation\n"
         "- **Compliance Score: NN%** and a one-sentence rationale.\n"
         "- **Next Actions:** 1–3 succinct steps to resolve gaps (e.g., request clearer photo of LH rail, attach OEM doc page X)."
     ),
+
     "damage_report_from_photos": (
         "# AI-4-IA Damage Report\n"
         "Create a concise, professional damage report **based only on the provided photos (and any optional text)**. Follow the provided sample style exactly.\n\n"
@@ -373,13 +372,14 @@ async def vision_review(
     )
     SYSTEM_COMPREHENSIVE_EXTRA = (
         "\nEXTRA RULES FOR COMPREHENSIVE:\n"
-        "- Use the 'Estimate Compliance Cross-Check' table to assess only the estimate itself "
-        "for Labor Rates, Refinish/Overlap, Paint Materials, OEM Procedures, Sublet, and Tax/Markup.\n"
-        "- Do NOT reference client_rules text for these; rely only on estimate evidence and photos.\n"
-        "- Mark Status as one of: Compliant / Non-compliant / Not Evidenced.\n"
-        "- Provide short, factual notes (1–2 sentences per row).\n"
-        "- Keep tables clean and aligned; use 'N/A' where a value isn't visible.\n"
-        "- Do not mark 'Missing' if any plausible evidence exists; prefer 'Present — not clearly legible'.\n"
+        "- summary_markdown MUST include, in this order: Brief Damage Descriptions, Photo ↔ Estimate Crosswalk, "
+        "and Estimate Compliance Cross-Check.\n"
+        "- 'Brief Damage Descriptions' must be 6–12 concise bullets with **part + condition + suggested op + Photo #**.\n"
+        "- 'Photo ↔ Estimate Crosswalk' must map each estimate line/part to Photo # and mark Consistent?/Notes. "
+        "If a photo shows a part with no matching estimate line, mark 'Not Evidenced'.\n"
+        "- 'Estimate Compliance Cross-Check' must assess ONLY the estimate/photos for: Labor Rates, Refinish/Overlap, "
+        "Paint Materials, OEM Procedures, Sublet, Tax/Markup. Do NOT use client_rules for these rows.\n"
+        "- When evidence exists but is hard to read, prefer 'Present — not clearly legible' over 'Missing'. Re-scan all pages/photos before declaring 'Not Evidenced'.\n"
     )
     SYSTEM_OTHER_EXTRA = (
         "\nIf request_type is 'Create a Damage Report from Photos', ignore estimate/compliance details; "
