@@ -3,6 +3,7 @@ from fastapi.responses import JSONResponse, FileResponse
 from fastapi.middleware.cors import CORSMiddleware
 from typing import List, Dict, Any, Optional
 import os, io, re, json, base64, logging, zipfile, glob
+import smtplib  # ✅ added for the email section
 from email.message import EmailMessage
 
 from fpdf import FPDF
@@ -237,7 +238,7 @@ SYSTEM_BASE += (
     "evidence completeness, and clarity/legibility. Provide a one-sentence rationale. "
     "If compliance_score < 100, include a dedicated section titled '## Compliance Score Rationale' "
     "which itemizes every deficiency with exact evidence references (estimate p#/L# and/or Photo #), "
-    "assigns an explicit deduction per item, and shows the arithmetic from 100 down to the final score. "
+    "assigns an explicit deduction per item, and shows the arithmetic to the final score. "
     "Use a consistent scheme (e.g., Minor −5, Moderate −10, Major −20) and never go below 0. "
     "The 'fraud_markdown' section must never be 'N/A'. If nothing material is found, write "
     "'No material inconsistencies found.' and briefly note what was checked (VIN match, date/metadata, "
@@ -704,6 +705,70 @@ async def vision_review(
 
     # Always return an exact filename link (prevents mismatched PDFs)
     pdf_url = f"/download-pdf?filename={pdf_filename}"
+
+    # -----------------------
+    # Email — restored original working section (info-only, no attachment)
+    # -----------------------
+    try:
+        msg = EmailMessage()
+
+        if ai_intent == "damage_report_from_photos":
+            subj = f"AI Damage Report: {file_number or ''} {result['claim_number'] or ''}".strip()
+            body = f"""AI-4-IA Damage Report
+
+Claim #: {result['claim_number'] or 'N/A'}    File #: {file_number or 'N/A'}
+Odometer: {result['odometer_estimate_only'] or 'N/A'}    Primary Impact: {result['primary_impact'] or 'N/A'}
+Secondary Impact: {result['secondary_impact'] or 'N/A'}
+
+{result['redaction_status']}
+
+Damage Summary
+{result['summary_markdown'] or 'N/A'}
+
+Estimated Repair Costs
+{result['estimated_costs_markdown'] or 'N/A'}
+
+Fraud & Authenticity Check
+{result['fraud_markdown'] or 'N/A'}
+
+Conclusion
+{result['conclusion'] or 'N/A'}
+"""
+        else:
+            subj = f"AI-4-IA Review: {result['claim_number'] or file_number}"
+            body = f"""NSPXN.com AI Review Report
+
+File Number: {file_number}
+IA Company: {ia_company}
+Appraiser ID #: {appraiser_id}
+Request Type: {result['request_type']}
+Claim #: {result['claim_number']}
+VIN (from estimate/photos): {result['vin']}
+VIN verification (estimate vs photo): {result['vin_verification']}
+Vehicle: {result['vehicle']}
+Odometer (from estimate): {result['odometer_estimate_only']}
+Compliance Score: {result['compliance_score']}
+
+{result['redaction_status']}
+
+AI-4-IA Review Summary
+{result['summary_markdown']}
+
+Fraud Detection
+{result['fraud_markdown']}
+"""
+
+        msg["Subject"] = subj
+        msg["From"] = "info@nspxn.com"
+        msg["To"] = "info@nspxn.com"
+        msg.set_content(body)
+
+        with smtplib.SMTP_SSL("mail.tierra.net", 465, timeout=20) as smtp:
+            smtp.login("info@nspxn.com", "grr2025GRR")
+            smtp.send_message(msg)
+        log.info("Info email sent to info@nspxn.com")
+    except Exception as e:
+        logging.error(f"Email error: {e}")
 
     return {
         **result,
