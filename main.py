@@ -281,7 +281,7 @@ def _add_bytes(parts: List[Dict[str,Any]], files_seen: List[str], raw: bytes, fn
     low = fname.lower()
     if low.endswith(SUPPORTED_PDF_EXTS) and used < max_images:
         try:
-            pages = convert_from_bytes(raw, dpi=300)  # slightly sharper thumbnails
+            pages = convert_from_bytes(raw, dpi=240)  # slightly sharper thumbnails
             files_seen.append(f"{fname} (pdf, {len(pages)} page(s))")
             for im in pages[:max_images - used]:
                 b = io.BytesIO()
@@ -549,11 +549,11 @@ async def vision_review(
     redaction_status = "Redacted PII: Successful ✅" if redaction_success else "Redacted PII: Not Applied"
 
     MAX_TOKENS_BY_INTENT = {
-        "comprehensive": 2400,
-        "guidelines_only": 2000,
-        "damage_report_from_photos": 1700
+        "comprehensive": 1500,
+        "guidelines_only": 1000,
+        "damage_report_from_photos": 900
     }
-    max_tokens = MAX_TOKENS_BY_INTENT.get(ai_intent, 2000)
+    max_tokens = MAX_TOKENS_BY_INTENT.get(ai_intent, 1000)
 
     # Call GPT and parse JSON
     try:
