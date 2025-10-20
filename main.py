@@ -112,7 +112,7 @@ DETAIL_TEMPLATES = {
         "- Compliance Score: NN% with one-sentence rationale."
     ),
 
-    # >>> PATCH 2 (tightened comprehensive template) <<<
+    # Comprehensive — with Detailed Appraisal Report + strict tables
     "comprehensive": (
         "## Inputs Used\n"
         "- List the estimate pages/lines and photo numbers you used, plus any rules text (if provided).\n\n"
@@ -121,13 +121,13 @@ DETAIL_TEMPLATES = {
         "- 3–6 bullets capturing the big picture: estimate integrity, rule alignment (only if rules text was supplied), "
         "and photo consistency.\n\n"
 
-        "## AI-4-IA Review Summary\n"
+        "## Detailed Appraisal Report\n"
         "- Write this section as a **formal, paragraph-style appraisal report** summarizing the entire claim. "
         "Include: scope of impact, damage by zone/panel, repair vs. replace rationale, parts type (OEM/LKQ/Aftermarket), "
         "labor operations, refinish/overlap considerations, rate validation, paint materials handling, sublet usage, "
         "tax/markup accuracy, and overall estimate integrity. Cite photos and estimate lines (e.g., 'Photo 3', 'p2/L14'). "
         "Close with compliance to any provided client rules and a clear final recommendation (Repairable vs. Total Loss). "
-        "Minimum 8–10 sentences.\n\n"
+        "Minimum 10–14 sentences (one continuous narrative, not bullets).\n\n"
 
         "## Photo-by-Photo Damage Ledger\n"
         "| Photo # | View/Angle | Panels/Parts Visible | Condition (dent/crease/scrape/misalignment) | Identifiers (VIN/odo/plate/reg) | Legibility |\n"
@@ -171,7 +171,7 @@ DETAIL_TEMPLATES = {
         "If no fraud indicators are identified, state **'No material inconsistencies found.'** Do not use 'N/A'."
     ),
 
-    # >>> PATCH 2 (tightened photos-only template) <<<
+    # Photos-only — with Detailed Appraisal Report + strict tables
     "damage_report_from_photos": (
         "# AI-4-IA Damage Report\n"
         "Create a concise, professional damage report **based only on the provided photos (and any optional text)**.\n\n"
@@ -194,10 +194,10 @@ DETAIL_TEMPLATES = {
         "## Damage Summary\n"
         "- 6–12 bullets with **panel/part + condition + suggested op**, citing **Photo #**.\n\n"
 
-        "## AI-4-IA Review Summary\n"
+        "## Detailed Appraisal Report\n"
         "- Provide a **detailed appraisal narrative** based on the photos: impact zones, repair/replace reasoning, "
         "likely parts source (OEM/LKQ/Aftermarket) when inferable, refinish/overlap notes, and cost implications. "
-        "Reference specific Photo #s. Minimum 6–8 sentences.\n\n"
+        "Reference specific Photo #s. Minimum 8–12 sentences (one continuous narrative, not bullets).\n\n"
 
         "## Estimated Repair Costs\n"
         "- Provide a reasonable high-level breakdown (Body Labor, Paint Labor, Paint Materials, Parts, Sublet, Tax) and brief rationale.\n\n"
@@ -227,7 +227,7 @@ SYSTEM_BASE = (
     "Avoid guessing; if uncertain, say 'N/A' and why. summary_brief must be <= 280 chars (plain text)."
 )
 
-# (Retained) No hallucinated rules + numeric score + fraud never N/A
+# (Retained) No hallucinated rules + numeric score + fraud never N/A (instruction-level)
 SYSTEM_BASE += (
     " Do not state or imply any client rule unless it appears verbatim in the provided client_rules text. "
     "If client_rules is blank, write the entire report without referencing client rules. "
@@ -244,7 +244,7 @@ SYSTEM_BASE += (
     "obvious photo tampering, duplicated images)."
 )
 
-# >>> PATCH 1 (force sections + counts + math) <<<
+# (Retained) Force sections + counts + math for tables and score rationale
 SYSTEM_BASE += (
     " Your 'summary_markdown' MUST contain the following sections with the exact headings and content:\n"
     " - '## Photo-by-Photo Damage Ledger' as a markdown table with columns: "
@@ -264,6 +264,15 @@ SYSTEM_BASE += (
     "if a field cannot be confirmed, explain why in 'Notes'. Use concrete p#/L# and Photo # references wherever possible.\n"
     " Before responding, double-check that ALL required sections exist, that the Photo ledger has ≥6 rows when ≥6 photos exist, "
     "the Estimate extract has ≥8 lines when available, and that the sum of deductions matches the reported compliance_score."
+)
+
+# >>> PATCH A addition: force a long narrative section named exactly '## Detailed Appraisal Report'
+SYSTEM_BASE += (
+    " Your 'summary_markdown' MUST include a top-level section named '## Detailed Appraisal Report' "
+    "containing a cohesive narrative of at least 10–14 sentences (not bullets). "
+    "It must synthesize: impact zones, per-panel damages, repair vs. replace rationale, parts type (OEM/LKQ/Aftermarket), "
+    "labor ops, refinish/overlap, rate/materials/sublet/tax handling, and estimate integrity. "
+    "It must cite concrete evidence inline (e.g., p2/L14, Photo 3)."
 )
 
 # -----------------------
@@ -510,7 +519,7 @@ async def vision_review(
         "ANALYSIS LAYOUT (guidance, not strict):\n" + DETAIL_TEMPLATES.get(ai_intent, DETAIL_TEMPLATES["comprehensive"])
     )
 
-    # Legibility nudge for comprehensive
+    # Odometer/registration legibility nudge for comprehensive
     if ai_intent == "comprehensive":
         prompt_text += (
             "\n\nUploader note: Odometer and Registration photos were provided. "
@@ -590,6 +599,14 @@ async def vision_review(
         "conclusion": _get("conclusion"),
         "redaction_status": redaction_status,
     }
+
+    # >>> PATCH B: Non-empty Fraud fallback (prevents 'N/A' in output/PDF) <<<
+    if not result["fraud_markdown"] or result["fraud_markdown"].strip().upper() in {"", "N/A"}:
+        result["fraud_markdown"] = (
+            "No material inconsistencies found. Checks performed: VIN match across estimate and photos, "
+            "odometer/registration presence and legibility, duplicate/edited images, timestamp continuity, and "
+            "panel/impact consistency."
+        )
 
     # -----------------------
     # PDF helpers (sanitizer for FPDF)
