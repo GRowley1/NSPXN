@@ -91,7 +91,7 @@ def _safe(s: str) -> str:
     return re.sub(r"[^\w.\-]+", "-", (s or "").strip()).strip("-_.")
 
 # -----------------------
-# App + CORS
+# EXACT client rules loader (no fuzz)
 # -----------------------
 app = FastAPI()
 app.add_middleware(
@@ -105,9 +105,6 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-# -----------------------
-# EXACT client rules loader (no fuzz)
-# -----------------------
 @app.get("/client-rules/{client_name}")
 async def get_client_rules(client_name: str):
     base = client_name.strip()
@@ -142,22 +139,18 @@ DETAIL_TEMPLATES = {
         "- Compliance Score: NN%\n"
         "- One-sentence justification."
     ),
-        "comprehensive": (
+    "comprehensive": (
         "## Inputs Used\n"
         "- Enumerate files seen; reference **Estimate page/line** and **Photo #** where applicable.\n\n"
-
         "## Executive Summary\n"
         "- 3–6 bullets: integrity of estimate, major deviations vs estimate categories below, and any photo mismatches.\n\n"
-
         "## Brief Damage Descriptions\n"
         "- 6–12 bullets. Each bullet MUST include: **panel/part** + **condition** (dent/crease/scrape/misalignment) + "
         "**suggested op** (repair/replace/refinish/blend) + **Photo #**. Keep each bullet ≤ 20 words.\n\n"
-
         "## Photo ↔ Estimate Crosswalk\n"
         "Only list parts/lines which appear in the estimate. If a photo shows a part with no matching estimate line, mark 'Not Evidenced'.\n"
         "| Estimate line / Part | Estimate page/line | Photo # | Consistent with estimate? | Notes |\n"
         "|---|---|---|:--:|---|\n\n"
-
         "## Estimate Compliance Cross-Check\n"
         "Evaluate the six topics **using only the estimate and photos** (do NOT use client_rules here). "
         "Status must be one of: **Compliant / Non-compliant / Not Evidenced**.\n"
@@ -169,21 +162,17 @@ DETAIL_TEMPLATES = {
         "| OEM Procedures |  |  |  |  |  |\n"
         "| Sublet |  |  |  |  |  |\n"
         "| Tax/Markup |  |  |  |  |  |\n\n"
-
         "## VIN & Identifiers Verification\n"
         "- State one of **MATCH / MISMATCH / NOT VERIFIED** and explicitly list: estimate VIN vs photo VIN(s). If any piece is unreadable, say so.\n\n"
-
         "## Missing Evidence & Documentation\n"
-        "- High / Medium / Low severity with one-line remediation (e.g., missing OEM doc, unclear photo of part).\n\n"
-
+        "- High / Medium / Low severity with one-line remediation.\n\n"
         "## Final Evaluation\n"
         "- **Compliance Score: NN%** and a one-sentence rationale.\n"
-        "- **Next Actions:** 1–3 succinct steps to resolve gaps (e.g., request clearer photo of LH rail, attach OEM doc page X)."
+        "- **Next Actions:** 1–3 succinct steps."
     ),
-
     "damage_report_from_photos": (
         "# AI-4-IA Damage Report\n"
-        "Create a concise, professional damage report **based only on the provided photos (and any optional text)**. Follow the provided sample style exactly.\n\n"
+        "Create a concise, professional damage report **based only on the provided photos (and any optional text)**.\n\n"
         "## Inputs Used\n"
         "- List exact Photo #s and any text used.\n\n"
         "## Quick Stats\n"
@@ -193,17 +182,11 @@ DETAIL_TEMPLATES = {
         "- Primary Impact: <area(s)>\n"
         "- Secondary Impact: <area(s) or 'None observed'>\n\n"
         "## Damage Summary\n"
-        "- 6–12 bullets: **panel/part** + **condition** (dent/crease/scrape/misalignment) + **suggested op** (repair/replace/refinish/blend). Always reference **Photo #** when applicable.\n\n"
+        "- 6–12 bullets: **panel/part + condition + suggested op**, always cite **Photo #** when applicable.\n\n"
         "## Estimated Repair Costs\n"
-        "  - Body Labor: <hrs> hr @ $<rate>/hr .......... $<amount>\n"
-        "  - Paint Labor: <hrs> hr @ $<rate>/hr .......... $<amount>\n"
-        "  - Paint Materials: <hrs> hr @ $<rate>/hr ...... $<amount>\n"
-        "  - Parts: <brief list> .... $<amount>\n"
-        "  - Subtotal ........................................ $<amount>\n"
-        "  - Sales Tax (<rate>%) ............................... $<amount>\n"
-        "  - Total Estimated Cost ...................... $<amount> ±<variance>%\n\n"
+        "- Provide a reasonable high-level breakdown and brief rationale.\n\n"
         "## Fraud & Authenticity Check\n"
-        "- Summarize any inconsistencies between photos, timestamps, or visible identifiers (VIN/badges). If none, say so.\n\n"
+        "- Any inconsistencies between photos/metadata/identifiers; if none, say so.\n\n"
         "## Conclusion\n"
         "- 1–2 sentences summarizing repairability and scope.\n"
     ),
@@ -249,7 +232,7 @@ def _add_bytes(parts: List[Dict[str,Any]], files_seen: List[str], raw: bytes, fn
             files_seen.append(f"{fname} (pdf, {len(pages)} page(s))")
             for im in pages[:max_images - used]:
                 b = io.BytesIO()
-                im.save(b, format="JPEG", quality=65, optimize=True)
+                im.save(b, format="JPEG", quality=70, optimize=True)
                 parts.append(_image_part_from_bytes(b.getvalue()))
                 used += 1
         except Exception as e:
@@ -409,8 +392,7 @@ async def vision_review(
             "and show 1–2 sentence rationale.\n"
             "- In 'fraud_markdown', list any inconsistencies as bullets with the evidence reference (Photo # / Estimate page/line). "
             "If none, state 'No material inconsistencies found.'\n"
-    )
-
+        )
 
     # Build user parts (redact PII in any free text, but keep VIN/Claim #)
     safe_user_parts: List[Dict[str,Any]] = []
@@ -490,15 +472,48 @@ async def vision_review(
     }
 
     # -----------------------
-    # PDF — separate file for Damage Report, classic for others
+    # PDF helpers (sanitize + long-token breaker)
+    # -----------------------
+    def _pdf_sanitize(text: str, max_token_len: int = 60) -> str:
+        """Make text safe for FPDF multi_cell: strip non-latin-1 and break long tokens."""
+        if text is None:
+            return ""
+        s = str(text).replace("\\r\\n", "\\n").replace("\\r", "\\n")
+        s = "".join(ch if ord(ch) < 256 else " " for ch in s)
+        def _break(tok: str) -> str:
+            if len(tok) <= max_token_len:
+                return tok
+            return " ".join(tok[i:i+max_token_len] for i in range(0, len(tok), max_token_len))
+        s = " ".join(_break(t) for t in s.split(" "))
+        return s
+
+    # -----------------------
+    # PDF — layout, margins, and SAFE mc()
     # -----------------------
     pdf = FPDF(); pdf.add_page()
+    pdf.set_auto_page_break(auto=True, margin=10)
+    pdf.set_left_margin(10); pdf.set_right_margin(10)
+
     try:
         pdf.add_font("DejaVu","", "DejaVuSans.ttf", uni=True); pdf.set_font("DejaVu", size=11)
     except Exception:
         pdf.set_font("Arial", size=11)
 
-    def mc(s): pdf.multi_cell(0,6,s)
+    def mc(s: str):
+        """Safe FPDF write: reset X, use fixed width, sanitize, and fail soft."""
+        try:
+            effective_w = pdf.w - pdf.l_margin - pdf.r_margin
+            if effective_w <= 5:
+                effective_w = 180
+            safe = _pdf_sanitize(s)
+            if not safe.strip():
+                safe = "-"
+            pdf.set_x(pdf.l_margin)
+            pdf.multi_cell(effective_w, 6, safe)
+        except Exception:
+            effective_w = pdf.w - pdf.l_margin - pdf.r_margin
+            pdf.set_x(pdf.l_margin)
+            pdf.multi_cell(effective_w, 6, (_pdf_sanitize(str(s))[:2000] + " …"))
 
     if ai_intent == "damage_report_from_photos":
         # Title only; sample-style layout
@@ -511,8 +526,9 @@ async def vision_review(
         if result["secondary_impact"]:
             mc(f"Secondary Impact: {result['secondary_impact']}")
 
-        # Simple confirmation line
-        mc(result["redaction_status"])
+        # Confirmation line (replace emoji for PDF safety)
+        pdf_status = result["redaction_status"].replace("✅", "OK")
+        mc(pdf_status)
 
         pdf.ln(2); mc("Damage Summary"); mc((result["summary_markdown"] or "N/A").strip())
         pdf.ln(2); mc("Estimated Repair Costs"); mc((result["estimated_costs_markdown"] or "N/A").strip())
@@ -536,8 +552,9 @@ async def vision_review(
         mc(f"Odometer (from estimate): {result['odometer_estimate_only']}")
         mc(f"Compliance Score: {result['compliance_score']}")
 
-        # Simple confirmation line in classic report
-        mc(result["redaction_status"])
+        # Confirmation line (replace emoji for PDF safety)
+        pdf_status = result["redaction_status"].replace("✅", "OK")
+        mc(pdf_status)
 
         pdf.ln(3); mc("AI-4-IA Review Summary"); mc((result["summary_markdown"] or '').strip())
         pdf.ln(3); mc("Fraud Detection"); mc((result["fraud_markdown"] or 'N/A').strip())
@@ -553,7 +570,7 @@ async def vision_review(
         logging.warning(f"PDF write error: {e}")
 
     # -----------------------
-    # Email — minimal mirror
+    # Email — minimal mirror (unchanged from your version)
     # -----------------------
     try:
         msg = EmailMessage()
@@ -661,5 +678,3 @@ async def download_pdf(file_number: Optional[str] = None, filename: Optional[str
         return FileResponse(path=raw_path, media_type="application/pdf", filename=f"{file_number}.pdf")
 
     return JSONResponse(status_code=404, content={"detail": "Not Found"})
-
-
