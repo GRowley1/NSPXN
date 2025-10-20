@@ -143,7 +143,6 @@ DETAIL_TEMPLATES = {
         "|---|---|---:|---:|---|---:|---|\n"
         "- Include 8+ lines if available, focusing on items tied to observed damages. Use 'Notes' for overlap/blend or rationale.\n\n"
 
-        # >>> SUBSTITUTION #2: simplified cross-check <<<
         "## Estimate Compliance Cross-Check (brief)\n"
         "Status: **Compliant / Non-compliant / Not Evidenced**. Cite only the most important evidence (p#/L# or Photo #). Keep it short.\n"
         "| Topic | Evidence (p#/L# or value; Photo # if relevant) | Status | Required Fix |\n"
@@ -154,6 +153,10 @@ DETAIL_TEMPLATES = {
         "| OEM Procedures |  |  |  |\n"
         "| Sublet |  |  |  |\n"
         "| Tax/Markup |  |  |  |\n\n"
+
+        "## Client Guidelines Comparison (if rules text was supplied)\n"
+        "- 3–8 bullets. Quote the relevant rule fragment and note **Aligned / Not Aligned / Not Evidenced**, with evidence refs (p#/L#, Photo #). "
+        "If no client_rules were provided, omit this section.\n\n"
 
         "## Risks / Missing Evidence\n"
         "- Short bullets with severity (High/Med/Low) and a one-line remediation.\n\n"
@@ -240,13 +243,14 @@ SYSTEM_BASE += (
     "obvious photo tampering, duplicated images)."
 )
 
-# >>> SUBSTITUTION #1: replace rigid table mandates with lighter narrative guidance
+# (Simplified) Encourage narrative; tables optional; rationale only when <100
 SYSTEM_BASE += (
     " Focus on a cohesive, professional appraisal. Prefer narrative over rigid tables. "
     "Include a section named '## Detailed Appraisal Report'. "
     "Include '## Compliance Score Rationale' only when compliance_score < 100, and show deductions from 100 with brief evidence refs (p#/L# or Photo #). "
     "If you include tables, keep them concise and only when they help clarity. "
-    "Avoid placeholder rows/columns; do not invent data."
+    "Avoid placeholder rows/columns; do not invent data. "
+    "When client_rules text is provided, also include a section titled '## Client Guidelines Comparison' with 3–8 concise bullets quoting the relevant rule fragment and citing evidence (p#/L#, Photo #); weave any material rule alignment/misalignment into the Detailed Appraisal Report narrative."
 )
 
 # >>> PATCH A addition (unchanged): require a long narrative section
@@ -508,6 +512,13 @@ async def vision_review(
             "\n\nUploader note: Odometer and Registration photos were provided. "
             "If you cannot clearly read them, report 'Present — not clearly legible' rather than 'Missing'."
         )
+    # NEW: If client_rules provided, require a dedicated Guidelines comparison section and narrative tie-in
+    if client_rules.strip():
+        prompt_text += (
+            "\n\nWhen client_rules text is provided, you MUST include a section titled '## Client Guidelines Comparison' "
+            "with 3–8 concise bullets. For each, quote the relevant rule fragment and mark Aligned / Not Aligned / Not Evidenced, "
+            "citing evidence (p#/L#, Photo #). Also weave any material rule alignment/misalignment into the '## Detailed Appraisal Report' narrative."
+        )
 
     # Build user parts (redact PII in any free text, but keep VIN/Claim #)
     safe_user_parts: List[Dict[str,Any]] = []
@@ -546,6 +557,15 @@ async def vision_review(
 
     # Call GPT and parse JSON
     try:
+        rsp = client.chat_completions.create(  # type: ignore[attr-defined]
+            model=MODEL,
+            messages=[{"role":"system","content": SYSTEM},
+                      {"role":"user","content": safe_user_parts}],
+            max_tokens=max_tokens,
+            temperature=0
+        )
+    except AttributeError:
+        # compatible with newer SDKs
         rsp = client.chat.completions.create(
             model=MODEL,
             messages=[{"role":"system","content": SYSTEM},
@@ -553,6 +573,7 @@ async def vision_review(
             max_tokens=max_tokens,
             temperature=0
         )
+    try:
         raw = (rsp.choices[0].message.content or "").strip()
         raw = raw.strip().removeprefix("```json").removesuffix("```").strip()
         data = json.loads(raw)
