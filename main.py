@@ -563,11 +563,17 @@ async def vision_review(
         pdf_filename = f"{safe_file}.pdf"
 
     pdf_path = os.path.join(PDF_DIR, pdf_filename)
-    try:
-        data_bytes = pdf.output(dest="S").encode("latin-1","ignore")
-        with open(pdf_path,"wb") as f: f.write(data_bytes)
-    except Exception as e:
-        logging.warning(f"PDF write error: {e}")
+try:
+    out = pdf.output(dest="S")
+    if isinstance(out, (bytes, bytearray)):
+        data_bytes = bytes(out)
+    else:
+        data_bytes = str(out).encode("latin-1", "ignore")
+    with open(pdf_path, "wb") as f:
+        f.write(data_bytes)
+except Exception as e:
+    logging.warning(f"PDF write error: {e}")
+
 
     # -----------------------
     # Email — minimal mirror (unchanged from your version)
