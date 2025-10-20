@@ -112,12 +112,13 @@ DETAIL_TEMPLATES = {
         "- Compliance Score: NN% with one-sentence rationale."
     ),
 
-    # Comprehensive (as requested)
+    # --- PATCH: Comprehensive template updated ---
     "comprehensive": (
         "## Inputs Used\n"
         "- List the estimate pages/lines and photo numbers you used, plus any rules text (if provided).\n\n"
         "## Executive Summary\n"
-        "- 3–6 bullets capturing the big picture: estimate integrity, rule alignment (only if rules text was supplied), and photo consistency.\n\n"
+        "- 3–6 bullets capturing the big picture: estimate integrity, rule alignment (only if rules text was supplied), "
+        "and photo consistency.\n\n"
         "## AI-4-IA Review Summary\n"
         "- Write this section as a **formal, paragraph-style appraisal report** summarizing the entire claim. "
         "Include: scope of impact, damage by zone/panel, repair vs. replace rationale, parts type (OEM/LKQ/Aftermarket), "
@@ -125,12 +126,20 @@ DETAIL_TEMPLATES = {
         "tax/markup accuracy, and overall estimate integrity. Cite photos and estimate lines (e.g., 'Photo 3', 'p2/L14'). "
         "Close with compliance to any provided client rules and a clear final recommendation (Repairable vs. Total Loss). "
         "Minimum 8–10 sentences.\n\n"
+        "## Photo-by-Photo Damage Ledger\n"
+        "| Photo # | View/Angle | Panels/Parts Visible | Condition (dent/crease/scrape/misalignment) | Identifiers (VIN/odo/plate/reg) | Legibility |\n"
+        "|---:|---|---|---|---|---|\n"
+        "- One row per photo used in the analysis. If an identifier is present but unreadable, mark **Present — not clearly legible**.\n\n"
         "## Brief Damage Descriptions\n"
-        "- 6–12 bullets. Each bullet: **part/panel** + **condition** (dent/crease/scrape/misalignment) + "
-        "**suggested op** (repair/replace/refinish/blend) + **Photo #**.\n\n"
+        "- 6–12 bullets. Each bullet: **part/panel** + **condition** + **suggested op** (repair/replace/refinish/blend) + **Photo #**.\n\n"
+        "## Estimate Line Extract (top relevant lines)\n"
+        "| Est. p#/L# | Part/Op | Labor Hrs | Rate | Part Type | Price | Notes |\n"
+        "|---|---|---:|---:|---|---:|---|\n"
+        "- Include lines directly tied to the observed damages. Part Type examples: OEM/LKQ/Aftermarket/Reman. "
+        "Use 'Notes' for overlap, blend, or rationale.\n\n"
         "## Photo ↔ Estimate Comparison\n"
         "- For each relevant part/line in the estimate, indicate if there is a matching photo. "
-        "If a photo shows a part with no matching estimate line, mark 'Not Evidenced'.\n"
+        "If a photo shows a part with no matching estimate line, mark **Not Evidenced**.\n"
         "| Estimate line / Part | Estimate page/line | Photo # | Consistent with estimate? | Notes |\n"
         "|---|---|---|:--:|---|\n\n"
         "## Estimate Compliance Cross-Check (Based ONLY on estimate & photos)\n"
@@ -145,12 +154,15 @@ DETAIL_TEMPLATES = {
         "| Tax/Markup |  |  |  |  |  |\n\n"
         "## Risks / Missing Evidence\n"
         "- Short bullets with severity (High/Med/Low) and a one-line remediation.\n\n"
+        "## Compliance Score Rationale (required if score < 100%)\n"
+        "- Start at **100** and list each deficiency with: short label, evidence reference (p#/L# and/or Photo #), "
+        "severity (Minor/Moderate/Major), and the deduction. End with the arithmetic to the final score.\n\n"
         "## Final Evaluation\n"
-        "- Compliance Score: NN% with a single-sentence justification."
-        " If no fraud indicators are identified, state 'No material inconsistencies found.' Do not use 'N/A'."
+        "- Compliance Score: NN% with a single-sentence justification. "
+        "If no fraud indicators are identified, state **'No material inconsistencies found.'** Do not use 'N/A'."
     ),
 
-    # Damage report from photos (as requested)
+    # --- PATCH: Damage report from photos template updated ---
     "damage_report_from_photos": (
         "# AI-4-IA Damage Report\n"
         "Create a concise, professional damage report **based only on the provided photos (and any optional text)**.\n\n"
@@ -162,6 +174,10 @@ DETAIL_TEMPLATES = {
         "- Odometer (if visible): <value or N/A>\n"
         "- Primary Impact: <area(s)>\n"
         "- Secondary Impact: <area(s) or 'None observed'>\n\n"
+        "## Photo-by-Photo Damage Ledger\n"
+        "| Photo # | View/Angle | Panels/Parts Visible | Condition (dent/crease/scrape/misalignment) | Identifiers (VIN/odo/plate/reg) | Legibility |\n"
+        "|---:|---|---|---|---|---|\n"
+        "- One row per photo used in the analysis. If an identifier is present but unreadable, mark **Present — not clearly legible**.\n\n"
         "## Damage Summary\n"
         "- 6–12 bullets with **panel/part + condition + suggested op**, citing **Photo #**.\n\n"
         "## AI-4-IA Review Summary\n"
@@ -172,9 +188,12 @@ DETAIL_TEMPLATES = {
         "- Provide a reasonable high-level breakdown (Body Labor, Paint Labor, Paint Materials, Parts, Sublet, Tax) and brief rationale.\n\n"
         "## Fraud & Authenticity Check\n"
         "- Any inconsistencies between photos/metadata/identifiers; if none, say so.\n\n"
+        "## Compliance Score Rationale (required if score < 100%)\n"
+        "- If compliance_score < 100, explain deductions based on evidence completeness, clarity/legibility, and "
+        "internal consistency among photos. Show the arithmetic from 100 to the final score.\n\n"
         "## Conclusion\n"
-        "- 1–2 sentences summarizing repairability and scope.\n"
-        " If no fraud indicators are identified, state 'No material inconsistencies found.' Do not use 'N/A'."
+        "- 1–2 sentences summarizing repairability and scope. "
+        "If no fraud indicators are identified, state **'No material inconsistencies found.'** Do not use 'N/A'.\n"
     ),
 }
 
@@ -190,15 +209,23 @@ SYSTEM_BASE = (
     "Avoid guessing; if uncertain, say 'N/A' and why. summary_brief must be <= 280 chars (plain text)."
 )
 
-# Guardrails: no hallucinated rules + always provide score/fraud text
+# --- PATCH: guardrails + scoring and fraud requirements ---
 SYSTEM_BASE += (
     " Do not state or imply any client rule unless it appears verbatim in the provided client_rules text. "
     "If client_rules is blank, write the entire report without referencing client rules. "
-    "If a value cannot be confirmed from the visible evidence, set it to 'N/A' and briefly state why. "
-    "Compliance Score must be a numeric percentage 0–100 (never 'N/A'). If no client rules are supplied, base the score on "
-    "internal consistency between estimate and photos, evidence completeness, and clarity/legibility. Provide a one-sentence rationale. "
-    "The 'fraud_markdown' section must never be 'N/A'. If nothing material is found, write 'No material inconsistencies found.' "
-    "and briefly note what was checked (e.g., VIN match, date/metadata, obvious photo tampering, duplicated images)."
+    "If a value cannot be confirmed from the visible evidence, set it to 'N/A' and briefly state why."
+)
+SYSTEM_BASE += (
+    " Compliance Score must be a numeric percentage 0–100 (never 'N/A'). "
+    "If no client rules are supplied, base the score on estimate↔photo internal consistency, "
+    "evidence completeness, and clarity/legibility. Provide a one-sentence rationale. "
+    "If compliance_score < 100, include a dedicated section titled '## Compliance Score Rationale' "
+    "which itemizes every deficiency with exact evidence references (estimate p#/L# and/or Photo #), "
+    "assigns an explicit deduction per item, and shows the arithmetic from 100 down to the final score. "
+    "Use a consistent scheme (e.g., Minor −5, Moderate −10, Major −20) and never go below 0. "
+    "The 'fraud_markdown' section must never be 'N/A'. If nothing material is found, write "
+    "'No material inconsistencies found.' and briefly note what was checked (e.g., VIN match, date/metadata, "
+    "obvious photo tampering, duplicated images)."
 )
 
 # -----------------------
@@ -445,7 +472,7 @@ async def vision_review(
         "ANALYSIS LAYOUT (guidance, not strict):\n" + DETAIL_TEMPLATES.get(ai_intent, DETAIL_TEMPLATES["comprehensive"])
     )
 
-    # Odometer/registration legibility note for comprehensive
+    # Legibility nudge for Comprehensive only
     if ai_intent == "comprehensive":
         prompt_text += (
             "\n\nUploader note: Odometer and Registration photos were provided. "
@@ -480,13 +507,12 @@ async def vision_review(
 
     redaction_status = "Redacted PII: Successful ✅" if redaction_success else "Redacted PII: Not Applied"
 
-    # Tightened token budgets
     MAX_TOKENS_BY_INTENT = {
-        "comprehensive": 1600,
-        "guidelines_only": 1200,
-        "damage_report_from_photos": 1100
+        "comprehensive": 2400,
+        "guidelines_only": 2000,
+        "damage_report_from_photos": 1700
     }
-    max_tokens = MAX_TOKENS_BY_INTENT.get(ai_intent, 1400)
+    max_tokens = MAX_TOKENS_BY_INTENT.get(ai_intent, 2000)
 
     # Call GPT and parse JSON
     try:
@@ -526,12 +552,6 @@ async def vision_review(
         "conclusion": _get("conclusion"),
         "redaction_status": redaction_status,
     }
-
-    # OPTIONAL belt-and-suspenders (keeps behavior consistent even if model slips)
-    if not result["compliance_score"] or result["compliance_score"].strip().upper() == "N/A":
-        result["compliance_score"] = "85% (Based on estimate↔photo consistency and evidence completeness)"
-    if not result["fraud_markdown"] or result["fraud_markdown"].strip().upper() == "N/A":
-        result["fraud_markdown"] = "No material inconsistencies found."
 
     # -----------------------
     # PDF helpers (sanitizer for FPDF)
@@ -662,6 +682,7 @@ async def download_pdf(file_number: Optional[str] = None, filename: Optional[str
 
     latest = max(candidates, key=lambda p: os.path.getmtime(p))
     return FileResponse(path=latest, media_type="application/pdf", filename=os.path.basename(latest))
+
 
 
 
