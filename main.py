@@ -112,13 +112,15 @@ DETAIL_TEMPLATES = {
         "- Compliance Score: NN% with one-sentence rationale."
     ),
 
-    # --- PATCH: Comprehensive template updated ---
+    # >>> PATCH 2 (tightened comprehensive template) <<<
     "comprehensive": (
         "## Inputs Used\n"
         "- List the estimate pages/lines and photo numbers you used, plus any rules text (if provided).\n\n"
+
         "## Executive Summary\n"
         "- 3–6 bullets capturing the big picture: estimate integrity, rule alignment (only if rules text was supplied), "
         "and photo consistency.\n\n"
+
         "## AI-4-IA Review Summary\n"
         "- Write this section as a **formal, paragraph-style appraisal report** summarizing the entire claim. "
         "Include: scope of impact, damage by zone/panel, repair vs. replace rationale, parts type (OEM/LKQ/Aftermarket), "
@@ -126,22 +128,26 @@ DETAIL_TEMPLATES = {
         "tax/markup accuracy, and overall estimate integrity. Cite photos and estimate lines (e.g., 'Photo 3', 'p2/L14'). "
         "Close with compliance to any provided client rules and a clear final recommendation (Repairable vs. Total Loss). "
         "Minimum 8–10 sentences.\n\n"
+
         "## Photo-by-Photo Damage Ledger\n"
         "| Photo # | View/Angle | Panels/Parts Visible | Condition (dent/crease/scrape/misalignment) | Identifiers (VIN/odo/plate/reg) | Legibility |\n"
         "|---:|---|---|---|---|---|\n"
-        "- One row per photo used in the analysis. If an identifier is present but unreadable, mark **Present — not clearly legible**.\n\n"
+        "- One row per photo used in the analysis (≥6 rows if ≥6 photos exist). If an identifier is present but unreadable, mark **Present — not clearly legible**.\n\n"
+
         "## Brief Damage Descriptions\n"
         "- 6–12 bullets. Each bullet: **part/panel** + **condition** + **suggested op** (repair/replace/refinish/blend) + **Photo #**.\n\n"
+
         "## Estimate Line Extract (top relevant lines)\n"
         "| Est. p#/L# | Part/Op | Labor Hrs | Rate | Part Type | Price | Notes |\n"
         "|---|---|---:|---:|---|---:|---|\n"
-        "- Include lines directly tied to the observed damages. Part Type examples: OEM/LKQ/Aftermarket/Reman. "
-        "Use 'Notes' for overlap, blend, or rationale.\n\n"
+        "- Include 8+ lines if available, focusing on items tied to observed damages. Use 'Notes' for overlap/blend or rationale.\n\n"
+
         "## Photo ↔ Estimate Comparison\n"
         "- For each relevant part/line in the estimate, indicate if there is a matching photo. "
         "If a photo shows a part with no matching estimate line, mark **Not Evidenced**.\n"
         "| Estimate line / Part | Estimate page/line | Photo # | Consistent with estimate? | Notes |\n"
         "|---|---|---|:--:|---|\n\n"
+
         "## Estimate Compliance Cross-Check (Based ONLY on estimate & photos)\n"
         "Status must be one of: **Compliant / Non-compliant / Not Evidenced**.\n"
         "| Topic | Estimate Evidence (page/line or value) | Photo Corroboration (Photo # or 'N/A') | Status | Impact | Required Fix |\n"
@@ -152,45 +158,57 @@ DETAIL_TEMPLATES = {
         "| OEM Procedures |  |  |  |  |  |\n"
         "| Sublet |  |  |  |  |  |\n"
         "| Tax/Markup |  |  |  |  |  |\n\n"
+
         "## Risks / Missing Evidence\n"
         "- Short bullets with severity (High/Med/Low) and a one-line remediation.\n\n"
-        "## Compliance Score Rationale (required if score < 100%)\n"
-        "- Start at **100** and list each deficiency with: short label, evidence reference (p#/L# and/or Photo #), "
-        "severity (Minor/Moderate/Major), and the deduction. End with the arithmetic to the final score.\n\n"
+
+        "## Compliance Score Rationale\n"
+        "- REQUIRED if score < 100: start at **100** and list each deficiency with evidence refs (p#/L# and/or Photo #), "
+        "severity (Minor/Moderate/Major), and numeric deduction. Show the arithmetic to the final score.\n\n"
+
         "## Final Evaluation\n"
         "- Compliance Score: NN% with a single-sentence justification. "
         "If no fraud indicators are identified, state **'No material inconsistencies found.'** Do not use 'N/A'."
     ),
 
-    # --- PATCH: Damage report from photos template updated ---
+    # >>> PATCH 2 (tightened photos-only template) <<<
     "damage_report_from_photos": (
         "# AI-4-IA Damage Report\n"
         "Create a concise, professional damage report **based only on the provided photos (and any optional text)**.\n\n"
+
         "## Inputs Used\n"
         "- List exact Photo #s and any text used.\n\n"
+
         "## Quick Stats\n"
         "- Claim # (if visible): <value or N/A>\n"
         "- File # (echo from request): <value or N/A>\n"
         "- Odometer (if visible): <value or N/A>\n"
         "- Primary Impact: <area(s)>\n"
         "- Secondary Impact: <area(s) or 'None observed'>\n\n"
+
         "## Photo-by-Photo Damage Ledger\n"
         "| Photo # | View/Angle | Panels/Parts Visible | Condition (dent/crease/scrape/misalignment) | Identifiers (VIN/odo/plate/reg) | Legibility |\n"
         "|---:|---|---|---|---|---|\n"
-        "- One row per photo used in the analysis. If an identifier is present but unreadable, mark **Present — not clearly legible**.\n\n"
+        "- One row per photo used in the analysis (≥6 rows if ≥6 photos exist). If an identifier is present but unreadable, mark **Present — not clearly legible**.\n\n"
+
         "## Damage Summary\n"
         "- 6–12 bullets with **panel/part + condition + suggested op**, citing **Photo #**.\n\n"
+
         "## AI-4-IA Review Summary\n"
         "- Provide a **detailed appraisal narrative** based on the photos: impact zones, repair/replace reasoning, "
         "likely parts source (OEM/LKQ/Aftermarket) when inferable, refinish/overlap notes, and cost implications. "
         "Reference specific Photo #s. Minimum 6–8 sentences.\n\n"
+
         "## Estimated Repair Costs\n"
         "- Provide a reasonable high-level breakdown (Body Labor, Paint Labor, Paint Materials, Parts, Sublet, Tax) and brief rationale.\n\n"
+
         "## Fraud & Authenticity Check\n"
         "- Any inconsistencies between photos/metadata/identifiers; if none, say so.\n\n"
-        "## Compliance Score Rationale (required if score < 100%)\n"
-        "- If compliance_score < 100, explain deductions based on evidence completeness, clarity/legibility, and "
+
+        "## Compliance Score Rationale\n"
+        "- REQUIRED if score < 100: explain deductions based on evidence completeness, clarity/legibility, and "
         "internal consistency among photos. Show the arithmetic from 100 to the final score.\n\n"
+
         "## Conclusion\n"
         "- 1–2 sentences summarizing repairability and scope. "
         "If no fraud indicators are identified, state **'No material inconsistencies found.'** Do not use 'N/A'.\n"
@@ -209,13 +227,11 @@ SYSTEM_BASE = (
     "Avoid guessing; if uncertain, say 'N/A' and why. summary_brief must be <= 280 chars (plain text)."
 )
 
-# --- PATCH: guardrails + scoring and fraud requirements ---
+# (Retained) No hallucinated rules + numeric score + fraud never N/A
 SYSTEM_BASE += (
     " Do not state or imply any client rule unless it appears verbatim in the provided client_rules text. "
     "If client_rules is blank, write the entire report without referencing client rules. "
-    "If a value cannot be confirmed from the visible evidence, set it to 'N/A' and briefly state why."
-)
-SYSTEM_BASE += (
+    "If a value cannot be confirmed from the visible evidence, set it to 'N/A' and briefly state why. "
     " Compliance Score must be a numeric percentage 0–100 (never 'N/A'). "
     "If no client rules are supplied, base the score on estimate↔photo internal consistency, "
     "evidence completeness, and clarity/legibility. Provide a one-sentence rationale. "
@@ -224,8 +240,30 @@ SYSTEM_BASE += (
     "assigns an explicit deduction per item, and shows the arithmetic from 100 down to the final score. "
     "Use a consistent scheme (e.g., Minor −5, Moderate −10, Major −20) and never go below 0. "
     "The 'fraud_markdown' section must never be 'N/A'. If nothing material is found, write "
-    "'No material inconsistencies found.' and briefly note what was checked (e.g., VIN match, date/metadata, "
+    "'No material inconsistencies found.' and briefly note what was checked (VIN match, date/metadata, "
     "obvious photo tampering, duplicated images)."
+)
+
+# >>> PATCH 1 (force sections + counts + math) <<<
+SYSTEM_BASE += (
+    " Your 'summary_markdown' MUST contain the following sections with the exact headings and content:\n"
+    " - '## Photo-by-Photo Damage Ledger' as a markdown table with columns: "
+    "[Photo # | View/Angle | Panels/Parts Visible | Condition (dent/crease/scrape/misalignment) | "
+    "Identifiers (VIN/odo/plate/reg) | Legibility]. Include at least 6 rows if 6+ photos exist; otherwise one row per photo. "
+    "For identifiers that are present but unreadable, write 'Present — not clearly legible'.\n"
+    " - '## Estimate Line Extract (top relevant lines)' as a markdown table with columns: "
+    "[Est. p#/L# | Part/Op | Labor Hrs | Rate | Part Type | Price | Notes]. Include 8+ lines if available; "
+    "otherwise include all available relevant lines. 'Notes' must mention overlap/blend or rationale when applicable.\n"
+    " - '## Photo ↔ Estimate Comparison' as a markdown table with columns: "
+    "[Estimate line / Part | Estimate page/line | Photo # | Consistent with estimate? | Notes]. "
+    "Mark items without photo support as 'Not Evidenced'.\n"
+    " - '## Compliance Score Rationale' whenever compliance_score < 100. Start at 100 and itemize EACH deduction with "
+    "[label + evidence refs (p#/L# and/or Photo #) + severity Minor/Moderate/Major + numeric deduction]. "
+    "Show the arithmetic ending at the exact final score. Do not skip this section if the score < 100.\n"
+    " Quality rules: No empty tables, no 'TBD'/'N/A' placeholders in table cells unless evidence truly does not exist; "
+    "if a field cannot be confirmed, explain why in 'Notes'. Use concrete p#/L# and Photo # references wherever possible.\n"
+    " Before responding, double-check that ALL required sections exist, that the Photo ledger has ≥6 rows when ≥6 photos exist, "
+    "the Estimate extract has ≥8 lines when available, and that the sum of deductions matches the reported compliance_score."
 )
 
 # -----------------------
@@ -472,7 +510,7 @@ async def vision_review(
         "ANALYSIS LAYOUT (guidance, not strict):\n" + DETAIL_TEMPLATES.get(ai_intent, DETAIL_TEMPLATES["comprehensive"])
     )
 
-    # Legibility nudge for Comprehensive only
+    # Legibility nudge for comprehensive
     if ai_intent == "comprehensive":
         prompt_text += (
             "\n\nUploader note: Odometer and Registration photos were provided. "
