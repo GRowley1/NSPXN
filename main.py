@@ -111,11 +111,13 @@ DETAIL_TEMPLATES = {
         "## Final\n"
         "- Compliance Score: NN% with one-sentence rationale."
     ),
+
+    # >>> PATCH #1: replace comprehensive template <<<
     "comprehensive": (
         "## Inputs Used\n"
         "- List the estimate pages/lines and photo numbers you used, plus any rules text (if provided).\n\n"
         "## Executive Summary\n"
-        "- 3–6 bullets capturing the big picture: estimate integrity, rule alignment, and photo consistency.\n\n"
+        "- 3–6 bullets capturing the big picture: estimate integrity, rule alignment (only if rules text was supplied), and photo consistency.\n\n"
         "## AI-4-IA Review Summary\n"
         "- Write this section as a **formal, paragraph-style appraisal report** summarizing the entire claim. "
         "Include: scope of impact, damage by zone/panel, repair vs. replace rationale, parts type (OEM/LKQ/Aftermarket), "
@@ -127,12 +129,27 @@ DETAIL_TEMPLATES = {
         "- 6–12 bullets. Each bullet: **part/panel** + **condition** (dent/crease/scrape/misalignment) + "
         "**suggested op** (repair/replace/refinish/blend) + **Photo #**.\n\n"
         "## Photo ↔ Estimate Comparison\n"
-        "- Note clear matches and any discrepancies (photo shows damage with no estimate line, or estimate line without photo support).\n\n"
+        "- For each relevant part/line in the estimate, indicate if there is a matching photo. "
+        "If a photo shows a part with no matching estimate line, mark 'Not Evidenced'.\n"
+        "| Estimate line / Part | Estimate page/line | Photo # | Consistent with estimate? | Notes |\n"
+        "|---|---|---|:--:|---|\n\n"
+        "## Estimate Compliance Cross-Check (Based ONLY on estimate & photos)\n"
+        "Status must be one of: **Compliant / Non-compliant / Not Evidenced**.\n"
+        "| Topic | Estimate Evidence (page/line or value) | Photo Corroboration (Photo # or 'N/A') | Status | Impact | Required Fix |\n"
+        "|---|---|---|:--:|:--:|---|\n"
+        "| Labor Rates |  |  |  |  |  |\n"
+        "| Refinish/Overlap |  |  |  |  |  |\n"
+        "| Paint Materials |  |  |  |  |  |\n"
+        "| OEM Procedures |  |  |  |  |  |\n"
+        "| Sublet |  |  |  |  |  |\n"
+        "| Tax/Markup |  |  |  |  |  |\n\n"
         "## Risks / Missing Evidence\n"
         "- Short bullets with severity (High/Med/Low) and a one-line remediation.\n\n"
         "## Final Evaluation\n"
         "- Compliance Score: NN% with a single-sentence justification."
     ),
+
+    # >>> PATCH #2: replace damage_report_from_photos template <<<
     "damage_report_from_photos": (
         "# AI-4-IA Damage Report\n"
         "Create a concise, professional damage report **based only on the provided photos (and any optional text)**.\n\n"
@@ -147,11 +164,11 @@ DETAIL_TEMPLATES = {
         "## Damage Summary\n"
         "- 6–12 bullets with **panel/part + condition + suggested op**, citing **Photo #**.\n\n"
         "## AI-4-IA Review Summary\n"
-        "- Provide a detailed appraisal narrative based on the photos: impact zones, repair/replace reasoning, "
+        "- Provide a **detailed appraisal narrative** based on the photos: impact zones, repair/replace reasoning, "
         "likely parts source (OEM/LKQ/Aftermarket) when inferable, refinish/overlap notes, and cost implications. "
         "Reference specific Photo #s. Minimum 6–8 sentences.\n\n"
         "## Estimated Repair Costs\n"
-        "- Provide a reasonable high-level breakdown and brief rationale.\n\n"
+        "- Provide a reasonable high-level breakdown (Body Labor, Paint Labor, Paint Materials, Parts, Sublet, Tax) and brief rationale.\n\n"
         "## Fraud & Authenticity Check\n"
         "- Any inconsistencies between photos/metadata/identifiers; if none, say so.\n\n"
         "## Conclusion\n"
@@ -169,6 +186,13 @@ SYSTEM_BASE = (
     "'fraud_markdown','primary_impact','secondary_impact','estimated_costs_markdown','conclusion']. "
     "Use evidence only from the provided inputs. Cite estimate page/line as 'p#/L#' and photos as 'Photo #'. "
     "Avoid guessing; if uncertain, say 'N/A' and why. summary_brief must be <= 280 chars (plain text)."
+)
+
+# >>> PATCH #3: strengthen system guardrails (no hallucinated rules) <<<
+SYSTEM_BASE += (
+    " Do not state or imply any client rule unless it appears verbatim in the provided client_rules text. "
+    "If client_rules is blank, write the entire report without referencing client rules. "
+    "If a value cannot be confirmed from the visible evidence, set it to 'N/A' and briefly state why."
 )
 
 # -----------------------
@@ -415,6 +439,13 @@ async def vision_review(
         "ANALYSIS LAYOUT (guidance, not strict):\n" + DETAIL_TEMPLATES.get(ai_intent, DETAIL_TEMPLATES["comprehensive"])
     )
 
+    # >>> PATCH #4: odometer/registration legibility note for comprehensive <<<
+    if ai_intent == "comprehensive":
+        prompt_text += (
+            "\n\nUploader note: Odometer and Registration photos were provided. "
+            "If you cannot clearly read them, report 'Present — not clearly legible' rather than 'Missing'."
+        )
+
     # Build user parts (redact PII in any free text, but keep VIN/Claim #)
     safe_user_parts: List[Dict[str,Any]] = []
     redaction_success = False
@@ -618,4 +649,5 @@ async def download_pdf(file_number: Optional[str] = None, filename: Optional[str
 
     latest = max(candidates, key=lambda p: os.path.getmtime(p))
     return FileResponse(path=latest, media_type="application/pdf", filename=os.path.basename(latest))
+
 
