@@ -512,7 +512,7 @@ async def vision_review(
             "\n\nUploader note: Odometer and Registration photos were provided. "
             "If you cannot clearly read them, report 'Present — not clearly legible' rather than 'Missing'."
         )
-    # NEW: If client_rules provided, require a dedicated Guidelines comparison section and narrative tie-in
+    # If client_rules provided, require a dedicated Guidelines comparison section and narrative tie-in
     if client_rules.strip():
         prompt_text += (
             "\n\nWhen client_rules text is provided, you MUST include a section titled '## Client Guidelines Comparison' "
@@ -717,8 +717,10 @@ async def vision_review(
 
         if ai_intent == "damage_report_from_photos":
             subj = f"AI Damage Report: {file_number or ''} {result['claim_number'] or ''}".strip()
+            # >>> ONLY CHANGE: IA Company line added above Claim/File.
             body = f"""AI-4-IA Damage Report
 
+IA Company: {ia_company}
 Claim #: {result['claim_number'] or 'N/A'}    File #: {file_number or 'N/A'}
 Odometer: {result['odometer_estimate_only'] or 'N/A'}    Primary Impact: {result['primary_impact'] or 'N/A'}
 Secondary Impact: {result['secondary_impact'] or 'N/A'}
