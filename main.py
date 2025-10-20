@@ -3,7 +3,7 @@ from fastapi.responses import JSONResponse, FileResponse
 from fastapi.middleware.cors import CORSMiddleware
 from typing import List, Dict, Any, Optional
 import os, io, re, json, base64, logging, zipfile, glob
-import smtplib  # ✅ added for the email section
+import smtplib  # email transport
 from email.message import EmailMessage
 
 from fpdf import FPDF
@@ -113,7 +113,7 @@ DETAIL_TEMPLATES = {
         "- Compliance Score: NN% with one-sentence rationale."
     ),
 
-    # Comprehensive — with Detailed Appraisal Report + strict tables
+    # Comprehensive — with Detailed Appraisal Report + simplified cross-check
     "comprehensive": (
         "## Inputs Used\n"
         "- List the estimate pages/lines and photo numbers you used, plus any rules text (if provided).\n\n"
@@ -143,22 +143,17 @@ DETAIL_TEMPLATES = {
         "|---|---|---:|---:|---|---:|---|\n"
         "- Include 8+ lines if available, focusing on items tied to observed damages. Use 'Notes' for overlap/blend or rationale.\n\n"
 
-        "## Photo ↔ Estimate Comparison\n"
-        "- For each relevant part/line in the estimate, indicate if there is a matching photo. "
-        "If a photo shows a part with no matching estimate line, mark **Not Evidenced**.\n"
-        "| Estimate line / Part | Estimate page/line | Photo # | Consistent with estimate? | Notes |\n"
-        "|---|---|---|:--:|---|\n\n"
-
-        "## Estimate Compliance Cross-Check (Based ONLY on estimate & photos)\n"
-        "Status must be one of: **Compliant / Non-compliant / Not Evidenced**.\n"
-        "| Topic | Estimate Evidence (page/line or value) | Photo Corroboration (Photo # or 'N/A') | Status | Impact | Required Fix |\n"
-        "|---|---|---|:--:|:--:|---|\n"
-        "| Labor Rates |  |  |  |  |  |\n"
-        "| Refinish/Overlap |  |  |  |  |  |\n"
-        "| Paint Materials |  |  |  |  |  |\n"
-        "| OEM Procedures |  |  |  |  |  |\n"
-        "| Sublet |  |  |  |  |  |\n"
-        "| Tax/Markup |  |  |  |  |  |\n\n"
+        # >>> SUBSTITUTION #2: simplified cross-check <<<
+        "## Estimate Compliance Cross-Check (brief)\n"
+        "Status: **Compliant / Non-compliant / Not Evidenced**. Cite only the most important evidence (p#/L# or Photo #). Keep it short.\n"
+        "| Topic | Evidence (p#/L# or value; Photo # if relevant) | Status | Required Fix |\n"
+        "|---|---|:--:|---|\n"
+        "| Labor Rates |  |  |  |\n"
+        "| Refinish/Overlap |  |  |  |\n"
+        "| Paint Materials |  |  |  |\n"
+        "| OEM Procedures |  |  |  |\n"
+        "| Sublet |  |  |  |\n"
+        "| Tax/Markup |  |  |  |\n\n"
 
         "## Risks / Missing Evidence\n"
         "- Short bullets with severity (High/Med/Low) and a one-line remediation.\n\n"
@@ -172,7 +167,7 @@ DETAIL_TEMPLATES = {
         "If no fraud indicators are identified, state **'No material inconsistencies found.'** Do not use 'N/A'."
     ),
 
-    # Photos-only — with Detailed Appraisal Report + strict tables
+    # Photos-only — unchanged template
     "damage_report_from_photos": (
         "# AI-4-IA Damage Report\n"
         "Create a concise, professional damage report **based only on the provided photos (and any optional text)**.\n\n"
@@ -245,29 +240,16 @@ SYSTEM_BASE += (
     "obvious photo tampering, duplicated images)."
 )
 
-# (Retained) Force sections + counts + math for tables and score rationale
+# >>> SUBSTITUTION #1: replace rigid table mandates with lighter narrative guidance
 SYSTEM_BASE += (
-    " Your 'summary_markdown' MUST contain the following sections with the exact headings and content:\n"
-    " - '## Photo-by-Photo Damage Ledger' as a markdown table with columns: "
-    "[Photo # | View/Angle | Panels/Parts Visible | Condition (dent/crease/scrape/misalignment) | "
-    "Identifiers (VIN/odo/plate/reg) | Legibility]. Include at least 6 rows if 6+ photos exist; otherwise one row per photo. "
-    "For identifiers that are present but unreadable, write 'Present — not clearly legible'.\n"
-    " - '## Estimate Line Extract (top relevant lines)' as a markdown table with columns: "
-    "[Est. p#/L# | Part/Op | Labor Hrs | Rate | Part Type | Price | Notes]. Include 8+ lines if available; "
-    "otherwise include all available relevant lines. 'Notes' must mention overlap/blend or rationale when applicable.\n"
-    " - '## Photo ↔ Estimate Comparison' as a markdown table with columns: "
-    "[Estimate line / Part | Estimate page/line | Photo # | Consistent with estimate? | Notes]. "
-    "Mark items without photo support as 'Not Evidenced'.\n"
-    " - '## Compliance Score Rationale' whenever compliance_score < 100. Start at 100 and itemize EACH deduction with "
-    "[label + evidence refs (p#/L# and/or Photo #) + severity Minor/Moderate/Major + numeric deduction]. "
-    "Show the arithmetic ending at the exact final score. Do not skip this section if the score < 100.\n"
-    " Quality rules: No empty tables, no 'TBD'/'N/A' placeholders in table cells unless evidence truly does not exist; "
-    "if a field cannot be confirmed, explain why in 'Notes'. Use concrete p#/L# and Photo # references wherever possible.\n"
-    " Before responding, double-check that ALL required sections exist, that the Photo ledger has ≥6 rows when ≥6 photos exist, "
-    "the Estimate extract has ≥8 lines when available, and that the sum of deductions matches the reported compliance_score."
+    " Focus on a cohesive, professional appraisal. Prefer narrative over rigid tables. "
+    "Include a section named '## Detailed Appraisal Report'. "
+    "Include '## Compliance Score Rationale' only when compliance_score < 100, and show deductions from 100 with brief evidence refs (p#/L# or Photo #). "
+    "If you include tables, keep them concise and only when they help clarity. "
+    "Avoid placeholder rows/columns; do not invent data."
 )
 
-# >>> PATCH A addition: force a long narrative section named exactly '## Detailed Appraisal Report'
+# >>> PATCH A addition (unchanged): require a long narrative section
 SYSTEM_BASE += (
     " Your 'summary_markdown' MUST include a top-level section named '## Detailed Appraisal Report' "
     "containing a cohesive narrative of at least 10–14 sentences (not bullets). "
@@ -601,7 +583,7 @@ async def vision_review(
         "redaction_status": redaction_status,
     }
 
-    # >>> PATCH B: Non-empty Fraud fallback (prevents 'N/A' in output/PDF) <<<
+    # Non-empty Fraud fallback (prevents 'N/A' in output/PDF)
     if not result["fraud_markdown"] or result["fraud_markdown"].strip().upper() in {"", "N/A"}:
         result["fraud_markdown"] = (
             "No material inconsistencies found. Checks performed: VIN match across estimate and photos, "
@@ -707,7 +689,7 @@ async def vision_review(
     pdf_url = f"/download-pdf?filename={pdf_filename}"
 
     # -----------------------
-    # Email — restored original working section (info-only, no attachment)
+    # Email — info-only (matches older working behavior)
     # -----------------------
     try:
         msg = EmailMessage()
@@ -802,6 +784,7 @@ async def download_pdf(file_number: Optional[str] = None, filename: Optional[str
 
     latest = max(candidates, key=lambda p: os.path.getmtime(p))
     return FileResponse(path=latest, media_type="application/pdf", filename=os.path.basename(latest))
+
 
 
 
