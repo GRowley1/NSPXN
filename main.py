@@ -216,19 +216,19 @@ DETAIL_TEMPLATES = {
 
 # --- Static audit questions (hard-coded) ---
 STATIC_AUDIT_QUESTIONS = [
-  "Do the photos substantiate the highest-cost operations (frame/sectioning/panel replace)?",
-  "Are ADAS calibrations or wheel alignments required and supported by the damage and OEM procedures?",
-  "Is blend time justified by color/finish (metallic/pearl/tri-coat) and adjacent panel visibility?",
-  "Do invoices corroborate parts used and match estimate line items (brand/grade, price, quantity)?",
-  "Are AM/LKQ choices compliant with age/mileage rules, and is OEM required anywhere by client policy or safety?",
-  "Is there evidence of prior or unrelated damage (UPD) that materially affects valuation or repair scope?",
-  "Are there structural/safety indicators (buckles, misalignments, airbags/pretensioners) that alter repair strategy?",
-  "Are materials/hazard charges (paint supplies, corrosion protection, seam sealer) aligned with operations and shop norms?",
-  "Are storage/tow charges and dates supported and reasonable given claim timeline and shop status?",
-  "Are scanner reports (pre/post) included or needed; if absent, does that meaningfully impact confidence?",
-  "Did the supplement (if any) correct earlier gaps, and are newly added operations now evidenced?",
-  "Are client-required documents present (e.g., NADA printout, release forms, production date plate); if missing, what’s the impact?",
-  "What is the bottom-line recommendation (approve as-is, adjust items, or request specific evidence)?"
+    "Do the photos substantiate the highest-cost operations (frame/sectioning/panel replace)?",
+    "Are ADAS calibrations or wheel alignments required and supported by the damage and OEM procedures?",
+    "Is blend time justified by color/finish (metallic/pearl/tri-coat) and adjacent panel visibility?",
+    "Do invoices corroborate parts used and match estimate line items (brand/grade, price, quantity)?",
+    "Are AM/LKQ choices compliant with age/mileage rules, and is OEM required anywhere by client policy or safety?",
+    "Is there evidence of prior or unrelated damage (UPD) that materially affects valuation or repair scope?",
+    "Are there structural/safety indicators (buckles, misalignments, airbags/pretensioners) that alter repair strategy?",
+    "Are materials/hazard charges (paint supplies, corrosion protection, seam sealer) aligned with operations and shop norms?",
+    "Are storage/tow charges and dates supported and reasonable given claim timeline and shop status?",
+    "Are scanner reports (pre/post) included or needed; if absent, does that meaningfully impact confidence?",
+    "Did the supplement (if any) correct earlier gaps, and are newly added operations now evidenced?",
+    "Are client-required documents present (e.g., NADA printout, release forms, production date plate); if missing, what’s the impact?",
+    "What is the bottom-line recommendation (approve as-is, adjust items, or request specific evidence)?"
 ]
 
 
@@ -535,15 +535,15 @@ async def vision_review(
         prompt_text += (
             "\n\nWhen client_rules text is provided, you MUST include a section titled '## Client Guidelines Comparison' "
             "with 3–8 concise bullets. For each, quote the relevant rule fragment and mark Aligned / Not Aligned / Not Evidenced, "
-            "citing evidence (p#/L#, Photo #). 
-# --- Ensure model addresses static audit questions inside the narrative ---
-prompt_text += (
-    "\n\nWeave the following static audit questions naturally into the '## Detailed Audit Report' narrative "
-    "(do NOT present as a separate Q&A list; integrate answers inline and cite evidence with p#/L# and Photo # as applicable):\n"
-    + "\n".join(f"- {q}" for q in STATIC_AUDIT_QUESTIONS)
-)
-Also weave any material rule alignment/misalignment into the '## Detailed Audit Report' narrative."
+            "citing evidence (p#/L#, Photo #). Also weave any material rule alignment/misalignment into the '## Detailed Audit Report' narrative."
         )
+        # --- Ensure model addresses static audit questions inside the narrative ---
+        prompt_text += (
+            "\n\nWeave the following static audit questions naturally into the '## Detailed Audit Report' narrative "
+            "(do NOT present as a separate Q&A list; integrate answers inline and cite evidence with p#/L# and Photo # as applicable):\n"
+            + "\n".join(f"- {q}" for q in STATIC_AUDIT_QUESTIONS)
+        )
+
 
     # Build user parts (redact PII in any free text, but keep VIN/Claim #)
     safe_user_parts: List[Dict[str,Any]] = []
@@ -832,6 +832,9 @@ async def download_pdf(file_number: Optional[str] = None, filename: Optional[str
 
     latest = max(candidates, key=lambda p: os.path.getmtime(p))
     return FileResponse(path=latest, media_type="application/pdf", filename=os.path.basename(latest))
+
+
+
 
 
 
