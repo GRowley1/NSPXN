@@ -113,7 +113,7 @@ DETAIL_TEMPLATES = {
         "- Compliance Score: NN% with one-sentence rationale."
     ),
 
-    # Comprehensive — with Detailed Appraisal Report + simplified cross-check
+    # Comprehensive — with Detailed Audit Report + simplified cross-check
     "comprehensive": (
         "## Inputs Used\n"
         "- List the estimate pages/lines and photo numbers you used, plus any rules text (if provided).\n\n"
@@ -199,7 +199,7 @@ DETAIL_TEMPLATES = {
         "Reference specific Photo #s. Minimum 8–12 sentences (one continuous narrative, not bullets).\n\n"
 
         "## Estimated Repair Costs\n"
-        "- Provide a **numeric** high-level breakdown (Body Labor, Paint Labor, Paint Materials, Parts, Sublet, Tax) with a one-line rationale each; **no placeholders** — output real dollar figures and a total. If rates/tax are missing, state assumptions and compute numbers. Show brief math (e.g., hours × rate).\n\n"
+        "- Provide a reasonable high-level breakdown (Body Labor, Paint Labor, Paint Materials, Parts, Sublet, Tax) and brief rationale.\n\n"
 
         "## Fraud & Authenticity Check\n"
         "- Any inconsistencies between photos/metadata/identifiers; if none, say so.\n\n"
@@ -213,6 +213,24 @@ DETAIL_TEMPLATES = {
         "If no fraud indicators are identified, state **'No material inconsistencies found.'** Do not use 'N/A'.\n"
     ),
 }
+
+# --- Static audit questions (hard-coded) ---
+STATIC_AUDIT_QUESTIONS = [
+    "Do the photos substantiate the highest-cost operations (frame/sectioning/panel replace)?",
+    "Are ADAS calibrations or wheel alignments required and supported by the damage and OEM procedures?",
+    "Is blend time justified by color/finish (metallic/pearl/tri-coat) and adjacent panel visibility?",
+    "Do invoices corroborate parts used and match estimate line items (brand/grade, price, quantity)?",
+    "Are AM/LKQ choices compliant with age/mileage rules, and is OEM required anywhere by client policy or safety?",
+    "Is there evidence of prior or unrelated damage (UPD) that materially affects valuation or repair scope?",
+    "Are there structural/safety indicators (buckles, misalignments, airbags/pretensioners) that alter repair strategy?",
+    "Are materials/hazard charges (paint supplies, corrosion protection, seam sealer) aligned with operations and shop norms?",
+    "Are storage/tow charges and dates supported and reasonable given claim timeline and shop status?",
+    "Are scanner reports (pre/post) included or needed; if absent, does that meaningfully impact confidence?",
+    "Did the supplement (if any) correct earlier gaps, and are newly added operations now evidenced?",
+    "Are client-required documents present (e.g., NADA printout, release forms, production date plate); if missing, what’s the impact?",
+    "What is the bottom-line recommendation (approve as-is, adjust items, or request specific evidence)?"
+]
+
 
 ALLOWED_INTENTS = {"guidelines_only","comprehensive","damage_report_from_photos"}
 
@@ -246,16 +264,16 @@ SYSTEM_BASE += (
 # (Simplified) Encourage narrative; tables optional; rationale only when <100
 SYSTEM_BASE += (
     " Focus on a cohesive, professional appraisal. Prefer narrative over rigid tables. "
-    "Include a section named '## Detailed Appraisal Report'. "
+    "Include a section named '## Detailed Audit Report'. "
     "Include '## Compliance Score Rationale' only when compliance_score < 100, and show deductions from 100 with brief evidence refs (p#/L# or Photo #). "
     "If you include tables, keep them concise and only when they help clarity. "
     "Avoid placeholder rows/columns; do not invent data. "
-    "When client_rules text is provided, also include a section titled '## Client Guidelines Comparison' with 3–8 concise bullets quoting the relevant rule fragment and citing evidence (p#/L#, Photo #); weave any material rule alignment/misalignment into the Detailed Appraisal Report narrative."
+    "When client_rules text is provided, also include a section titled '## Client Guidelines Comparison' with 3–8 concise bullets quoting the relevant rule fragment and citing evidence (p#/L#, Photo #); weave any material rule alignment/misalignment into the Detailed Audit Report narrative."
 )
 
 # >>> PATCH A addition (unchanged): require a long narrative section
 SYSTEM_BASE += (
-    " Your 'summary_markdown' MUST include a top-level section named '## Detailed Appraisal Report' "
+    " Your 'summary_markdown' MUST include a top-level section named '## Detailed Audit Report' "
     "containing a cohesive narrative of at least 10–14 sentences (not bullets). "
     "It must synthesize: impact zones, per-panel damages, repair vs. replace rationale, parts type (OEM/LKQ/Aftermarket), "
     "labor ops, refinish/overlap, rate/materials/sublet/tax handling, and estimate integrity. "
@@ -506,16 +524,6 @@ async def vision_review(
         "ANALYSIS LAYOUT (guidance, not strict):\n" + DETAIL_TEMPLATES.get(ai_intent, DETAIL_TEMPLATES["comprehensive"])
     )
 
-    # Photos-only mode: force numeric costs with assumptions if needed (prompt-only)
-    if ai_intent == "damage_report_from_photos":
-        prompt_text += (
-            "\n\nESTIMATED COSTS REQUIREMENTS:"
-            "\n- Output concrete dollar amounts for Body Labor, Paint Labor, Paint Materials, Parts, Sublet, and Tax — **no placeholders**."
-            "\n- If rates/tax are missing, **state reasonable assumptions** and compute numeric values anyway."
-            "\n- Show brief math (e.g., hours × rate) and sum to a **Total estimated cost**; round to whole dollars."
-            "\n- Double-check that the numeric total equals the sum of all listed categories (no rounding errors)."
-        )
-
     # Odometer/registration legibility nudge for comprehensive
     if ai_intent == "comprehensive":
         prompt_text += (
@@ -527,8 +535,15 @@ async def vision_review(
         prompt_text += (
             "\n\nWhen client_rules text is provided, you MUST include a section titled '## Client Guidelines Comparison' "
             "with 3–8 concise bullets. For each, quote the relevant rule fragment and mark Aligned / Not Aligned / Not Evidenced, "
-            "citing evidence (p#/L#, Photo #). Also weave any material rule alignment/misalignment into the '## Detailed Appraisal Report' narrative."
+            "citing evidence (p#/L#, Photo #). Also weave any material rule alignment/misalignment into the '## Detailed Audit Report' narrative."
         )
+        # --- Ensure model addresses static audit questions inside the narrative ---
+        prompt_text += (
+            "\n\nWeave the following static audit questions naturally into the '## Detailed Audit Report' narrative "
+            "(do NOT present as a separate Q&A list; integrate answers inline and cite evidence with p#/L# and Photo # as applicable):\n"
+            + "\n".join(f"- {q}" for q in STATIC_AUDIT_QUESTIONS)
+        )
+
 
     # Build user parts (redact PII in any free text, but keep VIN/Claim #)
     safe_user_parts: List[Dict[str,Any]] = []
@@ -572,7 +587,8 @@ async def vision_review(
             messages=[{"role":"system","content": SYSTEM},
                       {"role":"user","content": safe_user_parts}],
             max_tokens=max_tokens,
-            temperature=0
+            temperature=0,
+        response_format={"type":"json_object"}
         )
     except AttributeError:
         # compatible with newer SDKs
@@ -581,15 +597,79 @@ async def vision_review(
             messages=[{"role":"system","content": SYSTEM},
                       {"role":"user","content": safe_user_parts}],
             max_tokens=max_tokens,
-            temperature=0
+            temperature=0,
+            response_format={"type":"json_object"}
         )
+    
+    def _try_parse_json(raw_text: str):
+        raw_local = (raw_text or "").strip()
+        # strip accidental fences
+        if raw_local.startswith("```json"):
+            raw_local = raw_local[len("```json"):]
+        if raw_local.endswith("```"):
+            raw_local = raw_local[:-3]
+        raw_local = raw_local.strip()
+        # fast path
+        try:
+            return json.loads(raw_local)
+        except Exception:
+            pass
+        # extract first balanced object
+        start_i = raw_local.find("{"); end_i = raw_local.rfind("}")
+        chunk = raw_local[start_i:end_i+1] if start_i != -1 and end_i != -1 and end_i > start_i else raw_local
+        # normalize common bad chars
+        fixes = {
+            "\u2018": "'", "\u2019": "'", "\u201C": '"', "\u201D": '"',
+            "\u00A0": " ", "\r": "", "\t": "    ",
+        }
+        for k,v in fixes.items():
+            chunk = chunk.replace(k, v)
+        # remove stray trailing commas
+        chunk = re.sub(r",\s*([}\]])", r"\1", chunk)
+        try:
+            return json.loads(chunk)
+        except Exception:
+            return None
+
+    # --- Parse with repair & optional one-round reformat
     try:
-        raw = (rsp.choices[0].message.content or "").strip()
-        raw = raw.strip().removeprefix("```json").removesuffix("```").strip()
-        data = json.loads(raw)
+        raw = (rsp.choices[0].message.content or "")
     except Exception as e:
-        log.error(f"LLM failure or JSON parse error: {e}")
+        log.error(f"LLM returned no content: {e}")
+        return JSONResponse(status_code=500, content={"error":"Model returned no content."})
+
+    data = _try_parse_json(raw)
+    if data is None:
+        try:
+            fix_prompt = [
+                {"role":"system","content":"Return ONLY strict JSON. No prose. No backticks."},
+                {"role":"user","content": "Reformat this to valid JSON object with the exact keys already present. Do not add or remove keys.\n\n" + raw}
+            ]
+            try:
+                fix_rsp = client.chat_completions.create(  # type: ignore[attr-defined]
+                    model=MODEL,
+                    messages=fix_prompt,
+                    max_tokens=max_tokens,
+                    temperature=0,
+                    response_format={"type":"json_object"}
+                )
+            except AttributeError:
+                fix_rsp = client.chat.completions.create(
+                    model=MODEL,
+                    messages=fix_prompt,
+                    max_tokens=max_tokens,
+                    temperature=0,
+                    response_format={"type":"json_object"}
+                )
+            fixed = (fix_rsp.choices[0].message.content or "")
+            data = _try_parse_json(fixed)
+        except Exception as e:
+            log.error(f"Self-heal reformat failed: {e}")
+
+    if data is None:
+        log.error(f"LLM failure or JSON parse error; first 500 chars:\n{raw[:500]}")
         return JSONResponse(status_code=500, content={"error":"Model output could not be parsed as JSON."})
+
 
     def _get(k):
         v = data.get(k)
@@ -817,6 +897,11 @@ async def download_pdf(file_number: Optional[str] = None, filename: Optional[str
 
     latest = max(candidates, key=lambda p: os.path.getmtime(p))
     return FileResponse(path=latest, media_type="application/pdf", filename=os.path.basename(latest))
+
+
+
+
+
 
 
 
