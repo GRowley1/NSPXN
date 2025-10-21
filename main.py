@@ -513,6 +513,7 @@ async def vision_review(
             "\n- Output concrete dollar amounts for Body Labor, Paint Labor, Paint Materials, Parts, Sublet, and Tax — **no placeholders**."
             "\n- If rates/tax are missing, **state reasonable assumptions** and compute numeric values anyway."
             "\n- Show brief math (e.g., hours × rate) and sum to a **Total estimated cost**; round to whole dollars."
+            "\n- Double-check that the numeric total equals the sum of all listed categories (no rounding errors)."
         )
 
     # Odometer/registration legibility nudge for comprehensive
