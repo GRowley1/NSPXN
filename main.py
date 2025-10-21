@@ -113,7 +113,7 @@ DETAIL_TEMPLATES = {
         "- Compliance Score: NN% with one-sentence rationale."
     ),
 
-    # Comprehensive — with Detailed Appraisal Report + simplified cross-check
+    # Comprehensive — with Detailed Audit Report + simplified cross-check
     "comprehensive": (
         "## Inputs Used\n"
         "- List the estimate pages/lines and photo numbers you used, plus any rules text (if provided).\n\n"
@@ -122,7 +122,7 @@ DETAIL_TEMPLATES = {
         "- 3–6 bullets capturing the big picture: estimate integrity, rule alignment (only if rules text was supplied), "
         "and photo consistency.\n\n"
 
-        "## Detailed Appraisal Report\n"
+        "## Detailed Audit Report\n"
         "- Write this section as a **formal, paragraph-style appraisal report** summarizing the entire claim. "
         "Include: scope of impact, damage by zone/panel, repair vs. replace rationale, parts type (OEM/LKQ/Aftermarket), "
         "labor operations, refinish/overlap considerations, rate validation, paint materials handling, sublet usage, "
@@ -193,7 +193,7 @@ DETAIL_TEMPLATES = {
         "## Damage Summary\n"
         "- 6–12 bullets with **panel/part + condition + suggested op**, citing **Photo #**.\n\n"
 
-        "## Detailed Appraisal Report\n"
+        "## Detailed Audit Report\n"
         "- Provide a **detailed appraisal narrative** based on the photos: impact zones, repair/replace reasoning, "
         "likely parts source (OEM/LKQ/Aftermarket) when inferable, refinish/overlap notes, and cost implications. "
         "Reference specific Photo #s. Minimum 8–12 sentences (one continuous narrative, not bullets).\n\n"
@@ -213,6 +213,24 @@ DETAIL_TEMPLATES = {
         "If no fraud indicators are identified, state **'No material inconsistencies found.'** Do not use 'N/A'.\n"
     ),
 }
+
+# --- Static audit questions (hard-coded) ---
+STATIC_AUDIT_QUESTIONS = [
+  "Do the photos substantiate the highest-cost operations (frame/sectioning/panel replace)?",
+  "Are ADAS calibrations or wheel alignments required and supported by the damage and OEM procedures?",
+  "Is blend time justified by color/finish (metallic/pearl/tri-coat) and adjacent panel visibility?",
+  "Do invoices corroborate parts used and match estimate line items (brand/grade, price, quantity)?",
+  "Are AM/LKQ choices compliant with age/mileage rules, and is OEM required anywhere by client policy or safety?",
+  "Is there evidence of prior or unrelated damage (UPD) that materially affects valuation or repair scope?",
+  "Are there structural/safety indicators (buckles, misalignments, airbags/pretensioners) that alter repair strategy?",
+  "Are materials/hazard charges (paint supplies, corrosion protection, seam sealer) aligned with operations and shop norms?",
+  "Are storage/tow charges and dates supported and reasonable given claim timeline and shop status?",
+  "Are scanner reports (pre/post) included or needed; if absent, does that meaningfully impact confidence?",
+  "Did the supplement (if any) correct earlier gaps, and are newly added operations now evidenced?",
+  "Are client-required documents present (e.g., NADA printout, release forms, production date plate); if missing, what’s the impact?",
+  "What is the bottom-line recommendation (approve as-is, adjust items, or request specific evidence)?"
+]
+
 
 ALLOWED_INTENTS = {"guidelines_only","comprehensive","damage_report_from_photos"}
 
@@ -246,16 +264,16 @@ SYSTEM_BASE += (
 # (Simplified) Encourage narrative; tables optional; rationale only when <100
 SYSTEM_BASE += (
     " Focus on a cohesive, professional appraisal. Prefer narrative over rigid tables. "
-    "Include a section named '## Detailed Appraisal Report'. "
+    "Include a section named '## Detailed Audit Report'. "
     "Include '## Compliance Score Rationale' only when compliance_score < 100, and show deductions from 100 with brief evidence refs (p#/L# or Photo #). "
     "If you include tables, keep them concise and only when they help clarity. "
     "Avoid placeholder rows/columns; do not invent data. "
-    "When client_rules text is provided, also include a section titled '## Client Guidelines Comparison' with 3–8 concise bullets quoting the relevant rule fragment and citing evidence (p#/L#, Photo #); weave any material rule alignment/misalignment into the Detailed Appraisal Report narrative."
+    "When client_rules text is provided, also include a section titled '## Client Guidelines Comparison' with 3–8 concise bullets quoting the relevant rule fragment and citing evidence (p#/L#, Photo #); weave any material rule alignment/misalignment into the Detailed Audit Report narrative."
 )
 
 # >>> PATCH A addition (unchanged): require a long narrative section
 SYSTEM_BASE += (
-    " Your 'summary_markdown' MUST include a top-level section named '## Detailed Appraisal Report' "
+    " Your 'summary_markdown' MUST include a top-level section named '## Detailed Audit Report' "
     "containing a cohesive narrative of at least 10–14 sentences (not bullets). "
     "It must synthesize: impact zones, per-panel damages, repair vs. replace rationale, parts type (OEM/LKQ/Aftermarket), "
     "labor ops, refinish/overlap, rate/materials/sublet/tax handling, and estimate integrity. "
@@ -517,7 +535,14 @@ async def vision_review(
         prompt_text += (
             "\n\nWhen client_rules text is provided, you MUST include a section titled '## Client Guidelines Comparison' "
             "with 3–8 concise bullets. For each, quote the relevant rule fragment and mark Aligned / Not Aligned / Not Evidenced, "
-            "citing evidence (p#/L#, Photo #). Also weave any material rule alignment/misalignment into the '## Detailed Appraisal Report' narrative."
+            "citing evidence (p#/L#, Photo #). 
+# --- Ensure model addresses static audit questions inside the narrative ---
+prompt_text += (
+    "\n\nWeave the following static audit questions naturally into the '## Detailed Audit Report' narrative "
+    "(do NOT present as a separate Q&A list; integrate answers inline and cite evidence with p#/L# and Photo # as applicable):\n"
+    + "\n".join(f"- {q}" for q in STATIC_AUDIT_QUESTIONS)
+)
+Also weave any material rule alignment/misalignment into the '## Detailed Audit Report' narrative."
         )
 
     # Build user parts (redact PII in any free text, but keep VIN/Claim #)
