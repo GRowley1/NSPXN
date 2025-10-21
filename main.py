@@ -280,13 +280,7 @@ SYSTEM_BASE += (
     "Use a consistent scheme (e.g., Minor −5, Moderate −10, Major −20) and never go below 0. "
     "The 'fraud_markdown' section must never be 'N/A'. If nothing material is found, write "
     "'No material inconsistencies found.' and briefly note what was checked (VIN match, date/metadata, "
-    "obvious photo tampering, duplicated images)."
-    " For '## Compliance Score Rationale', enforce strict math: start at 100, "
-    "list each deduction as '- <reason> (Minor -5 / Moderate -10 / Major -20)' on its own line, "
-    "compute the total deduction D as the sum of the numbers shown, and set "
-    "compliance_score = 100 - D. Then include a final line exactly like: "
-    "'Final score: 100 - D = <value>'. Double-check the arithmetic; if it does not match, "
-    "recompute and correct the final number before returning."
+    "obvious photo tampering, duplicated images).
 )
 
 # (Simplified) Encourage narrative; tables optional; rationale only when <100
@@ -297,6 +291,15 @@ SYSTEM_BASE += (
     "If you include tables, keep them concise and only when they help clarity. "
     "Avoid placeholder rows/columns; do not invent data. "
     "When client_rules text is provided, also include a section titled '## Client Guidelines Comparison' with 3–8 concise bullets quoting the relevant rule fragment and citing evidence (p#/L#, Photo #); weave any material rule alignment/misalignment into the Detailed Audit Report narrative."
+)
+# --- Compliance-score math enforcement (prompt-only) ---
+SYSTEM_BASE += (
+    " For '## Compliance Score Rationale', enforce strict math: start at 100, "
+    "list each deduction as '- <reason> (Minor -5 / Moderate -10 / Major -20)' on its own line, "
+    "compute the total deduction D as the sum of the numbers shown, and set "
+    "compliance_score = 100 - D. Then include a final line exactly like: "
+    "'Final score: 100 - D = <value>'. Double-check the arithmetic; if it does not match, "
+    "recompute and correct the final number before returning."
 )
 
 # >>> PATCH A addition (unchanged): require a long narrative section
@@ -550,9 +553,7 @@ async def vision_review(
         + ("\n- ".join(files_seen) if files_seen else "none") + "\n\n"
         "CLIENT RULES (if provided; else blank):\n" + (client_rules[:2000] if client_rules else "") + "\n\n"
         "ANALYSIS LAYOUT (guidance, not strict):\n" + DETAIL_TEMPLATES.get(ai_intent, DETAIL_TEMPLATES["comprehensive"]    
-        "\n\nSCORING CONSISTENCY CHECK: Before finalizing, verify that "
-        "'Final score: 100 - D = <value>' matches the listed deductions. If not, fix the number."
-    )
+        )
 
     # Odometer/registration/VIN legibility nudge for comprehensive
     if ai_intent == "comprehensive":
@@ -585,6 +586,11 @@ async def vision_review(
             "\n\nWeave the following static audit questions naturally into the '## Detailed Audit Report' narrative "
             "(do NOT present as a separate Q&A list; integrate answers inline and cite evidence with p#/L# and Photo # as applicable):\n"
             + "\n".join(f"- {q}" for q in STATIC_AUDIT_QUESTIONS)
+        )
+        # --- Scoring consistency check (prompt-only) ---
+        prompt_text += (
+            "\n\nSCORING CONSISTENCY CHECK: Before finalizing, verify that "
+            "'Final score: 100 - D = <value>' matches the listed deductions. If not, fix the number."
         )
 
     # --- Always append the VIN/odo protocol + consistency guard (prompt-only; no logic) ---
