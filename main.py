@@ -549,10 +549,12 @@ async def vision_review(
     prompt_text = (
         f"REQUEST TYPE SELECTED (exact): '{req_label}'. Use this exact string in 'request_type'.\n\n"
         "FILES SEEN (echo verbatim in '## Inputs Used'):\n- "
-        + ("\n- ".join(files_seen) if files_seen else "none") + "\n\n"
-        "CLIENT RULES (if provided; else blank):\n" + (client_rules[:2000] if client_rules else "") + "\n\n"
-        "ANALYSIS LAYOUT (guidance, not strict):\n" + DETAIL_TEMPLATES.get(ai_intent, DETAIL_TEMPLATES["comprehensive"]    
-        )
+        + ("\n- ".join(files_seen) if files_seen else "none")
+        + "\n\nCLIENT RULES (if provided; else blank):\n"
+        + (client_rules[:2000] if client_rules else "")
+        + "\n\nANALYSIS LAYOUT (guidance, not strict):\n"
+        + DETAIL_TEMPLATES.get(ai_intent, DETAIL_TEMPLATES["comprehensive"])
+    )
 
     # Odometer/registration/VIN legibility nudge for comprehensive
     if ai_intent == "comprehensive":
