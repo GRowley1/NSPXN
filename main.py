@@ -232,6 +232,21 @@ STATIC_AUDIT_QUESTIONS = [
 ]
 
 
+
+# --- Identifiers Verification Protocol (prompt-only; no new logic) ---
+IDENTIFIERS_VERIFICATION_PROTOCOL = (
+    "\n\nIDENTIFIERS VERIFICATION PROTOCOL (must follow):"
+    "\n1) Search the photos for: windshield VIN plate, driver-door VIN label, odometer cluster."
+    "\n2) Transcribe the VIN exactly as visible (monospace) and cite Photo # for EACH location you find."
+    "\n3) If multiple VINs, compare them to each other and to the estimate VIN; explicitly state: MATCH / MISMATCH."
+    "\n4) Transcribe the odometer reading exactly as shown and cite Photo #."
+    "\n5) Grade legibility for each identifier as one of: 'Clearly legible' / 'Present — not clearly legible' / 'Not present'."
+    "\n6) If any identifier is present but not clearly legible, say why (glare, blur, angle) and what photo would resolve it."
+    "\n7) Write a one-line bottom line: 'VIN verification: <MATCH/MISMATCH/INCONCLUSIVE>; Odometer: <value or reason>'."
+    "\n8) Weave these facts naturally into the '## Detailed Audit Report' narrative and ALSO update the top-line fields "
+    "(vin, vin_verification, odometer_estimate_only) consistently."
+)
+
 ALLOWED_INTENTS = {"guidelines_only","comprehensive","damage_report_from_photos"}
 
 SYSTEM_BASE = (
@@ -527,7 +542,7 @@ async def vision_review(
     # Odometer/registration legibility nudge for comprehensive
     if ai_intent == "comprehensive":
         prompt_text += (
-            "\n\nUploader note: Odometer and Registration photos were provided. "
+            "\n\nUploader note: Odometer, Registration, and VIN plate photos may be present. "
             "If you cannot clearly read them, report 'Present — not clearly legible' rather than 'Missing'."
         )
     # If client_rules provided, require a dedicated Guidelines comparison section and narrative tie-in
@@ -537,15 +552,19 @@ async def vision_review(
             "with 3–8 concise bullets. For each, quote the relevant rule fragment and mark Aligned / Not Aligned / Not Evidenced, "
             "citing evidence (p#/L#, Photo #). Also weave any material rule alignment/misalignment into the '## Detailed Audit Report' narrative."
         )
-        # --- Ensure model addresses static audit questions inside the narrative ---
-        prompt_text += (
-            "\n\nWeave the following static audit questions naturally into the '## Detailed Audit Report' narrative "
-            "(do NOT present as a separate Q&A list; integrate answers inline and cite evidence with p#/L# and Photo # as applicable):\n"
-            + "\n".join(f"- {q}" for q in STATIC_AUDIT_QUESTIONS)
-        )
 
 
-    # Build user parts (redact PII in any free text, but keep VIN/Claim #)
+    
+    # --- Ensure model addresses static audit questions inside the narrative (always) ---
+    prompt_text += (
+        "\n\nWeave the following static audit questions naturally into the '## Detailed Audit Report' narrative "
+        "(do NOT present as a separate Q&A list; integrate answers inline and cite evidence with p#/L# and Photo # as applicable):\n"
+        + "\n".join(f"- {q}" for q in STATIC_AUDIT_QUESTIONS)
+    )
+
+    # --- Append Identifiers Verification Protocol (always) ---
+    prompt_text += IDENTIFIERS_VERIFICATION_PROTOCOL
+# Build user parts (redact PII in any free text, but keep VIN/Claim #)
     safe_user_parts: List[Dict[str,Any]] = []
     redaction_success = False
 
@@ -832,6 +851,11 @@ async def download_pdf(file_number: Optional[str] = None, filename: Optional[str
 
     latest = max(candidates, key=lambda p: os.path.getmtime(p))
     return FileResponse(path=latest, media_type="application/pdf", filename=os.path.basename(latest))
+
+
+
+
+
 
 
 
