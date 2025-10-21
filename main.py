@@ -231,6 +231,28 @@ STATIC_AUDIT_QUESTIONS = [
     "What is the bottom-line recommendation (approve as-is, adjust items, or request specific evidence)?"
 ]
 
+# --- Identifiers Verification Protocol (prompt-only; no new logic) ---
+IDENTIFIERS_VERIFICATION_PROTOCOL = (
+    "\n\nIDENTIFIERS VERIFICATION PROTOCOL (must follow):"
+    "\n1) Search the photos for: windshield VIN plate, driver-door VIN label, odometer cluster."
+    "\n2) Transcribe the VIN exactly as visible and cite Photo # for EACH location you find."
+    "\n3) If multiple VINs, compare them to each other and to the estimate VIN; explicitly state: MATCH / MISMATCH."
+    "\n4) Transcribe the odometer reading exactly as shown and cite Photo #."
+    "\n5) Grade legibility for each identifier as one of: 'Clearly legible' / 'Present — not clearly legible' / 'Not present'."
+    "\n6) If any identifier is present but not clearly legible, say why (glare, blur, angle) and what photo would resolve it."
+    "\n7) Write a one-line bottom line: 'VIN verification: <MATCH/MISMATCH/INCONCLUSIVE>; Odometer: <value or reason>'."
+    "\n8) Weave these facts naturally into the '## Detailed Audit Report' narrative and keep the top-line fields "
+    "(vin, vin_verification, odometer_estimate_only) consistent."
+)
+
+# --- Consistency Guard (prompt-only; avoid contradictions) ---
+CONSISTENCY_GUARD = (
+    "\n\nCONSISTENCY GUARD:"
+    "\n- Do not claim any required photo is 'missing' if you graded it 'Clearly legible' or 'Present — not clearly legible'."
+    "\n- For VIN and Odometer specifically: if present in any photo, do not write any sentence implying they are absent."
+    "\n- If legibility is the issue, explicitly say 'Present — not clearly legible' and explain why (glare/blur/angle),"
+    " and request a precise retake rather than marking it missing."
+)
 
 ALLOWED_INTENTS = {"guidelines_only","comprehensive","damage_report_from_photos"}
 
@@ -524,12 +546,13 @@ async def vision_review(
         "ANALYSIS LAYOUT (guidance, not strict):\n" + DETAIL_TEMPLATES.get(ai_intent, DETAIL_TEMPLATES["comprehensive"])
     )
 
-    # Odometer/registration legibility nudge for comprehensive
+    # Odometer/registration/VIN legibility nudge for comprehensive
     if ai_intent == "comprehensive":
         prompt_text += (
-            "\n\nUploader note: Odometer and Registration photos were provided. "
+            "\n\nUploader note: Odometer, Registration, and VIN plate photos may be present. "
             "If you cannot clearly read them, report 'Present — not clearly legible' rather than 'Missing'."
         )
+
     # If client_rules provided, require a dedicated Guidelines comparison section and narrative tie-in
     if client_rules.strip():
         prompt_text += (
@@ -544,6 +567,9 @@ async def vision_review(
             + "\n".join(f"- {q}" for q in STATIC_AUDIT_QUESTIONS)
         )
 
+    # --- Always append the VIN/odo protocol + consistency guard (prompt-only; no logic) ---
+    prompt_text += IDENTIFIERS_VERIFICATION_PROTOCOL
+    prompt_text += CONSISTENCY_GUARD
 
     # Build user parts (redact PII in any free text, but keep VIN/Claim #)
     safe_user_parts: List[Dict[str,Any]] = []
@@ -580,7 +606,7 @@ async def vision_review(
     }
     max_tokens = MAX_TOKENS_BY_INTENT.get(ai_intent, 1000)
 
-    # Call GPT and parse JSON
+    # Call GPT and parse JSON (JSON hardened)
     try:
         rsp = client.chat_completions.create(  # type: ignore[attr-defined]
             model=MODEL,
@@ -588,7 +614,7 @@ async def vision_review(
                       {"role":"user","content": safe_user_parts}],
             max_tokens=max_tokens,
             temperature=0,
-        response_format={"type":"json_object"}
+            response_format={"type":"json_object"}
         )
     except AttributeError:
         # compatible with newer SDKs
@@ -600,7 +626,7 @@ async def vision_review(
             temperature=0,
             response_format={"type":"json_object"}
         )
-    
+
     def _try_parse_json(raw_text: str):
         raw_local = (raw_text or "").strip()
         # strip accidental fences
@@ -669,7 +695,6 @@ async def vision_review(
     if data is None:
         log.error(f"LLM failure or JSON parse error; first 500 chars:\n{raw[:500]}")
         return JSONResponse(status_code=500, content={"error":"Model output could not be parsed as JSON."})
-
 
     def _get(k):
         v = data.get(k)
@@ -807,7 +832,6 @@ async def vision_review(
 
         if ai_intent == "damage_report_from_photos":
             subj = f"AI Damage Report: {file_number or ''} {result['claim_number'] or ''}".strip()
-            # >>> ONLY CHANGE: IA Company line added above Claim/File.
             body = f"""AI-4-IA Damage Report
 
 IA Company: {ia_company}
@@ -897,6 +921,7 @@ async def download_pdf(file_number: Optional[str] = None, filename: Optional[str
 
     latest = max(candidates, key=lambda p: os.path.getmtime(p))
     return FileResponse(path=latest, media_type="application/pdf", filename=os.path.basename(latest))
+
 
 
 
