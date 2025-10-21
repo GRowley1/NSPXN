@@ -308,6 +308,8 @@ SYSTEM_BASE += (
     "It must synthesize: impact zones, per-panel damages, repair vs. replace rationale, parts type (OEM/LKQ/Aftermarket), "
     "labor ops, refinish/overlap, rate/materials/sublet/tax handling, and estimate integrity. "
     "It must cite concrete evidence inline (e.g., p2/L14, Photo 3)."
+    " When evaluating paint materials, recognize that a summary line such as 'Paint Supplies' or 'Paint Materials' with hours and rate in the totals section "
+    "constitutes a valid cost breakdown. Do not mark it missing if such a line is present, even if materials are not listed per-panel."
 )
 
 # -----------------------
