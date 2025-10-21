@@ -281,6 +281,12 @@ SYSTEM_BASE += (
     "The 'fraud_markdown' section must never be 'N/A'. If nothing material is found, write "
     "'No material inconsistencies found.' and briefly note what was checked (VIN match, date/metadata, "
     "obvious photo tampering, duplicated images)."
+    " For '## Compliance Score Rationale', enforce strict math: start at 100, "
+    "list each deduction as '- <reason> (Minor -5 / Moderate -10 / Major -20)' on its own line, "
+    "compute the total deduction D as the sum of the numbers shown, and set "
+    "compliance_score = 100 - D. Then include a final line exactly like: "
+    "'Final score: 100 - D = <value>'. Double-check the arithmetic; if it does not match, "
+    "recompute and correct the final number before returning."
 )
 
 # (Simplified) Encourage narrative; tables optional; rationale only when <100
@@ -543,7 +549,9 @@ async def vision_review(
         "FILES SEEN (echo verbatim in '## Inputs Used'):\n- "
         + ("\n- ".join(files_seen) if files_seen else "none") + "\n\n"
         "CLIENT RULES (if provided; else blank):\n" + (client_rules[:2000] if client_rules else "") + "\n\n"
-        "ANALYSIS LAYOUT (guidance, not strict):\n" + DETAIL_TEMPLATES.get(ai_intent, DETAIL_TEMPLATES["comprehensive"])
+        "ANALYSIS LAYOUT (guidance, not strict):\n" + DETAIL_TEMPLATES.get(ai_intent, DETAIL_TEMPLATES["comprehensive"]    
+        "\n\nSCORING CONSISTENCY CHECK: Before finalizing, verify that "
+        "'Final score: 100 - D = <value>' matches the listed deductions. If not, fix the number."
     )
 
     # Odometer/registration/VIN legibility nudge for comprehensive
