@@ -552,7 +552,19 @@ async def vision_review(
             "\n\nUploader note: Odometer, Registration, and VIN plate photos may be present. "
             "If you cannot clearly read them, report 'Present — not clearly legible' rather than 'Missing'."
         )
-
+    # --- Client Rules Parsing Instructions ---
+    prompt_text += (
+        "\n\n--- CLIENT RULES PARSING INSTRUCTIONS ---\n"
+        "Break the client_rules text into sections using any headings or repeated phrases "
+        "(e.g., 'Client Photo Rules', 'Client Parts Application Rules', etc.). "
+        "Within each section, extract exact requirements and numeric thresholds "
+        "(miles, years, number of photos, bids, etc.). When writing the '## Client Guidelines Comparison', "
+        "quote the precise sentence from the rule and evaluate whether the evidence (estimate, photos, or invoices) "
+        "Meets / Violates / Not Evidenced it. For valuation sources, note that acceptable options include "
+        "NADA, J.D. Power, Kelly Blue Book, Edmunds, Carfax, or Cars.com per client language. "
+        "If a rule is satisfied by any of those, mark it 'Aligned'. "
+        "Reference rule fragments verbatim (keep wording identical)."
+    )
     # If client_rules provided, require a dedicated Guidelines comparison section and narrative tie-in
     if client_rules.strip():
         prompt_text += (
