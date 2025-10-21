@@ -279,8 +279,7 @@ SYSTEM_BASE += (
     "assigns an explicit deduction per item, and shows the arithmetic to the final score. "
     "Use a consistent scheme (e.g., Minor −5, Moderate −10, Major −20) and never go below 0. "
     "The 'fraud_markdown' section must never be 'N/A'. If nothing material is found, write "
-    "'No material inconsistencies found.' and briefly note what was checked (VIN match, date/metadata, "
-    "obvious photo tampering, duplicated images).
+    "'No material inconsistencies found.' and briefly note what was checked (VIN match, date/metadata, obvious photo tampering, duplicated images)."
 )
 
 # (Simplified) Encourage narrative; tables optional; rationale only when <100
