@@ -585,12 +585,12 @@ async def vision_review(
 
     # Odometer/registration/VIN legibility nudge for comprehensive
     if ai_intent == "comprehensive":
-    prompt_text += (
-        "\n\nUploader note: If odometer and registration photos are **present**, "
-        "report them accordingly — 'Clearly legible' or 'Present — not clearly legible'. "
-        "If they are **not present at all**, explicitly state 'Missing' and include this as a compliance deduction. "
-        "Do not assume their presence if they cannot be visually confirmed."
-    )
+        prompt_text += (
+            "\n\nUploader note: If odometer and registration photos are **present**, "
+            "report them accordingly — 'Clearly legible' or 'Present — not clearly legible'. "
+            "If they are **not present at all**, explicitly state 'Missing' and include this as a compliance deduction. "
+            "Do not assume their presence if they cannot be visually confirmed."
+        )
 
     # If client_rules provided, require a dedicated Guidelines comparison section and narrative tie-in
     if client_rules.strip():
