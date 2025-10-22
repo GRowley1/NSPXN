@@ -1,4 +1,3 @@
-# filename: main_photos_only_scoreless.py
 from fastapi import FastAPI, File, UploadFile, Form
 from fastapi.responses import JSONResponse, FileResponse
 from fastapi.middleware.cors import CORSMiddleware
@@ -171,7 +170,7 @@ DETAIL_TEMPLATES = {
         "If no fraud indicators are identified, state **'No material inconsistencies found.'** Do not use 'N/A'."
     ),
 
-    # Photos-only — scoreless and odometer/VIN stricter
+    # Photos-only — scoreless + strict identifier citations
     "damage_report_from_photos": (
         "# AI-4-IA Damage Report\n"
         "Create a concise, professional damage report **based only on the provided photos (and any optional text)**.\n\n"
@@ -183,7 +182,7 @@ DETAIL_TEMPLATES = {
         "## Quick Stats\n"
         "- Claim # (if visible): <value or N/A>\n"
         "- File # (echo from request): <value or N/A>\n"
-        "- Odometer (if visible): <value or 'Present — not clearly legible' with reason>\n"
+        "- Odometer (if visible): <value or 'Present — not clearly legible'>\n"
         "- Primary Impact: <area(s)>\n"
         "- Secondary Impact: <area(s) or 'None observed'>\n\n"
 
@@ -200,10 +199,10 @@ DETAIL_TEMPLATES = {
         "- Provide a **detailed appraisal narrative** based on the photos: impact zones, repair/replace reasoning, "
         "likely parts source (OEM/LKQ/Aftermarket) when inferable, refinish/overlap notes, and cost implications. "
         "Reference specific Photo #s. Minimum 8–12 sentences (one continuous narrative, not bullets). "
-        "Cite VIN and odometer with explicit Photo #s; if either is absent or unreadable, write 'Present — not clearly legible' and explain why (glare/blur/angle) instead of 'Missing'.\n\n"
+        "Cite VIN and odometer with explicit Photo #s; if either is unreadable, write 'Present — not clearly legible' and explain why (glare/blur/angle) instead of 'Missing'.\n\n"
 
         "## Estimated Repair Costs\n"
-        "- Provide a high-level breakdown (Body Labor, Paint Labor, Paint Materials, Parts, Sublet, Tax) and a one-line rationale tied to observed work "
+        "- Provide a high-level breakdown (Body Labor, Paint Labor, Paint Materials, Parts, Sublet, Tax) and a one-line rationale tying to observed work "
         "(e.g., '2 panels refinish × 2.5 hr each' or 'rear bumper cover likely replace'). If uncertainty is high, state it explicitly.\n\n"
 
         "## Fraud & Authenticity Check\n"
@@ -218,7 +217,7 @@ DETAIL_TEMPLATES = {
     ),
 }
 
-# --- Static audit questions (hard-coded) ---
+# --- Static audit questions (unchanged) ---
 STATIC_AUDIT_QUESTIONS = [
     "Do the photos substantiate the highest-cost operations (frame/sectioning/panel replace)?",
     "Are ADAS calibrations or wheel alignments required and supported by the damage and OEM procedures?",
@@ -247,9 +246,12 @@ IDENTIFIERS_VERIFICATION_PROTOCOL = (
     "\n7) Write a one-line bottom line: 'VIN verification: <MATCH/MISMATCH/INCONCLUSIVE>; Odometer: <value or reason>'."
     "\n8) Weave these facts naturally into the '## Detailed Audit Report' narrative and keep the top-line fields "
     "(vin, vin_verification, odometer_estimate_only) consistent."
-    "\n9) When citing more than one VIN location (e.g., windshield vs. door label), you must cite DISTINCT Photo #s; never reuse the same photo number for two different locations."
-    "\n10) Compare VINs as literal 17-character strings. If any single character differs between sources, report **MISMATCH**, and quote both strings with their Photo #/page references."
-    "\n11) ODOMETER RULES (photos-only especially): transcribe only the digits visible in the odometer photo; do not infer from estimate text or metadata. Include the exact Photo #. If any digit is unclear, state 'Present — not clearly legible' and explain why; do not guess."
+    "\n9) When citing more than one VIN location (e.g., windshield vs. door label), you must cite DISTINCT Photo #s; "
+    "never reuse the same photo number for two different locations."
+    "\n10) Compare VINs as literal 17-character strings. If any single character differs between sources, report "
+    "**MISMATCH**, and quote both strings with their Photo #/page references."
+    "\n11) ODOMETER RULES (photos-only especially): transcribe only the digits visible in the odometer photo; "
+    "do not infer from estimate text or metadata. Include the exact Photo #. If any digit is unclear, state 'Present — not clearly legible' and explain why; do not guess."
 )
 
 # --- Consistency Guard (prompt-only; avoid contradictions) ---
@@ -257,8 +259,10 @@ CONSISTENCY_GUARD = (
     "\n\nCONSISTENCY GUARD:"
     "\n- Do not claim any required photo is 'missing' if you graded it 'Clearly legible' or 'Present — not clearly legible'."
     "\n- For VIN and Odometer specifically: if present in any photo, do not write any sentence implying they are absent."
-    "\n- If legibility is the issue, explicitly say 'Present — not clearly legible' and explain why (glare/blur/angle), and request a precise retake rather than marking it missing."
-    "\n- Before finalizing, re-scan your output: confirm every referenced Photo # matches the content described (e.g., do not cite an Odometer photo as the point-of-impact photo). Correct any mismatches."
+    "\n- If legibility is the issue, explicitly say 'Present — not clearly legible' and explain why (glare/blur/angle),"
+    " and request a precise retake rather than marking it missing."
+    "\n- Before finalizing, re-scan your output: confirm every referenced Photo # matches the content described "
+    "(e.g., do not cite an Odometer photo as the point-of-impact photo). Correct any mismatches."
 )
 
 ALLOWED_INTENTS = {"guidelines_only","comprehensive","damage_report_from_photos"}
@@ -273,19 +277,24 @@ SYSTEM_BASE = (
     "Avoid guessing; if uncertain, say 'N/A' and why. summary_brief must be <= 280 chars (plain text)."
 )
 
-# (Retained) Rules + scoring with photos-only exception
+# (No hallucinated rules + score handling; now with photos-only exception)
 SYSTEM_BASE += (
     " Do not state or imply any client rule unless it appears verbatim in the provided client_rules text. "
     "If client_rules is blank, write the entire report without referencing client rules. "
     "If a value cannot be confirmed from the visible evidence, set it to 'N/A' and briefly state why. "
     " Except when the request_type is 'Create a Damage Report from Photos', Compliance Score must be a numeric percentage 0–100 (never 'N/A'). "
     "If the request_type is 'Create a Damage Report from Photos', set compliance_score to 'N/A' and omit the '## Compliance Score Rationale' section. "
-    "If no client rules are supplied, base the score on estimate↔photo internal consistency, evidence completeness, and clarity/legibility. Provide a one-sentence rationale when a score is present. "
-    "If compliance_score < 100, include a dedicated section titled '## Compliance Score Rationale' which itemizes every deficiency with exact evidence references (estimate p#/L# and/or Photo #), assigns an explicit deduction per item, and shows the arithmetic to the final score. Use a consistent scheme (e.g., Minor −5, Moderate −10, Major −20) and never go below 0. "
-    "The 'fraud_markdown' section must never be 'N/A'. If nothing material is found, write 'No material inconsistencies found.' and briefly note what was checked (VIN match, date/metadata, obvious photo tampering, duplicated images)."
+    "If no client_rules are supplied, base the score on estimate↔photo internal consistency, "
+    "evidence completeness, and clarity/legibility. Provide a one-sentence rationale when a score is required. "
+    "If compliance_score < 100, include a dedicated section titled '## Compliance Score Rationale' "
+    "which itemizes every deficiency with exact evidence references (estimate p#/L# and/or Photo #), "
+    "assigns an explicit deduction per item, and shows the arithmetic to the final score. "
+    "Use a consistent scheme (e.g., Minor −5, Moderate −10, Major −20) and never go below 0. "
+    "The 'fraud_markdown' section must never be 'N/A'. If nothing material is found, write "
+    "'No material inconsistencies found.' and briefly note what was checked (VIN match, date/metadata, obvious photo tampering, duplicated images)."
 )
 
-# (Simplified) Encourage narrative; tables optional; rationale only when <100
+# (Narrative requirement + paint-materials acceptance stays)
 SYSTEM_BASE += (
     " Focus on a cohesive, professional appraisal. Prefer narrative over rigid tables. "
     "Include a section named '## Detailed Audit Report'. "
@@ -294,16 +303,14 @@ SYSTEM_BASE += (
     "Avoid placeholder rows/columns; do not invent data. "
     "When client_rules text is provided, also include a section titled '## Client Guidelines Comparison' with 3–8 concise bullets quoting the relevant rule fragment and citing evidence (p#/L#, Photo #); weave any material rule alignment/misalignment into the Detailed Audit Report narrative."
 )
-
-# >>> Narrative requirement + paint-materials acceptance
 SYSTEM_BASE += (
     " Your 'summary_markdown' MUST include a top-level section named '## Detailed Audit Report' "
     "containing a cohesive narrative of at least 10–14 sentences (not bullets). "
     "It must synthesize: impact zones, per-panel damages, repair vs. replace rationale, parts type (OEM/LKQ/Aftermarket), "
     "labor ops, refinish/overlap, rate/materials/sublet/tax handling, and estimate integrity. "
     "It must cite concrete evidence inline (e.g., p2/L14, Photo 3). "
-    "When evaluating paint materials, recognize that a summary line such as 'Paint Supplies' or 'Paint Materials' with hours and rate in the totals section constitutes a valid cost breakdown. "
-    "Do not mark it missing if such a line is present, even if materials are not listed per-panel."
+    "When evaluating paint materials, recognize that a summary line such as 'Paint Supplies' or 'Paint Materials' with hours and rate in the totals section "
+    "constitutes a valid cost breakdown. Do not mark it missing if such a line is present, even if materials are not listed per-panel."
 )
 
 # -----------------------
@@ -325,7 +332,7 @@ def _add_bytes(parts: List[Dict[str,Any]], files_seen: List[str], raw: bytes, fn
     low = fname.lower()
     if low.endswith(SUPPORTED_PDF_EXTS) and used < max_images:
         try:
-            pages = convert_from_bytes(raw, dpi=240)
+            pages = convert_from_bytes(raw, dpi=200)
             files_seen.append(f"{fname} (pdf, {len(pages)} page(s))")
             for im in pages[:max_images - used]:
                 b = io.BytesIO()
@@ -552,12 +559,23 @@ async def vision_review(
         + DETAIL_TEMPLATES.get(ai_intent, DETAIL_TEMPLATES["comprehensive"])
     )
 
-    # Photos-only runs must be scoreless and odometer literal
+    # Ultra-blunt output contract (helps prevent headings/fences before JSON)
+    prompt_text = (
+        "OUTPUT FORMAT (MANDATORY): Return ONLY a single strict JSON object with keys "
+        "['file_number','request_type','claim_number','vin','vin_verification','vehicle',"
+        "'odometer_estimate_only','compliance_score','summary_brief','summary_markdown',"
+        "'fraud_markdown','primary_impact','secondary_impact','estimated_costs_markdown','conclusion'] "
+        "and no extra text before or after.\n\n"
+    ) + prompt_text
+
+    # Photos-only runs must be scoreless + strict odometer handling
     if ai_intent == "damage_report_from_photos":
         prompt_text += (
-            "\n\nPHOTOS-ONLY MODE: Set 'compliance_score' to 'N/A'. Do NOT include a '## Compliance Score Rationale' section."
-            "\nODOMETER TRANSCRIPTION: Use only the odometer photo for mileage. If the digits are not fully readable, "
-            "return 'Present — not clearly legible' and explain (glare/blur/angle). Do not infer or estimate mileage from other sources."
+            "\n\nPHOTOS-ONLY MODE: Set 'compliance_score' to 'N/A'. "
+            "Do NOT include a '## Compliance Score Rationale' section."
+            "\nODOMETER TRANSCRIPTION: Use only the odometer photo for mileage. "
+            "If the digits are not fully readable, return 'Present — not clearly legible' and explain (glare/blur/angle). "
+            "Do not infer or estimate mileage from other sources."
         )
 
     # Odometer/registration/VIN legibility nudge for comprehensive
@@ -567,47 +585,29 @@ async def vision_review(
             "If you cannot clearly read them, report 'Present — not clearly legible' rather than 'Missing'."
         )
 
-    # --- Client Rules Parsing Instructions (kept) ---
-    prompt_text += (
-        "\n\n--- CLIENT RULES PARSING INSTRUCTIONS ---\n"
-        "Break the client_rules text into sections using any headings or repeated phrases "
-        "(e.g., 'Client Photo Rules', 'Client Parts Application Rules', etc.). "
-        "Within each section, extract exact requirements and numeric thresholds "
-        "(miles, years, number of photos, bids, etc.). When writing the '## Client Guidelines Comparison', "
-        "quote the precise sentence from the rule and evaluate whether the evidence (estimate, photos, or invoices) "
-        "Meets / Violates / Not Evidenced it. For valuation sources, note that acceptable options include "
-        "NADA, J.D. Power, Kelly Blue Book, Edmunds, Carfax, or Cars.com per client language. "
-        "If a rule is satisfied by any of those, mark it 'Aligned'. "
-        "Reference rule fragments verbatim (keep wording identical). "
-    )
-
+    # If client_rules provided, require a dedicated Guidelines comparison section and narrative tie-in
     if client_rules.strip():
         prompt_text += (
             "\n\nWhen client_rules text is provided, you MUST include a section titled '## Client Guidelines Comparison' "
             "with 3–8 concise bullets. For each, quote the relevant rule fragment and mark Aligned / Not Aligned / Not Evidenced, "
             "citing evidence (p#/L#, Photo #). Also weave any material rule alignment/misalignment into the '## Detailed Audit Report' narrative."
         )
-        # Tie static questions into narrative
+        # Ensure model addresses static audit questions inside the narrative
         prompt_text += (
             "\n\nWeave the following static audit questions naturally into the '## Detailed Audit Report' narrative "
             "(do NOT present as a separate Q&A list; integrate answers inline and cite evidence with p#/L# and Photo # as applicable):\n"
             + "\n".join(f"- {q}" for q in STATIC_AUDIT_QUESTIONS)
         )
-        # Scoring section note (kept; but photos-only override already above)
-        prompt_text += (
-            "\n\nSCORING CONSISTENCY CHECK: Before finalizing, verify that "
-            "'Final score: 100 - D = <value>' matches the listed deductions whenever a score is provided."
-        )
+
+    # Photo number sanity + cost rationale reminders (prompt-only)
+    prompt_text += (
+        "\n\nPHOTO NUMBER SANITY CHECK: Before finalizing, verify that every referenced Photo # actually exists and matches the content described (damage vs. odometer vs. VIN). Correct any mismatches."
+        "\nCOST RATIONALE REQUIREMENT: For each cost bucket (Body/Paint/Materials/Parts/Sublet/Tax), include a one-line rationale tied to observed operations or panel counts. If assumptions were made, state them."
+    )
 
     # --- Always append the VIN/odo protocol + consistency guard (prompt-only; no logic) ---
     prompt_text += IDENTIFIERS_VERIFICATION_PROTOCOL
     prompt_text += CONSISTENCY_GUARD
-
-    # Additional global nudges (photo numbers & cost rationale)
-    prompt_text += (
-        "\n\nPHOTO NUMBER SANITY CHECK: Before finalizing, verify that every referenced Photo # actually exists and matches the content described."
-        "\nCOST RATIONALE REQUIREMENT: For each cost bucket (Body/Paint/Materials/Parts/Sublet/Tax), include a one-line rationale tied to observed operations or panel counts. If assumptions were made, state them."
-    )
 
     # Build user parts (redact PII in any free text, but keep VIN/Claim #)
     safe_user_parts: List[Dict[str,Any]] = []
@@ -637,10 +637,11 @@ async def vision_review(
 
     redaction_status = "Redacted PII: Successful ✅" if redaction_success else "Redacted PII: Not Applied"
 
+    # Token limits (bumped for photos-only to avoid mid-JSON truncation)
     MAX_TOKENS_BY_INTENT = {
         "comprehensive": 1500,
         "guidelines_only": 1000,
-        "damage_report_from_photos": 900
+        "damage_report_from_photos": 1100  # bumped from 900
     }
     max_tokens = MAX_TOKENS_BY_INTENT.get(ai_intent, 1000)
 
@@ -665,26 +666,49 @@ async def vision_review(
             response_format={"type":"json_object"}
         )
 
+    # --- Hardened JSON parse helper
     def _try_parse_json(raw_text: str):
-        raw_local = (raw_text or "").strip()
-        if raw_local.startswith("```json"):
-            raw_local = raw_local[len("```json"):]
-        if raw_local.endswith("```"):
-            raw_local = raw_local[:-3]
+        if not raw_text:
+            return None
+        raw_local = raw_text.strip()
+
+        # Strip fences/labels
+        for fence in ("```json", "```JSON", "```"):
+            if raw_local.startswith(fence):
+                raw_local = raw_local[len(fence):]
+            if raw_local.endswith("```"):
+                raw_local = raw_local[:-3]
         raw_local = raw_local.strip()
+
+        # Remove BOM / zero-width / NBSP
+        raw_local = raw_local.replace("\ufeff", "").replace("\u200b", "").replace("\u00A0", " ")
+
+        # Fast path
         try:
             return json.loads(raw_local)
         except Exception:
             pass
-        start_i = raw_local.find("{"); end_i = raw_local.rfind("}")
-        chunk = raw_local[start_i:end_i+1] if start_i != -1 and end_i != -1 and end_i > start_i else raw_local
+
+        # Trim to outermost braces, if present
+        lb = raw_local.find("{")
+        rb = raw_local.rfind("}")
+        if lb != -1 and rb != -1 and rb > lb:
+            chunk = raw_local[lb:rb+1]
+        else:
+            chunk = raw_local
+
+        # Normalize curly quotes and whitespace
         fixes = {
-            "\u2018": "'", "\u2019": "'", "\u201C": '"', "\u201D": '"',
-            "\u00A0": " ", "\r": "", "\t": "    ",
+            "\u2018": "'", "\u2019": "'",
+            "\u201C": '"', "\u201D": '"',
+            "\r": "", "\t": "    "
         }
-        for k,v in fixes.items():
+        for k, v in fixes.items():
             chunk = chunk.replace(k, v)
+
+        # Remove trailing commas
         chunk = re.sub(r",\s*([}\]])", r"\1", chunk)
+
         try:
             return json.loads(chunk)
         except Exception:
@@ -701,8 +725,18 @@ async def vision_review(
     if data is None:
         try:
             fix_prompt = [
-                {"role":"system","content":"Return ONLY strict JSON. No prose. No backticks."},
-                {"role":"user","content": "Reformat this to valid JSON object with the exact keys already present. Do not add or remove keys.\n\n" + raw}
+                {"role":"system","content":
+                    "You are a formatter. Return ONLY a strict JSON object. No prose. No markdown. No code fences."
+                },
+                {"role":"user","content":
+                    "Convert the following text into a valid JSON object. "
+                    "Use exactly these keys (all required): "
+                    "['file_number','request_type','claim_number','vin','vin_verification','vehicle',"
+                    "'odometer_estimate_only','compliance_score','summary_brief','summary_markdown',"
+                    "'fraud_markdown','primary_impact','secondary_impact','estimated_costs_markdown','conclusion'] "
+                    "Do not invent new keys. If a field is unavailable, use 'N/A'. "
+                    "Here is the text:\n\n" + raw
+                }
             ]
             try:
                 fix_rsp = client.chat_completions.create(  # type: ignore[attr-defined]
@@ -726,8 +760,18 @@ async def vision_review(
             log.error(f"Self-heal reformat failed: {e}")
 
     if data is None:
-        log.error(f"LLM failure or JSON parse error; first 500 chars:\n" + (raw[:500] if raw else ""))
-        return JSONResponse(status_code=500, content={"error":"Model output could not be parsed as JSON."})
+        # Final fallback: return a minimal skeleton with N/A so the UI/PDF still render
+        log.error(f"LLM failure or JSON parse error; first 500 chars:\n{raw[:500]}")
+        skeleton = {k: "N/A" for k in KEYS}
+        skeleton["file_number"] = file_number
+        skeleton["request_type"] = req_label
+        skeleton["summary_brief"] = "N/A (model output could not be parsed; skeleton returned)."
+        skeleton["summary_markdown"] = (
+            "## Detailed Audit Report\n"
+            "Model output could not be parsed into JSON on this run. Please resubmit."
+        )
+        skeleton["fraud_markdown"] = "No material inconsistencies found."
+        return skeleton
 
     def _get(k):
         v = data.get(k)
@@ -752,7 +796,7 @@ async def vision_review(
         "redaction_status": redaction_status,
     }
 
-    # Non-empty Fraud fallback
+    # Non-empty Fraud fallback (prevents 'N/A' in output/PDF)
     if not result["fraud_markdown"] or result["fraud_markdown"].strip().upper() in {"", "N/A"}:
         result["fraud_markdown"] = (
             "No material inconsistencies found. Checks performed: VIN match across estimate and photos, "
@@ -761,9 +805,10 @@ async def vision_review(
         )
 
     # -----------------------
-    # PDF helpers
+    # PDF helpers (sanitizer for FPDF)
     # -----------------------
     def _pdf_sanitize(text: str, max_token_len: int = 60) -> str:
+        """Make text safe for FPDF multi_cell: strip non-latin-1 and break long tokens."""
         if text is None:
             return ""
         s = str(text).replace("\r\n", "\n").replace("\r", "\n")
@@ -775,6 +820,9 @@ async def vision_review(
         s = " ".join(_break(t) for t in s.split(" "))
         return s
 
+    # -----------------------
+    # PDF — setup (margins/autobreak) + SAFE mc()
+    # -----------------------
     pdf = FPDF(); pdf.add_page()
     pdf.set_auto_page_break(auto=True, margin=10)
     pdf.set_left_margin(10); pdf.set_right_margin(10)
@@ -929,6 +977,7 @@ Fraud Detection
 # -----------------------
 @app.get("/download-pdf")
 async def download_pdf(file_number: Optional[str] = None, filename: Optional[str] = None):
+    # 1) Explicit filename wins
     if filename:
         safe = _safe(filename)
         path = os.path.join(PDF_DIR, safe)
@@ -936,6 +985,7 @@ async def download_pdf(file_number: Optional[str] = None, filename: Optional[str
             return FileResponse(path=path, media_type="application/pdf", filename=safe)
         return JSONResponse(status_code=404, content={"detail": "Not Found"})
 
+    # 2) Back-compat by file_number
     if not file_number:
         return JSONResponse(status_code=400, content={"detail": "Missing query param 'filename' or 'file_number'"})
 
@@ -946,6 +996,7 @@ async def download_pdf(file_number: Optional[str] = None, filename: Optional[str
 
     latest = max(candidates, key=lambda p: os.path.getmtime(p))
     return FileResponse(path=latest, media_type="application/pdf", filename=os.path.basename(latest))
+
 
 
 
