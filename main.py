@@ -1,3 +1,4 @@
+# filename: main_client_rules_enhanced.py
 from fastapi import FastAPI, File, UploadFile, Form
 from fastapi.responses import JSONResponse, FileResponse
 from fastapi.middleware.cors import CORSMiddleware
@@ -243,6 +244,10 @@ IDENTIFIERS_VERIFICATION_PROTOCOL = (
     "\n7) Write a one-line bottom line: 'VIN verification: <MATCH/MISMATCH/INCONCLUSIVE>; Odometer: <value or reason>'."
     "\n8) Weave these facts naturally into the '## Detailed Audit Report' narrative and keep the top-line fields "
     "(vin, vin_verification, odometer_estimate_only) consistent."
+    "\n9) When citing more than one VIN location (e.g., windshield vs. door label), you must cite DISTINCT Photo #s; "
+    "never reuse the same photo number for two different locations."
+    "\n10) Compare VINs as literal 17-character strings. If any single character differs between sources, report "
+    "**MISMATCH**, and quote both strings with their Photo #/page references."
 )
 
 # --- Consistency Guard (prompt-only; avoid contradictions) ---
@@ -252,6 +257,8 @@ CONSISTENCY_GUARD = (
     "\n- For VIN and Odometer specifically: if present in any photo, do not write any sentence implying they are absent."
     "\n- If legibility is the issue, explicitly say 'Present — not clearly legible' and explain why (glare/blur/angle),"
     " and request a precise retake rather than marking it missing."
+    "\n- Before finalizing, re-scan your output: confirm every referenced Photo # matches the content described "
+    "(e.g., do not cite an Odometer photo as the point-of-impact photo). Correct any mismatches."
 )
 
 ALLOWED_INTENTS = {"guidelines_only","comprehensive","damage_report_from_photos"}
@@ -575,7 +582,10 @@ async def vision_review(
         "Meets / Violates / Not Evidenced it. For valuation sources, note that acceptable options include "
         "NADA, J.D. Power, Kelly Blue Book, Edmunds, Carfax, or Cars.com per client language. "
         "If a rule is satisfied by any of those, mark it 'Aligned'. "
-        "Reference rule fragments verbatim (keep wording identical)."
+        "Reference rule fragments verbatim (keep wording identical). "
+        "If client_rules include a registration photo requirement, treat the presence of any photo labeled "
+        "'Registration' as **Aligned** (no deduction). If unreadable, use 'Present — not clearly legible'. "
+        "Only deduct if the registration is genuinely absent."
     )
     # If client_rules provided, require a dedicated Guidelines comparison section and narrative tie-in
     if client_rules.strip():
@@ -950,6 +960,7 @@ async def download_pdf(file_number: Optional[str] = None, filename: Optional[str
 
     latest = max(candidates, key=lambda p: os.path.getmtime(p))
     return FileResponse(path=latest, media_type="application/pdf", filename=os.path.basename(latest))
+
 
 
 
