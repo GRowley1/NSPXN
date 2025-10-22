@@ -128,6 +128,7 @@ DETAIL_TEMPLATES = {
         "labor operations, refinish/overlap considerations, rate validation, paint materials handling, sublet usage, "
         "tax/markup accuracy, and overall estimate integrity. Cite photos and estimate lines (e.g., 'Photo 3', 'p2/L14'). "
         "Close with compliance to any provided client rules and a clear final recommendation (Repairable vs. Total Loss). "
+        "Do **not** declare Repairable/Total Loss unless the estimate itself explicitly marks 'Total Loss' or an ACV comparison is provided. "
         "Minimum 10–14 sentences (one continuous narrative, not bullets).\n\n"
 
         "## Photo-by-Photo Damage Ledger\n"
@@ -213,6 +214,7 @@ DETAIL_TEMPLATES = {
 
         "## Conclusion\n"
         "- 1–2 sentences summarizing repairability and scope. "
+        "Do **not** declare Repairable/Total Loss in photos-only mode. "
         "If no fraud indicators are identified, state **'No material inconsistencies found.'** Do not use 'N/A'.\n"
     ),
 }
@@ -311,6 +313,9 @@ SYSTEM_BASE += (
     "It must cite concrete evidence inline (e.g., p2/L14, Photo 3). "
     "When evaluating paint materials, recognize that a summary line such as 'Paint Supplies' or 'Paint Materials' with hours and rate in the totals section "
     "constitutes a valid cost breakdown. Do not mark it missing if such a line is present, even if materials are not listed per-panel."
+    " Avoid categorical phrases such as 'deemed repairable' or 'deemed total loss' unless that exact determination "
+    "appears in the provided documents (e.g., estimate header says 'Total Loss' or an ACV comparison is shown). "
+    "Otherwise, use neutral language and do not make a repairability determination."
 )
 
 # -----------------------
