@@ -579,7 +579,8 @@ async def vision_review(
             "\n\nPHOTOS-ONLY MODE: Set 'compliance_score' to 'N/A'. "
             "Do NOT include a '## Compliance Score Rationale' section."
             "\nODOMETER TRANSCRIPTION: Use only the odometer photo for mileage. "
-            "If the digits are not fully readable, return 'Present — not clearly legible' and explain (glare/blur/angle)
+            "If the digits are not fully readable, return 'Present — not clearly legible' and explain (glare/blur/angle). "
+            "Do not infer or estimate mileage from other sources."
         prompt_text += (
             "
 ABSOLUTE BAN (PHOTOS-ONLY): Do not reference or imply any estimate document. Do not use phrases like 'the estimate', 'estimate suggests', 'p#/L#', 'CCC', 'labor rate', or any estimate page/line notation. If you need to discuss costs, label them as 'photo-based rough costs' with explicit assumptions, and keep them independent of any estimate.
