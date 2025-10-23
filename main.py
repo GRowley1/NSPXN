@@ -579,7 +579,13 @@ async def vision_review(
             "\n\nPHOTOS-ONLY MODE: Set 'compliance_score' to 'N/A'. "
             "Do NOT include a '## Compliance Score Rationale' section."
             "\nODOMETER TRANSCRIPTION: Use only the odometer photo for mileage. "
-            "If the digits are not fully readable, return 'Present — not clearly legible' and explain (glare/blur/angle). "
+            "If the digits are not fully readable, return 'Present — not clearly legible' and explain (glare/blur/angle)
+        prompt_text += (
+            "
+ABSOLUTE BAN (PHOTOS-ONLY): Do not reference or imply any estimate document. Do not use phrases like 'the estimate', 'estimate suggests', 'p#/L#', 'CCC', 'labor rate', or any estimate page/line notation. If you need to discuss costs, label them as 'photo-based rough costs' with explicit assumptions, and keep them independent of any estimate.
+If no odometer photo is present in the upload set, output 'Missing' for odometer_estimate_only."
+        )
+. "
             "Do not infer or estimate mileage from other sources."
         )
 
@@ -1030,3 +1036,7 @@ async def download_pdf(file_number: Optional[str] = None, filename: Optional[str
 
 
 
+
+SYSTEM_BASE += (
+    " In 'Create a Damage Report from Photos' runs, never reference any estimate or CCC content and never cite page/line numbers. Do not use phrases such as 'the estimate suggests'. Base all findings solely on the photos."
+)
