@@ -581,13 +581,12 @@ async def vision_review(
             "\nODOMETER TRANSCRIPTION: Use only the odometer photo for mileage. "
             "If the digits are not fully readable, return 'Present — not clearly legible' and explain (glare/blur/angle). "
             "Do not infer or estimate mileage from other sources."
-        prompt_text += (
-            "
-ABSOLUTE BAN (PHOTOS-ONLY): Do not reference or imply any estimate document. Do not use phrases like 'the estimate', 'estimate suggests', 'p#/L#', 'CCC', 'labor rate', or any estimate page/line notation. If you need to discuss costs, label them as 'photo-based rough costs' with explicit assumptions, and keep them independent of any estimate.
-If no odometer photo is present in the upload set, output 'Missing' for odometer_estimate_only."
         )
-. "
-            "Do not infer or estimate mileage from other sources."
+        prompt_text += (
+            "\nABSOLUTE BAN (PHOTOS-ONLY): Do not reference or imply any estimate document. "
+            "Do not use phrases like 'the estimate', 'estimate suggests', 'p#/L#', 'CCC', 'labor rate', or any estimate page/line notation. "
+            "If you need to discuss costs, label them as 'photo-based rough costs' with explicit assumptions, and keep them independent of any estimate. "
+            "If no odometer photo is present in the upload set, output 'Missing' for odometer_estimate_only."
         )
 
     # Odometer/registration/VIN legibility nudge for comprehensive
@@ -624,7 +623,7 @@ If no odometer photo is present in the upload set, output 'Missing' for odometer
     prompt_text += CONSISTENCY_GUARD
 
     # Build user parts (redact PII in any free text, but keep VIN/Claim #)
-    safe_user_parts: List[Dict[str,Any]] = []
+    parts_payload: List[Dict[str,Any]] = []
     redaction_success = False
 
     try:
@@ -634,7 +633,7 @@ If no odometer photo is present in the upload set, output 'Missing' for odometer
         log.warning(f"Redaction failed on prompt_text: {e}")
         red_prompt = prompt_text
 
-    safe_user_parts.append({"type": "text", "text": red_prompt})
+    parts_payload.append({"type": "text", "text": red_prompt})
 
     if parts:
         for p in parts:
@@ -645,9 +644,9 @@ If no odometer photo is present in the upload set, output 'Missing' for odometer
                 except Exception as e:
                     log.warning(f"Redaction failed on a text part: {e}")
                     red_txt = p["text"]
-                safe_user_parts.append({"type": "text", "text": red_txt})
+                parts_payload.append({"type": "text", "text": red_txt})
             else:
-                safe_user_parts.append(p)
+                parts_payload.append(p)
 
     redaction_status = "Redacted PII: Successful ✅" if redaction_success else "Redacted PII: Not Applied"
 
@@ -664,7 +663,7 @@ If no odometer photo is present in the upload set, output 'Missing' for odometer
         rsp = client.chat_completions.create(  # type: ignore[attr-defined]
             model=MODEL,
             messages=[{"role":"system","content": SYSTEM},
-                      {"role":"user","content": safe_user_parts}],
+                      {"role":"user","content": parts_payload}],
             max_tokens=max_tokens,
             temperature=0,
             response_format={"type":"json_object"}
@@ -674,7 +673,7 @@ If no odometer photo is present in the upload set, output 'Missing' for odometer
         rsp = client.chat.completions.create(
             model=MODEL,
             messages=[{"role":"system","content": SYSTEM},
-                      {"role":"user","content": safe_user_parts}],
+                      {"role":"user","content": parts_payload}],
             max_tokens=max_tokens,
             temperature=0,
             response_format={"type":"json_object"}
@@ -1011,33 +1010,3 @@ async def download_pdf(file_number: Optional[str] = None, filename: Optional[str
     latest = max(candidates, key=lambda p: os.path.getmtime(p))
     return FileResponse(path=latest, media_type="application/pdf", filename=os.path.basename(latest))
 
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-SYSTEM_BASE += (
-    " In 'Create a Damage Report from Photos' runs, never reference any estimate or CCC content and never cite page/line numbers. Do not use phrases such as 'the estimate suggests'. Base all findings solely on the photos."
-)
