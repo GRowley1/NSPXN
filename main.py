@@ -203,6 +203,7 @@ DETAIL_TEMPLATES = {
         "Cite VIN and odometer with explicit Photo #s; if either is unreadable, write 'Present — not clearly legible' and explain why (glare/blur/angle) instead of 'Missing'.\n\n"
 
         "## Estimated Repair Costs\n"
+        "- Label this section 'Photo-based rough costs' (not an estimate) — do not reference or cite any prepared repair estimate or p#/L#.\n"
         "- Provide a high-level breakdown (Body Labor, Paint Labor, Paint Materials, Parts, Sublet, Tax) and a one-line rationale tying to observed work "
         "(e.g., '2 panels refinish × 2.5 hr each' or 'rear bumper cover likely replace'). If uncertainty is high, state it explicitly.\n\n"
 
@@ -589,6 +590,7 @@ async def vision_review(
             "If you need to discuss costs, label them as 'photo-based rough costs' with explicit assumptions, and keep them independent of any estimate. "
             "If no odometer photo is present in the upload set, output 'Missing' for odometer_estimate_only."
             "\nPHOTOS-ONLY ODOMETER DEFAULT: If no odometer photo is present, set odometer_estimate_only to 'Missing' and do not invent a value."
+            "\nREMINDER: Still include a '## Estimated Repair Costs' section as photo-based rough costs."
         )
 
     # Odometer/registration/VIN legibility nudge for comprehensive
@@ -1011,4 +1013,5 @@ async def download_pdf(file_number: Optional[str] = None, filename: Optional[str
 
     latest = max(candidates, key=lambda p: os.path.getmtime(p))
     return FileResponse(path=latest, media_type="application/pdf", filename=os.path.basename(latest))
+
 
