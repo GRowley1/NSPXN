@@ -254,6 +254,7 @@ IDENTIFIERS_VERIFICATION_PROTOCOL = (
     "**MISMATCH**, and quote both strings with their Photo #/page references."
     "\n11) ODOMETER RULES (photos-only especially): transcribe only the digits visible in the odometer photo; "
     "do not infer from estimate text or metadata. Include the exact Photo #. If any digit is unclear, state 'Present — not clearly legible' and explain why; do not guess."
+    "\n12) Only report an odometer value if you also name the exact Photo # it came from in the same sentence; otherwise set odometer to 'Missing' (photos-only) or 'N/A' (other modes)."
 )
 
 # --- Consistency Guard (prompt-only; avoid contradictions) ---
@@ -587,6 +588,7 @@ async def vision_review(
             "Do not use phrases like 'the estimate', 'estimate suggests', 'p#/L#', 'CCC', 'labor rate', or any estimate page/line notation. "
             "If you need to discuss costs, label them as 'photo-based rough costs' with explicit assumptions, and keep them independent of any estimate. "
             "If no odometer photo is present in the upload set, output 'Missing' for odometer_estimate_only."
+            "\nPHOTOS-ONLY ODOMETER DEFAULT: If no odometer photo is present, set odometer_estimate_only to 'Missing' and do not invent a value."
         )
 
     # Odometer/registration/VIN legibility nudge for comprehensive
