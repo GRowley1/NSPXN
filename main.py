@@ -609,11 +609,20 @@ async def vision_review(
             "with 3–8 concise bullets. For each, quote the relevant rule fragment and mark Aligned / Not Aligned / Not Evidenced, "
             "citing evidence (p#/L#, Photo #). Also weave any material rule alignment/misalignment into the '## Detailed Audit Report' narrative."
         )
-        # Ensure model addresses static audit questions inside the narrative
+        # Ensure model addresses static audit questions AND valuation evidence inside the narrative
         prompt_text += (
-            "\n\nWeave the following static audit questions naturally into the '## Detailed Audit Report' narrative "
-            "(do NOT present as a separate Q&A list; integrate answers inline and cite evidence with p#/L# and Photo # as applicable):\n"
+            "\n\nYou MUST explicitly address each of the static audit questions below within the '## Detailed Audit Report' narrative. "
+            "If any question cannot be evidenced, mark it as 'Not Evidenced' inline rather than omitting it. "
+            "Integrate each answer naturally into the narrative (not as a separate list) and cite concrete evidence (p#/L#, Photo #) when possible.\n"
             + "\n".join(f"- {q}" for q in STATIC_AUDIT_QUESTIONS)
+        )
+
+        # Add valuation extraction directive (J.D. Power / NADA / KBB / etc.)
+        prompt_text += (
+            "\n\nVALUATION EXTRACTION DIRECTIVE: "
+            "If any text or photo includes a labeled retail or cash value such as 'J.D. Power', 'NADA', 'KBB', or 'Retail Value', "
+            "quote that value exactly as written, include its source label and page/line reference (e.g., 'p3/L22 – J.D. Power Clean Retail $14,725'), "
+            "and insert a single sentence labeled 'Valuation Evidence:' within the '## Detailed Audit Report' narrative summarizing it."
         )
 
     # Photo number sanity + cost rationale reminders (prompt-only)
