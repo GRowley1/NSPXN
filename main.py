@@ -131,9 +131,13 @@ DETAIL_TEMPLATES = {
         "Include: scope of impact, damage by zone/panel, repair vs. replace rationale, parts type (OEM/LKQ/Aftermarket), "
         "labor operations, refinish/overlap considerations, rate validation, paint materials handling, sublet usage, "
         "tax/markup accuracy, and overall estimate integrity. Cite photos and estimate lines (e.g., 'Photo 3', 'p2/L14'). "
-        "Close with compliance to any provided client rules and a clear final recommendation (Repairable vs. Total Loss). "
-        "Do **not** declare Repairable/Total Loss unless the estimate itself explicitly marks 'Total Loss' or an ACV comparison is provided. "
-        "Minimum 10–14 sentences (one continuous narrative, not bullets).\n\n"
+        "**If the file or estimate header/filename indicates a Supplement (e.g., 'Supplement', 'Supp', 'SUPP'), explicitly state that this is a supplement;** "
+        "briefly explain the reason for the supplement and describe what changed since the prior version (new operations/parts/labor, delta to totals) "
+        "**even if you do not have the prior estimate; base the explanation on visible new scope and current evidence.** "
+        "Add a short inline subheading 'Supplement Handling' within the narrative that lists (a) newly added operations, (b) any supporting invoices/photos, "
+        "and (c) whether the supplement aligns with client rules (if rules text was supplied). "
+        "Close with compliance to any provided client rules and a clear final recommendation **without** declaring Repairable/Total Loss unless the estimate itself "
+        "explicitly marks 'Total Loss' or an ACV comparison is provided. Minimum 10–14 sentences (one continuous narrative, not bullets).\n\n"
 
         "## Photo-by-Photo Damage Ledger\n"
         "| Photo # | View/Angle | Panels/Parts Visible | Condition (dent/crease/scrape/misalignment) | Identifiers (VIN/odo/plate/reg) | Legibility |\n"
@@ -167,8 +171,11 @@ DETAIL_TEMPLATES = {
         "- Short bullets with severity (High/Med/Low) and a one-line remediation.\n\n"
 
         "## Compliance Score Rationale\n"
+        ""## Compliance Score Rationale\n"
         "- REQUIRED if score < 100: start at **100** and list each deficiency with evidence refs (p#/L# and/or Photo #), "
-        "severity (Minor/Moderate/Major), and numeric deduction. Show the arithmetic to the final score.\n\n"
+        "severity (Minor/Moderate/Major), and numeric deduction. Show the arithmetic to the final score. "
+        "**Include the exact lines `Starting Score: 100` and `Final Score: NN` (where NN = 100 − sum of deductions). "
+        "Double-check your arithmetic and ensure `compliance_score` equals `Final Score`.**\n\n"
 
         "## Final Evaluation\n"
         "- Compliance Score: NN% with a single-sentence justification. "
@@ -833,6 +840,21 @@ async def vision_review(
             "odometer/registration presence and legibility, duplicate/edited images, timestamp continuity, and "
             "panel/impact consistency."
         )
+        # --- Score consistency fix (align field with narrative math) ---
+    try:
+        if (result.get("compliance_score","").strip().upper() != "N/A"):
+            md = result.get("summary_markdown","") or ""
+            # Prefer an explicit 'Final Score: NN' if present
+            m = re.search(r"Final\s*Score\s*:\s*(\d{1,3})", md, re.I)
+            if m:
+                result["compliance_score"] = m.group(1)
+            else:
+                # Fall back to computing 100 - sum(deductions) for bullets like '- ... -10'
+                nums = [int(n) for n in re.findall(r"(?:^|[^\d])-\s*(\d{1,3})\b", md)]
+                calc = max(0, 100 - sum(nums)) if nums else result["compliance_score"]
+                result["compliance_score"] = str(calc)
+    except Exception:
+        pass
 
     # -----------------------
     # PDF helpers (sanitizer for FPDF)
