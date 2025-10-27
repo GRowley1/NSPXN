@@ -121,6 +121,10 @@ DETAIL_TEMPLATES = {
         "## Executive Summary\n"
         "- 3–6 bullets capturing the big picture: estimate integrity, rule alignment (only if rules text was supplied), "
         "and photo consistency.\n\n"
+        
+        "## Supplement Handling\n"
+        "- If the estimate or document header contains 'Supplement', explicitly note this within the narrative (e.g., 'This is a supplement estimate – revised labor and parts values were analyzed.'). "
+        "If multiple versions appear, identify the newest by date or page order.\n\n"
 
         "## Detailed Audit Report\n"
         "- Write this section as a **formal, paragraph-style appraisal report** summarizing the entire claim. "
