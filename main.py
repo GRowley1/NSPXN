@@ -91,7 +91,7 @@ def redact_text_preserve_vin_claim(text: str) -> str:
         return text
 
 def _safe(s: str) -> str:
-    return re.sub(r"[^\w.\-]+", "-", (s or "").strip()).strip("-_.")
+    return re.sub(r"[^\w.\-]+", "-", (s or "").strip()).strip("-_.-")
 
 # -----------------------
 # Prompt steering (free analysis + detailed narrative)
@@ -953,27 +953,27 @@ Conclusion
 """
         else:
             subj = f"AI-4-IA Review: {result['claim_number'] or file_number}"
-            body = f"""NSPXN.com AI Review Report
-
-File Number: {file_number}
-IA Company: {ia_company}
-Appraiser ID #: {appraiser_id}
-Request Type: {result['request_type']}
-{"Supplement Status: Supplement Estimate detected in documentation\n" if supp_detected else ""}Claim #: {result['claim_number']}
-VIN (from estimate/photos): {result['vin']}
-VIN verification (estimate vs photo): {result['vin_verification']}
-Vehicle: {result['vehicle']}
-Odometer (from estimate): {result['odometer_estimate_only']}
-Compliance Score: {result['compliance_score']}
-
-{result['redaction_status']}
-
-AI-4-IA Review Summary
-{result['summary_markdown']}
-
-Fraud Detection
-{result['fraud_markdown']}
-"""
+            # precompute optional supplement header line to avoid complex inline f-string expressions
+            supplemental_line = "Supplement Status: Supplement Estimate detected in documentation\n" if supp_detected else ""
+            body = (
+                "NSPXN.com AI Review Report\n\n"
+                f"File Number: {file_number}\n"
+                f"IA Company: {ia_company}\n"
+                f"Appraiser ID #: {appraiser_id}\n"
+                f"Request Type: {result['request_type']}\n"
+                f"{supplemental_line}"
+                f"Claim #: {result['claim_number']}\n"
+                f"VIN (from estimate/photos): {result['vin']}\n"
+                f"VIN verification (estimate vs photo): {result['vin_verification']}\n"
+                f"Vehicle: {result['vehicle']}\n"
+                f"Odometer (from estimate): {result['odometer_estimate_only']}\n"
+                f"Compliance Score: {result['compliance_score']}\n\n"
+                f"{result['redaction_status']}\n\n"
+                "AI-4-IA Review Summary\n"
+                f"{result['summary_markdown']}\n\n"
+                "Fraud Detection\n"
+                f"{result['fraud_markdown']}\n"
+            )
 
         msg["Subject"] = subj
         msg["From"] = "info@nspxn.com"
@@ -1019,6 +1019,7 @@ async def download_pdf(file_number: Optional[str] = None, filename: Optional[str
 
     latest = max(candidates, key=lambda p: os.path.getmtime(p))
     return FileResponse(path=latest, media_type="application/pdf", filename=os.path.basename(latest))
+
 
 
 
