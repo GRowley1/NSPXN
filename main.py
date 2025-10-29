@@ -780,7 +780,7 @@ async def vision_review(
 
     if data is None:
         # Final fallback: return a minimal skeleton with N/A so the UI/PDF still render
-        log.error(f"LLM failure or JSON parse error; first 500 chars:\n{raw[:500]}")
+        log.error(f"LLM failure or JSON parse error; first 500 chars:\n" + (raw or "")[:500])
         skeleton = {k: "N/A" for k in KEYS}
         skeleton["file_number"] = file_number
         skeleton["request_type"] = req_label
@@ -1019,6 +1019,7 @@ async def download_pdf(file_number: Optional[str] = None, filename: Optional[str
 
     latest = max(candidates, key=lambda p: os.path.getmtime(p))
     return FileResponse(path=latest, media_type="application/pdf", filename=os.path.basename(latest))
+
 
 
 
