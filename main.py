@@ -171,7 +171,6 @@ DETAIL_TEMPLATES = {
         "- Short bullets with severity (High/Med/Low) and a one-line remediation.\n\n"
 
         "## Compliance Score Rationale\n"
-        ""## Compliance Score Rationale\n"
         "- REQUIRED if score < 100: start at **100** and list each deficiency with evidence refs (p#/L# and/or Photo #), "
         "severity (Minor/Moderate/Major), and numeric deduction. Show the arithmetic to the final score. "
         "**Include the exact lines `Starting Score: 100` and `Final Score: NN` (where NN = 100 − sum of deductions). "
@@ -840,7 +839,8 @@ async def vision_review(
             "odometer/registration presence and legibility, duplicate/edited images, timestamp continuity, and "
             "panel/impact consistency."
         )
-        # --- Score consistency fix (align field with narrative math) ---
+
+    # --- Score consistency fix (align field with narrative math) ---
     try:
         if (result.get("compliance_score","").strip().upper() != "N/A"):
             md = result.get("summary_markdown","") or ""
@@ -1048,5 +1048,6 @@ async def download_pdf(file_number: Optional[str] = None, filename: Optional[str
 
     latest = max(candidates, key=lambda p: os.path.getmtime(p))
     return FileResponse(path=latest, media_type="application/pdf", filename=os.path.basename(latest))
+
 
 
