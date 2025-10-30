@@ -91,7 +91,7 @@ def redact_text_preserve_vin_claim(text: str) -> str:
         return text
 
 def _safe(s: str) -> str:
-    return re.sub(r"[^\w.\-]+", "-", (s or "").strip()).strip("-_.-")
+    return re.sub(r"[^\w.\-]+", "-", (s or "").strip()).strip("-_.")
 
 # -----------------------
 # Prompt steering (free analysis + detailed narrative)
@@ -309,7 +309,7 @@ SYSTEM_BASE += (
     "If you include tables, keep them concise and only when they help clarity. "
     "Avoid placeholder rows/columns; do not invent data. "
     "When client_rules text is provided, also include a section titled '## Client Guidelines Comparison' with 3–8 concise bullets quoting the relevant rule fragment and citing evidence (p#/L#, Photo #); "
-    "weave any material rule alignment/misalignment into the Detailed Audit Report narrative."
+    "weave any material rule alignment/misalignment into the '## Detailed Audit Report' narrative."
 )
 SYSTEM_BASE += (
     " Your 'summary_markdown' MUST include a top-level section named '## Detailed Audit Report' containing a cohesive narrative of at least 10–14 sentences (not bullets). "
@@ -815,6 +815,21 @@ async def vision_review(
         "redaction_status": redaction_status,
     }
 
+    # --- Score↔Rationale synchronization guard ---
+    # If the narrative contains "## Compliance Score Rationale" and a "Final Score: NN", force compliance_score = NN
+    try:
+        sm = result.get("summary_markdown", "") or ""
+        if ai_intent == "damage_report_from_photos":
+            result["compliance_score"] = "N/A"
+        else:
+            if "## Compliance Score Rationale" in sm:
+                m = re.search(r"Final\s*Score:\s*(\d{1,3})", sm, flags=re.IGNORECASE)
+                if m:
+                    final_score = max(0, min(100, int(m.group(1))))
+                    result["compliance_score"] = str(final_score)
+    except Exception as _e:
+        pass
+
     # Non-empty Fraud fallback (prevents 'N/A' in output/PDF)
     if not result["fraud_markdown"] or result["fraud_markdown"].strip().upper() in {"", "N/A"}:
         result["fraud_markdown"] = (
@@ -930,38 +945,33 @@ async def vision_review(
 
         if ai_intent == "damage_report_from_photos":
             subj = f"AI Damage Report: {file_number or ''} {result['claim_number'] or ''}".strip()
-            body = f"""AI-4-IA Damage Report
-
-IA Company: {ia_company}
-Claim #: {result['claim_number'] or 'N/A'}    File #: {file_number or 'N/A'}
-Odometer: {result['odometer_estimate_only'] or 'N/A'}    Primary Impact: {result['primary_impact'] or 'N/A'}
-Secondary Impact: {result['secondary_impact'] or 'N/A'}
-
-{result['redaction_status']}
-
-Damage Summary
-{result['summary_markdown'] or 'N/A'}
-
-Estimated Repair Costs
-{result['estimated_costs_markdown'] or 'N/A'}
-
-Fraud & Authenticity Check
-{result['fraud_markdown'] or 'N/A'}
-
-Conclusion
-{result['conclusion'] or 'N/A'}
-"""
+            body = (
+                "AI-4-IA Damage Report\n\n"
+                f"IA Company: {ia_company}\n"
+                f"Claim #: {result['claim_number'] or 'N/A'}    File #: {file_number or 'N/A'}\n"
+                f"Odometer: {result['odometer_estimate_only'] or 'N/A'}    Primary Impact: {result['primary_impact'] or 'N/A'}\n"
+                f"Secondary Impact: {result['secondary_impact'] or 'N/A'}\n\n"
+                f"{result['redaction_status']}\n\n"
+                "Damage Summary\n"
+                f"{result['summary_markdown'] or 'N/A'}\n\n"
+                "Estimated Repair Costs\n"
+                f"{result['estimated_costs_markdown'] or 'N/A'}\n\n"
+                "Fraud & Authenticity Check\n"
+                f"{result['fraud_markdown'] or 'N/A'}\n\n"
+                "Conclusion\n"
+                f"{result['conclusion'] or 'N/A'}\n"
+            )
         else:
+            supp_detected = bool(re.search(r"\bSupplement\b", result.get("summary_markdown",""), flags=re.IGNORECASE))
+            supp_line = "Supplement Status: Supplement Estimate detected in documentation\n" if supp_detected else ""
             subj = f"AI-4-IA Review: {result['claim_number'] or file_number}"
-            # precompute optional supplement header line to avoid complex inline f-string expressions
-            supplemental_line = "Supplement Status: Supplement Estimate detected in documentation\n" if supp_detected else ""
             body = (
                 "NSPXN.com AI Review Report\n\n"
                 f"File Number: {file_number}\n"
                 f"IA Company: {ia_company}\n"
                 f"Appraiser ID #: {appraiser_id}\n"
                 f"Request Type: {result['request_type']}\n"
-                f"{supplemental_line}"
+                f"{supp_line}"
                 f"Claim #: {result['claim_number']}\n"
                 f"VIN (from estimate/photos): {result['vin']}\n"
                 f"VIN verification (estimate vs photo): {result['vin_verification']}\n"
@@ -1019,6 +1029,7 @@ async def download_pdf(file_number: Optional[str] = None, filename: Optional[str
 
     latest = max(candidates, key=lambda p: os.path.getmtime(p))
     return FileResponse(path=latest, media_type="application/pdf", filename=os.path.basename(latest))
+
 
 
 
