@@ -91,7 +91,7 @@ def redact_text_preserve_vin_claim(text: str) -> str:
         return text
 
 def _safe(s: str) -> str:
-    return re.sub(r"[^\w.\-]+", "-", (s or "").strip()).strip("-_.")
+    return re.sub(r"[^\w.\-]+", "-", (s or "").strip()).strip("-_. ")
 
 # -----------------------
 # Prompt steering (free analysis + detailed narrative)
@@ -294,10 +294,9 @@ SYSTEM_BASE += (
     " Except when the request_type is 'Create a Damage Report from Photos', Compliance Score must be a numeric percentage 0–100 (never 'N/A'). "
     "If the request_type is 'Create a Damage Report from Photos', set compliance_score to 'N/A' and omit the '## Compliance Score Rationale' section. "
     "If no client_rules are supplied, base the score on estimate-photo internal consistency, evidence completeness, and clarity/legibility. "
-    " If compliance_score < 100, include a dedicated section titled '## Compliance Score Rationale' that lists each deficiency with evidence refs and an explicit numeric deduction per item. "
-    " After listing deductions, show a 'Total deductions' line and the exact arithmetic to the final score. "
-    " The final score MUST EQUAL 100 minus the sum of listed deductions (clamped 0–100). "
-    " Choose any reasonable deduction values, but the math must match the final score. "
+    "If compliance_score < 100, include a dedicated section titled '## Compliance Score Rationale' which itemizes every deficiency with exact evidence references "
+    "(estimate p#/L# and/or Photo #), assigns an explicit deduction per item, and shows the arithmetic to the final score. "
+    "Use a consistent scheme (e.g., Minor -5, Moderate -10, Major -20) and never go below 0. "
     "The 'fraud_markdown' section must never be 'N/A'. If nothing material is found, write "
     "'No material inconsistencies found.' and briefly note what was checked (VIN match, date/metadata, obvious photo tampering, duplicated images)."
 )
@@ -314,7 +313,6 @@ SYSTEM_BASE += (
 )
 SYSTEM_BASE += (
     " Your 'summary_markdown' MUST include a top-level section named '## Detailed Audit Report' containing a cohesive narrative of at least 10–14 sentences (not bullets). "
-    "At the very start of '## Detailed Audit Report', include a single line 'Supplement: Yes — <brief reason>' or 'Supplement: No'. "
     "It must synthesize: impact zones, per-panel damages, repair vs. replace rationale, parts type (OEM/LKQ/Aftermarket), labor ops, refinish/overlap, rate/materials/sublet/tax handling, and estimate integrity. "
     "It must cite concrete evidence inline (e.g., p2/L14, Photo 3). "
     "When evaluating paint materials, recognize that a summary line such as 'Paint Supplies' or 'Paint Materials' with hours and rate in the totals section constitutes a valid cost breakdown. "
@@ -817,24 +815,19 @@ async def vision_review(
         "redaction_status": redaction_status,
     }
 
-    # --- Compliance score arithmetic lock (skip in photos-only mode) ---
-    def _coerce_int(x: str) -> Optional[int]:
-        try:
-            if isinstance(x, str):
-                m = re.search(r"-?\d+", x)
-                return int(m.group(0)) if m else None
-            return int(x)
-        except Exception:
-            return None
-
-    if ai_intent != "damage_report_from_photos":
-        score_now = _coerce_int(result.get("compliance_score",""))
-        md = result.get("summary_markdown","") or ""
-        deductions = [int(n) for n in re.findall(r"-(\d+)", md)]
-        if deductions:
-            calc = max(0, min(100, 100 - sum(deductions)))
-            if score_now is None or score_now != calc:
-                result["compliance_score"] = str(calc)
+    # --- Score↔Rationale synchronization guard ---
+    try:
+        sm = result.get("summary_markdown", "") or ""
+        if ai_intent == "damage_report_from_photos":
+            result["compliance_score"] = "N/A"
+        else:
+            if "## Compliance Score Rationale" in sm:
+                m = re.search(r"Final\s*Score:\s*(\d{1,3})", sm, flags=re.IGNORECASE)
+                if m:
+                    final_score = max(0, min(100, int(m.group(1))))
+                    result["compliance_score"] = str(final_score)
+    except Exception:
+        pass
 
     # Non-empty Fraud fallback (prevents 'N/A' in output/PDF)
     if not result["fraud_markdown"] or result["fraud_markdown"].strip().upper() in {"", "N/A"}:
@@ -890,6 +883,9 @@ async def vision_review(
     # -----------------------
     # Compose PDF content
     # -----------------------
+    # More robust Supplement detection for header/email:
+    SUPP_HEADER_RE = re.compile(r"(Supplement(?!al)|Supplement of\s*record|S0[1-9])", re.IGNORECASE)
+
     if ai_intent == "damage_report_from_photos":
         pdf.cell(0,10,"AI-4-IA Damage Report", ln=True, align="C")
         pdf.set_font_size(10); pdf.ln(3)
@@ -911,15 +907,11 @@ async def vision_review(
         mc(f"IA Company: {ia_company}")
         mc(f"Appraiser ID #: {appraiser_id}")
         mc(f"Request Type: {result['request_type']}")
-
-        # --- Supplement header echo derived from narrative first-line (with fallback) ---
-        sum_md = result.get("summary_markdown","") or ""
-        m = re.search(r"^\s*Supplement:\s*(Yes|No)\b.*", sum_md, flags=re.IGNORECASE|re.MULTILINE)
-        supp_flag = (m and m.group(1).strip().lower() == "yes")
-        supp_flag = bool(supp_flag or re.search(r"\bSupplement( of Record)?\b", sum_md, flags=re.IGNORECASE))
-        if supp_flag:
-            mc("Supplement Status: Supplement Estimate (per estimate packet / S01+ notations)")
-
+        # --- Supplement header echo (robust keywords) ---
+        sm_for_supp = result.get("summary_markdown","") or ""
+        supp_detected = bool(SUPP_HEADER_RE.search(sm_for_supp))
+        if supp_detected:
+            mc("Supplement Status: Supplement Estimate detected in documentation")
         mc(f"Claim #: {result['claim_number']}")
         mc(f"VIN (from estimate/photos): {result['vin']}")
         mc(f"VIN verification (estimate vs photo): {result['vin_verification']}")
@@ -956,56 +948,46 @@ async def vision_review(
 
         if ai_intent == "damage_report_from_photos":
             subj = f"AI Damage Report: {file_number or ''} {result['claim_number'] or ''}".strip()
-            body = f"""AI-4-IA Damage Report
-
-IA Company: {ia_company}
-Claim #: {result['claim_number'] or 'N/A'}    File #: {file_number or 'N/A'}
-Odometer: {result['odometer_estimate_only'] or 'N/A'}    Primary Impact: {result['primary_impact'] or 'N/A'}
-Secondary Impact: {result['secondary_impact'] or 'N/A'}
-
-{result['redaction_status']}
-
-Damage Summary
-{result['summary_markdown'] or 'N/A'}
-
-Estimated Repair Costs
-{result['estimated_costs_markdown'] or 'N/A'}
-
-Fraud & Authenticity Check
-{result['fraud_markdown'] or 'N/A'}
-
-Conclusion
-{result['conclusion'] or 'N/A'}
-"""
+            body = (
+                "AI-4-IA Damage Report\n\n"
+                f"IA Company: {ia_company}\n"
+                f"Claim #: {result['claim_number'] or 'N/A'}    File #: {file_number or 'N/A'}\n"
+                f"Odometer: {result['odometer_estimate_only'] or 'N/A'}    Primary Impact: {result['primary_impact'] or 'N/A'}\n"
+                f"Secondary Impact: {result['secondary_impact'] or 'N/A'}\n\n"
+                f"{result['redaction_status']}\n\n"
+                "Damage Summary\n"
+                f"{result['summary_markdown'] or 'N/A'}\n\n"
+                "Estimated Repair Costs\n"
+                f"{result['estimated_costs_markdown'] or 'N/A'}\n\n"
+                "Fraud & Authenticity Check\n"
+                f"{result['fraud_markdown'] or 'N/A'}\n\n"
+                "Conclusion\n"
+                f"{result['conclusion'] or 'N/A'}\n"
+            )
         else:
-            # Reuse supplement flag for email header echo
-            sum_md = result.get("summary_markdown","") or ""
-            m = re.search(r"^\s*Supplement:\s*(Yes|No)\b.*", sum_md, flags=re.IGNORECASE|re.MULTILINE)
-            supp_flag = (m and m.group(1).strip().lower() == "yes")
-            supp_flag = bool(supp_flag or re.search(r"\bSupplement( of Record)?\b", sum_md, flags=re.IGNORECASE))
-
+            sm_for_supp = result.get("summary_markdown","") or ""
+            supp_detected = bool(SUPP_HEADER_RE.search(sm_for_supp))
+            supp_line = "Supplement Status: Supplement Estimate detected in documentation\n" if supp_detected else ""
             subj = f"AI-4-IA Review: {result['claim_number'] or file_number}"
-            body = f"""NSPXN.com AI Review Report
-
-File Number: {file_number}
-IA Company: {ia_company}
-Appraiser ID #: {appraiser_id}
-Request Type: {result['request_type']}
-{("Supplement Status: Supplement Estimate (per estimate packet / S01+ notations)\n" if supp_flag else "")}Claim #: {result['claim_number']}
-VIN (from estimate/photos): {result['vin']}
-VIN verification (estimate vs photo): {result['vin_verification']}
-Vehicle: {result['vehicle']}
-Odometer (from estimate): {result['odometer_estimate_only']}
-Compliance Score: {result['compliance_score']}
-
-{result['redaction_status']}
-
-AI-4-IA Review Summary
-{result['summary_markdown']}
-
-Fraud Detection
-{result['fraud_markdown']}
-"""
+            body = (
+                "NSPXN.com AI Review Report\n\n"
+                f"File Number: {file_number}\n"
+                f"IA Company: {ia_company}\n"
+                f"Appraiser ID #: {appraiser_id}\n"
+                f"Request Type: {result['request_type']}\n"
+                f"{supp_line}"
+                f"Claim #: {result['claim_number']}\n"
+                f"VIN (from estimate/photos): {result['vin']}\n"
+                f"VIN verification (estimate vs photo): {result['vin_verification']}\n"
+                f"Vehicle: {result['vehicle']}\n"
+                f"Odometer (from estimate): {result['odometer_estimate_only']}\n"
+                f"Compliance Score: {result['compliance_score']}\n\n"
+                f"{result['redaction_status']}\n\n"
+                "AI-4-IA Review Summary\n"
+                f"{result['summary_markdown']}\n\n"
+                "Fraud Detection\n"
+                f"{result['fraud_markdown']}\n"
+            )
 
         msg["Subject"] = subj
         msg["From"] = "info@nspxn.com"
@@ -1051,6 +1033,7 @@ async def download_pdf(file_number: Optional[str] = None, filename: Optional[str
 
     latest = max(candidates, key=lambda p: os.path.getmtime(p))
     return FileResponse(path=latest, media_type="application/pdf", filename=os.path.basename(latest))
+
 
 
 
