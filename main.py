@@ -10,7 +10,6 @@ from fpdf import FPDF
 from docx import Document
 from pdf2image import convert_from_bytes
 from PIL import Image
-import pytesseract  # <-- (1) OCR import for Supplement detection
 
 # Optional HEIC/HEIF support if available
 try:
@@ -266,11 +265,14 @@ CONSISTENCY_GUARD = (
     "\n- Before finalizing, re-scan your output: confirm every referenced Photo # matches the content described (e.g., do not cite an Odometer photo as the point-of-impact photo). Correct any mismatches."
 )
 
-# --- Supplement Handling (prompt-only; ensures detection + narrative mention) ---
+# --- Supplement Handling (prompt-only; tightened to avoid false positives) ---
 SUPPLEMENT_HANDLING = (
     "\n\nSUPPLEMENT HANDLING:"
-    "\n- Examine the estimate documents for explicit supplement indicators: 'Supplement', 'Supplement of record', 'S01', 'S02', 'Supplement Summary', or similar."
-    "\n- If a supplement is detected, clearly state in the narrative that the estimate is a supplement and summarize what changed: added operations/parts, rate updates, refinish overlap changes, or corrections to prior omissions."
+    "\n- Only declare 'supplement' if you find explicit indicators in the provided documents such as the exact phrases "
+    "'Supplement of Record' or 'Supplement Summary', or a line like 'S01'/'S02' that is clearly labeled as a supplement entry."
+    "\n- Do NOT treat generic instructions like 'Request a Supplement' as evidence of a supplement."
+    "\n- If (and only if) a supplement is detected, clearly state in the narrative that the estimate is a supplement and "
+    "summarize what changed (added operations/parts, rate updates, refinish overlap changes, corrections to prior omissions)."
     "\n- If the supplement corrects earlier deficiencies (e.g., missing materials line, added calibrations), note that improvement explicitly."
     "\n- If a supplement exists but required supporting evidence (invoices, photos) is still missing, call this out in Risks/Missing Evidence."
 )
@@ -330,10 +332,6 @@ SUPPORTED_TEXT_EXTS = (".txt",)
 SUPPORTED_DOCX_EXTS = (".docx",)
 SUPPORTED_PDF_EXTS = (".pdf",)
 
-# --- (2) Supplement OCR patterns/constants ---
-SUPP_PAT = re.compile(r"(supplement(?:\s+of\s+record)?\s*\d*|S0?\d|supplement\s+summary)", re.IGNORECASE)
-OCR_PAGES_TO_SCAN = 4  # scan first N pages for speed
-
 # -----------------------
 # Helpers to add parts from bytes
 # -----------------------
@@ -341,34 +339,12 @@ def _image_part_from_bytes(raw: bytes) -> Dict[str, Any]:
     b64 = base64.b64encode(raw).decode("utf-8")
     return {"type": "image_url", "image_url": {"url": "data:image/jpeg;base64," + b64}}
 
-# --- (3/4) Extend _add_bytes to optionally OCR PDFs and collect text ---
-def _add_bytes(
-    parts: List[Dict[str,Any]],
-    files_seen: List[str],
-    raw: bytes,
-    fname: str,
-    used: int,
-    max_images: int,
-    ocr_text_accumulator: Optional[List[str]] = None
-) -> int:
+def _add_bytes(parts: List[Dict[str,Any]], files_seen: List[str], raw: bytes, fname: str, used: int, max_images: int) -> int:
     low = fname.lower()
     if low.endswith(SUPPORTED_PDF_EXTS) and used < max_images:
         try:
             pages = convert_from_bytes(raw, dpi=200)
             files_seen.append(f"{fname} (pdf, {len(pages)} page(s))")
-            # OCR a few early pages to detect 'Supplement' deterministically
-            try:
-                if ocr_text_accumulator is not None:
-                    for im in pages[:OCR_PAGES_TO_SCAN]:
-                        try:
-                            txt = pytesseract.image_to_string(im)
-                            if txt:
-                                ocr_text_accumulator.append(txt[:5000])  # cap per page
-                        except Exception:
-                            pass
-            except Exception:
-                pass
-            # continue building image parts for GPT vision
             for im in pages[:max_images - used]:
                 b = io.BytesIO()
                 im.save(b, format="JPEG", quality=85, optimize=True)
@@ -534,9 +510,6 @@ async def vision_review(
     MAX_ZIP_FILES = 100
     MAX_ENTRY_SIZE = 15 * 1024 * 1024  # 15 MB
 
-    # (3) Supplement OCR text collector
-    ocr_text_accumulator: List[str] = []
-
     for f in files:
         raw = await f.read()
         fname = f.filename or "upload"
@@ -562,9 +535,9 @@ async def vision_review(
                     data = zf.read(zi)
                 except Exception as e:
                     files_seen.append(f"{fname}::{inner_name} (read error: {e})"); continue
-                used = _add_bytes(parts, files_seen, data, f"{fname}::{inner_name}", used, MAX_IMAGES, ocr_text_accumulator)
+                used = _add_bytes(parts, files_seen, data, f"{fname}::{inner_name}", used, MAX_IMAGES)
         else:
-            used = _add_bytes(parts, files_seen, raw, fname, used, MAX_IMAGES, ocr_text_accumulator)
+            used = _add_bytes(parts, files_seen, raw, fname, used, MAX_IMAGES)
 
     # Lock to 3 intents only
     if ai_intent not in ALLOWED_INTENTS:
@@ -622,7 +595,7 @@ async def vision_review(
             "If no odometer photo is present in the upload set, output 'Missing' for odometer_estimate_only."
         )
     else:
-        # Append supplement handling guidance for any non-photos-only run
+        # Append tightened supplement handling for any non-photos-only run
         prompt_text += SUPPLEMENT_HANDLING
 
     # Odometer/registration/VIN legibility nudge for comprehensive
@@ -654,7 +627,7 @@ async def vision_review(
         "\nCOST RATIONALE REQUIREMENT: For each cost bucket (Body/Paint/Materials/Parts/Sublet/Tax), include a one-line rationale tied to observed operations or panel counts. If assumptions were made, state them."
     )
 
-    # --- Always append the VIN/odo protocol + consistency guard (prompt-only; no logic) ---
+    # --- Always append the VIN/odo protocol + consistency guard ---
     prompt_text += IDENTIFIERS_VERIFICATION_PROTOCOL
     prompt_text += CONSISTENCY_GUARD
 
@@ -690,7 +663,7 @@ async def vision_review(
     MAX_TOKENS_BY_INTENT = {
         "comprehensive": 1500,
         "guidelines_only": 1000,
-        "damage_report_from_photos": 1100  # bumped from 900
+        "damage_report_from_photos": 1100
     }
     max_tokens = MAX_TOKENS_BY_INTENT.get(ai_intent, 1000)
 
@@ -846,7 +819,6 @@ async def vision_review(
     }
 
     # --- Score↔Rationale synchronization guard ---
-    # If the narrative contains "## Compliance Score Rationale" and a "Final Score: NN", force compliance_score = NN
     try:
         sm = result.get("summary_markdown", "") or ""
         if ai_intent == "damage_report_from_photos":
@@ -857,19 +829,10 @@ async def vision_review(
                 if m:
                     final_score = max(0, min(100, int(m.group(1))))
                     result["compliance_score"] = str(final_score)
-    except Exception as _e:
+    except Exception:
         pass
 
-    # --- (5) Compute supplement status once (hard OCR + soft narrative) ---
-    try:
-        hard_txt = "\n".join(ocr_text_accumulator) if ocr_text_accumulator else ""
-        hard_hit = bool(SUPP_PAT.search(hard_txt))
-    except Exception:
-        hard_hit = False
-    soft_hit = bool(re.search(r"\bSupplement\b", (result.get("summary_markdown","") or ""), flags=re.IGNORECASE))
-    supp_detected_any = hard_hit or soft_hit
-
-    # Non-empty Fraud fallback (prevents 'N/A' in output/PDF)
+    # Non-empty Fraud fallback
     if not result["fraud_markdown"] or result["fraud_markdown"].strip().upper() in {"", "N/A"}:
         result["fraud_markdown"] = (
             "No material inconsistencies found. Checks performed: VIN match across estimate and photos, "
@@ -944,9 +907,18 @@ async def vision_review(
         mc(f"IA Company: {ia_company}")
         mc(f"Appraiser ID #: {appraiser_id}")
         mc(f"Request Type: {result['request_type']}")
-        # --- (6) Supplement header echo uses combined detection ---
-        if supp_detected_any:
+
+        # --- Conservative Supplement header echo ---
+        # Only echo if narrative explicitly shows true indicators (avoid 'Request a Supplement' boilerplate)
+        text_for_detection = (result.get("summary_markdown","") or "")
+        supple_explicit = bool(re.search(r"\b(Supplement of Record|Supplement Summary)\b", text_for_detection, re.IGNORECASE))
+        supple_code = bool(re.search(r"\bS0\d\b", text_for_detection, re.IGNORECASE) and re.search(r"\bSupplement\b", text_for_detection, re.IGNORECASE))
+        not_request_boiler = not re.search(r"Request a Supplement", text_for_detection, re.IGNORECASE)
+        supp_detected = (not_request_boiler) and (supple_explicit or supple_code)
+
+        if supp_detected:
             mc("Supplement Status: Supplement Estimate detected in documentation")
+
         mc(f"Claim #: {result['claim_number']}")
         mc(f"VIN (from estimate/photos): {result['vin']}")
         mc(f"VIN verification (estimate vs photo): {result['vin_verification']}")
@@ -1000,8 +972,14 @@ async def vision_review(
                 f"{result['conclusion'] or 'N/A'}\n"
             )
         else:
-            # --- (6) Email supplement line uses combined detection ---
-            supp_line = "Supplement Status: Supplement Estimate detected in documentation\n" if supp_detected_any else ""
+            # Mirror conservative supplement header logic in email body
+            text_for_detection = (result.get("summary_markdown","") or "")
+            supple_explicit = bool(re.search(r"\b(Supplement of Record|Supplement Summary)\b", text_for_detection, re.IGNORECASE))
+            supple_code = bool(re.search(r"\bS0\d\b", text_for_detection, re.IGNORECASE) and re.search(r"\bSupplement\b", text_for_detection, re.IGNORECASE))
+            not_request_boiler = not re.search(r"Request a Supplement", text_for_detection, re.IGNORECASE)
+            supp_detected = (not_request_boiler) and (supple_explicit or supple_code)
+
+            supp_line = "Supplement Status: Supplement Estimate detected in documentation\n" if supp_detected else ""
             subj = f"AI-4-IA Review: {result['claim_number'] or file_number}"
             body = (
                 "NSPXN.com AI Review Report\n\n"
@@ -1067,6 +1045,7 @@ async def download_pdf(file_number: Optional[str] = None, filename: Optional[str
 
     latest = max(candidates, key=lambda p: os.path.getmtime(p))
     return FileResponse(path=latest, media_type="application/pdf", filename=os.path.basename(latest))
+
 
 
 
