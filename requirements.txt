@@ -16,4 +16,4 @@ fpdf2==2.7.9
 
 # <-- required for FastAPI forms/uploads
 python-multipart==0.0.9
-
+pytesseract==0.3.10
