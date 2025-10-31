@@ -169,6 +169,8 @@ DETAIL_TEMPLATES = {
         "## Final Evaluation\n"
         "- Compliance Score: NN% with a single-sentence justification. "
         "If no fraud indicators are identified, state 'No material inconsistencies found.' Do not use 'N/A'."
+        " TOTAL LOSS CHECK: Only recommend repairs when the estimate is NOT marked Total Loss. "
+        "If the estimate IS marked Total Loss, explicitly recommend Total Loss and cite the evidence (page/line). "
     ),
 
     # Photos-only — scoreless + strict identifier citations
@@ -265,14 +267,11 @@ CONSISTENCY_GUARD = (
     "\n- Before finalizing, re-scan your output: confirm every referenced Photo # matches the content described (e.g., do not cite an Odometer photo as the point-of-impact photo). Correct any mismatches."
 )
 
-# --- Supplement Handling (prompt-only; tightened to avoid false positives) ---
+# --- Supplement Handling (prompt-only; ensures detection + narrative mention) ---
 SUPPLEMENT_HANDLING = (
     "\n\nSUPPLEMENT HANDLING:"
-    "\n- Only declare 'supplement' if you find explicit indicators in the provided documents such as the exact phrases "
-    "'Supplement of Record' or 'Supplement Summary', or a line like 'S01'/'S02' that is clearly labeled as a supplement entry."
-    "\n- Do NOT treat generic instructions like 'Request a Supplement' as evidence of a supplement."
-    "\n- If (and only if) a supplement is detected, clearly state in the narrative that the estimate is a supplement and "
-    "summarize what changed (added operations/parts, rate updates, refinish overlap changes, corrections to prior omissions)."
+    "\n- Examine the estimate documents for explicit supplement indicators: 'Supplement', 'Supplement of record', 'S01', 'S02', 'Supplement Summary', or similar."
+    "\n- If a supplement is detected, clearly state in the narrative that the estimate is a supplement and summarize what changed: added operations/parts, rate updates, refinish overlap changes, or corrections to prior omissions."
     "\n- If the supplement corrects earlier deficiencies (e.g., missing materials line, added calibrations), note that improvement explicitly."
     "\n- If a supplement exists but required supporting evidence (invoices, photos) is still missing, call this out in Risks/Missing Evidence."
 )
@@ -322,6 +321,14 @@ SYSTEM_BASE += (
     "Do not mark it missing if such a line is present, even if materials are not listed per-panel. "
     "Avoid categorical phrases such as 'deemed repairable' or 'deemed total loss' unless that exact determination appears in the provided documents (e.g., estimate header says 'Total Loss' or an ACV comparison is shown). "
     "Otherwise, use neutral language and do not make a repairability determination."
+)
+
+# --- NEW (1): Total Loss consistency hard rule in SYSTEM_BASE ---
+SYSTEM_BASE += (
+    " TOTAL LOSS CONSISTENCY: If the provided estimate explicitly shows 'Total Loss' (or a 'Total Loss Evaluation/Worksheet'), "
+    "you must clearly state that the estimate is a Total Loss and you must NOT recommend proceeding with repairs. "
+    "Your narrative and the 'conclusion' field must align with Total Loss (e.g., 'Recommendation: Total Loss per estimate evidence p#/L# or page ref'). "
+    "If 'Total Loss' is not explicitly evidenced in the inputs, do not mention or imply Total Loss at all."
 )
 
 # -----------------------
@@ -595,7 +602,7 @@ async def vision_review(
             "If no odometer photo is present in the upload set, output 'Missing' for odometer_estimate_only."
         )
     else:
-        # Append tightened supplement handling for any non-photos-only run
+        # Append supplement handling guidance for any non-photos-only run
         prompt_text += SUPPLEMENT_HANDLING
 
     # Odometer/registration/VIN legibility nudge for comprehensive
@@ -627,7 +634,7 @@ async def vision_review(
         "\nCOST RATIONALE REQUIREMENT: For each cost bucket (Body/Paint/Materials/Parts/Sublet/Tax), include a one-line rationale tied to observed operations or panel counts. If assumptions were made, state them."
     )
 
-    # --- Always append the VIN/odo protocol + consistency guard ---
+    # --- Always append the VIN/odo protocol + consistency guard (prompt-only; no logic) ---
     prompt_text += IDENTIFIERS_VERIFICATION_PROTOCOL
     prompt_text += CONSISTENCY_GUARD
 
@@ -663,7 +670,7 @@ async def vision_review(
     MAX_TOKENS_BY_INTENT = {
         "comprehensive": 1500,
         "guidelines_only": 1000,
-        "damage_report_from_photos": 1100
+        "damage_report_from_photos": 1100  # bumped from 900
     }
     max_tokens = MAX_TOKENS_BY_INTENT.get(ai_intent, 1000)
 
@@ -819,6 +826,7 @@ async def vision_review(
     }
 
     # --- Score↔Rationale synchronization guard ---
+    # If the narrative contains "## Compliance Score Rationale" and a "Final Score: NN", force compliance_score = NN
     try:
         sm = result.get("summary_markdown", "") or ""
         if ai_intent == "damage_report_from_photos":
@@ -829,10 +837,10 @@ async def vision_review(
                 if m:
                     final_score = max(0, min(100, int(m.group(1))))
                     result["compliance_score"] = str(final_score)
-    except Exception:
+    except Exception as _e:
         pass
 
-    # Non-empty Fraud fallback
+    # Non-empty Fraud fallback (prevents 'N/A' in output/PDF)
     if not result["fraud_markdown"] or result["fraud_markdown"].strip().upper() in {"", "N/A"}:
         result["fraud_markdown"] = (
             "No material inconsistencies found. Checks performed: VIN match across estimate and photos, "
@@ -907,18 +915,14 @@ async def vision_review(
         mc(f"IA Company: {ia_company}")
         mc(f"Appraiser ID #: {appraiser_id}")
         mc(f"Request Type: {result['request_type']}")
-
-        # --- Conservative Supplement header echo ---
-        # Only echo if narrative explicitly shows true indicators (avoid 'Request a Supplement' boilerplate)
-        text_for_detection = (result.get("summary_markdown","") or "")
-        supple_explicit = bool(re.search(r"\b(Supplement of Record|Supplement Summary)\b", text_for_detection, re.IGNORECASE))
-        supple_code = bool(re.search(r"\bS0\d\b", text_for_detection, re.IGNORECASE) and re.search(r"\bSupplement\b", text_for_detection, re.IGNORECASE))
-        not_request_boiler = not re.search(r"Request a Supplement", text_for_detection, re.IGNORECASE)
-        supp_detected = (not_request_boiler) and (supple_explicit or supple_code)
-
+        # --- Supplement header echo (auto if detected in narrative) ---
+        supp_detected = bool(re.search(r"\bSupplement\b", result.get("summary_markdown",""), flags=re.IGNORECASE))
         if supp_detected:
             mc("Supplement Status: Supplement Estimate detected in documentation")
-
+        # --- NEW (3): Total Loss header echo (auto if detected in narrative) ---
+        tl_detected = bool(re.search(r"\bTotal\s*Loss\b", result.get("summary_markdown",""), flags=re.IGNORECASE))
+        if tl_detected:
+            mc("Estimate Status: Total Loss (per provided documentation)")
         mc(f"Claim #: {result['claim_number']}")
         mc(f"VIN (from estimate/photos): {result['vin']}")
         mc(f"VIN verification (estimate vs photo): {result['vin_verification']}")
@@ -972,14 +976,11 @@ async def vision_review(
                 f"{result['conclusion'] or 'N/A'}\n"
             )
         else:
-            # Mirror conservative supplement header logic in email body
-            text_for_detection = (result.get("summary_markdown","") or "")
-            supple_explicit = bool(re.search(r"\b(Supplement of Record|Supplement Summary)\b", text_for_detection, re.IGNORECASE))
-            supple_code = bool(re.search(r"\bS0\d\b", text_for_detection, re.IGNORECASE) and re.search(r"\bSupplement\b", text_for_detection, re.IGNORECASE))
-            not_request_boiler = not re.search(r"Request a Supplement", text_for_detection, re.IGNORECASE)
-            supp_detected = (not_request_boiler) and (supple_explicit or supple_code)
-
+            supp_detected = bool(re.search(r"\bSupplement\b", result.get("summary_markdown",""), flags=re.IGNORECASE))
+            tl_detected = bool(re.search(r"\bTotal\s*Loss\b", result.get("summary_markdown",""), flags=re.IGNORECASE))
             supp_line = "Supplement Status: Supplement Estimate detected in documentation\n" if supp_detected else ""
+            # --- NEW (4): Total Loss line in email body header ---
+            tl_line = "Estimate Status: Total Loss (per provided documentation)\n" if tl_detected else ""
             subj = f"AI-4-IA Review: {result['claim_number'] or file_number}"
             body = (
                 "NSPXN.com AI Review Report\n\n"
@@ -988,6 +989,7 @@ async def vision_review(
                 f"Appraiser ID #: {appraiser_id}\n"
                 f"Request Type: {result['request_type']}\n"
                 f"{supp_line}"
+                f"{tl_line}"
                 f"Claim #: {result['claim_number']}\n"
                 f"VIN (from estimate/photos): {result['vin']}\n"
                 f"VIN verification (estimate vs photo): {result['vin_verification']}\n"
@@ -1045,6 +1047,7 @@ async def download_pdf(file_number: Optional[str] = None, filename: Optional[str
 
     latest = max(candidates, key=lambda p: os.path.getmtime(p))
     return FileResponse(path=latest, media_type="application/pdf", filename=os.path.basename(latest))
+
 
 
 
