@@ -274,14 +274,6 @@ SUPPLEMENT_HANDLING = (
     "\n- If a supplement exists but required supporting evidence (invoices, photos) is still missing, call this out in Risks/Missing Evidence."
 )
 
-# --- Total Loss Handling (prompt-only; hard guard) ---
-TOTAL_LOSS_HANDLING = (
-    "\n\nTOTAL LOSS HANDLING:"
-    "\n- You may only state 'Total Loss' if the estimate explicitly labels it 'Total Loss' or provides an ACV comparison that clearly results in a total loss determination."
-    "\n- If 'Total Loss' is indicated on the estimate, the narrative must reflect a total loss stance and must NOT recommend proceeding with repairs."
-    "\n- If 'Total Loss' is NOT explicitly indicated, do NOT call it a total loss and do NOT imply a total loss based on speculation."
-)
-
 ALLOWED_INTENTS = {"guidelines_only","comprehensive","damage_report_from_photos"}
 
 SYSTEM_BASE = (
@@ -297,7 +289,7 @@ SYSTEM_BASE = (
 # (No hallucinated rules + score handling; now with photos-only exception)
 SYSTEM_BASE += (
     " Do not state or imply any client rule unless it appears verbatim in the provided client_rules text. "
-    "If client_rules is blank, write the entire report without referencing client rules or external valuation brands (e.g., NADA, J.D. Power, KBB). "
+    "If client_rules is blank, write the entire report without referencing client rules. "
     "If a value cannot be confirmed from the visible evidence, set it to 'N/A' and briefly state why. "
     " Except when the request_type is 'Create a Damage Report from Photos', Compliance Score must be a numeric percentage 0–100 (never 'N/A'). "
     "If the request_type is 'Create a Damage Report from Photos', set compliance_score to 'N/A' and omit the '## Compliance Score Rationale' section. "
@@ -319,6 +311,22 @@ SYSTEM_BASE += (
     "When client_rules text is provided, also include a section titled '## Client Guidelines Comparison' with 3–8 concise bullets quoting the relevant rule fragment and citing evidence (p#/L#, Photo #); "
     "weave any material rule alignment/misalignment into the '## Detailed Audit Report' narrative."
 )
+
+# >>> INSERT #1: Total-Loss Determination Rule (prompt-only, minimal nudge)
+SYSTEM_BASE += (
+    " TOTAL LOSS DETERMINATION RULE: Treat the estimate as 'Total Loss' only if the estimate itself visibly shows "
+    "'Point of Impact: 15 Total Loss' (or equivalent 'POI 15 Total Loss'). "
+    "If that explicit indicator is NOT visible, do NOT label the file as Total Loss; write the estimate type as 'Repair'. "
+    "Include a one-line statement early in the narrative exactly as 'Estimate Type: Total Loss' or 'Estimate Type: Repair'. "
+    "Never infer Total Loss from costs alone or photo condition; only the explicit POI 15 indicator qualifies."
+)
+
+# >>> INSERT #2: Anti-contradiction nudge regarding Total Loss vs Repair (prompt-only)
+SYSTEM_BASE += (
+    " CONSISTENCY CHECK (TL/Repair): If you wrote 'Estimate Type: Total Loss', do not recommend proceeding with repairs; "
+    "if you wrote 'Estimate Type: Repair', do not claim the file is a total loss. Keep the determination consistent across the narrative, score rationale, and conclusion."
+)
+
 SYSTEM_BASE += (
     " Your 'summary_markdown' MUST include a top-level section named '## Detailed Audit Report' containing a cohesive narrative of at least 10–14 sentences (not bullets). "
     "It must synthesize: impact zones, per-panel damages, repair vs. replace rationale, parts type (OEM/LKQ/Aftermarket), labor ops, refinish/overlap, rate/materials/sublet/tax handling, and estimate integrity. "
@@ -565,7 +573,6 @@ async def vision_review(
 
     SYSTEM = SYSTEM_BASE
 
-    # Build prompt text
     prompt_text = (
         f"REQUEST TYPE SELECTED (exact): '{req_label}'. Use this exact string in 'request_type'.\n\n"
         "FILES SEEN (echo verbatim in '## Inputs Used'):\n- "
@@ -576,7 +583,7 @@ async def vision_review(
         + DETAIL_TEMPLATES.get(ai_intent, DETAIL_TEMPLATES["comprehensive"])
     )
 
-    # Ultra-blunt output contract
+    # Ultra-blunt output contract (helps prevent headings/fences before JSON)
     prompt_text = (
         "OUTPUT FORMAT (MANDATORY): Return ONLY a single strict JSON object with keys "
         "['file_number','request_type','claim_number','vin','vin_verification','vehicle',"
@@ -585,7 +592,7 @@ async def vision_review(
         "and no extra text before or after.\n\n"
     ) + prompt_text
 
-    # Photos-only instructions
+    # Photos-only runs must be scoreless + strict odometer handling
     if ai_intent == "damage_report_from_photos":
         prompt_text += (
             "\n\nPHOTOS-ONLY MODE: Set 'compliance_score' to 'N/A'. "
@@ -601,9 +608,8 @@ async def vision_review(
             "If no odometer photo is present in the upload set, output 'Missing' for odometer_estimate_only."
         )
     else:
-        # Append supplement and total loss guidance for any non-photos-only run
+        # Append supplement handling guidance for any non-photos-only run
         prompt_text += SUPPLEMENT_HANDLING
-        prompt_text += TOTAL_LOSS_HANDLING
 
     # Odometer/registration/VIN legibility nudge for comprehensive
     if ai_intent == "comprehensive":
@@ -614,13 +620,14 @@ async def vision_review(
             "Do not assume their presence if they cannot be visually confirmed."
         )
 
-    # If client_rules provided, require guidelines comparison and weave static questions
+    # If client_rules provided, require a dedicated Guidelines comparison section and narrative tie-in
     if client_rules.strip():
         prompt_text += (
             "\n\nWhen client_rules text is provided, you MUST include a section titled '## Client Guidelines Comparison' "
             "with 3–8 concise bullets. For each, quote the relevant rule fragment and mark Aligned / Not Aligned / Not Evidenced, "
             "citing evidence (p#/L#, Photo #). Also weave any material rule alignment/misalignment into the '## Detailed Audit Report' narrative."
         )
+        # Ensure model addresses static audit questions inside the narrative
         prompt_text += (
             "\n\nWeave the following static audit questions naturally into the '## Detailed Audit Report' narrative "
             "(do NOT present as a separate Q&A list; integrate answers inline and cite evidence with p#/L# and Photo # as applicable):\n"
@@ -838,85 +845,7 @@ async def vision_review(
     except Exception:
         pass
 
-    # --- Post-parse narrative scrub helpers ---
-    def _sentences(text: str) -> List[str]:
-        # Simple sentence split by ., ?, ! and line breaks (keeps it ASCII-safe)
-        tokens = re.split(r'(?<=[\.\?!])\s+|\n+', text.strip())
-        return [t for t in tokens if t.strip()]
-
-    def scrub_total_loss_and_rules(text: str, rules_present: bool) -> Dict[str, Any]:
-        """
-        - Enforce conservative Total Loss echo & remove contradictory 'proceed with repairs' if TL asserted.
-        - When rules are blank, remove NADA/J.D. Power/KBB mentions.
-        - Return dict with scrubbed text and flags.
-        """
-        t = text or ""
-        original = t
-
-        # Detect explicit NOT total loss phrasing
-        neg_tl = re.search(r"(?i)\bnot (?:a )?total\s*loss\b", t) is not False
-
-        # Positive TL mention and tied to 'estimate/header/document'
-        pos_tl = re.search(r"(?i)\btotal\s*loss\b", t) is not None
-        tied_to_est = re.search(r"(?i)\b(total\s*loss)\b.*\b(estimate|header|document)\b", t) is not None
-
-        # Conservative TL flag: must mention TL and be tied to estimate/header, and not negated
-        tl_flag = bool(pos_tl and tied_to_est and not neg_tl)
-
-        # Remove/neutralize contradictory repair recs when TL is flagged
-        if tl_flag:
-            sents = _sentences(t)
-            bad_phrases = [
-                r"(?i)\bproceed with repairs\b",
-                r"(?i)\brepair(s)? as outlined\b",
-                r"(?i)\bapprove repairs\b",
-                r"(?i)\bcontinue with repair\b",
-                r"(?i)\brepair recommendation\b"
-            ]
-            keep = []
-            for s in sents:
-                if any(re.search(p, s) for p in bad_phrases):
-                    continue
-                keep.append(s)
-            t = " ".join(keep)
-
-        # If narrative includes weird phrase like "explicitly stated by AI" about TL, neutralize unless tied to estimate
-        t = re.sub(r"(?i)Estimate Type:\s*Total\s*Loss\s*\(explicitly stated by AI\)", 
-                   "Estimate Type: Not indicated on estimate", t)
-
-        # Ban external valuation brand mentions when no client_rules
-        if not rules_present:
-            banned = [
-                r"(?i)\bNADA\b",
-                r"(?i)\bJ\.?D\.?\s*Power\b",
-                r"(?i)\bKBB\b",
-                r"(?i)\bKelley Blue Book\b",
-                r"(?i)\bClean Retail Value\b"
-            ]
-            sents = _sentences(t)
-            keep = []
-            for s in sents:
-                if any(re.search(p, s) for p in banned):
-                    continue
-                keep.append(s)
-            t = " ".join(keep)
-
-        # Supplement misclassification guard: if narrative says "Supplement" BUT also says "NOT a supplement", do not flag
-        supp_flag = bool(re.search(r"(?i)\bSupplement\b", t)) and not bool(re.search(r"(?i)\bnot (?:a )?supplement\b", t))
-
-        return {"text": t, "tl_flag": tl_flag, "supp_flag": supp_flag}
-
-    # Apply narrative scrub
-    try:
-        scrubbed = scrub_total_loss_and_rules(result.get("summary_markdown","") or "", bool(client_rules.strip()))
-        result["summary_markdown"] = scrubbed["text"]
-        tl_detected_for_header = bool(scrubbed["tl_flag"])
-        supp_detected_for_header = bool(scrubbed["supp_flag"])
-    except Exception:
-        tl_detected_for_header = False
-        supp_detected_for_header = bool(re.search(r"\bSupplement\b", result.get("summary_markdown",""), flags=re.IGNORECASE))
-
-    # --- Ensure fraud_markdown never empty
+    # Non-empty Fraud fallback
     if not result["fraud_markdown"] or result["fraud_markdown"].strip().upper() in {"", "N/A"}:
         result["fraud_markdown"] = (
             "No material inconsistencies found. Checks performed: VIN match across estimate and photos, "
@@ -967,6 +896,19 @@ async def vision_review(
             pdf.set_x(pdf.l_margin)
             pdf.multi_cell(effective_w, 6, (_pdf_sanitize(str(s))[:2000] + " …"))
 
+    # >>> INSERT #3: Extract "Estimate Type: ..." from model narrative for header/email echo
+    def _extract_estimate_type(narrative: str) -> Optional[str]:
+        if not narrative:
+            return None
+        m = re.search(r"Estimate\s*Type:\s*(Total\s*Loss|Repair)", narrative, flags=re.IGNORECASE)
+        if m:
+            val = m.group(1).strip()
+            # normalize casing
+            if val.lower().startswith("total"):
+                return "Total Loss"
+            return "Repair"
+        return None
+
     # -----------------------
     # Compose PDF content
     # -----------------------
@@ -991,12 +933,17 @@ async def vision_review(
         mc(f"IA Company: {ia_company}")
         mc(f"Appraiser ID #: {appraiser_id}")
         mc(f"Request Type: {result['request_type']}")
-        # --- Supplement header echo (conservative)
-        if supp_detected_for_header:
+
+        # Supplement header echo (model-driven)
+        supp_detected = bool(re.search(r"\bSupplement\b", result.get("summary_markdown",""), flags=re.IGNORECASE))
+        if supp_detected:
             mc("Supplement Status: Supplement Estimate detected in documentation")
-        # --- Total Loss header echo (conservative)
-        if tl_detected_for_header:
-            mc("Estimate Type: Total Loss (explicit on estimate)")
+
+        # Estimate Type header echo (model-driven)
+        est_type = _extract_estimate_type(result.get("summary_markdown",""))
+        if est_type:
+            mc(f"Estimate Type: {est_type}")
+
         mc(f"Claim #: {result['claim_number']}")
         mc(f"VIN (from estimate/photos): {result['vin']}")
         mc(f"VIN verification (estimate vs photo): {result['vin_verification']}")
@@ -1050,9 +997,11 @@ async def vision_review(
                 f"{result['conclusion'] or 'N/A'}\n"
             )
         else:
+            supp_detected = bool(re.search(r"\bSupplement\b", result.get("summary_markdown",""), flags=re.IGNORECASE))
+            supp_line = "Supplement Status: Supplement Estimate detected in documentation\n" if supp_detected else ""
+            est_type = _extract_estimate_type(result.get("summary_markdown",""))
+            est_line = f"Estimate Type: {est_type}\n" if est_type else ""
             subj = f"AI-4-IA Review: {result['claim_number'] or file_number}"
-            supp_line = "Supplement Status: Supplement Estimate detected in documentation\n" if supp_detected_for_header else ""
-            tl_line = "Estimate Type: Total Loss (explicit on estimate)\n" if tl_detected_for_header else ""
             body = (
                 "NSPXN.com AI Review Report\n\n"
                 f"File Number: {file_number}\n"
@@ -1060,7 +1009,7 @@ async def vision_review(
                 f"Appraiser ID #: {appraiser_id}\n"
                 f"Request Type: {result['request_type']}\n"
                 f"{supp_line}"
-                f"{tl_line}"
+                f"{est_line}"
                 f"Claim #: {result['claim_number']}\n"
                 f"VIN (from estimate/photos): {result['vin']}\n"
                 f"VIN verification (estimate vs photo): {result['vin_verification']}\n"
@@ -1118,6 +1067,7 @@ async def download_pdf(file_number: Optional[str] = None, filename: Optional[str
 
     latest = max(candidates, key=lambda p: os.path.getmtime(p))
     return FileResponse(path=latest, media_type="application/pdf", filename=os.path.basename(latest))
+
 
 
 
