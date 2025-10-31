@@ -915,8 +915,8 @@ async def vision_review(
         smark = result.get("summary_markdown","") or ""
         if _supp_header_flag(smark):
             mc("Supplement Status: Supplement Estimate detected in documentation")
-        if _total_loss_header_flag(smark):
-            mc("Total Loss: Indicated on estimate")
+        if re.search(r"\bTotal\s+Loss\b", (result.get("conclusion") or "") + (result.get("summary_markdown") or ""), re.IGNORECASE):
+            mc("Estimate Type: Total Loss (explicitly stated by AI)")
 
         mc(f"Claim #: {result['claim_number']}")
         mc(f"VIN (from estimate/photos): {result['vin']}")
@@ -973,7 +973,10 @@ async def vision_review(
         else:
             smark = result.get("summary_markdown","") or ""
             supp_line = "Supplement Status: Supplement Estimate detected in documentation\n" if _supp_header_flag(smark) else ""
-            tl_line = "Total Loss: Indicated on estimate\n" if _total_loss_header_flag(smark) else ""
+            tl_line = ""
+            if re.search(r"\bTotal\s+Loss\b", (result.get("conclusion") or "") + (result.get("summary_markdown") or ""), re.IGNORECASE):
+                tl_line = "Estimate Type: Total Loss (explicitly stated by AI)\n"
+
             subj = f"AI-4-IA Review: {result['claim_number'] or file_number}"
             body = (
                 "NSPXN.com AI Review Report\n\n"
