@@ -116,11 +116,9 @@ DETAIL_TEMPLATES = {
     "comprehensive": (
         "## Inputs Used\n"
         "- List the estimate pages/lines and photo numbers you used, plus any rules text (if provided).\n\n"
-
         "## Executive Summary\n"
         "- 3–6 bullets capturing the big picture: estimate integrity, rule alignment (only if rules text was supplied), "
         "and photo consistency.\n\n"
-
         "## Detailed Audit Report\n"
         "- Write this section as a formal, paragraph-style appraisal report summarizing the entire claim. "
         "Include: scope of impact, damage by zone/panel, repair vs. replace rationale, parts type (OEM/LKQ/Aftermarket), "
@@ -129,20 +127,16 @@ DETAIL_TEMPLATES = {
         "Close with compliance to any provided client rules and a clear final recommendation (Repairable vs. Total Loss). "
         "Do not declare Repairable/Total Loss unless the estimate itself explicitly marks 'Total Loss' or an ACV comparison is provided. "
         "Minimum 10–14 sentences (one continuous narrative, not bullets).\n\n"
-
         "## Photo-by-Photo Damage Ledger\n"
         "| Photo # | View/Angle | Panels/Parts Visible | Condition (dent/crease/scrape/misalignment) | Identifiers (VIN/odo/plate/reg) | Legibility |\n"
         "|---:|---|---|---|---|---|\n"
         "- One row per photo used in the analysis (>=6 rows if >=6 photos exist). If an identifier is present but unreadable, mark 'Present — not clearly legible'.\n\n"
-
         "## Brief Damage Descriptions\n"
         "- 6–12 bullets. Each: part/panel + condition + suggested op (repair/replace/refinish/blend) + Photo #.\n\n"
-
         "## Estimate Line Extract (top relevant lines)\n"
         "| Est. p#/L# | Part/Op | Labor Hrs | Rate | Part Type | Price | Notes |\n"
         "|---|---|---:|---:|---|---:|---|\n"
         "- Include 8+ lines if available, focusing on items tied to observed damages. Use 'Notes' for overlap/blend or rationale.\n\n"
-
         "## Estimate Compliance Cross-Check (brief)\n"
         "Status: Compliant / Non-compliant / Not Evidenced. Cite only the most important evidence (p#/L# or Photo #). Keep it short.\n"
         "| Topic | Evidence (p#/L# or value; Photo # if relevant) | Status | Required Fix |\n"
@@ -153,18 +147,14 @@ DETAIL_TEMPLATES = {
         "| OEM Procedures |  |  |  |\n"
         "| Sublet |  |  |  |\n"
         "| Tax/Markup |  |  |  |\n\n"
-
         "## Client Guidelines Comparison (if rules text was supplied)\n"
         "- 3–8 bullets. Quote the relevant rule fragment and note Aligned / Not Aligned / Not Evidenced, with evidence refs (p#/L#, Photo #). "
         "If no client_rules were provided, omit this section.\n\n"
-
         "## Risks / Missing Evidence\n"
         "- Short bullets with severity (High/Med/Low) and a one-line remediation.\n\n"
-
         "## Compliance Score Rationale\n"
         "- REQUIRED if score < 100: start at 100 and list each deficiency with evidence refs (p#/L# and/or Photo #), "
         "severity (Minor/Moderate/Major), and numeric deduction. Show the arithmetic to the final score.\n\n"
-
         "## Final Evaluation\n"
         "- Compliance Score: NN% with a single-sentence justification. "
         "If no fraud indicators are identified, state 'No material inconsistencies found.' Do not use 'N/A'."
@@ -173,43 +163,34 @@ DETAIL_TEMPLATES = {
     "damage_report_from_photos": (
         "# AI-4-IA Damage Report\n"
         "Create a concise, professional damage report based only on the provided photos (and any optional text).\n\n"
-
         "## Inputs Used\n"
         "- List exact Photo #s and any text used.\n"
         "- Include a one-line count of photos and list the exact photo labels used (e.g., 'Photo 1–12; used 1–9, 11').\n\n"
-
         "## Quick Stats\n"
         "- Claim # (if visible): <value or N/A>\n"
         "- File # (echo from request): <value or N/A>\n"
         "- Odometer (if visible): <value or 'Present — not clearly legible'>\n"
         "- Primary Impact: <area(s)>\n"
         "- Secondary Impact: <area(s) or 'None observed'>\n\n"
-
         "## Photo-by-Photo Damage Ledger\n"
         "| Photo # | View/Angle | Panels/Parts Visible | Condition (dent/crease/scrape/misalignment) | Identifiers (VIN/odo/plate/reg) | Legibility |\n"
         "|---:|---|---|---|---|---|\n"
         "- One row per photo used in the analysis (>=6 rows if >=6 photos exist). If an identifier is present but unreadable, mark 'Present — not clearly legible'.\n"
         "- The ledger is required. Do not omit it. Each row must have a concrete Photo # that exists in the set.\n\n"
-
         "## Damage Summary\n"
         "- 6–12 bullets with panel/part + condition + suggested op, citing Photo #.\n\n"
-
         "## Detailed Audit Report\n"
         "- Provide a detailed appraisal narrative based on the photos: impact zones, repair/replace reasoning, "
         "likely parts source (OEM/LKQ/Aftermarket) when inferable, refinish/overlap notes, and cost implications. "
         "Reference specific Photo #s. Minimum 8–12 sentences (one continuous narrative, not bullets). "
         "Cite VIN and odometer with explicit Photo #s; if either is unreadable, write 'Present — not clearly legible' and explain why (glare/blur/angle) instead of 'Missing'.\n\n"
-
         "## Estimated Repair Costs\n"
         "- Provide a high-level breakdown (Body Labor, Paint Labor, Paint Materials, Parts, Sublet, Tax) and a one-line rationale tying to observed work "
         "(e.g., '2 panels refinish x 2.5 hr each' or 'rear bumper cover likely replace'). If uncertainty is high, state it explicitly.\n\n"
-
         "## Fraud & Authenticity Check\n"
         "- State VIN and odometer with Photo # citations; note any EXIF/date anomalies or duplicate images. If none, say so.\n\n"
-
         "## Compliance Score Rationale\n"
         "- Omit this section entirely for photos-only reports. Do not provide a score.\n\n"
-
         "## Conclusion\n"
         "- 1–2 sentences summarizing repairability and scope. "
         "Do not declare Repairable/Total Loss in photos-only mode. "
@@ -819,7 +800,7 @@ async def vision_review(
         "estimated_costs_markdown": _get("estimated_costs_markdown"),
         "conclusion": _get("conclusion"),
         "redaction_status": redaction_status,
-    """
+    }
 
     # --- Score↔Rationale synchronization guard ---
     # If the narrative contains "## Compliance Score Rationale" and a "Final Score: NN", force compliance_score = NN
@@ -833,7 +814,7 @@ async def vision_review(
                 if m:
                     final_score = max(0, min(100, int(m.group(1))))
                     result["compliance_score"] = str(final_score)
-    except Exception as _e:
+    except Exception:
         pass
 
     # Non-empty Fraud fallback (prevents 'N/A' in output/PDF)
@@ -887,6 +868,24 @@ async def vision_review(
             pdf.set_x(pdf.l_margin)
             pdf.multi_cell(effective_w, 6, (_pdf_sanitize(str(s))[:2000] + " …"))
 
+    # Helper: conservative header flags read only from model narrative to avoid false positives
+    def _supp_header_flag(text: str) -> bool:
+        if not text:
+            return False
+        # Look for strong phrases, not any generic 'supplement'
+        patterns = [
+            r"\bSupplement of Record\b",
+            r"\bSupplement Summary\b",
+            r"\bthis estimate is a supplement\b",
+            r"\bEstimate\s+Type:\s*Supplement\b",
+        ]
+        return any(re.search(p, text, flags=re.IGNORECASE) for p in patterns)
+
+    def _total_loss_header_flag(text: str) -> bool:
+        if not text:
+            return False
+        return bool(re.search(r"\bTotal\s+Loss\b", text, flags=re.IGNORECASE))
+
     # -----------------------
     # Compose PDF content
     # -----------------------
@@ -911,10 +910,14 @@ async def vision_review(
         mc(f"IA Company: {ia_company}")
         mc(f"Appraiser ID #: {appraiser_id}")
         mc(f"Request Type: {result['request_type']}")
-        # --- Supplement header echo (auto if detected in narrative) ---
-        supp_detected = bool(re.search(r"\bSupplement\b", result.get("summary_markdown",""), flags=re.IGNORECASE))
-        if supp_detected:
+
+        # Conservative header echoes based on narrative only
+        smark = result.get("summary_markdown","") or ""
+        if _supp_header_flag(smark):
             mc("Supplement Status: Supplement Estimate detected in documentation")
+        if _total_loss_header_flag(smark):
+            mc("Total Loss: Indicated on estimate")
+
         mc(f"Claim #: {result['claim_number']}")
         mc(f"VIN (from estimate/photos): {result['vin']}")
         mc(f"VIN verification (estimate vs photo): {result['vin_verification']}")
@@ -923,7 +926,7 @@ async def vision_review(
         mc(f"Compliance Score: {result['compliance_score']}")
         pdf_status = result["redaction_status"].replace("✅", "OK")
         mc(pdf_status)
-        pdf.ln(3); mc("AI-4-IA Review Summary"); mc((result["summary_markdown"] or '').strip())
+        pdf.ln(3); mc("AI-4-IA Review Summary"); mc((smark).strip())
         pdf.ln(3); mc("Fraud Detection"); mc((result["fraud_markdown"] or 'N/A').strip())
 
         safe_file = _safe(file_number)
@@ -968,8 +971,9 @@ async def vision_review(
                 f"{result['conclusion'] or 'N/A'}\n"
             )
         else:
-            supp_detected = bool(re.search(r"\bSupplement\b", result.get("summary_markdown",""), flags=re.IGNORECASE))
-            supp_line = "Supplement Status: Supplement Estimate detected in documentation\n" if supp_detected else ""
+            smark = result.get("summary_markdown","") or ""
+            supp_line = "Supplement Status: Supplement Estimate detected in documentation\n" if _supp_header_flag(smark) else ""
+            tl_line = "Total Loss: Indicated on estimate\n" if _total_loss_header_flag(smark) else ""
             subj = f"AI-4-IA Review: {result['claim_number'] or file_number}"
             body = (
                 "NSPXN.com AI Review Report\n\n"
@@ -977,7 +981,7 @@ async def vision_review(
                 f"IA Company: {ia_company}\n"
                 f"Appraiser ID #: {appraiser_id}\n"
                 f"Request Type: {result['request_type']}\n"
-                f"{supp_line}"
+                f"{supp_line}{tl_line}"
                 f"Claim #: {result['claim_number']}\n"
                 f"VIN (from estimate/photos): {result['vin']}\n"
                 f"VIN verification (estimate vs photo): {result['vin_verification']}\n"
@@ -1035,6 +1039,7 @@ async def download_pdf(file_number: Optional[str] = None, filename: Optional[str
 
     latest = max(candidates, key=lambda p: os.path.getmtime(p))
     return FileResponse(path=latest, media_type="application/pdf", filename=os.path.basename(latest))
+
 
 
 
