@@ -306,6 +306,11 @@ SYSTEM_BASE += (
     "Avoid categorical phrases such as 'deemed repairable' or 'deemed total loss' unless that exact determination appears in the provided documents. "
     "Otherwise, use neutral language and do not make a repairability determination."
 )
+SYSTEM_BASE += (
+    " NEVER write or imply 'Total Loss' unless the uploaded estimate text itself LITERALLY contains the words 'Total Loss' "
+    " in a header/label OR a valuation worksheet/CCC page is present and explicitly marked as such. "
+    " If those literal words are not visible in the inputs, you must avoid the phrase entirely and use neutral language instead."
+)
 
 # -----------------------
 # Supported file types
@@ -816,7 +821,25 @@ async def vision_review(
                     result["compliance_score"] = str(final_score)
     except Exception:
         pass
-
+        # --- Total Loss hallucination guard (post-process) ---
+    if ai_intent != "damage_report_from_photos":
+        sm = result.get("summary_markdown") or ""
+        # Consider it 'substantiated' only if we see a literal evidence hook indicating TL
+        has_literal_tl = bool(re.search(
+            r"(?:^|\n).*?(Total\s*Loss).*?(Estimate|header|CCC|valuation|ACV|p\d+/L\d+)",
+            sm, flags=re.IGNORECASE
+        ))
+        # If the model mentioned Total Loss but we don't see literal evidence, neutralize phrasing
+        mentions_tl = bool(re.search(r"\bTotal\s*Loss\b", sm, flags=re.IGNORECASE))
+        if mentions_tl and not has_literal_tl:
+            # Replace sentence-level TL claims with neutral wording
+            sm = re.sub(
+                r"(?im)^.*?\bTotal\s*Loss\b.*?$",
+                "No repairability determination is made here because the documents provided do not literally show a 'Total Loss' header or valuation page.",
+                sm
+            )
+            result["summary_markdown"] = sm
+    
     # Non-empty Fraud fallback (prevents 'N/A' in output/PDF)
     if not result["fraud_markdown"] or result["fraud_markdown"].strip().upper() in {"", "N/A"}:
         result["fraud_markdown"] = (
