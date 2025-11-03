@@ -222,6 +222,7 @@ DETAIL_TEMPLATES = {
 # --- Static audit questions (unchanged) ---
 STATIC_AUDIT_QUESTIONS = [
     "Do the photos substantiate the highest-cost operations (frame/sectioning/panel replace)?",
+    "Is the vehicle at a Repair Facility and is this Repair Facility listed on the estimate?",
     "Are ADAS calibrations or wheel alignments required and supported by the damage and OEM procedures?",
     "Is blend time justified by color/finish (metallic/pearl/tri-coat) and adjacent panel visibility?",
     "Do invoices corroborate parts used and match estimate line items (brand/grade, price, quantity)?",
