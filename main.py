@@ -301,6 +301,16 @@ SYSTEM_BASE += (
     "Otherwise, use neutral language and do not make a repairability determination."
 )
 
+# ---- Consistency/visibility/deductions patch (REQUESTED CHANGE) ----
+SYSTEM_BASE += (
+    " Total Loss visibility guard: only state 'Total Loss' if the documents explicitly state 'Total Loss' "
+    "or the uploaded estimate text contains the phrase 'Point of Impact 15 Total Loss'. "
+    "Do not describe both repair scope and total-loss status simultaneously unless the documents show an explicit total-loss designation; if not, use neutral language.\n"
+    " Evidence-based deductions: never deduct for towing/storage or NADA-related adjustments unless specific evidence is cited "
+    "(e.g., tow invoice with dates, storage dates/amounts, NADA printout/ref). If evidence is missing, mark 'Not Evidenced' and do not deduct.\n"
+    " Static Audit Questions: you MUST cover their substance within the narrative (integrate answers inline with evidence references)."
+)
+
 # -----------------------
 # Supported file types
 # -----------------------
@@ -516,6 +526,13 @@ async def vision_review(
         else:
             used = _add_bytes(parts, files_seen, raw, fname, used, MAX_IMAGES)
 
+    # Collect uploaded TEXT ONLY for POI/Total Loss trigger (do not include our prompts/templates)
+    uploaded_text_blobs = []
+    for p in parts:
+        if isinstance(p, dict) and p.get("type") == "text" and isinstance(p.get("text"), str):
+            uploaded_text_blobs.append(p["text"])
+    uploaded_text_all = "\n".join(uploaded_text_blobs)
+
     # Lock to 3 intents only
     if ai_intent not in ALLOWED_INTENTS:
         ai_intent = "comprehensive"
@@ -547,7 +564,7 @@ async def vision_review(
         + DETAIL_TEMPLATES.get(ai_intent, DETAIL_TEMPLATES["comprehensive"])
     )
 
-    # Ultra-blunt output contract (helps prevent headings/fences before JSON)
+    # OUTPUT contract (helps prevent headings/fences before JSON)
     prompt_text = (
         "OUTPUT FORMAT (MANDATORY): Return ONLY a single strict JSON object with keys "
         "['file_number','request_type','claim_number','vin','vin_verification','vehicle',"
@@ -582,18 +599,12 @@ async def vision_review(
             "If they are not present, state 'Missing' plainly. Do not assume their presence if they cannot be visually confirmed."
         )
 
-    # If client_rules provided, require Guidelines comparison and integrate static questions in narrative
-    if client_rules.strip():
-        prompt_text += (
-            "\n\nWhen client_rules text is provided, you MUST include a section titled '## Client Guidelines Comparison' "
-            "with 3–8 concise bullets. For each, quote the relevant rule fragment and mark Aligned / Not Aligned / Not Evidenced, "
-            "citing evidence (p#/L#, Photo #). Also weave any material rule alignment/misalignment into the '## Detailed Audit Report' narrative."
-        )
-        prompt_text += (
-            "\n\nWeave the following static audit questions naturally into the '## Detailed Audit Report' narrative "
-            "(do NOT present as a separate Q&A list; integrate answers inline and cite evidence with p#/L# and Photo # as applicable):\n"
-            + "\n".join(f"- {q}" for q in STATIC_AUDIT_QUESTIONS)
-        )
+    # --- Static Audit Questions ENFORCEMENT (REQUESTED CHANGE): always weave into narrative ---
+    prompt_text += (
+        "\n\nYou MUST integrate the following Static Audit Questions into the '## Detailed Audit Report' narrative "
+        "(do NOT present as a separate Q&A list; answer each within the flow and cite evidence using p#/L# and/or Photo #):\n"
+        + "\n".join(f"- {q}" for q in STATIC_AUDIT_QUESTIONS)
+    )
 
     # Photo number sanity + cost rationale reminders (prompt-only)
     prompt_text += (
@@ -792,7 +803,7 @@ async def vision_review(
         "redaction_status": redaction_status,
     }
 
-    # --- Stronger Score↔Rationale synchronization guard ---
+    # --- Stronger Score↔Rationale synchronization guard (REQUESTED CHANGE) ---
     try:
         sm = (result.get("summary_markdown") or "")
         if ai_intent == "damage_report_from_photos":
@@ -801,12 +812,17 @@ async def vision_review(
             # Prefer an explicit "Final score: NN"
             m_final = re.search(r"\bFinal\s*score\s*:\s*(\d{1,3})\b", sm, flags=re.IGNORECASE)
             if m_final:
-                result["compliance_score"] = str(max(0, min(100, int(m_final.group(1)))))
+                result["compliance_score"] = str(max(0, min(100, int(m_final.group(1))))) 
             else:
                 # Or an inline "Compliance Score: NN"
                 m_cs = re.search(r"\bCompliance\s*Score\s*:\s*(\d{1,3})\b", sm, flags=re.IGNORECASE)
                 if m_cs:
                     result["compliance_score"] = str(max(0, min(100, int(m_cs.group(1)))))
+
+            # If narrative lacks a visible compliance score line, append one so UI/PDF + JSON stay aligned
+            if re.fullmatch(r"\d{1,3}", (result["compliance_score"] or "").strip()):
+                if not re.search(r"\bCompliance\s*Score\s*:\s*\d{1,3}\b", sm, flags=re.IGNORECASE):
+                    result["summary_markdown"] = (sm + f"\n\nCompliance Score: {result['compliance_score']}").strip()
     except Exception:
         pass
 
@@ -864,6 +880,18 @@ async def vision_review(
     # -----------------------
     # Compose PDF content
     # -----------------------
+    # POI-15 Total Loss trigger from uploaded text ONLY (REQUESTED CHANGE)
+    poi15_hit = False
+    try:
+        txt = uploaded_text_all.lower()
+        # exact phrase or flexible: "point of impact ... 15 ... total loss" OR simple "15 total loss"
+        if re.search(r"\b15\s*total\s*loss\b", txt, flags=re.IGNORECASE):
+            poi15_hit = True
+        elif re.search(r"point\s*of\s*impact[^A-Za-z0-9]{0,10}15[^A-Za-z0-9]{0,20}total\s*loss", txt, flags=re.IGNORECASE):
+            poi15_hit = True
+    except Exception:
+        poi15_hit = False
+
     if ai_intent == "damage_report_from_photos":
         pdf.cell(0,10,"AI-4-IA Damage Report", ln=True, align="C")
         pdf.set_font_size(10); pdf.ln(3)
@@ -892,11 +920,12 @@ async def vision_review(
         if supp_detected:
             mc("Supplement Status: Supplement Estimate detected in documentation")
 
-        # --- Total Loss echo (keyword from narrative; avoid negation) ---
+        # --- Total Loss echo (guarded by explicit text or POI-15 trigger) (REQUESTED CHANGE) ---
         tl_positive = bool(re.search(r"\bTotal\s+Loss\b", smark, flags=re.IGNORECASE))
         tl_negation = bool(re.search(r"\bnot\s+a?\s*total\s+loss\b", smark, flags=re.IGNORECASE))
-        if tl_positive and not tl_negation:
-            mc("Estimate Type: Total Loss (explicit in documents/output)")
+        final_total_loss_flag = (poi15_hit) or (tl_positive and not tl_negation)
+        if final_total_loss_flag:
+            mc("Estimate Type: Total Loss (explicit in documents)")
 
         mc(f"Claim #: {result['claim_number']}")
         mc(f"VIN (from estimate/photos): {result['vin']}")
@@ -951,8 +980,9 @@ async def vision_review(
                 f"{result['conclusion'] or 'N/A'}\n"
             )
         else:
+            # Use the same final_total_loss_flag as in PDF (REQUESTED CHANGE)
+            tl_line = "Estimate Type: Total Loss (explicit in documents)\n" if final_total_loss_flag else ""
             supp_line = "Supplement Status: Supplement Estimate detected in documentation\n" if supp_detected else ""
-            tl_line = "Estimate Type: Total Loss (explicit in documents/output)\n" if (tl_positive and not tl_negation) else ""
             subj = f"AI-4-IA Review: {result['claim_number'] or file_number}"
             body = (
                 "NSPXN.com AI Review Report\n\n"
@@ -1019,6 +1049,7 @@ async def download_pdf(file_number: Optional[str] = None, filename: Optional[str
 
     latest = max(candidates, key=lambda p: os.path.getmtime(p))
     return FileResponse(path=latest, media_type="application/pdf", filename=os.path.basename(latest))
+
 
 
 
