@@ -224,7 +224,7 @@ STATIC_AUDIT_QUESTIONS = [
     "Do the photos substantiate the highest-cost operations (frame/sectioning/panel replace)?",
     "Is the vehicle at a Repair Facility and is this Repair Facility listed on the estimate?",
     "Are ADAS calibrations or wheel alignments required and supported by the damage and OEM procedures?",
-    "Is blend time justified by color/finish (metallic/pearl/tri-coat) and adjacent panel visibility?",
+    "Is blend time justified by color/finish (metallic/pearlescent/tri-coat) and adjacent panel visibility?",
     "Do invoices corroborate parts used and match estimate line items (brand/grade, price, quantity)?",
     "Are AM/LKQ choices compliant with age/mileage rules, and is OEM required anywhere by client policy or safety?",
     "Is there evidence of prior or unrelated damage (UPD) that materially affects valuation or repair scope?",
@@ -904,7 +904,6 @@ async def vision_review(
         m = re.search(r"Estimate\s*Type:\s*(Total\s*Loss|Repair)", narrative, flags=re.IGNORECASE)
         if m:
             val = m.group(1).strip()
-            # normalize casing
             if val.lower().startswith("total"):
                 return "Total Loss"
             return "Repair"
@@ -1068,6 +1067,7 @@ async def download_pdf(file_number: Optional[str] = None, filename: Optional[str
 
     latest = max(candidates, key=lambda p: os.path.getmtime(p))
     return FileResponse(path=latest, media_type="application/pdf", filename=os.path.basename(latest))
+
 
 
 
