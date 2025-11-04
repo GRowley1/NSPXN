@@ -592,7 +592,14 @@ async def vision_review(
     uploaded_text_all = "\n".join(uploaded_text_blobs)
 
     # Robust Clean Retail source regex flag (set early)
-    clean_retail_rx = r"(NADA|J[.\s-]*D[.\s-]*\s*Power|Kell?ey\s+Blue\s+Book|Edmunds|Carfax|Cars\.com|Clean\s+Retail\s+Value)"
+    clean_retail_rx = (
+        r"(?i)\b("
+        r"NADA|J[.\s-]*D[.\s-]*\s*Power|JDPower\.com|"
+        r"Kell?ey\s+Blue\s+Book|KBB\.com|"
+        r"Edmunds|Carfax|Cars\.com|"
+        r"Clean\s+Retail(?:\s+Value)?"
+        r")\b"
+    )
     _clean_retail_missing = not re.search(clean_retail_rx, uploaded_text_all or "", flags=re.IGNORECASE)
 
     # Lock to 3 intents only
@@ -870,11 +877,6 @@ async def vision_review(
         "conclusion": _get("conclusion"),
         "redaction_status": redaction_status,
     }
-
-    # Append clean-retail message if missing
-    if _clean_retail_missing:
-        result["summary_markdown"] = (result.get("summary_markdown","") +
-            "\n- Clean retail value printout: Not Evidenced (NADA/J.D. Power/KBB/etc. required on all files).")
 
     # --- Stronger Score↔Rationale synchronization guard (existing behavior retained) ---
     try:
