@@ -332,6 +332,15 @@ def _add_bytes(parts: List[Dict[str,Any]], files_seen: List[str], raw: bytes, fn
         try:
             pages = convert_from_bytes(raw, dpi=200)
             files_seen.append(f"{fname} (pdf, {len(pages)} page(s))")
+        try:
+            from pdfminer.high_level import extract_text as _pdfminer_extract_text
+            t = (_pdfminer_extract_text(io.BytesIO(raw)) or "")[:12000]
+            if t.strip():
+                parts.insert(0, {"type": "text", "text": t})
+                files_seen.append(f"{fname} (pdf text extracted)")
+        except Exception:
+            pass
+            
             for im in pages[:max_images - used]:
                 b = io.BytesIO()
                 im.save(b, format="JPEG", quality=85, optimize=True)
@@ -532,6 +541,11 @@ async def vision_review(
         if isinstance(p, dict) and p.get("type") == "text" and isinstance(p.get("text"), str):
             uploaded_text_blobs.append(p["text"])
     uploaded_text_all = "\n".join(uploaded_text_blobs)
+    # Evidence check: Clean Retail value printout (NADA/J.D. Power/KBB/etc.)
+    clean_retail_rx = r"(NADA|J[.\s-]*D[.\s-]*\s*Power|Kell?ey\s+Blue\s+Book|Edmunds|Carfax|Cars\.com|Clean\s+Retail\s+Value)"
+    if not re.search(clean_retail_rx, uploaded_text_all or "", flags=re.IGNORECASE):
+        result_msg = "\n- Clean retail value printout: Not Evidenced (NADA/J.D. Power/KBB/etc. required on all files)."
+    # Defer append until after 'result' is created (downstream). We’ll tack this on then.
 
     # Lock to 3 intents only
     if ai_intent not in ALLOWED_INTENTS:
@@ -802,7 +816,12 @@ async def vision_review(
         "conclusion": _get("conclusion"),
         "redaction_status": redaction_status,
     }
-
+    # Append deferred Clean Retail message if we set one above
+    try:
+        if 'result_msg' in locals() and result_msg:
+            result["summary_markdown"] = (result.get("summary_markdown","") + result_msg)
+    except Exception:
+        pass
     # --- Stronger Score↔Rationale synchronization guard (REQUESTED CHANGE) ---
     try:
         sm = (result.get("summary_markdown") or "")
