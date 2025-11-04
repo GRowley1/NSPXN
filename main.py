@@ -18,6 +18,13 @@ try:
 except Exception:
     pass
 
+# Optional OCR (pytesseract). Safe no-op if not installed or tesseract binary missing.
+try:
+    import pytesseract  # type: ignore
+    _OCR_ENABLED = True
+except Exception:
+    _OCR_ENABLED = False
+
 from openai import OpenAI
 
 # --- PII Redaction (Presidio) ---
@@ -316,13 +323,9 @@ def _image_part_from_bytes(raw: bytes) -> Dict[str, Any]:
     b64 = base64.b64encode(raw).decode("utf-8")
     return {"type": "image_url", "image_url": {"url": "data:image/jpeg;base64," + b64}}
 
-# === NEW: safe PDF text extract helper (no stray try:) ===
+# Safe PDF text extract helper (no stray try:)
 def _maybe_extract_pdf_text(raw: bytes, fname: str, parts: List[Dict[str, Any]], files_seen: List[str]) -> None:
     """Best-effort embedded text extraction for vector PDFs. Safe no-op if not available."""
-    try:
-        from pdfminer_high_level import extract_text as _wrong_import  # intentional wrong import to ensure we only use the correct one below
-    except Exception:
-        pass
     try:
         from pdfminer.high_level import extract_text as _pdfminer_extract_text
         t = (_pdfminer_extract_text(io.BytesIO(raw)) or "")[:12000]
@@ -333,6 +336,24 @@ def _maybe_extract_pdf_text(raw: bytes, fname: str, parts: List[Dict[str, Any]],
         # fail-open: do nothing if pdfminer not installed or PDF is image-only
         pass
 
+# Lightweight OCR helper for images
+def _maybe_ocr_image_text(im: Image.Image) -> str:
+    """
+    Best-effort OCR for an image page.
+    Returns '' on any failure so callers can safely ignore.
+    """
+    if not _OCR_ENABLED:
+        return ""
+    try:
+        im2 = im.convert("L")
+        if max(im2.size) < 1400:
+            scale = 1400 / max(im2.size)
+            im2 = im2.resize((int(im2.width*scale), int(im2.height*scale)))
+        txt = pytesseract.image_to_string(im2)
+        return (txt or "").strip()
+    except Exception:
+        return ""
+
 def _add_bytes(parts: List[Dict[str,Any]], files_seen: List[str], raw: bytes, fname: str, used: int, max_images: int) -> int:
     low = fname.lower()
     if low.endswith(SUPPORTED_PDF_EXTS) and used < max_images:
@@ -340,28 +361,54 @@ def _add_bytes(parts: List[Dict[str,Any]], files_seen: List[str], raw: bytes, fn
             pages = convert_from_bytes(raw, dpi=200)
             files_seen.append(f"{fname} (pdf, {len(pages)} page(s))")
 
-            # NEW: safe vector-text sniff (no inline try here)
+            # Safe vector-text sniff (no inline try here)
             _maybe_extract_pdf_text(raw, fname, parts, files_seen)
 
-            for im in pages[:max_images - used]:
+            # Limit OCR to a few pages for speed
+            OCR_PAGE_CAP = 6
+            ocr_collected = []
+
+            for idx, im in enumerate(pages[:max_images - used]):
+                # Add the rasterized page as before
                 b = io.BytesIO()
                 im.save(b, format="JPEG", quality=85, optimize=True)
                 parts.append(_image_part_from_bytes(b.getvalue()))
                 used += 1
+
+                # Best-effort OCR on the first few pages (captures J.D. Power / NADA scans)
+                if idx < OCR_PAGE_CAP:
+                    txt = _maybe_ocr_image_text(im)
+                    if txt:
+                        ocr_collected.append(txt)
+
+            if ocr_collected:
+                parts.insert(0, {"type": "text", "text": ("\n".join(ocr_collected))[:12000]})
+                files_seen.append(f"{fname} (ocr text extracted)")
+
         except Exception as e:
             logging.warning(f"pdf2image failed for {fname}: {e}")
             files_seen.append(f"{fname} (pdf, could not be converted)")
     elif low.endswith(SUPPORTED_IMAGE_EXTS) and used < max_images:
+        im_ref = None
         try:
             im = Image.open(io.BytesIO(raw)).convert("RGB")
+            im_ref = im.copy()
             im.thumbnail((1800,1800))
             b = io.BytesIO(); im.save(b, format="JPEG", quality=85, optimize=True)
             raw = b.getvalue()
         except Exception:
-            pass
+            im_ref = None
+
         parts.append(_image_part_from_bytes(raw))
         used += 1
         files_seen.append(f"{fname} (photo)")
+
+        # Best-effort OCR for scanned value pages / screenshots
+        if im_ref is not None:
+            txt = _maybe_ocr_image_text(im_ref)
+            if txt:
+                parts.insert(0, {"type":"text", "text": txt[:12000]})
+                files_seen.append(f"{fname} (ocr text extracted)")
     elif low.endswith(SUPPORTED_DOCX_EXTS):
         try:
             text = "\n".join([p.text for p in Document(io.BytesIO(raw)).paragraphs if p.text.strip()])
@@ -543,9 +590,8 @@ async def vision_review(
         if isinstance(p, dict) and p.get("type") == "text" and isinstance(p.get("text"), str):
             uploaded_text_blobs.append(p["text"])
     uploaded_text_all = "\n".join(uploaded_text_blobs)
-    _has_pdf = any("(pdf," in s for s in files_seen)
-    _has_pdf_text = any("(pdf text extracted)" in s for s in files_seen)
-    # === NEW: robust Clean Retail source regex flag (set early) ===
+
+    # Robust Clean Retail source regex flag (set early)
     clean_retail_rx = r"(NADA|J[.\s-]*D[.\s-]*\s*Power|Kell?ey\s+Blue\s+Book|Edmunds|Carfax|Cars\.com|Clean\s+Retail\s+Value)"
     _clean_retail_missing = not re.search(clean_retail_rx, uploaded_text_all or "", flags=re.IGNORECASE)
 
@@ -825,16 +871,10 @@ async def vision_review(
         "redaction_status": redaction_status,
     }
 
-    # === NEW: Append clean-retail message if missing ===
+    # Append clean-retail message if missing
     if _clean_retail_missing:
-        if _has_pdf and not _has_pdf_text:
-            # Pages appear scanned; don’t penalize — mark as inconclusive instead of Not Evidenced
-            result["summary_markdown"] = (result.get("summary_markdown","") +
-                "\n- Clean retail value printout: Inconclusive in extracted text (PDF appears scanned). "
-                "If present on image pages (e.g., NADA/J.D. Power/KBB), no deduction; upload value printout or enable OCR.")
-        else:
-            result["summary_markdown"] = (result.get("summary_markdown","") +
-                "\n- Clean retail value printout: Not Evidenced (NADA/J.D. Power/KBB/etc. required on all files).")
+        result["summary_markdown"] = (result.get("summary_markdown","") +
+            "\n- Clean retail value printout: Not Evidenced (NADA/J.D. Power/KBB/etc. required on all files).")
 
     # --- Stronger Score↔Rationale synchronization guard (existing behavior retained) ---
     try:
@@ -1077,6 +1117,7 @@ async def download_pdf(file_number: Optional[str] = None, filename: Optional[str
 
     latest = max(candidates, key=lambda p: os.path.getmtime(p))
     return FileResponse(path=latest, media_type="application/pdf", filename=os.path.basename(latest))
+
 
 
 
