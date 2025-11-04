@@ -591,14 +591,23 @@ async def vision_review(
             uploaded_text_blobs.append(p["text"])
     uploaded_text_all = "\n".join(uploaded_text_blobs)
 
-    # Robust Clean Retail source regex flag (set early)
-    clean_retail_rx = r"(NADA|J[.\s-]*D[.\s-]*\s*Power|Kell?ey\s+Blue\s+Book|Edmunds|Carfax|Cars\.com|Clean\s+Retail\s+Value)"
-    _clean_retail_missing = not re.search(clean_retail_rx, uploaded_text_all or "", flags=re.IGNORECASE)
+    # --- Robust detectors (CLEAN RETAIL + ADVISOR) ---
+    clean_retail_rx = (
+        r"(?i)\b("
+        r"NADA|J[.\s-]*D[.\s-]*\s*Power|JDPower\.com|"
+        r"Kell?ey\s+Blue\s+Book|KBB\.com|"
+        r"Edmunds|Carfax|Cars\.com|"
+        r"Clean\s+Retail(?:\s+Value)?"
+        r")\b"
+    )
+    _clean_retail_present = bool(re.search(clean_retail_rx, uploaded_text_all or ""))
 
-    # >>> ADDITION #1: detect paint materials / paint supplies present in extracted text <<<
+    advisor_rx = r"(?i)\bAdvisor\s+Report\b"
+    _advisor_present = bool(re.search(advisor_rx, uploaded_text_all or ""))
+
+    # Detect paint materials / paint supplies presence in extracted text
     paint_mat_rx = r"(Paint\s+(Suppl(?:ies|y)|Materials)|Materials\s*Line)"
     _paint_materials_present = bool(re.search(paint_mat_rx, uploaded_text_all or "", flags=re.IGNORECASE))
-    # <<< END ADDITION #1 >>>
 
     # Lock to 3 intents only
     if ai_intent not in ALLOWED_INTENTS:
@@ -689,14 +698,26 @@ async def vision_review(
     prompt_text += IDENTIFIERS_VERIFICATION_PROTOCOL
     prompt_text += CONSISTENCY_GUARD
 
-    # >>> ADDITION #2: minimal evidence flag to prevent false 'missing materials' claims <<<
+    # --------- EVIDENCE FLAGS (must respect) — minimal, no nudging ----------
+    flags = []
     if _paint_materials_present:
-        prompt_text += (
-            "\n\nEVIDENCE FLAGS (must respect):"
-            "\n- Paint materials summary line is present in the estimate totals (e.g., 'Paint Supplies' on the totals page). "
+        flags.append(
+            "- Paint materials summary line is present in the estimate totals (e.g., 'Paint Supplies' on the totals page). "
             "Treat paint materials as evidenced even if not itemized per panel."
         )
-    # <<< END ADDITION #2 >>>
+    if _clean_retail_present:
+        flags.append(
+            "- Clean Retail Value printout is present (e.g., J.D. Power / NADA / KBB / Edmunds / Carfax / Cars.com). "
+            "Do not mark it 'Not Evidenced'."
+        )
+    if _advisor_present:
+        flags.append(
+            "- A refreshed copy of the Advisor Report is present in the documents. "
+            "Do not state it is missing."
+        )
+    if flags:
+        prompt_text += "\n\nEVIDENCE FLAGS (must respect):\n" + "\n".join(flags)
+    # ------------------------------------------------------------------------
 
     # Build user parts (redact PII in any free text, but keep VIN/Claim #)
     parts_payload: List[Dict[str,Any]] = []
@@ -1126,6 +1147,7 @@ async def download_pdf(file_number: Optional[str] = None, filename: Optional[str
 
     latest = max(candidates, key=lambda p: os.path.getmtime(p))
     return FileResponse(path=latest, media_type="application/pdf", filename=os.path.basename(latest))
+
 
 
 
