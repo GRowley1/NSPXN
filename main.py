@@ -543,7 +543,8 @@ async def vision_review(
         if isinstance(p, dict) and p.get("type") == "text" and isinstance(p.get("text"), str):
             uploaded_text_blobs.append(p["text"])
     uploaded_text_all = "\n".join(uploaded_text_blobs)
-
+    _has_pdf = any("(pdf," in s for s in files_seen)
+    _has_pdf_text = any("(pdf text extracted)" in s for s in files_seen)
     # === NEW: robust Clean Retail source regex flag (set early) ===
     clean_retail_rx = r"(NADA|J[.\s-]*D[.\s-]*\s*Power|Kell?ey\s+Blue\s+Book|Edmunds|Carfax|Cars\.com|Clean\s+Retail\s+Value)"
     _clean_retail_missing = not re.search(clean_retail_rx, uploaded_text_all or "", flags=re.IGNORECASE)
@@ -826,8 +827,14 @@ async def vision_review(
 
     # === NEW: Append clean-retail message if missing ===
     if _clean_retail_missing:
-        result["summary_markdown"] = (result.get("summary_markdown","") +
-            "\n- Clean retail value printout: Not Evidenced (NADA/J.D. Power/KBB/etc. required on all files).")
+        if _has_pdf and not _has_pdf_text:
+            # Pages appear scanned; don’t penalize — mark as inconclusive instead of Not Evidenced
+            result["summary_markdown"] = (result.get("summary_markdown","") +
+                "\n- Clean retail value printout: Inconclusive in extracted text (PDF appears scanned). "
+                "If present on image pages (e.g., NADA/J.D. Power/KBB), no deduction; upload value printout or enable OCR.")
+        else:
+            result["summary_markdown"] = (result.get("summary_markdown","") +
+                "\n- Clean retail value printout: Not Evidenced (NADA/J.D. Power/KBB/etc. required on all files).")
 
     # --- Stronger Score↔Rationale synchronization guard (existing behavior retained) ---
     try:
