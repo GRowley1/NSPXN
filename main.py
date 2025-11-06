@@ -1019,12 +1019,29 @@ async def vision_review(
         if supp_detected:
             mc("Supplement Status: Supplement Estimate detected in documentation")
 
-        # --- Total Loss echo (guarded by explicit text or POI-15 trigger) ---
-        tl_positive = bool(re.search(r"\bTotal\s+Loss\b", smark, flags=re.IGNORECASE))
-        tl_negation = bool(re.search(r"\bnot\s+a?\s*total\s+loss\b", smark, flags=re.IGNORECASE))
-        final_total_loss_flag = (poi15_hit) or (tl_positive and not tl_negation)
-        if final_total_loss_flag:
+        # --- Total Loss echo (documents-only; no narrative trigger) ---
+        # Match ONLY if the uploaded estimate text itself declares it,
+        # or if the exact POI-15 Total Loss phrase appears.
+        explicit_tl_hit = False
+        try:
+            txt = (uploaded_text_all or "")
+            # Exact POI-15 Total Loss phrase (allow a little punctuation/space drift)
+            poi15 = re.search(
+                r"(?is)\bpoint\s*of\s*impact[^a-z0-9]{0,10}15[^a-z0-9]{0,20}total\s*loss\b",
+                txt
+            )   
+       # Direct “Estimate Type: Total Loss” style declaration in documents
+            doc_tl = re.search(
+                r"(?i)\b(estimate\s*type|type\s*of\s*loss)\s*:\s*total\s*loss\b",
+                txt
+            )
+            explicit_tl_hit = bool(poi15 or doc_tl)
+        except Exception:
+            explicit_tl_hit = False
+
+        if explicit_tl_hit:
             mc("Estimate Type: Total Loss (explicit in documents)")
+
 
         mc(f"Claim #: {result['claim_number']}")
         mc(f"VIN (from estimate/photos): {result['vin']}")
