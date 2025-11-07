@@ -1096,7 +1096,16 @@ async def vision_review(
                 f"{result['conclusion'] or 'N/A'}\n"
             )
         else:
-            tl_line = "Estimate Type: Total Loss (explicit in documents)\n" if final_total_loss_flag else ""
+            # Re-evaluate TL for email from uploaded docs only (no narrative)
+            try:
+                _txt_email = uploaded_text_all or ""
+                _poi15_email = re.search(r"(?is)\bpoint\s*of\s*impact[^a-z0-9]{0,10}15[^a-z0-9]{0,20}total\s*loss\b", _txt_email)
+                _doc_tl_email = re.search(r"(?i)\b(estimate\s*type|type\s*of\s*loss)\s*:\s*total\s*loss\b", _txt_email)
+                _explicit_tl_email = bool(_poi15_email or _doc_tl_email)
+            except Exception:
+                _explicit_tl_email = False
+
+            tl_line = "Estimate Type: Total Loss (explicit in documents)\n" if _explicit_tl_email else ""
             supp_line = "Supplement Status: Supplement Estimate detected in documentation\n" if supp_detected else ""
             subj = f"AI-4-IA Review: {result['claim_number'] or file_number}"
             body = (
