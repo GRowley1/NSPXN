@@ -134,6 +134,7 @@ DETAIL_TEMPLATES = {
         "Close with compliance to any provided client rules and a clear final recommendation (Repairable vs. Total Loss). "
         "Do not declare Repairable/Total Loss unless the estimate itself explicitly marks 'Total Loss' or an ACV comparison is provided. "
         "If the shop info is listed under Repair Facility, add only the shop name to the Detailed Audit Report narrative. "
+        "Printout showing the Clean Retail Value of the unit may include NADA, J.D. Power, Kelly Blue Book, Edmunds, Carfax, or Cars.com. "
         "Minimum 10–14 sentences (one continuous narrative, not bullets).\n\n"
         "## Photo-by-Photo Damage Ledger\n"
         "| Photo # | View/Angle | Panels/Parts Visible | Condition (dent/crease/scrape/misalignment) | Identifiers (VIN/odo/plate/reg) | Legibility |\n"
