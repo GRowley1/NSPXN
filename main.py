@@ -133,6 +133,7 @@ DETAIL_TEMPLATES = {
         "tax/markup accuracy, and overall estimate integrity. Cite photos and estimate lines (e.g., 'Photo 3', 'p2/L14'). "
         "Close with compliance to any provided client rules and a clear final recommendation (Repairable vs. Total Loss). "
         "Do not declare Repairable/Total Loss unless the estimate itself explicitly marks 'Total Loss' or an ACV comparison is provided. "
+        "If the shop info is listed under Repair Facility, add only the shop name to the narrative. "
         "Minimum 10–14 sentences (one continuous narrative, not bullets).\n\n"
         "## Photo-by-Photo Damage Ledger\n"
         "| Photo # | View/Angle | Panels/Parts Visible | Condition (dent/crease/scrape/misalignment) | Identifiers (VIN/odo/plate/reg) | Legibility |\n"
