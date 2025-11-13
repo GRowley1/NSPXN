@@ -712,7 +712,7 @@ async def vision_review(
     if _clean_retail_present:
         flags.append(
             "- Clean Retail Value printout is present (e.g., J.D. Power / NADA / KBB / Edmunds / Carfax / Cars.com). "
-            "Do not mark it 'Not Evidenced' or missing."
+            "Treat this requirement as satisfied; do NOT mark it 'Not Evidenced' or 'missing'."
         )
     if _advisor_present:
         flags.append(
@@ -929,6 +929,36 @@ async def vision_review(
                     result["summary_markdown"] = (sm + f"\n\nCompliance Score: {result['compliance_score']}").strip()
     except Exception:
         pass
+    # --- Clean Retail deterministic override ---
+    # If we have clear evidence of a Clean Retail printout (NADA / J.D. Power / KBB / etc.),
+    # NEVER allow the narrative to say "Clean retail value printout: Not Evidenced".
+    if _clean_retail_present:
+        try:
+            sm = result.get("summary_markdown") or ""
+            # Generic pattern: flip any "Not Evidenced" phrasing on the Clean Retail line
+            sm_fixed = re.sub(
+                r"(?i)(Clean\s+retail\s+value[^:\n]*:\s*)(Not\s+Evidenced[^.\n]*)",
+                r"\1Evidenced (Clean Retail printout present via NADA/J.D. Power/KBB/Edmunds/Carfax/Cars.com)",
+                sm,
+            )
+            # Also patch the specific long phrase you've been seeing
+            sm_fixed = sm_fixed.replace(
+                "Clean retail value printout: Not Evidenced (NADA/J.D. Power/KBB/etc. required on all files).",
+                "Clean retail value printout: Evidenced (Clean Retail printout present via NADA/J.D. Power/KBB/etc.).",
+            )
+            result["summary_markdown"] = sm_fixed
+
+            # Optional: if summary_brief happens to mention this, clean it too
+            sb = result.get("summary_brief") or ""
+            sb_fixed = re.sub(
+                r"(?i)Clean\s+retail\s+value[^.]*Not Evidenced[^.]*",
+                "Clean Retail value printout present and compliant.",
+                sb,
+            )
+            result["summary_brief"] = sb_fixed
+        except Exception:
+            # Fail-open: if anything goes wrong here, don't block the response.
+            pass
 
     # Non-empty Fraud fallback (prevents 'N/A' in output/PDF)
     if not result["fraud_markdown"] or result["fraud_markdown"].strip().upper() in {"", "N/A"}:
