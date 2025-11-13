@@ -133,7 +133,7 @@ DETAIL_TEMPLATES = {
         "tax/markup accuracy, and overall estimate integrity. Cite photos and estimate lines (e.g., 'Photo 3', 'p2/L14'). "
         "Close with compliance to any provided client rules and a clear final recommendation (Repairable vs. Total Loss). "
         "Do not declare Repairable/Total Loss unless the estimate itself explicitly marks 'Total Loss' or an ACV comparison is provided. "
-        "If the shop info is listed under Repair Facility, add only the shop name to the narrative. "
+        "If the shop info is listed under Repair Facility, add only the shop name to the Detailed Audit Report narrative. "
         "Minimum 10–14 sentences (one continuous narrative, not bullets).\n\n"
         "## Photo-by-Photo Damage Ledger\n"
         "| Photo # | View/Angle | Panels/Parts Visible | Condition (dent/crease/scrape/misalignment) | Identifiers (VIN/odo/plate/reg) | Legibility |\n"
@@ -229,7 +229,7 @@ STATIC_AUDIT_QUESTIONS = [
 # --- Identifiers Verification Protocol (prompt-only; no new logic) ---
 IDENTIFIERS_VERIFICATION_PROTOCOL = (
     "\n\nIDENTIFIERS VERIFICATION PROTOCOL (must follow):"
-    "\n1) Search the photos for: windshield VIN plate, driver-door VIN label, odometer cluster."
+    "\n1) Search the photos for: windshield VIN plate, driver-door VIN label or VIN sticker, odometer cluster."
     "\n2) Transcribe the VIN exactly as visible and cite Photo # for EACH location you find."
     "\n3) If multiple VINs, compare them to each other and to the estimate VIN; explicitly state: MATCH / MISMATCH."
     "\n4) Transcribe the odometer reading exactly as shown and cite Photo #."
