@@ -712,7 +712,7 @@ async def vision_review(
     if _clean_retail_present:
         flags.append(
             "- Clean Retail Value printout is present (e.g., J.D. Power / NADA / KBB / Edmunds / Carfax / Cars.com). "
-            "Do not mark it 'Not Evidenced'."
+            "Do not mark it 'Not Evidenced' or missing."
         )
     if _advisor_present:
         flags.append(
