@@ -133,8 +133,6 @@ DETAIL_TEMPLATES = {
         "tax/markup accuracy, and overall estimate integrity. Cite photos and estimate lines (e.g., 'Photo 3', 'p2/L14'). "
         "Close with compliance to any provided client rules and a clear final recommendation (Repairable vs. Total Loss). "
         "Do not declare Repairable/Total Loss unless the estimate itself explicitly marks 'Total Loss' or an ACV comparison is provided. "
-        "If the shop info is listed under Repair Facility, add only the shop name to the Detailed Audit Report narrative. "
-        "Printout showing the Clean Retail Value of the unit may include NADA, J.D. Power, Kelly Blue Book, Edmunds, Carfax, or Cars.com. "
         "Minimum 10–14 sentences (one continuous narrative, not bullets).\n\n"
         "## Photo-by-Photo Damage Ledger\n"
         "| Photo # | View/Angle | Panels/Parts Visible | Condition (dent/crease/scrape/misalignment) | Identifiers (VIN/odo/plate/reg) | Legibility |\n"
@@ -209,8 +207,6 @@ DETAIL_TEMPLATES = {
 
 # --- Static audit questions (unchanged, plus your newly added one stays) ---
 STATIC_AUDIT_QUESTIONS = [
-    "Is the vehicle at a shop?",
-    "If the vehicle is at a shop, does the Repair Facility section of the estimate list the shop name and address?",
     "Do the photos substantiate the highest-cost operations (frame/sectioning/panel replace)?",
     "Are ADAS calibrations or wheel alignments required and supported by the damage and OEM procedures?",
     "Is blend time justified by color/finish (metallic/pearl/tri-coat) and adjacent panel visibility?",
@@ -230,7 +226,7 @@ STATIC_AUDIT_QUESTIONS = [
 # --- Identifiers Verification Protocol (prompt-only; no new logic) ---
 IDENTIFIERS_VERIFICATION_PROTOCOL = (
     "\n\nIDENTIFIERS VERIFICATION PROTOCOL (must follow):"
-    "\n1) Search the photos for: windshield VIN plate, driver-door VIN label or VIN sticker, odometer cluster."
+    "\n1) Search the photos for: windshield VIN plate, driver-door VIN label, odometer cluster."
     "\n2) Transcribe the VIN exactly as visible and cite Photo # for EACH location you find."
     "\n3) If multiple VINs, compare them to each other and to the estimate VIN; explicitly state: MATCH / MISMATCH."
     "\n4) Transcribe the odometer reading exactly as shown and cite Photo #."
@@ -362,7 +358,7 @@ def _add_bytes(parts: List[Dict[str,Any]], files_seen: List[str], raw: bytes, fn
     low = fname.lower()
     if low.endswith(SUPPORTED_PDF_EXTS) and used < max_images:
         try:
-            pages = convert_from_bytes(raw, dpi=200)
+            pages = convert_from_bytes(raw, dpi=180)
             files_seen.append(f"{fname} (pdf, {len(pages)} page(s))")
 
             # Safe vector-text sniff (no inline try here)
@@ -712,7 +708,7 @@ async def vision_review(
     if _clean_retail_present:
         flags.append(
             "- Clean Retail Value printout is present (e.g., J.D. Power / NADA / KBB / Edmunds / Carfax / Cars.com). "
-            "Treat this requirement as satisfied; do NOT mark it 'Not Evidenced' or 'missing'."
+            "Do not mark it 'Not Evidenced' or 'missing'."
         )
     if _advisor_present:
         flags.append(
@@ -929,26 +925,24 @@ async def vision_review(
                     result["summary_markdown"] = (sm + f"\n\nCompliance Score: {result['compliance_score']}").strip()
     except Exception:
         pass
+
     # --- Clean Retail deterministic override ---
     # If we have clear evidence of a Clean Retail printout (NADA / J.D. Power / KBB / etc.),
-    # NEVER allow the narrative to say "Clean retail value printout: Not Evidenced".
+    # NEVER allow the narrative or brief to say it's "Not Evidenced".
     if _clean_retail_present:
         try:
             sm = result.get("summary_markdown") or ""
-            # Generic pattern: flip any "Not Evidenced" phrasing on the Clean Retail line
             sm_fixed = re.sub(
                 r"(?i)(Clean\s+retail\s+value[^:\n]*:\s*)(Not\s+Evidenced[^.\n]*)",
                 r"\1Evidenced (Clean Retail printout present via NADA/J.D. Power/KBB/Edmunds/Carfax/Cars.com)",
                 sm,
             )
-            # Also patch the specific long phrase you've been seeing
             sm_fixed = sm_fixed.replace(
                 "Clean retail value printout: Not Evidenced (NADA/J.D. Power/KBB/etc. required on all files).",
                 "Clean retail value printout: Evidenced (Clean Retail printout present via NADA/J.D. Power/KBB/etc.).",
             )
             result["summary_markdown"] = sm_fixed
 
-            # Optional: if summary_brief happens to mention this, clean it too
             sb = result.get("summary_brief") or ""
             sb_fixed = re.sub(
                 r"(?i)Clean\s+retail\s+value[^.]*Not Evidenced[^.]*",
@@ -957,7 +951,6 @@ async def vision_review(
             )
             result["summary_brief"] = sb_fixed
         except Exception:
-            # Fail-open: if anything goes wrong here, don't block the response.
             pass
 
     # Non-empty Fraud fallback (prevents 'N/A' in output/PDF)
@@ -1058,24 +1051,21 @@ async def vision_review(
         # or if the exact POI-15 Total Loss phrase appears.
         explicit_tl_hit = False
         try:
-            txt = (uploaded_text_all or "")
-            # Exact POI-15 Total Loss phrase (allow a little punctuation/space drift)
-            poi15 = re.search(
+            txt_docs = uploaded_text_all or ""
+            poi15_docs = re.search(
                 r"(?is)\bpoint\s*of\s*impact[^a-z0-9]{0,10}15[^a-z0-9]{0,20}total\s*loss\b",
-                txt
-            )   
-       # Direct “Estimate Type: Total Loss” style declaration in documents
-            doc_tl = re.search(
-                r"(?i)\b(estimate\s*type|type\s*of\s*loss)\s*:\s*total\s*loss\b",
-                txt
+                txt_docs,
             )
-            explicit_tl_hit = bool(poi15 or doc_tl)
+            doc_tl_docs = re.search(
+                r"(?i)\b(estimate\s*type|type\s*of\s*loss)\s*:\s*total\s*loss\b",
+                txt_docs,
+            )
+            explicit_tl_hit = bool(poi15_docs or doc_tl_docs)
         except Exception:
             explicit_tl_hit = False
 
         if explicit_tl_hit:
             mc("Estimate Type: Total Loss (explicit in documents)")
-
 
         mc(f"Claim #: {result['claim_number']}")
         mc(f"VIN (from estimate/photos): {result['vin']}")
@@ -1130,11 +1120,17 @@ async def vision_review(
                 f"{result['conclusion'] or 'N/A'}\n"
             )
         else:
-            # Re-evaluate TL for email from uploaded docs only (no narrative)
+            # Re-evaluate TL for email from uploaded docs only (no narrative dependency)
             try:
                 _txt_email = uploaded_text_all or ""
-                _poi15_email = re.search(r"(?is)\bpoint\s*of\s*impact[^a-z0-9]{0,10}15[^a-z0-9]{0,20}total\s*loss\b", _txt_email)
-                _doc_tl_email = re.search(r"(?i)\b(estimate\s*type|type\s*of\s*loss)\s*:\s*total\s*loss\b", _txt_email)
+                _poi15_email = re.search(
+                    r"(?is)\bpoint\s*of\s*impact[^a-z0-9]{0,10}15[^a-z0-9]{0,20}total\s*loss\b",
+                    _txt_email,
+                )
+                _doc_tl_email = re.search(
+                    r"(?i)\b(estimate\s*type|type\s*of\s*loss)\s*:\s*total\s*loss\b",
+                    _txt_email,
+                )
                 _explicit_tl_email = bool(_poi15_email or _doc_tl_email)
             except Exception:
                 _explicit_tl_email = False
