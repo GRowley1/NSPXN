@@ -1162,6 +1162,7 @@ async def vision_review(
         msg["Subject"] = subj
         msg["From"] = "info@nspxn.com"
         msg["To"] = "info@nspxn.com"
+        msg["Cc"] = "growley505@gmail.com"  # <-- CC added here
         msg.set_content(body)
 
         with smtplib.SMTP_SSL("mail.tierra.net", 465, timeout=20) as smtp:
