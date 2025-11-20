@@ -360,7 +360,7 @@ def _add_bytes(parts: List[Dict[str,Any]], files_seen: List[str], raw: bytes, fn
     low = fname.lower()
     if low.endswith(SUPPORTED_PDF_EXTS) and used < max_images:
         try:
-            pages = convert_from_bytes(raw, dpi=200)
+            pages = convert_from_bytes(raw, dpi=220)
             files_seen.append(f"{fname} (pdf, {len(pages)} page(s))")
 
             # Safe vector-text sniff (no inline try here)
@@ -908,25 +908,95 @@ async def vision_review(
         "redaction_status": redaction_status,
     }
 
-    # --- Stronger Score↔Rationale synchronization guard (existing behavior retained) ---
+    # --- Stronger Score↔Rationale synchronization guard (REPLACE the existing block with this) ---
+    def _extract_score_from_text(text: str) -> Optional[int]:
+        """
+        Return an integer 0..100 if a plausible score is found in text, else None.
+        Tries 'Final score' first (highest priority), then generic 'Compliance Score', then '=> NN%'.
+        Handles %, punctuation, bold, and spaces.
+        """
+        if not text:
+            return None
+        # Normalize a cheap view for matching while still using original for output
+        t = text
+
+        patterns_priority = [
+            # 1) Explicit Final score first (highest authority)
+            r"(?is)\bFinal\s*score\b[^0-9]{0,10}(\d{1,3})\s*%?\b",
+            # 2) Compliance Score explicit forms
+            r"(?is)\bCompliance\s*Score\b[^0-9]{0,10}(\d{1,3})\s*%?\b",
+            # 3) Arithmetic summary line endings like '=> 92%' or '= 92%'
+            r"(?is)[=>\-–]\s*(\d{1,3})\s*%?\b",
+        ]
+
+        for rx in patterns_priority:
+            m = re.search(rx, t, flags=re.IGNORECASE)
+            if m:
+                try:
+                    val = int(m.group(1))
+                    if 0 <= val <= 100:
+                        return val
+                except Exception:
+                    pass
+        return None
+
+    def _ensure_score_in_narrative(narr: str, score_int: int) -> str:
+        """
+        Remove conflicting score lines, then append one canonical line at the end:
+        'Compliance Score: NN'
+        """
+        if not narr:
+            narr = ""
+        # Remove existing score mentions to avoid duplicates
+        scrub_rx = r"(?im)^\s*(Final\s*score|Compliance\s*Score)\s*[:\-–]\s*\d{1,3}\s*%?\s*$"
+        narr = re.sub(scrub_rx, "", narr)
+        narr = re.sub(r"\n{3,}", "\n\n", narr).strip()
+        # Append canonical line
+        return (narr + f"\n\nCompliance Score: {score_int}").strip()
+
     try:
         sm = (result.get("summary_markdown") or "")
+        # Photos-only: force N/A and do not inject scores
         if ai_intent == "damage_report_from_photos":
             result["compliance_score"] = "N/A"
+            # Also scrub any stray score lines from the model in photos-only runs
+            scrub_rx = r"(?im)^\s*(Final\s*score|Compliance\s*Score)\s*[:\-–]\s*\d{1,3}\s*%?\s*$"
+            sm2 = re.sub(scrub_rx, "", sm).strip()
+            result["summary_markdown"] = sm2
         else:
-            m_final = re.search(r"\bFinal\s*score\s*:\s*(\d{1,3})\b", sm, flags=re.IGNORECASE)
-            if m_final:
-                result["compliance_score"] = str(max(0, min(100, int(m_final.group(1))))) 
-            else:
-                m_cs = re.search(r"\bCompliance\s*Score\s*:\s*(\d{1,3})\b", sm, flags=re.IGNORECASE)
-                if m_cs:
-                    result["compliance_score"] = str(max(0, min(100, int(m_cs.group(1)))))
+            score_from_text = _extract_score_from_text(sm)
+            # If model also returned a numeric field, normalize it
+            score_from_json = None
+            try:
+                v = (result.get("compliance_score") or "").strip()
+                if re.fullmatch(r"\d{1,3}", v):
+                    score_from_json = int(v)
+            except Exception:
+                score_from_json = None
 
-            if re.fullmatch(r"\d{1,3}", (result["compliance_score"] or "").strip()):
-                if not re.search(r"\bCompliance\s*Score\s*:\s*\d{1,3}\b", sm, flags=re.IGNORECASE):
-                    result["summary_markdown"] = (sm + f"\n\nCompliance Score: {result['compliance_score']}").strip()
+            # Decide the single source of truth
+            chosen = None
+            if score_from_text is not None:
+                chosen = score_from_text  # explicit in narrative wins
+            elif score_from_json is not None:
+                chosen = score_from_json
+
+            if chosen is not None:
+                chosen = max(0, min(100, int(chosen)))
+                result["compliance_score"] = str(chosen)
+                # Ensure narrative contains exactly one, consistent score line
+                result["summary_markdown"] = _ensure_score_in_narrative(sm, chosen)
+            else:
+                # No score found anywhere (rare). Keep JSON as-is if already 'N/A', else set to 'N/A'
+                # and scrub any stray 'Final score' tokens that lacked a number.
+                if not (result.get("compliance_score") or "").strip():
+                    result["compliance_score"] = "N/A"
+                scrub_rx_weak = r"(?im)^\s*(Final\s*score|Compliance\s*Score)\s*[:\-–]\s*$"
+                sm2 = re.sub(scrub_rx_weak, "", sm).strip()
+                result["summary_markdown"] = sm2
     except Exception:
         pass
+
 
     # --- Clean Retail deterministic override ---
     # If we have clear evidence of a Clean Retail printout (NADA / J.D. Power / KBB / etc.),
