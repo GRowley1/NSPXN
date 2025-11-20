@@ -759,24 +759,18 @@ async def vision_review(
 
     # Call GPT and parse JSON (JSON hardened)
     try:
-        rsp = client.chat_completions.create(  # type: ignore[attr-defined]
+        rsp = client.chat.completions.create(  # FIXED
             model=MODEL,
             messages=[{"role":"system","content": SYSTEM},
                       {"role":"user","content": parts_payload}],
             max_tokens=max_tokens,
             temperature=0,
             response_format={"type":"json_object"}
-        )
-    except AttributeError:
-        # compatible with newer SDKs
-        rsp = client.chat.completions.create(
-            model=MODEL,
-            messages=[{"role":"system","content": SYSTEM},
-                      {"role":"user","content": parts_payload}],
-            max_tokens=max_tokens,
-            temperature=0,
-            response_format={"type":"json_object"}
-        )
+    )
+except Exception as e:
+    log.error(f"OpenAI API call failed: {e}")
+    return JSONResponse(status_code=500, content={"error": f"OpenAI API error: {str(e)}"})
+    )
 
     # --- Hardened JSON parse helper
     def _try_parse_json(raw_text: str):
@@ -858,14 +852,6 @@ async def vision_review(
                     temperature=0,
                     response_format={"type":"json_object"}
                 )
-            except AttributeError:
-                fix_rsp = client.chat.completions.create(
-                    model=MODEL,
-                    messages=fix_prompt,
-                    max_tokens=max_tokens,
-                    temperature=0,
-                    response_format={"type":"json_object"}
-                )
             fixed = (fix_rsp.choices[0].message.content or "")
             data = _try_parse_json(fixed)
         except Exception as e:
@@ -914,19 +900,31 @@ async def vision_review(
         if ai_intent == "damage_report_from_photos":
             result["compliance_score"] = "N/A"
         else:
-            m_final = re.search(r"\bFinal\s*score\s*:\s*(\d{1,3})\b", sm, flags=re.IGNORECASE)
+            # FIXED: Look for compliance score in rationale section arithmetic FIRST
+            rationale_match = re.search(
+                r"Final\s*Score\s*:\s*100\s*-\s*([\d\s\-+]+)\s*=\s*(\d{1,3})",
+                sm,
+                flags=re.IGNORECASE
+        )
+        if rationale_match:
+            calculated_score = int(rationale_match.group(2))
+            result["compliance_score"] = str(max(0, min(100, calculated_score)))
+        else:
+            # Fallback to final score or compliance score mentions
+            m_final = re.search(r"\bFinal\s*[Ss]core\s*:\s*(\d{1,3})\b", sm, flags=re.IGNORECASE)
             if m_final:
-                result["compliance_score"] = str(max(0, min(100, int(m_final.group(1))))) 
+                result["compliance_score"] = str(max(0, min(100, int(m_final.group(1)))))
             else:
                 m_cs = re.search(r"\bCompliance\s*Score\s*:\s*(\d{1,3})\b", sm, flags=re.IGNORECASE)
                 if m_cs:
                     result["compliance_score"] = str(max(0, min(100, int(m_cs.group(1)))))
 
-            if re.fullmatch(r"\d{1,3}", (result["compliance_score"] or "").strip()):
-                if not re.search(r"\bCompliance\s*Score\s*:\s*\d{1,3}\b", sm, flags=re.IGNORECASE):
-                    result["summary_markdown"] = (sm + f"\n\nCompliance Score: {result['compliance_score']}").strip()
-    except Exception:
-        pass
+        # Ensure score appears at end if numeric
+        if re.fullmatch(r"\d{1,3}", (result["compliance_score"] or "").strip()):
+            if not re.search(r"\bCompliance\s*Score\s*:\s*\d{1,3}\b", sm, flags=re.IGNORECASE):
+                result["summary_markdown"] = (sm + f"\n\nCompliance Score: {result['compliance_score']}").strip()
+except Exception as e:
+    log.warning(f"Score synchronization error: {e}")
 
     # --- Clean Retail deterministic override ---
     # If we have clear evidence of a Clean Retail printout (NADA / J.D. Power / KBB / etc.),
