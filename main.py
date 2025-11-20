@@ -759,7 +759,7 @@ async def vision_review(
 
     # Call GPT and parse JSON (JSON hardened)
     try:
-        rsp = client.chat.completions.create(  # FIXED
+        rsp = client.chat.completions.create(  # type: ignore[attr-defined]
             model=MODEL,
             messages=[{"role":"system","content": SYSTEM},
                       {"role":"user","content": parts_payload}],
