@@ -299,6 +299,7 @@ SYSTEM_BASE += (
     "Avoid placeholder rows/columns; do not invent data. "
     "When client_rules text is provided, also include a section titled '## Client Guidelines Comparison' with 3–8 concise bullets quoting the relevant rule fragment and citing evidence (p#/L#, Photo #); "
     "weave any material rule alignment/misalignment into the Detailed Audit Report narrative."
+    "When a valuation/clean retail printout exists but the header doesn’t match the estimate’s VIN/year/trim/mileage, label it “Present — mismatched (detail the differences)” and request a corrected printout; never mark it Missing/Not Evidenced. "
 )
 SYSTEM_BASE += (
     " Your 'summary_markdown' MUST include a top-level section named '## Detailed Audit Report' containing a cohesive narrative of at least 10–14 sentences (not bullets). "
@@ -710,7 +711,8 @@ async def vision_review(
     if _clean_retail_present:
         flags.append(
             "- Clean Retail Value printout is present (e.g., J.D. Power / NADA / KBB / Edmunds / Carfax / Cars.com). "
-            "Do not mark it 'Not Evidenced' or 'missing'."
+            "If the year/trim/mileage do not match the estimate/VIN, state 'Present — mismatched' and specify the differences. "
+            "Do not mark it 'Not Evidenced'."
         )
     if _advisor_present:
         flags.append(
