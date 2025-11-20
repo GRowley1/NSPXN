@@ -228,7 +228,7 @@ STATIC_AUDIT_QUESTIONS = [
 # --- Identifiers Verification Protocol (prompt-only; no new logic) ---
 IDENTIFIERS_VERIFICATION_PROTOCOL = (
     "\n\nIDENTIFIERS VERIFICATION PROTOCOL (must follow):"
-    "\n1) Search the photos for: windshield VIN plate, driver-door VIN label, odometer cluster."
+    "\n1) Search the photos for: windshield VIN plate, driver-door VIN label, driver-door VIN label Production date, driver-door VIN label Date of Mfr, odometer cluster."
     "\n2) Transcribe the VIN exactly as visible and cite Photo # for EACH location you find."
     "\n3) If multiple VINs, compare them to each other and to the estimate VIN; explicitly state: MATCH / MISMATCH."
     "\n4) Transcribe the odometer reading exactly as shown and cite Photo #."
