@@ -753,9 +753,9 @@ async def vision_review(
 
     # Token limits
     MAX_TOKENS_BY_INTENT = {
-        "comprehensive": 1500,
-        "guidelines_only": 1000,
-        "damage_report_from_photos": 1100
+        "comprehensive": 2600,
+        "guidelines_only": 1800,
+        "damage_report_from_photos": 1600
     }
     max_tokens = MAX_TOKENS_BY_INTENT.get(ai_intent, 1000)
 
@@ -856,7 +856,7 @@ async def vision_review(
                 fix_rsp = client.chat_completions.create(  # type: ignore[attr-defined]
                     model=MODEL,
                     messages=fix_prompt,
-                    max_tokens=max_tokens,
+                    max_tokens=800,
                     temperature=0,
                     response_format={"type":"json_object"}
                 )
