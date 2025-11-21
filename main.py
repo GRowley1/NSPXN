@@ -331,7 +331,7 @@ def _maybe_extract_pdf_text(raw: bytes, fname: str, parts: List[Dict[str, Any]],
     """Best-effort embedded text extraction for vector PDFs. Safe no-op if not available."""
     try:
         from pdfminer.high_level import extract_text as _pdfminer_extract_text
-        t = (_pdfminer_extract_text(io.BytesIO(raw)) or "")[:12000]
+        t = (_pdfminer_extract_text(io.BytesIO(raw)) or "")[:6000]
         if t.strip():
             parts.insert(0, {"type": "text", "text": t})
             files_seen.append(f"{fname} (pdf text extracted)")
@@ -361,7 +361,7 @@ def _add_bytes(parts: List[Dict[str,Any]], files_seen: List[str], raw: bytes, fn
     low = fname.lower()
     if low.endswith(SUPPORTED_PDF_EXTS) and used < max_images:
         try:
-            pages = convert_from_bytes(raw, dpi=240)
+            pages = convert_from_bytes(raw, dpi=180)
             files_seen.append(f"{fname} (pdf, {len(pages)} page(s))")
 
             # Safe vector-text sniff (no inline try here)
@@ -385,7 +385,7 @@ def _add_bytes(parts: List[Dict[str,Any]], files_seen: List[str], raw: bytes, fn
                         ocr_collected.append(txt)
 
             if ocr_collected:
-                parts.insert(0, {"type": "text", "text": ("\n".join(ocr_collected))[:12000]})
+                parts.insert(0, {"type": "text", "text": ("\n".join(ocr_collected))[:6000]})
                 files_seen.append(f"{fname} (ocr text extracted)")
 
         except Exception as e:
@@ -844,6 +844,7 @@ async def vision_review(
                 },
                 {"role":"user","content":
                     "Convert the following text into a valid JSON object. "
+                    "Return ONLY a valid single JSON object. No markdown, no prose, no arrays, no code fences. If a value is unknown, set it to 'N/A'."
                     "Use exactly these keys (all required): "
                     "['file_number','request_type','claim_number','vin','vin_verification','vehicle',"
                     "'odometer_estimate_only','compliance_score','summary_brief','summary_markdown',"
