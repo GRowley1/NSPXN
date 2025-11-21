@@ -885,7 +885,7 @@ async def vision_review(
             "Model output could not be parsed into JSON on this run. Please resubmit."
         )
         skeleton["fraud_markdown"] = "No material inconsistencies found."
-        return skeleton
+        data = skeleton
 
     def _get(k):
         v = data.get(k)
