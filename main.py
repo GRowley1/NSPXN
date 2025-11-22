@@ -368,7 +368,7 @@ def _add_bytes(parts: List[Dict[str,Any]], files_seen: List[str], raw: bytes, fn
             _maybe_extract_pdf_text(raw, fname, parts, files_seen)
 
             # Limit OCR to a few pages for speed
-            OCR_PAGE_CAP = 50
+            OCR_PAGE_CAP = 45
             ocr_collected = []
 
             for idx, im in enumerate(pages[:max_images - used]):
@@ -593,7 +593,11 @@ async def vision_review(
         if isinstance(p, dict) and p.get("type") == "text" and isinstance(p.get("text"), str):
             uploaded_text_blobs.append(p["text"])
     uploaded_text_all = "\n".join(uploaded_text_blobs)
-
+    # keep prompt within safe bounds to avoid truncated JSON
+    TOTAL_TEXT_CAP = 18000
+    if len(uploaded_text_all) > TOTAL_TEXT_CAP:
+        uploaded_text_all = uploaded_text_all[:TOTAL_TEXT_CAP]
+        
     # --- Robust detectors (CLEAN RETAIL + ADVISOR) ---
     clean_retail_rx = (
         r"(?i)\b("
@@ -842,15 +846,12 @@ async def vision_review(
                 {"role":"system","content":
                     "You are a formatter. Return ONLY a strict JSON object. No prose. No markdown. No code fences."
                 },
-                {"role":"user","content":
-                    "Convert the following text into a valid JSON object. "
-                    "Return ONLY a valid single JSON object. No markdown, no prose, no arrays, no code fences. If a value is unknown, set it to 'N/A'."
-                    "Use exactly these keys (all required): "
-                    "['file_number','request_type','claim_number','vin','vin_verification','vehicle',"
-                    "'odometer_estimate_only','compliance_score','summary_brief','summary_markdown',"
-                    "'fraud_markdown','primary_impact','secondary_impact','estimated_costs_markdown','conclusion'] "
-                    "Do not invent new keys. If a field is unavailable, use 'N/A'. "
-                    "Here is the text:\n\n" + raw
+                {"role":"system","content":
+                 "Return ONLY a valid single JSON object. No markdown, no prose, no arrays, no code fences. "
+                 "Use exactly these keys: ['file_number','request_type','claim_number','vin','vin_verification','vehicle',"
+                 "'odometer_estimate_only','compliance_score','summary_brief','summary_markdown','fraud_markdown',"
+                 "'primary_impact','secondary_impact','estimated_costs_markdown','conclusion']. "
+                 "If a value is unknown, set it to 'N/A'."
                 }
             ]
             try:
@@ -877,15 +878,15 @@ async def vision_review(
     if data is None:
         # Final fallback: return a minimal skeleton with N/A so the UI/PDF still render
         log.error(f"LLM failure or JSON parse error; first 500 chars:\n" + (raw or "")[:500])
-        skeleton = {k: "N/A" for k in KEYS}
-        skeleton["file_number"] = file_number
-        skeleton["request_type"] = req_label
-        skeleton["summary_brief"] = "N/A (model output could not be parsed; skeleton returned)."
-        skeleton["summary_markdown"] = (
+        data = {k: "N/A" for k in KEYS}
+        data["file_number"] = file_number
+        data["request_type"] = req_label
+        data["summary_brief"] = "N/A (model output could not be parsed; skeleton returned)."
+        data["summary_markdown"] = (
             "## Detailed Audit Report\n"
-            "Model output could not be parsed into JSON on this run. Please resubmit."
+            "Model output could not be parsed into JSON on this run. Proceeding with a minimal report so a PDF is produced."
         )
-        skeleton["fraud_markdown"] = "No material inconsistencies found."
+        data["fraud_markdown"] = "No material inconsistencies found."
         data = skeleton
 
     def _get(k):
