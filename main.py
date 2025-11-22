@@ -615,7 +615,14 @@ async def vision_review(
     # Detect paint materials / paint supplies presence in extracted text
     paint_mat_rx = r"(Paint\s+(Suppl(?:ies|y)|Materials)|Materials\s*Line)"
     _paint_materials_present = bool(re.search(paint_mat_rx, uploaded_text_all or "", flags=re.IGNORECASE))
+    
+    # --- VIN / Odometer photo presence (from extracted text & photo labels) ---
+    vin_photo_rx = r"(?i)\bDescription:\s*VIN\b|\bVIN(?:\s*#|:)?\s*[A-HJ-NPR-Z0-9]{17}\b"
+    odo_photo_rx = r"(?i)\bDescription:\s*Odometer\b|\bOdometer\b"
 
+    _vin_photo_present = bool(re.search(vin_photo_rx, uploaded_text_all or ""))
+    _odo_photo_present = bool(re.search(odo_photo_rx, uploaded_text_all or ""))
+    
     # Lock to 3 intents only
     if ai_intent not in ALLOWED_INTENTS:
         ai_intent = "comprehensive"
@@ -722,6 +729,16 @@ async def vision_review(
         flags.append(
             "- A refreshed copy of the Advisor Report is present in the documents. "
             "Do not state it is missing."
+        )
+    if _vin_photo_present:
+        flags.append(
+            "- A VIN label/photo is present in the photo set. Do not mark VIN as missing; "
+            "cite the specific Photo # and compare to the estimate VIN."
+        )
+    if _odo_photo_present:
+        flags.append(
+            "- An odometer photo is present. Do not mark the odometer as missing; transcribe the digits and cite the Photo #. "
+            "If glare/blur, use 'Present — not clearly legible' rather than 'Missing'."
         )
     if flags:
         prompt_text += "\n\nEVIDENCE FLAGS (must respect):\n" + "\n".join(flags)
@@ -1017,6 +1034,16 @@ async def vision_review(
             result["summary_brief"] = sb_fixed
         except Exception:
             pass
+    # --- Scrub false 'missing' bullets if VIN/Odo photos were detected ---
+    try:
+        sm = result.get("summary_markdown") or ""
+        if _vin_photo_present:
+        sm = re.sub(r"(?im)^\s*[-*]\s*Missing\s+door/?windshield\s+VIN\s+label\s+photo.*$", "", sm)
+        if _odo_photo_present:
+        sm = re.sub(r"(?im)^\s*[-*]\s*Missing\s+odometer\s+photo.*$", "", sm)
+        result["summary_markdown"] = re.sub(r"\n{3,}", "\n\n", sm).strip()
+    except Exception:
+        pass
 
     # Non-empty Fraud fallback (prevents 'N/A' in output/PDF)
     if not result["fraud_markdown"] or result["fraud_markdown"].strip().upper() in {"", "N/A"}:
