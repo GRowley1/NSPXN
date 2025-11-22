@@ -597,7 +597,22 @@ async def vision_review(
     TOTAL_TEXT_CAP = 18000
     if len(uploaded_text_all) > TOTAL_TEXT_CAP:
         uploaded_text_all = uploaded_text_all[:TOTAL_TEXT_CAP]
-        
+    # --- Supplement indicator from documents only ---
+    supp_rx = r"(?i)\b(Supplement(?:\s+(?:Summary|of\s+record|Estimate))?|S0[1-9]\b|Supp\.?\s*(?:Summary|of\s*record)?)"
+    _supp_in_docs = bool(re.search(supp_rx, uploaded_text_all or ""))
+
+    # Nudge the model to stay consistent with the documents
+    if _supp_in_docs:
+        flags.append(
+            "- A supplement indicator appears in the estimate documents (e.g., 'Supplement', 'Supplement Summary', 'S01'). "
+            "Treat this as a supplement and do not state 'not marked as a supplement'."
+        )
+    else:
+        flags.append(
+            "- No supplement indicator appears in the estimate documents. Do not state that a supplement exists unless "
+            "you can cite the exact location in the estimate text (p#/L#)."
+        )
+    
     # --- Robust detectors (CLEAN RETAIL + ADVISOR) ---
     clean_retail_rx = (
         r"(?i)\b("
@@ -1044,6 +1059,20 @@ async def vision_review(
         result["summary_markdown"] = re.sub(r"\n{3,}", "\n\n", sm).strip()
     except Exception:
         pass
+    # --- Keep narrative consistent with document-based supplement detection ---
+    try:
+        sm = result.get("summary_markdown") or ""
+        if _supp_in_docs:
+            # Remove lines that assert "not a supplement" or "no supplement summary"
+            sm = re.sub(r"(?im)^.*\bnot\s+marked\s+as\s+a\s+supplement\b.*\n?", "", sm)
+            sm = re.sub(r"(?im)^.*\bno\s+supplement\s+summary\s+is\s+present\b.*\n?", "", sm)
+        else:
+            # Remove lines that claim it IS a supplement when the docs don't show it
+            sm = re.sub(r"(?im)^.*\bsupplement\s+estimate\b.*\n?", "", sm)
+            sm = re.sub(r"(?im)^.*\bsupplement\s+summary\b.*\n?", "", sm)
+        result["summary_markdown"] = sm.strip()
+    except Exception:
+        pass
 
     # Non-empty Fraud fallback (prevents 'N/A' in output/PDF)
     if not result["fraud_markdown"] or result["fraud_markdown"].strip().upper() in {"", "N/A"}:
@@ -1134,7 +1163,7 @@ async def vision_review(
 
         # --- Supplement header echo (keyword from narrative) ---
         smark = result.get("summary_markdown","")
-        supp_detected = bool(re.search(r"\bSupplement\b", smark, flags=re.IGNORECASE))
+        supp_detected = _supp_in_docs
         if supp_detected:
             mc("Supplement Status: Supplement Estimate detected in documentation")
 
