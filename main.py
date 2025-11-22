@@ -1038,9 +1038,9 @@ async def vision_review(
     try:
         sm = result.get("summary_markdown") or ""
         if _vin_photo_present:
-        sm = re.sub(r"(?im)^\s*[-*]\s*Missing\s+door/?windshield\s+VIN\s+label\s+photo.*$", "", sm)
+            sm = re.sub(r"(?im)^\s*[-*]\s*Missing\s+door/?windshield\s+VIN\s+label\s+photo.*$", "", sm)
         if _odo_photo_present:
-        sm = re.sub(r"(?im)^\s*[-*]\s*Missing\s+odometer\s+photo.*$", "", sm)
+            sm = re.sub(r"(?im)^\s*[-*]\s*Missing\s+odometer\s+photo.*$", "", sm)
         result["summary_markdown"] = re.sub(r"\n{3,}", "\n\n", sm).strip()
     except Exception:
         pass
