@@ -410,7 +410,7 @@ def _add_bytes(parts: List[Dict[str,Any]], files_seen: List[str], raw: bytes, fn
         if im_ref is not None:
             txt = _maybe_ocr_image_text(im_ref)
             if txt:
-                parts.insert(0, {"type":"text", "text": txt[:12000]})
+                parts.insert(0, {"type":"text", "text": txt[:8000]})
                 files_seen.append(f"{fname} (ocr text extracted)")
     elif low.endswith(SUPPORTED_DOCX_EXTS):
         try:
@@ -418,7 +418,7 @@ def _add_bytes(parts: List[Dict[str,Any]], files_seen: List[str], raw: bytes, fn
         except Exception:
             text = ""
         if text.strip():
-            parts.insert(0, {"type":"text","text": text[:12000]})
+            parts.insert(0, {"type":"text","text": text[:8000]})
             files_seen.append(f"{fname} (docx text included)")
         else:
             files_seen.append(f"{fname} (docx, no readable text)")
@@ -757,11 +757,11 @@ async def vision_review(
 
     # Token limits
     MAX_TOKENS_BY_INTENT = {
-        "comprehensive": 2600,
-        "guidelines_only": 1800,
-        "damage_report_from_photos": 1600
+        "comprehensive": 3500,
+        "guidelines_only": 2400,
+        "damage_report_from_photos": 2200
     }
-    max_tokens = MAX_TOKENS_BY_INTENT.get(ai_intent, 1000)
+    max_tokens = MAX_TOKENS_BY_INTENT.get(ai_intent, 2400)
 
     # Call GPT and parse JSON (JSON hardened)
     try:
@@ -769,7 +769,7 @@ async def vision_review(
             model=MODEL,
             messages=[{"role":"system","content": SYSTEM},
                       {"role":"user","content": parts_payload}],
-            max_tokens=max_tokens,
+            max_completion_tokens=max_tokens,
             temperature=0,
             response_format={"type":"json_object"}
         )
@@ -779,7 +779,7 @@ async def vision_review(
             model=MODEL,
             messages=[{"role":"system","content": SYSTEM},
                       {"role":"user","content": parts_payload}],
-            max_tokens=max_tokens,
+            max_completion_tokens=max_tokens,
             temperature=0,
             response_format={"type":"json_object"}
         )
@@ -866,7 +866,7 @@ async def vision_review(
                 fix_rsp = client.chat.completions.create(
                     model=MODEL,
                     messages=fix_prompt,
-                    max_tokens=max_tokens,
+                    max_completion_tokens=max_tokens,
                     temperature=0,
                     response_format={"type":"json_object"}
                 )
