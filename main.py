@@ -302,6 +302,10 @@ SYSTEM_BASE += (
     "When a valuation/clean retail printout exists but the header doesn’t match the estimate’s VIN/year/trim/mileage, label it “Present — mismatched (detail the differences)” and request a corrected printout; never mark it Missing/Not Evidenced. "
 )
 SYSTEM_BASE += (
+    " Do not deduct for 'missing sublet details' when no sublet operations/invoices are present (Not Applicable), "
+    "and do not claim 'incomplete labor rate documentation' if any labor rates appear in the estimate header or totals (e.g., 'Body Labor $65/hr', 'Paint Materials $48/hr')."
+)
+SYSTEM_BASE += (
     " Your 'summary_markdown' MUST include a top-level section named '## Detailed Audit Report' containing a cohesive narrative of at least 10–14 sentences (not bullets). "
     "It must synthesize: impact zones, per-panel damages, repair vs. replace rationale, parts type (OEM/LKQ/Aftermarket), labor ops, refinish/overlap, rate/materials/sublet/tax handling, and estimate integrity. "
     "It must cite concrete evidence inline (e.g., p2/L14, Photo 3). "
@@ -720,6 +724,22 @@ async def vision_review(
             "- A refreshed copy of the Advisor Report is present in the documents. "
             "Do not state it is missing."
         )
+        # --- Labor rates present? Sublet present? (steer away from bad deductions) ---
+        labor_rate_rx = r"(?i)\b(Body|Refinish|Paint|Mechanical|Frame)\s+Labor[^0-9]{0,12}\$?\s*\d{2,3}\s*/?\s*hr\b"
+        sublet_rx = r"(?i)\bSublet\b"
+
+        _labor_rates_present = bool(re.search(labor_rate_rx, uploaded_text_all or ""))
+        _sublet_present = bool(re.search(sublet_rx, uploaded_text_all or ""))
+
+    if _labor_rates_present:
+        flags.append(
+            "- Labor rates are listed in the estimate totals/sections; do not claim labor rates are undocumented."
+        )
+
+    if not _sublet_present:
+        flags.append(
+            "- No sublet operations/invoices appear in the estimate; treat sublet as Not Applicable and do not deduct for 'missing sublet details'."
+        )
 
     # --- INSERT #2: VIN / Odometer photo presence (from extracted text & photo labels) ---
     vin_photo_rx = r"(?i)\bDescription:\s*VIN\b|\bVIN(?:\s*#|:)?\s*[A-HJ-NPR-Z0-9]{17}\b"
@@ -919,16 +939,16 @@ async def vision_review(
     if data is None:
         # Final fallback: return a minimal skeleton with N/A so the UI/PDF still render
         log.error(f"LLM failure or JSON parse error; first 500 chars:\n" + (raw or "")[:500])
-        skeleton = {k: "N/A" for k in KEYS}
-        skeleton["file_number"] = file_number
-        skeleton["request_type"] = req_label
-        skeleton["summary_brief"] = "N/A (model output could not be parsed; skeleton returned)."
-        skeleton["summary_markdown"] = (
+        data = {k: "N/A" for k in KEYS}
+        data["file_number"] = file_number
+        data["request_type"] = req_label
+        data["summary_brief"] = "N/A (model output could not be parsed; skeleton returned)."
+        data["summary_markdown"] = (
             "## Detailed Audit Report\n"
             "Model output could not be parsed into JSON on this run. Please resubmit."
         )
-        skeleton["fraud_markdown"] = "No material inconsistencies found."
-        return skeleton
+        data["fraud_markdown"] = "No material inconsistencies found."
+        data = skeleton
 
     def _get(k):
         v = data.get(k)
