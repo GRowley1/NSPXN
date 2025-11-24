@@ -617,6 +617,9 @@ async def vision_review(
     paint_mat_rx = r"(Paint\s+(Suppl(?:ies|y)|Materials)|Materials\s*Line)"
     _paint_materials_present = bool(re.search(paint_mat_rx, uploaded_text_all or "", flags=re.IGNORECASE))
 
+    labor_rates_rx = r"(?i)\b(Labor\s*Rate|Body\s*Labor\s*\$|Paint\s*Labor\s*\$|Rate\s*:\s*\$)\b"
+    _labor_rates_present = bool(re.search(labor_rates_rx, uploaded_text_all or ""))
+    
     # Lock to 3 intents only
     if ai_intent not in ALLOWED_INTENTS:
         ai_intent = "comprehensive"
