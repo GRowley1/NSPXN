@@ -619,7 +619,10 @@ async def vision_review(
 
     labor_rates_rx = r"(?i)\b(Labor\s*Rate|Body\s*Labor\s*\$|Paint\s*Labor\s*\$|Rate\s*:\s*\$)\b"
     _labor_rates_present = bool(re.search(labor_rates_rx, uploaded_text_all or ""))
-    
+
+    sublet_rx = r"(?i)\b(Sublet|Sub-let|Glass\s+Sublet|Calibration\s+Sublet|Alignment\s+Sublet|Sublet\s+Labor|Sublet\s+Charge|Sublet\s+Amt|Invoice\s+#|Tow(?:ing)?\s+Invoice)\b"
+    _sublet_present = bool(re.search(sublet_rx, uploaded_text_all or ""))
+
     # Lock to 3 intents only
     if ai_intent not in ALLOWED_INTENTS:
         ai_intent = "comprehensive"
