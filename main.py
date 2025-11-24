@@ -728,23 +728,50 @@ async def vision_review(
     prompt_text += CONSISTENCY_GUARD
 
     # --------- EVIDENCE FLAGS (must respect) — minimal, no nudging ----------
-    flags = []
+    flags: List[str] = []
+
+    # Detect paint materials / paint supplies presence in extracted text
+    paint_mat_rx = r"(Paint\s+(Suppl(?:ies|y)|Materials)|Materials\s*Line)"
+    _paint_materials_present = bool(re.search(paint_mat_rx, uploaded_text_all or "", flags=re.IGNORECASE))
     if _paint_materials_present:
         flags.append(
             "- Paint materials summary line is present in the estimate totals (e.g., 'Paint Supplies' on the totals page). "
             "Treat paint materials as evidenced even if not itemized per panel."
         )
+
+    # Clean Retail / valuation printout presence
+    clean_retail_rx = (
+        r"(?i)\b("
+        r"NADA|J[.\s-]*D[.\s-]*\s*Power|JDPower\.com|"
+        r"Kell?ey\s+Blue\s+Book|KBB\.com|"
+        r"Edmunds|Carfax|Cars\.com|"
+        r"Clean\s+Retail(?:\s+Value)?"
+        r")\b"
+    )
+    _clean_retail_present = bool(re.search(clean_retail_rx, uploaded_text_all or ""))
     if _clean_retail_present:
         flags.append(
             "- Clean Retail Value printout is present (e.g., J.D. Power / NADA / KBB / Edmunds / Carfax / Cars.com). "
             "If the year/trim/mileage do not match the estimate/VIN, state 'Present — mismatched' and specify the differences. "
             "Do not mark it 'Not Evidenced'."
         )
+
+    # Advisor Report presence
+    advisor_rx = r"(?i)\bAdvisor\s+Report\b"
+    _advisor_present = bool(re.search(advisor_rx, uploaded_text_all or ""))
     if _advisor_present:
         flags.append(
             "- A refreshed copy of the Advisor Report is present in the documents. "
             "Do not state it is missing."
         )
+
+    # --- VIN / Odometer photo presence (from extracted text & photo labels) ---
+    vin_photo_rx = r"(?i)\bDescription:\s*VIN\b|\bVIN(?:\s*#|:)?\s*[A-HJ-NPR-Z0-9]{17}\b"
+    odo_photo_rx = r"(?i)\bDescription:\s*Odometer\b|\bOdometer\b"
+
+    _vin_photo_present = bool(re.search(vin_photo_rx, uploaded_text_all or ""))
+    _odo_photo_present = bool(re.search(odo_photo_rx, uploaded_text_all or ""))
+
     if _vin_photo_present:
         flags.append(
             "- A VIN label/photo is present in the photo set. Do not mark VIN as missing; "
@@ -755,6 +782,8 @@ async def vision_review(
             "- An odometer photo is present. Do not mark the odometer as missing; transcribe the digits and cite the Photo #. "
             "If glare/blur, use 'Present — not clearly legible' rather than 'Missing'."
         )
+
+    # Inject the flags into the prompt if we have any
     if flags:
         prompt_text += "\n\nEVIDENCE FLAGS (must respect):\n" + "\n".join(flags)
     # ------------------------------------------------------------------------
