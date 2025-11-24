@@ -593,6 +593,10 @@ async def vision_review(
         if isinstance(p, dict) and p.get("type") == "text" and isinstance(p.get("text"), str):
             uploaded_text_blobs.append(p["text"])
     uploaded_text_all = "\n".join(uploaded_text_blobs)
+
+    # --------- EVIDENCE FLAGS list (must be initialized before use) ----------
+    flags: List[str] = []
+
     # keep prompt within safe bounds to avoid truncated JSON
     TOTAL_TEXT_CAP = 18000
     if len(uploaded_text_all) > TOTAL_TEXT_CAP:
@@ -728,8 +732,7 @@ async def vision_review(
     prompt_text += CONSISTENCY_GUARD
 
     # --------- EVIDENCE FLAGS (must respect) — minimal, no nudging ----------
-    flags: List[str] = []
-
+    
     # Detect paint materials / paint supplies presence in extracted text
     paint_mat_rx = r"(Paint\s+(Suppl(?:ies|y)|Materials)|Materials\s*Line)"
     _paint_materials_present = bool(re.search(paint_mat_rx, uploaded_text_all or "", flags=re.IGNORECASE))
