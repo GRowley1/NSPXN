@@ -1150,7 +1150,7 @@ async def vision_review(
 
     if ai_intent == "damage_report_from_photos":
         pdf.cell(0,12,"AI-4-IA Damage Report", ln=True, align="C")
-        pdf.set_font_size(09); pdf.ln(3)
+        pdf.set_font_size(9); pdf.ln(3)
 
         mc(f"Claim #: {result['claim_number'] or 'N/A'}    File #: {file_number or 'N/A'}")
         pdf_status = result["redaction_status"].replace("✅", "OK")
@@ -1164,7 +1164,7 @@ async def vision_review(
         pdf_filename = f"AI_Damage_Report_{safe_file}.pdf"
     else:
         pdf.cell(0,12,"NSPXN.com AI Audit Report", ln=True, align="C")
-        pdf.set_font_size(09); pdf.ln(3)
+        pdf.set_font_size(9); pdf.ln(3)
         mc(f"File Number: {file_number}")
         mc(f"IA Company: {ia_company}")
         mc(f"Appraiser ID #: {appraiser_id}")
