@@ -262,6 +262,18 @@ SUPPLEMENT_HANDLING = (
     "\n- If the supplement corrects earlier deficiencies (e.g., missing materials line, added calibrations), note that improvement explicitly."
     "\n- If a supplement exists but required supporting evidence (invoices, photos) is still missing, call this out in Risks/Missing Evidence."
 )
+DIARY_INSTRUCTIONS = (
+    "\n\nDIARY NOTES HANDLING (strict):"
+    "\n- Treat diary notes as ancillary evidence. Parse ONLY operational facts that affect appraisal quality, timing, or compliance."
+    "\n- Extract at most 2–5 concise sentences and weave them NATURALLY into '## Detailed Audit Report' (not a separate section)."
+    "\n- PRIORITIZE: (a) parts delays/backorders with dates, (b) shop scheduling or teardown dates, (c) approvals/authorization numbers, "
+    "(d) storage/tow periods, (e) supplement requests/approvals with dates, (f) contact attempts that impact evidence completeness."
+    "\n- DO NOT include personal chatter, payment arrangements unrelated to estimate content, or internal admin notes."
+    "\n- Cite diary notes in-line like: 'Diary (2025-11-03): parts ETA 3–5 days' or 'Diary (2025-11-05): S01 approved'."
+    "\n- If a diary entry conflicts with the estimate/photos, state the conflict briefly and prefer documentary evidence (estimate/photos) for scoring."
+    "\n- Do NOT lower the compliance score solely due to diary chatter; only adjust if the diary reveals a material contradiction affecting evidence or rules."
+    "\n- Do NOT mark Clean Retail printout or Advisor Report as 'Missing' if diary merely mentions them—presence/absence must be verified from the uploaded documents/photos."
+)
 
 ALLOWED_INTENTS = {"guidelines_only","comprehensive","damage_report_from_photos"}
 
@@ -554,6 +566,7 @@ async def vision_review(
     ia_company: str = Form(""),
     appraiser_id: str = Form(""),
     ai_intent: str = Form("comprehensive")
+    diary_notes: str = Form("")  # <--- NEW (optional)
 ):
     parts: List[Dict[str, Any]] = []
     files_seen: List[str] = []
