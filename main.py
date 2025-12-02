@@ -565,7 +565,7 @@ async def vision_review(
     file_number: str = Form(...),
     ia_company: str = Form(""),
     appraiser_id: str = Form(""),
-    ai_intent: str = Form("comprehensive")
+    ai_intent: str = Form("comprehensive"),
     diary_notes: str = Form("")  # <--- NEW (optional)
 ):
     parts: List[Dict[str, Any]] = []
