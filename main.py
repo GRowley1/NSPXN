@@ -1324,6 +1324,13 @@ async def vision_review(
         msg["To"] = "info@nspxn.com"
         msg["Cc"] = "growley505@gmail.com"  # CC added
         msg.set_content(body)
+        # Attach the generated PDF to the email
+        try:
+            with open(pdf_path, "rb") as f:
+                msg.add_attachment(f.read(), maintype="application", subtype="pdf", filename=pdf_filename)
+        except Exception as e:
+            logging.error(f"Could not attach PDF {pdf_filename}: {e}")
+
 
         with smtplib.SMTP_SSL("mail.tierra.net", 465, timeout=20) as smtp:
             smtp.login("info@nspxn.com", "grr2025GRR")
