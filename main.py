@@ -420,7 +420,7 @@ def _add_bytes(parts: List[Dict[str,Any]], files_seen: List[str], raw: bytes, fn
             im_ref = im.copy()
             im.thumbnail((1800,1800))
             b = io.BytesIO(); im.save(b, format="JPEG", quality=85, optimize=True)
-            raw = b.getvalue()
+            raw = b.value()
         except Exception:
             im_ref = None
 
@@ -1350,6 +1350,7 @@ async def download_pdf(file_number: Optional[str] = None, filename: Optional[str
 
     latest = max(candidates, key=lambda p: os.path.getmtime(p))
     return FileResponse(path=latest, media_type="application/pdf", filename=os.path.basename(latest))
+
 
 
 
