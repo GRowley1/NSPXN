@@ -1188,9 +1188,23 @@ async def vision_review(
         mc(f"Appraiser ID #: {appraiser_id}")
         mc(f"Request Type: {result['request_type']}")
 
-        # --- Supplement header echo (keyword from narrative) ---
-        smark = result.get("summary_markdown","")
-        supp_detected = bool(re.search(r"\bSupplement\b", smark, flags=re.IGNORECASE))
+        # --- Supplement header echo (documents-only; robust detection with negation) ---
+        # Use ONLY the uploaded estimate text to decide if it's a supplement.
+        # Positive signals: "Supplement Summary", "Supplement of Record", "S01", "S02", "SUPPLEMENT ESTIMATE"
+        # Negation examples: "not a supplement", "no supplement", "without supplement"
+        smark = result.get("summary_markdown", "")
+
+        supp_positive = re.search(
+            r"(?is)\b(Supplement\s+(Summary|of\s+Record|Estimate)|S0\d\b)\b",
+            uploaded_text_all or ""
+        )
+        supp_negation = re.search(
+            r"(?is)\b(not\s+a\s+supplement|no\s+supplement|without\s+supplement)s?\b",
+            uploaded_text_all or ""
+        )
+
+        supp_detected = bool(supp_positive and not supp_negation)
+
         if supp_detected:
             mc("Supplement Status: Supplement Estimate detected in documentation")
 
