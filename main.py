@@ -42,7 +42,7 @@ logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(levelname)s - %(
 log = logging.getLogger("nspxn")
 log.info(f"Using CLIENT_RULES_DIR={CLIENT_RULES_DIR}")
 
-# Use GPT-4.1 everywhere
+# Use GPT-4.1 everywhere (override with OAI_MODEL)
 MODEL = os.getenv("OAI_MODEL", "gpt-4.1")
 if not os.getenv("OPENAI_API_KEY"):
     raise RuntimeError("OPENAI_API_KEY missing")
@@ -207,7 +207,7 @@ DETAIL_TEMPLATES = {
     ),
 }
 
-# --- Static audit questions (unchanged, plus your newly added one stays) ---
+# --- Static audit questions (unchanged) ---
 STATIC_AUDIT_QUESTIONS = [
     "Do the photos substantiate the highest-cost operations (frame/sectioning/panel replace)?",
     "Are ADAS calibrations or wheel alignments required and supported by the damage and OEM procedures?",
@@ -222,7 +222,6 @@ STATIC_AUDIT_QUESTIONS = [
     "Did the supplement (if any) correct earlier gaps, and are newly added operations now evidenced?",
     "Are client-required documents present (e.g., NADA printout, release forms, production date plate); if missing, what’s the impact?",
     "What is the bottom-line recommendation (approve as-is, adjust items, or request specific evidence)?",
-    # (keeps your “one more question added” – leave as-is if it was appended externally)
 ]
 
 # --- Identifiers Verification Protocol (prompt-only; no new logic) ---
@@ -249,9 +248,9 @@ IDENTIFIERS_VERIFICATION_PROTOCOL = (
 CONSISTENCY_GUARD = (
     "\n\nCONSISTENCY GUARD:"
     "\n- Do not claim any required photo is 'missing' if you graded it 'Clearly legible' or 'Present — not clearly legible'."
-    "\n- For VIN and Odometer specifically: if present in any photo, do not write any sentence implying they are absent."
-    "\n- If legibility is the issue, explicitly say 'Present — not clearly legible' and explain why (glare/blur/angle), and request a precise retake rather than marking it missing."
-    "\n- Before finalizing, re-scan your output: confirm every referenced Photo # matches the content described (e.g., do not cite an Odometer photo as the point-of-impact photo). Correct any mismatches."
+    "\n- For VIN, Odometer, and Production Date specifically: if present in any photo, do not write any sentence implying they are absent."
+    "\n- If legibility is the issue, use 'Present — not clearly legible' and say why (glare/blur/angle), and request a precise retake rather than marking it missing."
+    "\n- Before finalizing, re-scan your output: confirm every referenced Photo # matches the content described. Correct any mismatches."
 )
 
 # --- Supplement Handling (prompt-only; ensures detection + narrative mention) ---
@@ -364,21 +363,21 @@ def _add_bytes(parts: List[Dict[str,Any]], files_seen: List[str], raw: bytes, fn
             pages = convert_from_bytes(raw, dpi=240)
             files_seen.append(f"{fname} (pdf, {len(pages)} page(s))")
 
-            # Safe vector-text sniff (no inline try here)
+            # Safe vector-text sniff
             _maybe_extract_pdf_text(raw, fname, parts, files_seen)
 
             # Limit OCR to a few pages for speed
-            OCR_PAGE_CAP = 80
+            OCR_PAGE_CAP = 50
             ocr_collected = []
 
             for idx, im in enumerate(pages[:max_images - used]):
-                # Add the rasterized page as before
+                # Add the rasterized page
                 b = io.BytesIO()
-                im.save(b, format="JPEG", quality=80, optimize=True)
+                im.save(b, format="JPEG", quality=85, optimize=True)
                 parts.append(_image_part_from_bytes(b.getvalue()))
                 used += 1
 
-                # Best-effort OCR on the first few pages (captures J.D. Power / NADA scans)
+                # Best-effort OCR
                 if idx < OCR_PAGE_CAP:
                     txt = _maybe_ocr_image_text(im)
                     if txt:
@@ -615,15 +614,30 @@ async def vision_review(
     # >>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>
     # INSERT #1a: Presence detectors for VIN / Odometer / Production Date (OCR text)
     vin_photo_rx = r"(?i)\bDescription:\s*VIN\b|\bVIN(?:\s*#|:)?\s*[A-HJ-NPR-Z0-9]{17}\b"
-    odo_photo_rx = r"(?i)\bDescription:\s*Odometer\b|\bOdometer\b"
+
+    # Be generous for ODO presence: “Odometer”, “ODO”, or numeric clusters commonly seen next to the label.
+    odo_photo_rx = (
+        r"(?is)\b(?:Odometer|ODO)\b"
+        r"|(?:Odometer\s*(?:Reading|Miles|Mi)?\s*[:#]?\s*\d[\d,\.]{2,})"
+    )
+
+    # Be generous with labels and separators for Production Date: handles "MFD DATE 05/24", "MFR DATE 05-2024", etc.
     prod_date_rx = (
-        r"(?is)\b(Production\s*date|Date\s*of\s*Mfr|Date\s*of\s*Manufacture|MFD\.?\s*(?:BY|DATE)?|MFR\s*DATE)\b"
-        r".{0,60}?\b(0[1-9]|1[0-2])\s*[/\-\.\s]\s*(20\d{2}|\d{2})\b"
+        r"(?is)\b(Production\s*date|Prod(?:uction)?\s*Date|Date\s*of\s*Mfr|Date\s*of\s*Manufacture|"
+        r"MFD\.?\s*(?:BY|DATE)?|MFR\.?\s*DATE|MFG\.?\s*DATE|DATE)\b"
+        r".{0,80}?\b(0[1-9]|1[0-2])\s*[-/.\u2013\u2014\u2212:\s]\s*(20\d{2}|\d{2})\b"
     )
 
     _vin_photo_present = bool(re.search(vin_photo_rx, uploaded_text_all or ""))
     _odo_photo_present = bool(re.search(odo_photo_rx, uploaded_text_all or ""))
     _prod_date_present = bool(re.search(prod_date_rx, uploaded_text_all or ""))
+
+    if not _prod_date_present:
+        loose_prod_rx = (
+            r"(?is)\b(MFD|MFR|MFG|PROD\.?|PRODUCTION|DATE)\b"
+            r".{0,60}?\b(0[1-9]|1[0-2])\s*[-/.\u2013\u2014\u2212:\s]\s*(20\d{2}|\d{2})\b"
+        )
+        _prod_date_present = bool(re.search(loose_prod_rx, uploaded_text_all or ""))
     # <<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<
 
     # Lock to 3 intents only
@@ -733,7 +747,6 @@ async def vision_review(
             "- A refreshed copy of the Advisor Report is present in the documents. "
             "Do not state it is missing."
         )
-    # INSERT #1b: add flags for VIN/ODO/Production Date presence
     if _vin_photo_present:
         flags.append(
             "- A VIN label/photo is present in the photo set. Do not mark VIN as missing; compare to the estimate VIN and cite the specific Photo # if visible."
@@ -746,6 +759,8 @@ async def vision_review(
         flags.append(
             "- A production date (Date of Mfr/MFD DATE) is visible on a door label photo. Do not mark Production Date as missing; cite the Photo # and the month/year (e.g., 05/2024)."
         )
+    if flags:
+        prompt_text += "\n\nEVIDENCE FLAGS (must respect):\n" + "\n".join(flags)
     # ------------------------------------------------------------------------
 
     # Build user parts (redact PII in any free text, but keep VIN/Claim #)
@@ -1015,8 +1030,6 @@ async def vision_review(
         pass
 
     # --- Clean Retail deterministic override ---
-    # If we have clear evidence of a Clean Retail printout (NADA / J.D. Power / KBB / etc.),
-    # NEVER allow the narrative or brief to say it's "Not Evidenced".
     if _clean_retail_present:
         try:
             sm = result.get("summary_markdown") or ""
@@ -1046,12 +1059,18 @@ async def vision_review(
     try:
         sm = result.get("summary_markdown") or ""
         if _odo_photo_present:
+            # bullets + sentence forms
             sm = re.sub(r"(?im)^\s*[-*]\s*Missing\s+odometer\s+photo.*$", "", sm)
             sm = re.sub(r"(?is)\bodometer\s+photo\s+not\s+present\b.*?(?:\n|$)", "", sm)
+            sm = re.sub(r"(?is)\bthe\s+odometer\s+(?:photo\s+)?is\s+missing\b.*?(?:\n|$)", "", sm)
+
         if _prod_date_present:
-            sm = re.sub(r"(?im)^\s*[-*]\s*Missing\s+production\s+date\s*(?:photo)?\b.*$", "", sm)
-            sm = re.sub(r"(?is)\bproduction\s+date\s+(?:photo\s+)?not\s+present\b.*?(?:\n|$)", "", sm)
-            sm = re.sub(r"(?is)\bno\s+production\s+date\s+(?:photo|image)\b.*?(?:\n|$)", "", sm)
+            # bullets + multiple sentence forms
+            sm = re.sub(r"(?im)^\s*[-*]\s*Missing\s+production\s+date\s*(?:plate|photo)?\b.*$", "", sm)
+            sm = re.sub(r"(?is)\bproduction\s+date\s+(?:plate\s+)?(?:photo\s+)?not\s+present\b.*?(?:\n|$)", "", sm)
+            sm = re.sub(r"(?is)\bno\s+production\s+date(?:\s+(?:plate|photo|image))?\b.*?(?:\n|$)", "", sm)
+            sm = re.sub(r"(?is)\bthe\s+production\s+date(?:\s+(?:plate|photo|image))?\s+is\s+missing\b.*?(?:\n|$)", "", sm)
+
         sm = re.sub(r"\n{3,}", "\n\n", sm).strip()
         result["summary_markdown"] = sm
     except Exception:
@@ -1145,15 +1164,17 @@ async def vision_review(
         mc(f"Appraiser ID #: {appraiser_id}")
         mc(f"Request Type: {result['request_type']}")
 
-        # --- Supplement header echo (keyword from narrative) ---
+        # --- Supplement header echo (must be affirmatively stated; ignore negations) ---
         smark = result.get("summary_markdown","")
-        supp_detected = bool(re.search(r"\bSupplement\b", smark, flags=re.IGNORECASE))
+        supp_detected = bool(re.search(
+            r"(?is)(?:\bmarked\s+as\s+a\s+supplement\b|\bis\s+a\s+supplement\b|\bsupplement\s+estimate\b|\bsupplement\s+summary\b|\bS0[1-9]\b)"
+            r"(?![^.]{0,40}\bnot\b)",
+            smark
+        ))
         if supp_detected:
             mc("Supplement Status: Supplement Estimate detected in documentation")
 
         # --- Total Loss echo (documents-only; no narrative trigger) ---
-        # Match ONLY if the uploaded estimate text itself declares it,
-        # or if the exact POI-15 Total Loss phrase appears.
         explicit_tl_hit = False
         try:
             txt_docs = uploaded_text_all or ""
@@ -1207,22 +1228,22 @@ async def vision_review(
         msg = EmailMessage()
 
         if ai_intent == "damage_report_from_photos":
-            subj = f"AI Damage Report: {file_number or ''} {result.get('claim_number','')}".strip()
+            subj = f"AI Damage Report: {file_number or ''} {result['claim_number'] or ''}".strip()
             body = (
                 "AI-4-IA Damage Report\n\n"
                 f"IA Company: {ia_company}\n"
-                f"Claim #: {result.get('claim_number','N/A')}    File #: {file_number or 'N/A'}\n"
-                f"Odometer: {result.get('odometer_estimate_only','N/A')}    Primary Impact: {result.get('primary_impact','N/A')}\n"
-                f"Secondary Impact: {result.get('secondary_impact','N/A')}\n\n"
-                f"{result.get('redaction_status','')}\n\n"
+                f"Claim #: {result['claim_number'] or 'N/A'}    File #: {file_number or 'N/A'}\n"
+                f"Odometer: {result['odometer_estimate_only'] or 'N/A'}    Primary Impact: {result['primary_impact'] or 'N/A'}\n"
+                f"Secondary Impact: {result['secondary_impact'] or 'N/A'}\n\n"
+                f"{result['redaction_status']}\n\n"
                 "Damage Summary\n"
-                f"{result.get('summary_markdown','N/A')}\n\n"
+                f"{result['summary_markdown'] or 'N/A'}\n\n"
                 "Estimated Repair Costs\n"
-                f"{result.get('estimated_costs_markdown','N/A')}\n\n"
+                f"{result['estimated_costs_markdown'] or 'N/A'}\n\n"
                 "Fraud & Authenticity Check\n"
-                f"{result.get('fraud_markdown','N/A')}\n\n"
+                f"{result['fraud_markdown'] or 'N/A'}\n\n"
                 "Conclusion\n"
-                f"{result.get('conclusion','N/A')}\n"
+                f"{result['conclusion'] or 'N/A'}\n"
             )
         else:
             # Re-evaluate TL for email from uploaded docs only (no narrative dependency)
@@ -1317,6 +1338,7 @@ async def download_pdf(file_number: Optional[str] = None, filename: Optional[str
 
     latest = max(candidates, key=lambda p: os.path.getmtime(p))
     return FileResponse(path=latest, media_type="application/pdf", filename=os.path.basename(latest))
+
 
 
 
