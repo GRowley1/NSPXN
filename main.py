@@ -1222,7 +1222,7 @@ async def vision_review(
                 "Fraud & Authenticity Check\n"
                 f"{result['fraud_markdown'] or 'N/A')}\n\n"
                 "Conclusion\n"
-                f"{result['conclusion'] or 'N/A']}\n"
+                f"{result['conclusion'] or 'N/A')}\n"
             )
         else:
             # Re-evaluate TL for email from uploaded docs only (no narrative dependency)
