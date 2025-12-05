@@ -42,7 +42,7 @@ logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(levelname)s - %(
 log = logging.getLogger("nspxn")
 log.info(f"Using CLIENT_RULES_DIR={CLIENT_RULES_DIR}")
 
-# Use GPT-4.1 everywhere (override with OAI_MODEL)
+# Use GPT-4.1 everywhere
 MODEL = os.getenv("OAI_MODEL", "gpt-4.1")
 if not os.getenv("OPENAI_API_KEY"):
     raise RuntimeError("OPENAI_API_KEY missing")
@@ -207,7 +207,7 @@ DETAIL_TEMPLATES = {
     ),
 }
 
-# --- Static audit questions (unchanged) ---
+# --- Static audit questions (unchanged, plus your newly added one stays) ---
 STATIC_AUDIT_QUESTIONS = [
     "Do the photos substantiate the highest-cost operations (frame/sectioning/panel replace)?",
     "Are ADAS calibrations or wheel alignments required and supported by the damage and OEM procedures?",
@@ -222,6 +222,7 @@ STATIC_AUDIT_QUESTIONS = [
     "Did the supplement (if any) correct earlier gaps, and are newly added operations now evidenced?",
     "Are client-required documents present (e.g., NADA printout, release forms, production date plate); if missing, what’s the impact?",
     "What is the bottom-line recommendation (approve as-is, adjust items, or request specific evidence)?",
+    # (keeps your “one more question added” – leave as-is if it was appended externally)
 ]
 
 # --- Identifiers Verification Protocol (prompt-only; no new logic) ---
@@ -363,7 +364,7 @@ def _add_bytes(parts: List[Dict[str,Any]], files_seen: List[str], raw: bytes, fn
             pages = convert_from_bytes(raw, dpi=240)
             files_seen.append(f"{fname} (pdf, {len(pages)} page(s))")
 
-            # Safe vector-text sniff
+            # Safe vector-text sniff (no inline try here)
             _maybe_extract_pdf_text(raw, fname, parts, files_seen)
 
             # Limit OCR to a few pages for speed
@@ -371,13 +372,13 @@ def _add_bytes(parts: List[Dict[str,Any]], files_seen: List[str], raw: bytes, fn
             ocr_collected = []
 
             for idx, im in enumerate(pages[:max_images - used]):
-                # Add the rasterized page
+                # Add the rasterized page as before
                 b = io.BytesIO()
                 im.save(b, format="JPEG", quality=85, optimize=True)
                 parts.append(_image_part_from_bytes(b.getvalue()))
                 used += 1
 
-                # Best-effort OCR
+                # Best-effort OCR on the first few pages (captures J.D. Power / NADA scans)
                 if idx < OCR_PAGE_CAP:
                     txt = _maybe_ocr_image_text(im)
                     if txt:
@@ -612,16 +613,11 @@ async def vision_review(
     _paint_materials_present = bool(re.search(paint_mat_rx, uploaded_text_all or "", flags=re.IGNORECASE))
 
     # >>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>
-    # INSERT #1a: Presence detectors for VIN / Odometer / Production Date (OCR text)
+    # Presence detectors for VIN / Odometer / Production Date (OCR tolerant)
     vin_photo_rx = r"(?i)\bDescription:\s*VIN\b|\bVIN(?:\s*#|:)?\s*[A-HJ-NPR-Z0-9]{17}\b"
+    odo_photo_rx = r"(?i)\bDescription:\s*Odometer\b|\bOdometer\b"
 
-    # Be generous for ODO presence: “Odometer”, “ODO”, or numeric clusters commonly seen next to the label.
-    odo_photo_rx = (
-        r"(?is)\b(?:Odometer|ODO)\b"
-        r"|(?:Odometer\s*(?:Reading|Miles|Mi)?\s*[:#]?\s*\d[\d,\.]{2,})"
-    )
-
-    # Be generous with labels and separators for Production Date: handles "MFD DATE 05/24", "MFR DATE 05-2024", etc.
+    # Be generous with labels and separators: handles "MFD DATE 05/24", "MFR DATE 05-2024", "Production date 05 2024", etc.
     prod_date_rx = (
         r"(?is)\b(Production\s*date|Prod(?:uction)?\s*Date|Date\s*of\s*Mfr|Date\s*of\s*Manufacture|"
         r"MFD\.?\s*(?:BY|DATE)?|MFR\.?\s*DATE|MFG\.?\s*DATE|DATE)\b"
@@ -632,6 +628,7 @@ async def vision_review(
     _odo_photo_present = bool(re.search(odo_photo_rx, uploaded_text_all or ""))
     _prod_date_present = bool(re.search(prod_date_rx, uploaded_text_all or ""))
 
+    # Loose fallback for production date
     if not _prod_date_present:
         loose_prod_rx = (
             r"(?is)\b(MFD|MFR|MFG|PROD\.?|PRODUCTION|DATE)\b"
@@ -759,8 +756,6 @@ async def vision_review(
         flags.append(
             "- A production date (Date of Mfr/MFD DATE) is visible on a door label photo. Do not mark Production Date as missing; cite the Photo # and the month/year (e.g., 05/2024)."
         )
-    if flags:
-        prompt_text += "\n\nEVIDENCE FLAGS (must respect):\n" + "\n".join(flags)
     # ------------------------------------------------------------------------
 
     # Build user parts (redact PII in any free text, but keep VIN/Claim #)
@@ -812,13 +807,25 @@ async def vision_review(
     except AttributeError:
         # compatible with newer SDKs
         rsp = client.chat.completions.create(
-            model=MODEL,
-            messages=[{"role":"system","content": SYSTEM},
-                      {"role":"user","content": parts_payload}],
-            max_tokens=max_tokens,
-            temperature=0,
-            response_format={"type":"json_object"}
-        )
+                    model=MODEL,
+                    messages=[{"role":"system","content": SYSTEM},
+                              {"role":"user","content": parts_payload}],
+                    max_tokens=max_tokens,
+                    temperature=0,
+                    response_format={"type":"json_object"}
+                )
+
+    # --- Sanitizer for raw model text (prevents logs/code fences breaking JSON) ---
+    def _sanitize_raw_model_text(t: str) -> str:
+        if not t:
+            return ""
+        t = re.sub(r'(?m)^(INFO|ERROR|WARNING|DEBUG):.*$', '', t)
+        t = t.replace("```json", "").replace("```JSON", "").replace("```", "")
+        t = t.replace("\ufeff", "").replace("\u200b", "").replace("\u00A0", " ")
+        rb = t.rfind("}")
+        if rb != -1:
+            t = t[:rb+1]
+        return t.strip()
 
     # --- Hardened JSON parse helper
     def _try_parse_json(raw_text: str):
@@ -875,6 +882,9 @@ async def vision_review(
         log.error(f"LLM returned no content: {e}")
         return JSONResponse(status_code=500, content={"error":"Model returned no content."})
 
+    # Sanitize raw before parsing
+    raw = _sanitize_raw_model_text(raw)
+
     data = _try_parse_json(raw)
     if data is None:
         try:
@@ -889,6 +899,7 @@ async def vision_review(
                     "'odometer_estimate_only','compliance_score','summary_brief','summary_markdown',"
                     "'fraud_markdown','primary_impact','secondary_impact','estimated_costs_markdown','conclusion'] "
                     "Do not invent new keys. If a field is unavailable, use 'N/A'. "
+                    "Remove any lines that begin with INFO:, WARNING:, ERROR:, or DEBUG:; they are not part of the JSON.\n\n"
                     "Here is the text:\n\n" + raw
                 }
             ]
@@ -909,6 +920,7 @@ async def vision_review(
                     response_format={"type":"json_object"}
                 )
             fixed = (fix_rsp.choices[0].message.content or "")
+            fixed = _sanitize_raw_model_text(fixed)
             data = _try_parse_json(fixed)
         except Exception as e:
             log.error(f"Self-heal reformat failed: {e}")
@@ -949,6 +961,27 @@ async def vision_review(
         "conclusion": _get("conclusion"),
         "redaction_status": redaction_status,
     }
+
+    # --- Narrative cleanup to remove false "missing" claims if evidence present
+    try:
+        sm = result.get("summary_markdown") or ""
+        if _odo_photo_present:
+            # bullets + sentence forms
+            sm = re.sub(r"(?im)^\s*[-*]\s*Missing\s+odometer\s+photo.*$", "", sm)
+            sm = re.sub(r"(?is)\bodometer\s+photo\s+not\s+present\b.*?(?:\n|$)", "", sm)
+            sm = re.sub(r"(?is)\bthe\s+odometer\s+(?:photo\s+)?is\s+missing\b.*?(?:\n|$)", "", sm)
+
+        if _prod_date_present:
+            # bullets + multiple sentence forms
+            sm = re.sub(r"(?im)^\s*[-*]\s*Missing\s+production\s+date\s*(?:plate|photo)?\b.*$", "", sm)
+            sm = re.sub(r"(?is)\bproduction\s+date\s+(?:plate\s+)?(?:photo\s+)?not\s+present\b.*?(?:\n|$)", "", sm)
+            sm = re.sub(r"(?is)\bno\s+production\s+date(?:\s+(?:plate|photo|image))?\b.*?(?:\n|$)", "", sm)
+            sm = re.sub(r"(?is)\bthe\s+production\s+date(?:\s+(?:plate|photo|image))?\s+is\s+missing\b.*?(?:\n|$)", "", sm)
+
+        sm = re.sub(r"\n{3,}", "\n\n", sm).strip()
+        result["summary_markdown"] = sm
+    except Exception:
+        pass
 
     # --- Score ↔ narrative synchronization (deterministic; minimal logic) ---
     def _extract_score_from_text(text: str):
@@ -1054,37 +1087,6 @@ async def vision_review(
         except Exception:
             pass
 
-    # >>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>
-    # INSERT #2: Narrative cleanup to remove false "missing" claims if evidence present
-    try:
-        sm = result.get("summary_markdown") or ""
-        if _odo_photo_present:
-            # bullets + sentence forms
-            sm = re.sub(r"(?im)^\s*[-*]\s*Missing\s+odometer\s+photo.*$", "", sm)
-            sm = re.sub(r"(?is)\bodometer\s+photo\s+not\s+present\b.*?(?:\n|$)", "", sm)
-            sm = re.sub(r"(?is)\bthe\s+odometer\s+(?:photo\s+)?is\s+missing\b.*?(?:\n|$)", "", sm)
-
-        if _prod_date_present:
-            # bullets + multiple sentence forms
-            sm = re.sub(r"(?im)^\s*[-*]\s*Missing\s+production\s+date\s*(?:plate|photo)?\b.*$", "", sm)
-            sm = re.sub(r"(?is)\bproduction\s+date\s+(?:plate\s+)?(?:photo\s+)?not\s+present\b.*?(?:\n|$)", "", sm)
-            sm = re.sub(r"(?is)\bno\s+production\s+date(?:\s+(?:plate|photo|image))?\b.*?(?:\n|$)", "", sm)
-            sm = re.sub(r"(?is)\bthe\s+production\s+date(?:\s+(?:plate|photo|image))?\s+is\s+missing\b.*?(?:\n|$)", "", sm)
-
-        sm = re.sub(r"\n{3,}", "\n\n", sm).strip()
-        result["summary_markdown"] = sm
-    except Exception:
-        pass
-    # <<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<
-
-    # Non-empty Fraud fallback (prevents 'N/A' in output/PDF)
-    if not result["fraud_markdown"] or result["fraud_markdown"].strip().upper() in {"", "N/A"}:
-        result["fraud_markdown"] = (
-            "No material inconsistencies found. Checks performed: VIN match across estimate and photos, "
-            "odometer/registration presence and legibility, duplicate/edited images, timestamp continuity, and "
-            "panel/impact consistency."
-        )
-
     # -----------------------
     # PDF helpers (sanitizer for FPDF)
     # -----------------------
@@ -1093,6 +1095,7 @@ async def vision_review(
         if text is None:
             return ""
         s = str(text).replace("\r\n", "\n").replace("\r", "\n")
+    # keep latin-1 for built-in fonts; replace other chars
         s = "".join(ch if ord(ch) < 256 else " " for ch in s)
         def _break(tok: str) -> str:
             if len(tok) <= max_token_len:
@@ -1164,7 +1167,7 @@ async def vision_review(
         mc(f"Appraiser ID #: {appraiser_id}")
         mc(f"Request Type: {result['request_type']}")
 
-        # --- Supplement header echo (must be affirmatively stated; ignore negations) ---
+        # --- Supplement header echo (positive-only; ignore negations) ---
         smark = result.get("summary_markdown","")
         supp_detected = bool(re.search(
             r"(?is)(?:\bmarked\s+as\s+a\s+supplement\b|\bis\s+a\s+supplement\b|\bsupplement\s+estimate\b|\bsupplement\s+summary\b|\bS0[1-9]\b)"
@@ -1175,6 +1178,8 @@ async def vision_review(
             mc("Supplement Status: Supplement Estimate detected in documentation")
 
         # --- Total Loss echo (documents-only; no narrative trigger) ---
+        # Match ONLY if the uploaded estimate text itself declares it,
+        # or if the exact POI-15 Total Loss phrase appears.
         explicit_tl_hit = False
         try:
             txt_docs = uploaded_text_all or ""
@@ -1338,6 +1343,7 @@ async def download_pdf(file_number: Optional[str] = None, filename: Optional[str
 
     latest = max(candidates, key=lambda p: os.path.getmtime(p))
     return FileResponse(path=latest, media_type="application/pdf", filename=os.path.basename(latest))
+
 
 
 
