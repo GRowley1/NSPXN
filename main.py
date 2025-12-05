@@ -368,13 +368,13 @@ def _add_bytes(parts: List[Dict[str,Any]], files_seen: List[str], raw: bytes, fn
             _maybe_extract_pdf_text(raw, fname, parts, files_seen)
 
             # Limit OCR to a few pages for speed
-            OCR_PAGE_CAP = 50
+            OCR_PAGE_CAP = 80
             ocr_collected = []
 
             for idx, im in enumerate(pages[:max_images - used]):
                 # Add the rasterized page as before
                 b = io.BytesIO()
-                im.save(b, format="JPEG", quality=85, optimize=True)
+                im.save(b, format="JPEG", quality=80, optimize=True)
                 parts.append(_image_part_from_bytes(b.getvalue()))
                 used += 1
 
@@ -1216,13 +1216,13 @@ async def vision_review(
                 f"Secondary Impact: {result['secondary_impact'] or 'N/A'}\n\n"
                 f"{result['redaction_status']}\n\n"
                 "Damage Summary\n"
-                f"{(result['summary_markdown'] or 'N/A')}\n\n"
+                f"{(result['summary_markdown'] or 'N/A'}\n\n"
                 "Estimated Repair Costs\n"
-                f"{(result['estimated_costs_markdown'] or 'N/A')}\n\n"
+                f"{(result['estimated_costs_markdown'] or 'N/A'}\n\n"
                 "Fraud & Authenticity Check\n"
-                f"{(result['fraud_markdown'] or 'N/A')}\n\n"
+                f"{(result['fraud_markdown'] or 'N/A'}\n\n"
                 "Conclusion\n"
-                f"{(result['conclusion'] or 'N/A')}\n"
+                f"{(result['conclusion'] or 'N/A'}\n"
             )
         else:
             # Re-evaluate TL for email from uploaded docs only (no narrative dependency)
