@@ -783,6 +783,16 @@ async def vision_review(
             "- An odometer photo is present. Do not mark the odometer as missing; transcribe the digits and cite the Photo #. "
             "If glare/blur, use 'Present — not clearly legible' rather than 'Missing'."
         )
+    # --- Production date on VIN label (from OCR/extracted text) ---
+    prod_rx = r"(?i)\b(Production\s*Date|Date\s*of\s*Mfr|Date\s*of\s*Manufacture)\b[:\s]*([0-1]?\d[\/\-]\s*20[0-3]\d|[0-1]?\d\s*20[0-3]\d|20[0-3]\d)"
+    m_prod = re.search(prod_rx, uploaded_text_all or "")
+    _prod_date_str = (m_prod.group(2).strip() if m_prod else "")
+
+    if _prod_date_str:
+        flags.append(
+            f"- Production date appears on the driver-door VIN label (e.g., {_prod_date_str}). "
+            "Cite the Photo # and do not mark it missing."
+        )
 
     # --- INSERT #1: Shop/Tax-ID guard (only deduct when vehicle is actually at a shop) ---
     _shop_tokens = r"(?i)(Repair\s*Facility|Repair\s*Facility\s*Information|Shop\s*Name|Tax\s*ID|TIN)"
