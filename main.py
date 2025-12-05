@@ -614,7 +614,7 @@ async def vision_review(
     _paint_materials_present = bool(re.search(paint_mat_rx, uploaded_text_all or "", flags=re.IGNORECASE))
 
     # >>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>
-    # INSERT #1a: Presence detectors for VIN / Odometer / Production Date (OCR text)
+    # Presence detectors for VIN / Odometer / Production Date (OCR text)
     vin_photo_rx = r"(?i)\bDescription:\s*VIN\b|\bVIN(?:\s*#|:)?\s*[A-HJ-NPR-Z0-9]{17}\b"
     odo_photo_rx = r"(?i)\bDescription:\s*Odometer\b|\bOdometer\b"
 
@@ -624,20 +624,20 @@ async def vision_review(
         r"MFD\.?\s*(?:BY|DATE)?|MFR\.?\s*DATE|MFG\.?\s*DATE|DATE)\b"
         r".{0,80}?\b(0[1-9]|1[0-2])\s*[-/.\u2013\u2014\u2212:\s]\s*(20\d{2}|\d{2})\b"
     )
+    # Define the loose fallback unconditionally so we can safely reuse it later
+    loose_prod_rx = (
+        r"(?is)\b(MFD|MFR|MFG|PROD\.?|PRODUCTION|DATE)\b"
+        r".{0,60}?\b(0[1-9]|1[0-2])\s*[-/.\u2013\u2014\u2212:\s]\s*(20\d{2}|\d{2})\b"
+    )
 
     _vin_photo_present = bool(re.search(vin_photo_rx, uploaded_text_all or ""))
     _odo_photo_present = bool(re.search(odo_photo_rx, uploaded_text_all or ""))
-    _prod_date_present = bool(re.search(prod_date_rx, uploaded_text_all or ""))
+    _prod_date_present = bool(
+        re.search(prod_date_rx, uploaded_text_all or "") or
+        re.search(loose_prod_rx, uploaded_text_all or "")
+    )
 
-    # Loose fallback: catch split/odd OCR
-    if not _prod_date_present:
-        loose_prod_rx = (
-            r"(?is)\b(MFD|MFR|MFG|PROD\.?|PRODUCTION|DATE)\b"
-            r".{0,60}?\b(0[1-9]|1[0-2])\s*[-/.\u2013\u2014\u2212:\s]\s*(20\d{2}|\d{2})\b"
-        )
-        _prod_date_present = bool(re.search(loose_prod_rx, uploaded_text_all or ""))
-
-    # Optional: capture a string to show in the header if present
+    # Extract a displayable production date if present
     prod_date_str = ""
     m = re.search(prod_date_rx, uploaded_text_all or "")
     if not m:
@@ -735,7 +735,8 @@ async def vision_review(
     )
 
     # Always append the VIN/odo protocol + consistency guard
-    prompt_text += IDENTIFIERS_VERIFICATION_PROTOCOL
+    prompt_text += IDENTIFIERS_VERIFICATION_PRO
+TOCOL
     prompt_text += CONSISTENCY_GUARD
 
     # --------- EVIDENCE FLAGS (must respect) — minimal, no nudging ----------
@@ -926,6 +927,11 @@ async def vision_review(
     if data is None:
         # Final fallback: return a minimal skeleton with N/A so the UI/PDF still render
         log.error(f"LLM failure or JSON parse error; first 500 chars:\n" + (raw or "")[:500])
+        KEYS = [
+            "file_number","request_type","claim_number","vin","vin_verification","vehicle",
+            "odometer_estimate_only","compliance_score","summary_brief","summary_markdown",
+            "fraud_markdown","primary_impact","secondary_impact","estimated_costs_markdown","conclusion"
+        ]
         skeleton = {k: "N/A" for k in KEYS}
         skeleton["file_number"] = file_number
         skeleton["request_type"] = req_label
@@ -1049,8 +1055,6 @@ async def vision_review(
         pass
 
     # --- Clean Retail deterministic override ---
-    # If we have clear evidence of a Clean Retail printout (NADA / J.D. Power / KBB / etc.),
-    # NEVER allow the narrative or brief to say it's "Not Evidenced".
     if _clean_retail_present:
         try:
             sm = result.get("summary_markdown") or ""
@@ -1075,8 +1079,7 @@ async def vision_review(
         except Exception:
             pass
 
-    # >>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>
-    # INSERT #2: Narrative cleanup to remove false "missing" claims if evidence present
+    # --- Narrative cleanup to remove false "missing" claims if evidence present
     try:
         sm = result.get("summary_markdown") or ""
         if _odo_photo_present:
@@ -1096,7 +1099,6 @@ async def vision_review(
         result["summary_markdown"] = sm
     except Exception:
         pass
-    # <<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<
 
     # Non-empty Fraud fallback (prevents 'N/A' in output/PDF)
     if not result["fraud_markdown"] or result["fraud_markdown"].strip().upper() in {"", "N/A"}:
@@ -1171,7 +1173,7 @@ async def vision_review(
         pdf_status = result["redaction_status"].replace("✅", "OK")
         pdf.ln(2); mc(pdf_status)
         pdf.ln(2); mc("Damage Summary"); mc((result["summary_markdown"] or "N/A").strip())
-        mc("Estimated Repair Costs"); mc((result["estimated_costs_markdown'] or "N/A").strip())
+        mc("Estimated Repair Costs"); mc((result["estimated_costs_markdown"] or "N/A").strip())
         pdf.ln(2); mc("Fraud & Authenticity Check"); mc((result["fraud_markdown"] or 'N/A').strip())
         pdf.ln(2); mc("Conclusion"); mc((result["conclusion"] or 'N/A').strip())
 
@@ -1187,10 +1189,9 @@ async def vision_review(
 
         # --- Supplement header echo (require positive phrasing; ignore negations) ---
         smark = result.get("summary_markdown","")
-        # Require a positive statement and avoid negations like "not a supplement", "no supplement"
         supp_detected = bool(re.search(
             r"(?is)(?:\bmarked\s+as\s+a\s+supplement\b|\bis\s+a\s+supplement\b|\bsupplement\s+estimate\b|\bsupplement\s+summary\b|\bS0[1-9]\b)"
-            r"(?![^.]{0,40}\bnot\b)",  # basic negation guard within the same clause/sentence
+            r"(?![^.]{0,40}\bnot\b)",
             smark
         ))
         if supp_detected:
@@ -1371,6 +1372,7 @@ async def download_pdf(file_number: Optional[str] = None, filename: Optional[str
 
     latest = max(candidates, key=lambda p: os.path.getmtime(p))
     return FileResponse(path=latest, media_type="application/pdf", filename=os.path.basename(latest))
+
 
 
 
