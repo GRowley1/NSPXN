@@ -1207,22 +1207,22 @@ async def vision_review(
         msg = EmailMessage()
 
         if ai_intent == "damage_report_from_photos":
-            subj = f"AI Damage Report: {file_number or ''} {result['claim_number'] or ''}".strip()
+            subj = f"AI Damage Report: {file_number or ''} {result.get('claim_number','')}".strip()
             body = (
                 "AI-4-IA Damage Report\n\n"
                 f"IA Company: {ia_company}\n"
-                f"Claim #: {result['claim_number'] or 'N/A'}    File #: {file_number or 'N/A'}\n"
-                f"Odometer: {result['odometer_estimate_only'] or 'N/A'}    Primary Impact: {result['primary_impact'] or 'N/A'}\n"
-                f"Secondary Impact: {result['secondary_impact'] or 'N/A'}\n\n"
-                f"{result['redaction_status']}\n\n"
+                f"Claim #: {result.get('claim_number','N/A')}    File #: {file_number or 'N/A'}\n"
+                f"Odometer: {result.get('odometer_estimate_only','N/A')}    Primary Impact: {result.get('primary_impact','N/A')}\n"
+                f"Secondary Impact: {result.get('secondary_impact','N/A')}\n\n"
+                f"{result.get('redaction_status','')}\n\n"
                 "Damage Summary\n"
-                f"{(result['summary_markdown'] or 'N/A'}\n\n"
+                f"{result.get('summary_markdown','N/A')}\n\n"
                 "Estimated Repair Costs\n"
-                f"{(result['estimated_costs_markdown'] or 'N/A'}\n\n"
+                f"{result.get('estimated_costs_markdown','N/A')}\n\n"
                 "Fraud & Authenticity Check\n"
-                f"{(result['fraud_markdown'] or 'N/A'}\n\n"
+                f"{result.get('fraud_markdown','N/A')}\n\n"
                 "Conclusion\n"
-                f"{(result['conclusion'] or 'N/A'}\n"
+                f"{result.get('conclusion','N/A')}\n"
             )
         else:
             # Re-evaluate TL for email from uploaded docs only (no narrative dependency)
