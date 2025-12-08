@@ -736,7 +736,6 @@ async def vision_review(
 
     # Always append the VIN/odo protocol + consistency guard
     prompt_text += IDENTIFIERS_VERIFICATION_PRO
-TOCOL
     prompt_text += CONSISTENCY_GUARD
 
     # --------- EVIDENCE FLAGS (must respect) — minimal, no nudging ----------
