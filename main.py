@@ -1164,7 +1164,7 @@ async def vision_review(
         pdf_status = result["redaction_status"].replace("✅", "OK")
         pdf.ln(2); mc(pdf_status)
         pdf.ln(2); mc("Damage Summary"); mc((result["summary_markdown"] or "N/A").strip())
-        mc("Estimated Repair Costs"); mc((result["estimated_costs_markdown'] or "N/A").strip())
+        mc("Estimated Repair Costs"); mc((result['estimated_costs_markdown'] or 'N/A').strip())
         pdf.ln(2); mc("Fraud & Authenticity Check"); mc((result["fraud_markdown"] or 'N/A').strip())
         pdf.ln(2); mc("Conclusion"); mc((result["conclusion"] or 'N/A').strip())
 
