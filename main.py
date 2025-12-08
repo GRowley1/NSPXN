@@ -368,20 +368,20 @@ def _add_bytes(parts: List[Dict[str,Any]], files_seen: List[str], raw: bytes, fn
     low = fname.lower()
     if low.endswith(SUPPORTED_PDF_EXTS) and used < max_images:
         try:
-            pages = convert_from_bytes(raw, dpi=240)
+            pages = convert_from_bytes(raw, dpi=200)
             files_seen.append(f"{fname} (pdf, {len(pages)} page(s))")
 
             # Safe vector-text sniff (no inline try here)
             _maybe_extract_pdf_text(raw, fname, parts, files_seen)
 
             # Limit OCR to a few pages for speed
-            OCR_PAGE_CAP = 50
+            OCR_PAGE_CAP = 80
             ocr_collected = []
 
             for idx, im in enumerate(pages[:max_images - used]):
                 # Add the rasterized page as before
                 b = io.BytesIO()
-                im.save(b, format="JPEG", quality=85, optimize=True)
+                im.save(b, format="JPEG", quality=75, optimize=True)
                 parts.append(_image_part_from_bytes(b.getvalue()))
                 used += 1
 
@@ -404,7 +404,7 @@ def _add_bytes(parts: List[Dict[str,Any]], files_seen: List[str], raw: bytes, fn
             im = Image.open(io.BytesIO(raw)).convert("RGB")
             im_ref = im.copy()
             im.thumbnail((1800,1800))
-            b = io.BytesIO(); im.save(b, format="JPEG", quality=85, optimize=True)
+            b = io.BytesIO(); im.save(b, format="JPEG", quality=75, optimize=True)
             raw = b.getvalue()
         except Exception:
             im_ref = None
