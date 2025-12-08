@@ -735,7 +735,7 @@ async def vision_review(
     )
 
     # Always append the VIN/odo protocol + consistency guard
-    prompt_text += IDENTIFIERS_VERIFICATION_PRO
+    prompt_text += IDENTIFIERS_VERIFICATION_PROTOCOL
     prompt_text += CONSISTENCY_GUARD
 
     # --------- EVIDENCE FLAGS (must respect) — minimal, no nudging ----------
@@ -1371,6 +1371,7 @@ async def download_pdf(file_number: Optional[str] = None, filename: Optional[str
 
     latest = max(candidates, key=lambda p: os.path.getmtime(p))
     return FileResponse(path=latest, media_type="application/pdf", filename=os.path.basename(latest))
+
 
 
 
