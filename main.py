@@ -42,7 +42,7 @@ logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(levelname)s - %(
 log = logging.getLogger("nspxn")
 log.info(f"Using CLIENT_RULES_DIR={CLIENT_RULES_DIR}")
 
-# Use GPT-4.1 everywhere (override via env OAI_MODEL)
+# Use GPT-4.1 everywhere unless overridden
 MODEL = os.getenv("OAI_MODEL", "gpt-4.1")
 if not os.getenv("OPENAI_API_KEY"):
     raise RuntimeError("OPENAI_API_KEY missing")
@@ -207,7 +207,7 @@ DETAIL_TEMPLATES = {
     ),
 }
 
-# --- Static audit questions ---
+# --- Static audit questions (unchanged) ---
 STATIC_AUDIT_QUESTIONS = [
     "Do the photos substantiate the highest-cost operations (frame/sectioning/panel replace)?",
     "Are ADAS calibrations or wheel alignments required and supported by the damage and OEM procedures?",
@@ -325,18 +325,20 @@ def _image_part_from_bytes(raw: bytes) -> Dict[str, Any]:
     b64 = base64.b64encode(raw).decode("utf-8")
     return {"type": "image_url", "image_url": {"url": "data:image/jpeg;base64," + b64}}
 
-# Safe PDF text extract helper (no stray try:)
+# Safe PDF text extract helper
 def _maybe_extract_pdf_text(raw: bytes, fname: str, parts: List[Dict[str, Any]], files_seen: List[str]) -> None:
     """Best-effort embedded text extraction for vector PDFs. Safe no-op if not available."""
     try:
-        from pdfminer.high_level import extract_text as _pdfminer_extract_text
-        t = (_pdfminer_extract_text(io.BytesIO(raw)) or "")[:12000]
-        if t.strip():
-            parts.insert(0, {"type": "text", "text": t})
-            files_seen.append(f"{fname} (pdf text extracted)")
+        from pdfminer_high_level import extract_text as _bad  # wrong import to trigger except if mispackaged
     except Exception:
-        # fail-open: do nothing if pdfminer not installed or PDF is image-only
-        pass
+        try:
+            from pdfminer.high_level import extract_text as _pdfminer_extract_text
+            t = (_pdfminer_extract_text(io.BytesIO(raw)) or "")[:12000]
+            if t.strip():
+                parts.insert(0, {"type": "text", "text": t})
+                files_seen.append(f"{fname} (pdf text extracted)")
+        except Exception:
+            pass
 
 # Lightweight OCR helper for images
 def _maybe_ocr_image_text(im: Image.Image) -> str:
@@ -363,7 +365,7 @@ def _add_bytes(parts: List[Dict[str,Any]], files_seen: List[str], raw: bytes, fn
             pages = convert_from_bytes(raw, dpi=200)
             files_seen.append(f"{fname} (pdf, {len(pages)} page(s))")
 
-            # Safe vector-text sniff (no inline try here)
+            # Vector-text sniff
             _maybe_extract_pdf_text(raw, fname, parts, files_seen)
 
             # Limit OCR to a few pages for speed
@@ -371,7 +373,7 @@ def _add_bytes(parts: List[Dict[str,Any]], files_seen: List[str], raw: bytes, fn
             ocr_collected = []
 
             for idx, im in enumerate(pages[:max_images - used]):
-                # Add the rasterized page as before
+                # Add the rasterized page
                 b = io.BytesIO()
                 im.save(b, format="JPEG", quality=75, optimize=True)
                 parts.append(_image_part_from_bytes(b.getvalue()))
@@ -611,6 +613,7 @@ async def vision_review(
     paint_mat_rx = r"(Paint\s+(Suppl(?:ies|y)|Materials)|Materials\s*Line)"
     _paint_materials_present = bool(re.search(paint_mat_rx, uploaded_text_all or "", flags=re.IGNORECASE))
 
+    # >>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>
     # INSERT #1a: Presence detectors for VIN / Odometer / Production Date (OCR text)
     vin_photo_rx = r"(?i)\bDescription:\s*VIN\b|\bVIN(?:\s*#|:)?\s*[A-HJ-NPR-Z0-9]{17}\b"
     odo_photo_rx = r"(?i)\bDescription:\s*Odometer\b|\bOdometer\b"
@@ -633,6 +636,7 @@ async def vision_review(
             r".{0,60}?\b(0[1-9]|1[0-2])\s*[-/.\u2013\u2014\u2212:\s]\s*(20\d{2}|\d{2})\b"
         )
         _prod_date_present = bool(re.search(loose_prod_rx, uploaded_text_all or ""))
+    # <<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<
 
     # Lock to 3 intents only
     if ai_intent not in ALLOWED_INTENTS:
@@ -741,7 +745,7 @@ async def vision_review(
             "- A refreshed copy of the Advisor Report is present in the documents. "
             "Do not state it is missing."
         )
-    # Flags for VIN/ODO/Production Date presence
+    # VIN/ODO/Production Date presence flags
     if _vin_photo_present:
         flags.append(
             "- A VIN label/photo is present in the photo set. Do not mark VIN as missing; compare to the estimate VIN and cite the specific Photo # if visible."
@@ -784,9 +788,9 @@ async def vision_review(
 
     redaction_status = "Redacted PII: Successful ✅" if redaction_success else "Redacted PII: Not Applied"
 
-    # --- Keep prompt lean to avoid truncation ---
+    # Keep prompt lean to avoid truncation / empty output
     TEXT_PART_LIMIT = 6
-    _text_parts = [p for p in parts_payload if p.get("type") == "text"]
+    _text_parts  = [p for p in parts_payload if p.get("type") == "text"]
     _image_parts = [p for p in parts_payload if p.get("type") != "text"]
     for tp in _text_parts:
         if isinstance(tp.get("text"), str) and len(tp["text"]) > 8000:
@@ -952,13 +956,12 @@ async def vision_review(
         "redaction_status": redaction_status,
     }
 
-    # --- Minimal narrative safety net ---
+    # Minimal narrative safety net
     if not (result.get("summary_markdown") or "").strip():
         result["summary_markdown"] = (
             "## Detailed Audit Report\n"
-            "A narrative could not be generated from the current model output. "
-            "Evidence was parsed, but the narrative field was empty. "
-            "Please re-run or add one small document at a time to reduce prompt size."
+            "A narrative could not be generated from the current model output after prompt trimming. "
+            "Evidence was parsed, but the narrative field was empty. Please re-run with fewer uploads or add one document at a time."
         )
 
     # --- Score ↔ narrative synchronization (deterministic; minimal logic) ---
@@ -969,7 +972,7 @@ async def vision_review(
         m = re.search(r"(?is)\bFinal\s*score\b[^0-9]{0,10}(\d{1,3})\s*%?\b", text)
         if m:
             try:
-                v = int(m.group(1))
+                v = int(m.group(1)); 
                 if 0 <= v <= 100:
                     return v
             except Exception:
@@ -1041,6 +1044,8 @@ async def vision_review(
         pass
 
     # --- Clean Retail deterministic override ---
+    # If we have clear evidence of a Clean Retail printout (NADA / J.D. Power / KBB / etc.),
+    # NEVER allow the narrative or brief to say it's "Not Evidenced".
     if _clean_retail_present:
         try:
             sm = result.get("summary_markdown") or ""
@@ -1065,6 +1070,7 @@ async def vision_review(
         except Exception:
             pass
 
+    # >>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>
     # INSERT #2: Narrative cleanup to remove false "missing" claims if evidence present
     try:
         sm = result.get("summary_markdown") or ""
@@ -1083,19 +1089,13 @@ async def vision_review(
             sm = re.sub(r"(?is)\bno\s+production\s+date(?:\s+(?:plate|photo|image))?\b.*?(?:\n|$)", "", sm)
             sm = re.sub(r"(?is)\bthe\s+production\s+date(?:\s+(?:plate|photo|image))?\s+is\s+missing\b.*?(?:\n|$)", "", sm)
 
-            # Remove nonsense about a separate production date plate
-            sm = re.sub(r"(?is)^[-*]\s*Missing\s+production\s+date\s+plate\s+separate\s+from\s+VIN\s+label.*?$", "", sm)
-            sm = re.sub(r"(?is)\bseparate\s+production\s+date\s+plate\b.*?(?:\n|$)", "", sm)
-
         sm = re.sub(r"\n{3,}", "\n\n", sm).strip()
-
-        # rollback if we scrubbed too much
         if len(sm) < 120:
             sm = orig_sm.strip()
-
         result["summary_markdown"] = sm if sm else orig_sm.strip()
     except Exception:
         pass
+    # <<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<
 
     # Non-empty Fraud fallback (prevents 'N/A' in output/PDF)
     if not result["fraud_markdown"] or result["fraud_markdown"].strip().upper() in {"", "N/A"}:
@@ -1169,10 +1169,10 @@ async def vision_review(
         mc(f"Claim #: {result['claim_number'] or 'N/A'}    File #: {file_number or 'N/A'}")
         pdf_status = result["redaction_status"].replace("✅", "OK")
         pdf.ln(2); mc(pdf_status)
-        pdf.ln(2); mc("Damage Summary"); mc((result.get("summary_markdown") or "N/A").strip())
-        mc("Estimated Repair Costs"); mc((result.get("estimated_costs_markdown") or "N/A").strip())
-        pdf.ln(2); mc("Fraud & Authenticity Check"); mc((result.get("fraud_markdown") or 'N/A').strip())
-        pdf.ln(2); mc("Conclusion"); mc((result.get("conclusion") or 'N/A').strip())
+        pdf.ln(2); mc("Damage Summary"); mc((result["summary_markdown"] or "N/A").strip())
+        mc("Estimated Repair Costs"); mc((result["estimated_costs_markdown"] or "N/A").strip())
+        pdf.ln(2); mc("Fraud & Authenticity Check"); mc((result["fraud_markdown"] or "N/A").strip())
+        pdf.ln(2); mc("Conclusion"); mc((result["conclusion"] or "N/A").strip())
 
         safe_file = _safe(file_number)
         pdf_filename = f"AI_Damage_Report_{safe_file}.pdf"
@@ -1223,7 +1223,7 @@ async def vision_review(
         pdf_status = result["redaction_status"].replace("✅", "OK")
         mc(pdf_status)
         pdf.ln(3); mc("AI-4-IA Review Summary"); mc((smark or '').strip())
-        pdf.ln(3); mc("Fraud Detection"); mc((result.get("fraud_markdown") or 'N/A').strip())
+        pdf.ln(3); mc("Fraud Detection"); mc((result["fraud_markdown"] or "N/A").strip())
 
         safe_file = _safe(file_number)
         pdf_filename = f"{safe_file}.pdf"
@@ -1243,28 +1243,28 @@ async def vision_review(
     pdf_url = f"/download-pdf?filename={pdf_filename}"
 
     # -----------------------
-    # Email — info-only + PDF attachment
+    # Email — info-only (with PDF attachment)
     # -----------------------
     try:
         msg = EmailMessage()
 
         if ai_intent == "damage_report_from_photos":
-            subj = f"AI Damage Report: {file_number or ''} {result.get('claim_number') or ''}".strip()
+            subj = f"AI Damage Report: {file_number or ''} {result['claim_number'] or ''}".strip()
             body = (
                 "AI-4-IA Damage Report\n\n"
                 f"IA Company: {ia_company}\n"
-                f"Claim #: {result.get('claim_number') or 'N/A'}    File #: {file_number or 'N/A'}\n"
-                f"Odometer: {result.get('odometer_estimate_only') or 'N/A'}    Primary Impact: {result.get('primary_impact') or 'N/A'}\n"
-                f"Secondary Impact: {result.get('secondary_impact') or 'N/A'}\n\n"
-                f"{result.get('redaction_status')}\n\n"
+                f"Claim #: {result['claim_number'] or 'N/A'}    File #: {file_number or 'N/A'}\n"
+                f"Odometer: {result['odometer_estimate_only'] or 'N/A'}    Primary Impact: {result['primary_impact'] or 'N/A'}\n"
+                f"Secondary Impact: {result['secondary_impact'] or 'N/A'}\n\n"
+                f"{result['redaction_status']}\n\n"
                 "Damage Summary\n"
-                f"{(result.get('summary_markdown') or 'N/A')}\n\n"
+                f"{(result['summary_markdown'] or 'N/A')}\n\n"
                 "Estimated Repair Costs\n"
-                f"{(result.get('estimated_costs_markdown') or 'N/A')}\n\n"
+                f"{(result['estimated_costs_markdown'] or 'N/A')}\n\n"
                 "Fraud & Authenticity Check\n"
-                f"{(result.get('fraud_markdown') or 'N/A')}\n\n"
+                f"{(result['fraud_markdown'] or 'N/A')}\n\n"
                 "Conclusion\n"
-                f"{(result.get('conclusion') or 'N/A')}\n"
+                f"{(result['conclusion'] or 'N/A')}\n"
             )
         else:
             # Re-evaluate TL for email from uploaded docs only (no narrative dependency)
@@ -1284,26 +1284,26 @@ async def vision_review(
 
             tl_line = "Estimate Type: Total Loss (explicit in documents)\n" if _explicit_tl_email else ""
             supp_line = "Supplement Status: Supplement Estimate detected in documentation\n" if supp_detected else ""
-            subj = f"AI-4-IA Review: {result.get('claim_number') or file_number}"
+            subj = f"AI-4-IA Review: {result['claim_number'] or file_number}"
             body = (
                 "NSPXN.com AI Review Report\n\n"
                 f"File Number: {file_number}\n"
                 f"IA Company: {ia_company}\n"
                 f"Appraiser ID #: {appraiser_id}\n"
-                f"Request Type: {result.get('request_type')}\n"
+                f"Request Type: {result['request_type']}\n"
                 f"{supp_line}"
                 f"{tl_line}"
-                f"Claim #: {result.get('claim_number')}\n"
-                f"VIN (from estimate/photos): {result.get('vin')}\n"
-                f"VIN verification (estimate vs photo): {result.get('vin_verification')}\n"
-                f"Vehicle: {result.get('vehicle')}\n"
-                f"Odometer (from estimate): {result.get('odometer_estimate_only')}\n"
-                f"Compliance Score: {result.get('compliance_score')}\n\n"
-                f"{result.get('redaction_status')}\n\n"
+                f"Claim #: {result['claim_number']}\n"
+                f"VIN (from estimate/photos): {result['vin']}\n"
+                f"VIN verification (estimate vs photo): {result['vin_verification']}\n"
+                f"Vehicle: {result['vehicle']}\n"
+                f"Odometer (from estimate): {result['odometer_estimate_only']}\n"
+                f"Compliance Score: {result['compliance_score']}\n\n"
+                f"{result['redaction_status']}\n\n"
                 "AI-4-IA Review Summary\n"
-                f"{result.get('summary_markdown')}\n\n"
+                f"{result['summary_markdown']}\n\n"
                 "Fraud Detection\n"
-                f"{result.get('fraud_markdown')}\n"
+                f"{result['fraud_markdown']}\n"
             )
 
         msg["Subject"] = subj
@@ -1359,6 +1359,7 @@ async def download_pdf(file_number: Optional[str] = None, filename: Optional[str
 
     latest = max(candidates, key=lambda p: os.path.getmtime(p))
     return FileResponse(path=latest, media_type="application/pdf", filename=os.path.basename(latest))
+
 
 
 
