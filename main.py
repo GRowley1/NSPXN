@@ -521,7 +521,7 @@ async def vision_review(
             members = [zi for zi in zf.infolist() if not zi.is_dir()]
             if len(members) > MAX_ZIP_FILES:
                 files_seen.append(f"{fname} (zip, too many entries: {len(members)})")
-                members = [:MAX_ZIP_FILES]
+                members = members[:MAX_ZIP_FILES]  # <-- fixed slice
             for zi in members:
                 inner_name = zi.filename
                 if ".." in inner_name or inner_name.startswith(("/", "\\")):
@@ -1304,6 +1304,7 @@ async def download_pdf(file_number: Optional[str] = None, filename: Optional[str
 
     latest = max(candidates, key=lambda p: os.path.getmtime(p))
     return FileResponse(path=latest, media_type="application/pdf", filename=os.path.basename(latest))
+
 
 
 
