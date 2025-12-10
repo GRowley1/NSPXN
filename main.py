@@ -329,11 +329,18 @@ def _image_part_from_bytes(raw: bytes) -> Dict[str, Any]:
 def _maybe_extract_pdf_text(raw: bytes, fname: str, parts: List[Dict[str, Any]], files_seen: List[str]) -> None:
     """Best-effort embedded text extraction for vector PDFs. Safe no-op if not available."""
     try:
-        from pdfminer.high_level import extract_text as _pdfminer_extract_text
-        t = (_pdfminer_extract_text(io.BytesIO(raw)) or "")[:12000]
-        if t.strip():
-            parts.insert(0, {"type": "text", "text": t})
-            files_seen.append(f"{fname} (pdf text extracted)")
+        from pdfminer_high_level import extract_text as _pdfminer_extract_text  # type: ignore
+    except Exception:
+        try:
+            from pdfminer.high_level import extract_text as _pdfminer_extract_text  # type: ignore
+        except Exception:
+            _pdfminer_extract_text = None
+    try:
+        if _pdfminer_extract_text:
+            t = (_pdfminer_extract_text(io.BytesIO(raw)) or "")[:12000]
+            if t.strip():
+                parts.insert(0, {"type": "text", "text": t})
+                files_seen.append(f"{fname} (pdf text extracted)")
     except Exception:
         # fail-open: do nothing if pdfminer not installed or PDF is image-only
         pass
@@ -1392,6 +1399,7 @@ async def download_pdf(file_number: Optional[str] = None, filename: Optional[str
 
     latest = max(candidates, key=lambda p: os.path.getmtime(p))
     return FileResponse(path=latest, media_type="application/pdf", filename=os.path.basename(latest))
+
 
 
 
