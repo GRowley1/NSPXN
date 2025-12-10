@@ -329,6 +329,10 @@ def _image_part_from_bytes(raw: bytes) -> Dict[str, Any]:
 def _maybe_extract_pdf_text(raw: bytes, fname: str, parts: List[Dict[str, Any]], files_seen: List[str]) -> None:
     """Best-effort embedded text extraction for vector PDFs. Safe no-op if not available."""
     try:
+        from pdfminer_high_level import extract_text as _unused  # noqa
+    except Exception:
+        pass
+    try:
         from pdfminer.high_level import extract_text as _pdfminer_extract_text
         t = (_pdfminer_extract_text(io.BytesIO(raw)) or "")[:12000]
         if t.strip():
@@ -624,7 +628,19 @@ async def vision_review(
 
     _vin_photo_present = bool(re.search(vin_photo_rx, uploaded_text_all or ""))
     _odo_photo_present = bool(re.search(odo_photo_rx, uploaded_text_all or ""))
-    _prod_date_present = bool(re.search(prod_date_rx, uploaded_text_all or ""))
+
+    # presence + extractor
+    _prod_date_present = False
+    _prod_date_str: Optional[str] = None
+
+    m = re.search(prod_date_rx, uploaded_text_all or "")
+    if m:
+        mm = m.group(2)
+        yy = m.group(3)
+        if len(yy) == 2:
+            yy = "20" + yy
+        _prod_date_present = True
+        _prod_date_str = f"{mm}/{yy}"
 
     # Loose fallback: catch common OCR where the label/numbering is split oddly
     if not _prod_date_present:
@@ -632,7 +648,14 @@ async def vision_review(
             r"(?is)\b(MFD|MFR|MFG|PROD\.?|PRODUCTION|DATE)\b"
             r".{0,60}?\b(0[1-9]|1[0-2])\s*[-/.\u2013\u2014\u2212:\s]\s*(20\d{2}|\d{2})\b"
         )
-        _prod_date_present = bool(re.search(loose_prod_rx, uploaded_text_all or ""))
+        m2 = re.search(loose_prod_rx, uploaded_text_all or "")
+        if m2:
+            mm = m2.group(2)
+            yy = m2.group(3)
+            if len(yy) == 2:
+                yy = "20" + yy
+            _prod_date_present = True
+            _prod_date_str = f"{mm}/{yy}"
 
     # Lock to 3 intents only
     if ai_intent not in ALLOWED_INTENTS:
@@ -1040,18 +1063,20 @@ async def vision_review(
         orig_sm = sm
 
         if _odo_photo_present:
+            # bullets + sentence forms
             sm = re.sub(r"(?im)^\s*[-*]\s*Missing\s+odometer\s+photo.*$", "", sm)
             sm = re.sub(r"(?is)\bodometer\s+photo\s+not\s+present\b.*?(?:\n|$)", "", sm)
             sm = re.sub(r"(?is)\bthe\s+odometer\s+(?:photo\s+)?is\s+missing\b.*?(?:\n|$)", "", sm)
 
         if _prod_date_present:
+            # bullets + multiple sentence forms
             sm = re.sub(r"(?im)^\s*[-*]\s*Missing\s+production\s+date\s*(?:plate|photo)?\b.*$", "", sm)
             sm = re.sub(r"(?is)\bproduction\s+date\s+(?:plate\s+)?(?:photo\s+)?not\s+present\b.*?(?:\n|$)", "", sm)
             sm = re.sub(r"(?is)\bno\s+production\s+date(?:\s+(?:plate|photo|image))?\b.*?(?:\n|$)", "", sm)
             sm = re.sub(r"(?is)\bthe\s+production\s+date(?:\s+(?:plate|photo|image))?\s+is\s+missing\b.*?(?:\n|$)", "", sm)
 
         sm = re.sub(r"\n{3,}", "\n\n", sm).strip()
-        if len(sm) < 120:
+        if len(sm) < 120:  # rollback if we scrubbed too much
             sm = orig_sm.strip()
         result["summary_markdown"] = sm if sm else orig_sm.strip()
     except Exception:
@@ -1141,7 +1166,7 @@ async def vision_review(
         mc(f"Appraiser ID #: {appraiser_id}")
         mc(f"Request Type: {result['request_type']}")
 
-        # --- Supplement header echo with negation-aware positive detector ---
+        # --- Supplement header echo with negation-aware positive detector + doc cues ---
         smark = result.get("summary_markdown","")
         supp_detected = bool(re.search(
             r"(?is)(?:\bmarked\s+as\s+a\s+supplement\b|\bis\s+a\s+supplement\b|\bsupplement\s+estimate\b|\bsupplement\s+summary\b|\bS0[1-9]\b)"
@@ -1149,7 +1174,6 @@ async def vision_review(
             smark
         ))
 
-        # Also scan documents for supplement cues (S01/S02 table, 'Supplement of record')
         doc_supp = bool(re.search(r"(?is)\bSupplement(?:\s+of\s+record)?\b", uploaded_text_all or "")) or \
                    bool(re.search(r"(?is)\bS0[1-9]\b", uploaded_text_all or "")) or \
                    bool(re.search(r"(?is)\bSupplement\s+Summary\b", uploaded_text_all or ""))
@@ -1157,20 +1181,13 @@ async def vision_review(
 
         if final_supp_flag:
             mc("Supplement Status: Supplement Estimate detected in documentation")
-
-        # Small Supplement Details box (very brief)
-        if final_supp_flag:
             pdf.set_font_size(10); pdf.ln(2)
             mc("Supplement Details")
-            # Try to echo a minimal detail line from docs (best-effort)
-            sup_line = ""
-            # Capture S01/S02 mention
             msi = re.search(r"(?is)\b(S0[1-9])\b.*?(?:completed|of record|summary)?", uploaded_text_all or "")
             if msi:
-                sup_line = f"- Detected {msi.group(1)} in estimate documentation."
+                mc(f"- Detected {msi.group(1)} in estimate documentation.")
             else:
-                sup_line = "- Supplement indicators present (e.g., 'Supplement', 'Supplement Summary')."
-            mc(sup_line)
+                mc("- Supplement indicators present (e.g., 'Supplement', 'Supplement Summary').")
 
         # --- Total Loss echo (documents-only; no narrative trigger) ---
         explicit_tl_hit = False
@@ -1196,9 +1213,13 @@ async def vision_review(
         mc(f"VIN verification (estimate vs photo): {result['vin_verification']}")
         mc(f"Vehicle: {result['vehicle']}")
         mc(f"Odometer (from estimate): {result['odometer_estimate_only']}")
-        # If production date present, echo a simple satisfied note to avoid confusion
-        if _prod_date_present:
+
+        # Production Date header line with MM/YYYY when available
+        if _prod_date_str:
+            mc(f"Production Date: {_prod_date_str}")
+        elif _prod_date_present:
             mc("Production Date: Present on door label (satisfies client requirement)")
+
         mc(f"Compliance Score: {result['compliance_score']}")
         pdf_status = result["redaction_status"].replace("✅", "OK")
         mc(pdf_status)
@@ -1261,7 +1282,8 @@ async def vision_review(
             _supp_email = final_supp_flag
             tl_line = "Estimate Type: Total Loss (explicit in documents)\n" if _explicit_tl_email else ""
             supp_line = "Supplement Status: Supplement Estimate detected in documentation\n" if _supp_email else ""
-            prod_line = "Production Date: Present on door label (satisfies client requirement)\n" if _prod_date_present else ""
+            prod_line = (f"Production Date: {_prod_date_str}\n" if _prod_date_str
+                        else ("Production Date: Present on door label (satisfies client requirement)\n" if _prod_date_present else ""))
 
             subj = f"AI-4-IA Review: {result['claim_number'] or file_number}"
             body = (
@@ -1339,3 +1361,4 @@ async def download_pdf(file_number: Optional[str] = None, filename: Optional[str
 
     latest = max(candidates, key=lambda p: os.path.getmtime(p))
     return FileResponse(path=latest, media_type="application/pdf", filename=os.path.basename(latest))
+
