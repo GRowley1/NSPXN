@@ -1157,8 +1157,6 @@ async def vision_review(
         mc(f"VIN verification (estimate vs photo): {result['vin_verification']}")
         mc(f"Vehicle: {result['vehicle']}")
         mc(f"Odometer (from estimate): {result['odometer_estimate_only']}")
-        if _prod_date_str:
-            mc(f"Production Date: {_prod_date_str}")
         mc(f"Compliance Score: {result['compliance_score']}")
         pdf_status = result["redaction_status"].replace("✅", "OK")
         mc(pdf_status)
