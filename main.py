@@ -249,6 +249,8 @@ CONSISTENCY_GUARD = (
     "\n\nCONSISTENCY GUARD:"
     "\n- Do not claim any required photo is 'missing' if you graded it 'Clearly legible' or 'Present — not clearly legible'."
     "\n- For VIN, Odometer, and Production Date specifically: if present in any photo, do not write any sentence implying they are absent."
+    "\n- If a legible driver-door VIN label photo is present, treat the Production Date requirement as evidenced (the production month/year appears on the same label). Do NOT deduct or say 'not separately documented'."
+    "\n- Do not deduct for missing Repair Facility info when the estimate/Closing Report does not contain a 'Repair Facility Information' section; report as 'N/A — not provided' without deduction."
     "\n- If legibility is the issue, explicitly say 'Present — not clearly legible' and explain why (glare/blur/angle), and request a precise retake rather than marking it missing."
     "\n- Before finalizing, re-scan your output: confirm every referenced Photo # matches the content described (e.g., do not cite an Odometer photo as the point-of-impact photo). Correct any mismatches."
 )
@@ -297,7 +299,10 @@ SYSTEM_BASE += (
     "When client_rules text is provided, also include a section titled '## Client Guidelines Comparison' with 3–8 concise bullets quoting the relevant rule fragment and citing evidence (p#/L#, Photo #); "
     "weave any material rule alignment/misalignment into the Detailed Audit Report narrative."
     "When a valuation/clean retail printout exists but the header doesn’t match the estimate’s VIN/year/trim/mileage, label it “Present — mismatched (detail the differences)” and request a corrected printout; never mark it Missing/Not Evidenced. "
+    "If a legible driver-door VIN label photo is present, treat Production Date as evidenced; do not mark 'missing' or deduct for lack of a separate photo. "
+    "Do not deduct for missing Repair Facility info when the estimate/Closing Report does not contain a 'Repair Facility Information' section; report 'N/A — not provided' without deduction."
 )
+
 SYSTEM_BASE += (
     " Your 'summary_markdown' MUST include a top-level section named '## Detailed Audit Report' containing a cohesive narrative of at least 10–14 sentences (not bullets). "
     "It must synthesize: impact zones, per-panel damages, repair vs. replace rationale, parts type (OEM/LKQ/Aftermarket), labor ops, refinish/overlap, rate/materials/sublet/tax handling, and estimate integrity. "
@@ -326,11 +331,18 @@ def _image_part_from_bytes(raw: bytes) -> Dict[str, Any]:
 # Safe PDF text extract helper
 def _maybe_extract_pdf_text(raw: bytes, fname: str, parts: List[Dict[str, Any]], files_seen: List[str]) -> None:
     try:
-        from pdfminer.high_level import extract_text as _pdfminer_extract_text
-        t = (_pdfminer_extract_text(io.BytesIO(raw)) or "")[:12000]
-        if t.strip():
-            parts.insert(0, {"type": "text", "text": t})
-            files_seen.append(f"{fname} (pdf text extracted)")
+        from pdfminer_high_level import extract_text as _x  # type: ignore
+    except Exception:
+        try:
+            from pdfminer.high_level import extract_text as _x  # fallback
+        except Exception:
+            _x = None
+    try:
+        if _x:
+            t = (_x(io.BytesIO(raw)) or "")[:12000]
+            if t.strip():
+                parts.insert(0, {"type": "text", "text": t})
+                files_seen.append(f"{fname} (pdf text extracted)")
     except Exception:
         pass
 
@@ -352,14 +364,14 @@ def _add_bytes(parts: List[Dict[str,Any]], files_seen: List[str], raw: bytes, fn
     low = fname.lower()
     if low.endswith(SUPPORTED_PDF_EXTS) and used < max_images:
         try:
-            pages = convert_from_bytes(raw, dpi=240)
+            pages = convert_from_bytes(raw, dpi=200)
             files_seen.append(f"{fname} (pdf, {len(pages)} page(s))")
             _maybe_extract_pdf_text(raw, fname, parts, files_seen)
-            OCR_PAGE_CAP = 50
+            OCR_PAGE_CAP = 80
             ocr_collected = []
             for idx, im in enumerate(pages[:max_images - used]):
                 b = io.BytesIO()
-                im.save(b, format="JPEG", quality=85, optimize=True)
+                im.save(b, format="JPEG", quality=75, optimize=True)
                 parts.append(_image_part_from_bytes(b.getvalue()))
                 used += 1
                 if idx < OCR_PAGE_CAP:
@@ -378,7 +390,7 @@ def _add_bytes(parts: List[Dict[str,Any]], files_seen: List[str], raw: bytes, fn
             im = Image.open(io.BytesIO(raw)).convert("RGB")
             im_ref = im.copy()
             im.thumbnail((1800,1800))
-            b = io.BytesIO(); im.save(b, format="JPEG", quality=85, optimize=True)
+            b = io.BytesIO(); im.save(b, format="JPEG", quality=75, optimize=True)
             raw = b.getvalue()
         except Exception:
             im_ref = None
@@ -704,7 +716,7 @@ async def vision_review(
         )
     if _vin_photo_present:
         flags.append(
-            "- A VIN label/photo is present in the photo set. Do not mark VIN as missing; compare to the estimate VIN and cite the specific Photo # if visible."
+            "- A driver-door VIN label/photo is present. Treat Production Date as evidenced by the same label; do NOT deduct or claim 'not separately documented'."
         )
     if _odo_photo_present:
         flags.append(
@@ -712,7 +724,7 @@ async def vision_review(
         )
     if _prod_date_present:
         flags.append(
-            "- A production date (Date of Mfr/MFD DATE) is visible on a door label photo. Do not mark Production Date as missing; cite the Photo # and the month/year (e.g., 05/2024)."
+            "- A production date (Date of Mfr/MFD DATE) is visible on a door label photo. Do not mark Production Date as missing; cite the Photo # and the month/year."
         )
 
     parts_payload: List[Dict[str,Any]] = []
@@ -1019,10 +1031,18 @@ async def vision_review(
             sm = re.sub(r"(?im)^\s*[-*]\s*Missing\s+odometer\s+photo.*$", "", sm)
             sm = re.sub(r"(?is)\bodometer\s+photo\s+not\s+present\b.*?(?:\n|$)", "", sm)
             sm = re.sub(r"(?is)\bthe\s+odometer\s+(?:photo\s+)?is\s+missing\b.*?(?:\n|$)", "", sm)
-        if _prod_date_present:
+        if _vin_photo_present:
+            # treat PD as evidenced; scrub PD 'missing' and 'not separately documented'
             sm = re.sub(r"(?im)^\s*[-*]\s*Missing\s+production\s+date\s*(?:plate|photo)?\b.*$", "", sm)
             sm = re.sub(r"(?is)\bproduction\s+date\s+(?:plate\s+)?(?:photo\s+)?not\s+present\b.*?(?:\n|$)", "", sm)
             sm = re.sub(r"(?is)\bno\s+production\s+date(?:\s+(?:plate|photo|image))?\b.*?(?:\n|$)", "", sm)
+            sm = re.sub(r"(?is)\bproduction\s+date\s+not\s+separately\s+documented\b.*?(?:\n|$)", "", sm)
+            sm = re.sub(r"(?is)\bthe\s+production\s+date(?:\s+(?:plate|photo|image))?\s+is\s+missing\b.*?(?:\n|$)", "", sm)
+        elif _prod_date_present:
+            sm = re.sub(r"(?im)^\s*[-*]\s*Missing\s+production\s+date\s*(?:plate|photo)?\b.*$", "", sm)
+            sm = re.sub(r"(?is)\bproduction\s+date\s+(?:plate\s+)?(?:photo\s+)?not\s+present\b.*?(?:\n|$)", "", sm)
+            sm = re.sub(r"(?is)\bno\s+production\s+date(?:\s+(?:plate|photo|image))?\b.*?(?:\n|$)", "", sm)
+            sm = re.sub(r"(?is)\bproduction\s+date\s+not\s+separately\s+documented\b.*?(?:\n|$)", "", sm)
             sm = re.sub(r"(?is)\bthe\s+production\s+date(?:\s+(?:plate|photo|image))?\s+is\s+missing\b.*?(?:\n|$)", "", sm)
         sm = re.sub(r"\n{3,}", "\n\n", sm).strip()
         if len(sm) < 120:
@@ -1059,7 +1079,7 @@ async def vision_review(
     pdf.set_left_margin(10); pdf.set_right_margin(10)
 
     try:
-        pdf.add_font("DejaVu","", "DejaVuSans.ttf", uni=True); pdf.set_font("DejaVu", size=11)
+        pdf.add_font("DejaVu","", "DejaVuSans.ttf", uni=True); pdf.set_font(size=11)
     except Exception:
         pdf.set_font("Arial", size=11)
 
@@ -1289,6 +1309,7 @@ async def download_pdf(file_number: Optional[str] = None, filename: Optional[str
         return JSONResponse(status_code=404, content={"detail": "Not Found"})
     latest = max(candidates, key=lambda p: os.path.getmtime(p))
     return FileResponse(path=latest, media_type="application/pdf", filename=os.path.basename(latest))
+
 
 
 
