@@ -1294,7 +1294,7 @@ async def vision_review(
 # PDF download
 # -----------------------
 @app.get("/download-pdf")
-async def download_pdf(file_number: Optional[str] = None, filename: Optional[str] = None):
+async def download_pdf(file_number: Optional[str] = None, filename: Optional:str = None):
     if filename:
         safe = _safe(filename)
         path = os.path.join(PDF_DIR, safe)
@@ -1309,6 +1309,7 @@ async def download_pdf(file_number: Optional[str] = None, filename: Optional[str
         return JSONResponse(status_code=404, content={"detail": "Not Found"})
     latest = max(candidates, key=lambda p: os.path.getmtime(p))
     return FileResponse(path=latest, media_type="application/pdf", filename=os.path.basename(latest))
+
 
 
 
