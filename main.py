@@ -1294,7 +1294,7 @@ async def vision_review(
 # PDF download
 # -----------------------
 @app.get("/download-pdf")
-async def download_pdf(file_number: Optional[str] = None, filename: Optional:str = None):
+async def download_pdf(file_number: Optional[str] = None, filename: Optional[str] = None):
     if filename:
         safe = _safe(filename)
         path = os.path.join(PDF_DIR, safe)
