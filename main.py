@@ -1371,8 +1371,7 @@ async def vision_review(
         def _break(tok: str) -> str:
             if len(tok) <= max_token_len:
                 return tok
-            return " ".
-join(tok[i:i+max_token_len] for i in range(0, len(tok), max_token_len))
+            return " ".join(tok[i:i+max_token_len] for i in range(0, len(tok), max_token_len))
         s = " ".join(_break(t) for t in s.split(" "))
         return s
 
@@ -1611,6 +1610,7 @@ async def download_pdf(file_number: Optional[str] = None, filename: Optional[str
         return JSONResponse(status_code=404, content={"detail": "Not Found"})
     latest = max(candidates, key=lambda p: os.path.getmtime(p))
     return FileResponse(path=latest, media_type="application/pdf", filename=os.path.basename(latest))
+
 
 
 
