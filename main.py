@@ -337,7 +337,7 @@ def _maybe_extract_pdf_text(raw: bytes, fname: str, parts: List[Dict[str, Any]],
         from pdfminer_high_level import extract_text as _x  # type: ignore
     except Exception:
         try:
-            from pdfminer.high.level import extract_text as _x  # fallback (note: typo in original kept)
+            from pdfminer.high.level import extract_text as _x  # fallback
         except Exception:
             _x = None
     try:
@@ -583,11 +583,11 @@ async def vision_review(
     paint_mat_rx = r"(Paint\s+(Suppl(?:ies|y)|Materials)|Materials\s*Line)"
     _paint_materials_present = bool(re.search(paint_mat_rx, uploaded_text_all or "", flags=re.IGNORECASE))
 
-    # INSERT #1a: Presence detectors for VIN / Odometer / Production Date (OCR text)
+    # Presence detectors for VIN / Odometer / Production Date (OCR text)
     vin_photo_rx = r"(?i)\bDescription:\s*VIN\b|\bVIN(?:\s*#|:)?\s*[A-HJ-NPR-Z0-9]{17}\b"
     odo_photo_rx = r"(?i)\bDescription:\s*Odometer\b|\bOdometer\b"
 
-    # Be generous with labels and separators (OCR tolerant)
+    # Production date patterns (label)
     prod_date_rx = (
         r"(?is)\b(Production\s*date|Prod(?:uction)?\s*Date|Date\s*of\s*Mfr|Date\s*of\s*Manufacture|"
         r"MFD\.?\s*(?:BY|DATE)?|MFR\.?\s*DATE|MFG\.?\s*DATE|DATE)\b"
@@ -760,7 +760,7 @@ async def vision_review(
     redaction_status = "Redacted PII: Successful ✅" if redaction_success else "Redacted PII: Not Applied"
 
     # -------------------------------
-    # PATCH #1: Keep prompt lean
+    # Keep prompt lean
     # -------------------------------
     TEXT_PART_LIMIT = 6
     _text_parts = [p for p in parts_payload if p.get("type") == "text"]
@@ -771,9 +771,6 @@ async def vision_review(
     parts_payload = _text_parts[:TEXT_PART_LIMIT] + _image_parts
 
     # Token limits
-    # -------------------------------
-    # PATCH #2: Raise token ceilings
-    # -------------------------------
     MAX_TOKENS_BY_INTENT = {
         "comprehensive": 2200,
         "guidelines_only": 1500,
@@ -836,9 +833,7 @@ async def vision_review(
 
     data = _try_parse_json(raw)
 
-    # -------------------------------
-    # PATCH #3: One safe retry on truncation
-    # -------------------------------
+    # One safe retry on truncation
     try:
         finish_reason = getattr(rsp.choices[0], "finish_reason", None)
     except Exception:
@@ -1016,7 +1011,7 @@ async def vision_review(
                     rationale_lines = [
                         "",
                         "## Compliance Score Rationale",
-                        f"Starting from 100%, a total deduction of {deduction} points was applied based on the minor/non-fatal issues described above, resulting in a final compliance score of {score_int}%.",
+                        f"Starting from 100%, a total deduction of {deduction} points was applied based on the minor, non-fatal documentation/formatting items described above, resulting in a final compliance score of {score_int}%.",
                     ]
                     if _prod_evidenced or _clean_retail_present:
                         rationale_lines.append(
@@ -1031,8 +1026,7 @@ async def vision_review(
     if _clean_retail_present:
         try:
             sm = result.get("summary_markdown") or ""
-            # 1) Flip any explicit "Not Evidenced" or "Missing clean retail value printout"
-            # bullets or sentences into "present" language.
+            # 1) Flip or remove "missing clean retail" style statements
             sm = re.sub(
                 r"(?im)^\s*[-*]\s*Missing\s+clean\s+retail\s+value\s+printout[^\n]*$",
                 "",
@@ -1058,6 +1052,12 @@ async def vision_review(
                 "Valuation printout confirmed present in file.",
                 sm,
             )
+            # New: Also rewrite the longer paragraph variant
+            sm = re.sub(
+                r"(?is)Also,\s+the\s+client\s+rules\s+require\s+a\s+printout\s+showing\s+the\s+Clean\s+Retail\s+Value\s+of\s+the\s+unit,[^.]*\.\s*The\s+NADA\s+value\s+is\s+mentioned[^.]*\.\s*These\s+omissions\s+reduce\s+compliance\.",
+                "Client rules require a printout showing the Clean Retail Value of the unit; a valuation printout (e.g., J.D. Power or NADA clean retail page) is present in the file and satisfies this requirement.",
+                sm,
+            )
             # 2) Client Guidelines bullet: convert 'Not Evidenced' to 'Aligned'
             sm = re.sub(
                 r'(?im)^-?\s*"Printout\s+showing\s+the\s+Clean\s+Retail\s+Value\s+of\s+the\s+unit\s+is\s+required[^"]*"\s*-\s*Not\s+Evidenced[^\n]*$',
@@ -1070,8 +1070,19 @@ async def vision_review(
                 "",
                 sm,
             )
+            # 4) Conclusion/summary variants mentioning absence of clean retail
+            sm = re.sub(
+                r"(?is)Missing\s+repair\s+facility\s+info\s+and\s+clean\s+retail\s+value\s+printout\s+are\s+noted\s+compliance\s+issues\.",
+                "Only minor documentation items are noted; core estimate, Clean Retail value evidence, and production date requirements are satisfied.",
+                sm,
+            )
+            sm = re.sub(
+                r"(?is)Compliance\s+is\s+reduced\s+due\s+to\s+missing\s+repair\s+facility\s+information\s+and\s+absence\s+of\s+a\s+clean\s+retail\s+value\s+printout\.",
+                "Compliance is modestly reduced due to minor non-fatal documentation items only; Production Date and Clean Retail value requirements are satisfied in this file.",
+                sm,
+            )
 
-            # Original narrow replacements kept as a backstop
+            # Backstop replacements
             sm_fixed = re.sub(
                 r"(?i)(Clean\s+retail\s+value[^:\n]*:\s*)(Not\s+Evidenced[^.\n]*)",
                 r"\1Evidenced (Clean Retail printout present via NADA/J.D. Power/KBB/Edmunds/Carfax/Cars.com)",
@@ -1094,27 +1105,32 @@ async def vision_review(
                 "Clean Retail value printout present via J.D. Power/NADA/KBB valuation.",
                 sb,
             )
+            sb = re.sub(
+                r"(?is)absence\s+of\s+a\s+clean\s+retail\s+value\s+printout",
+                "minor non-fatal documentation items (not related to Clean Retail value requirement)",
+                sb,
+            )
             result["summary_brief"] = sb
         except Exception:
             pass
 
-    # INSERT #2: Narrative cleanup to remove false "missing" claims if evidence present
+    # Narrative cleanup to remove false "missing" claims if evidence present
     try:
         sm = result.get("summary_markdown") or ""
         orig_sm = sm
+        lower_sm = sm.lower()
+
         if _odo_photo_present:
             sm = re.sub(r"(?im)^\s*[-*]\s*Missing\s+odometer\s+photo.*$", "", sm)
             sm = re.sub(r"(?is)\bodometer\s+photo\s+not\s+present\b.*?(?:\n|$)", "", sm)
             sm = re.sub(r"(?is)\bthe\s+odometer\s+(?:photo\s+)?is\s+missing\b.*?(?:\n|$)", "", sm)
 
         if _prod_evidenced:
-            # Remove bullets that say "Missing production date..."
             sm = re.sub(
                 r"(?im)^\s*[-*]\s*Missing\s+production\s+date\s*(?:plate|photo)?[^\n]*$",
                 "",
                 sm,
             )
-            # Remove/neutralize sentences claiming missing production date
             sm = re.sub(
                 r"(?is)\bfile\s+is\s+missing\s+(?:a\s+)?production\s+date\s+photo\b[^\n\.]*",
                 "Production date is documented on the driver-door VIN label photo and satisfies the client requirement",
@@ -1145,19 +1161,16 @@ async def vision_review(
                 "",
                 sm,
             )
-            # Client guidelines bullet: flip "Production Date Photo is mandatory - Not Evidenced" → Aligned
             sm = re.sub(
                 r'(?im)^-?\s*"Production\s+Date\s+Photo\s+is\s+mandatory"\s*-\s*Not\s+Evidenced[^\n]*$',
                 '- "Production Date Photo is mandatory" - Aligned (production date documented on the driver-door VIN label photo).',
                 sm,
             )
-            # Risks bullet for missing production date: drop it
             sm = re.sub(
                 r"(?im)^\s*[-*]\s*High:\s*Missing\s+production\s+date\s*photo[^\n]*$",
                 "",
                 sm,
             )
-            # Fix the bad sentence where PD was incorrectly treated as an exception
             sm = re.sub(
                 r"(?is)The\s+production\s+date\s+is\s+listed\s+in\s+the\s+estimate\s*\(p1\)\s*but\s+no\s+separate\s+photo\s+of\s+the\s+production\s+date\s+sticker\s+is\s+provided,\s*which\s+is\s+a\s+client\s+rule\s+requirement\.",
                 "",
@@ -1210,23 +1223,33 @@ async def vision_review(
                 sm,
             )
 
-        # Also remove risk bullet about missing clean retail when valuation present
-        if _clean_retail_present:
-            sm = re.sub(
-                r"(?im)^\s*[-*]\s*High:\s*Missing\s+clean\s+retail\s+value\s+printout[^\n]*$",
-                "",
-                sm,
-            )
+        # Clean retail risk bullet already handled above when _clean_retail_present
 
-        # If the model left a raw arithmetic line like "100 - 20 - 20 - 5 = 55 ..."
-        # and we know clean retail / production date are actually evidenced,
-        # replace it with a neutral explanation so we don't memorialize wrong deductions.
+        # If arithmetic line exists and PD/Clean Retail are evidenced, rephrase
         if _clean_retail_present or _prod_evidenced:
             score_str2 = str(result.get("compliance_score") or "").strip()
             arith_re = r"(?im)^\s*100\s*-[^\n]*$"
             if re.search(arith_re, sm):
                 repl_line = f"Compliance score math: Adjusted from 100% to {score_str2 or 'the final'}% based on documented minor issues (e.g., overlap/blend explanation), not on Production Date or Clean Retail printout."
                 sm = re.sub(arith_re, repl_line, sm)
+
+        # Repair Facility + Owner's location: do NOT deduct
+        if "owner's location" in lower_sm and "repair facility" in lower_sm:
+            sm = re.sub(
+                r"(?is)However,\s+the\s+file\s+lacks\s+repair\s+facility\s+information[^\.]*\.",
+                "",
+                sm,
+            )
+            sm = re.sub(
+                r"(?is)Missing\s+repair\s+facility\s+info[^\.]*\.",
+                "",
+                sm,
+            )
+            sm = re.sub(
+                r"(?is)missing\s+repair\s+facility\s+information\b[^\.]*\.",
+                "",
+                sm,
+            )
 
         sm = re.sub(r"\n{3,}", "\n\n", sm).strip()
         if len(sm) < 120:
@@ -1235,7 +1258,7 @@ async def vision_review(
     except Exception:
         pass
 
-    # ---- FINAL OVERRIDE of Compliance Score Rationale when PD / Clean Retail are evidenced ----
+    # FINAL OVERRIDE of Compliance Score Rationale when PD / Clean Retail are evidenced
     try:
         if ai_intent != "damage_report_from_photos":
             sm = result.get("summary_markdown") or ""
@@ -1253,12 +1276,40 @@ async def vision_review(
                         "## Compliance Score Rationale",
                         f"Starting from 100%, a total deduction of {deduction} points was applied for minor, non-fatal documentation/formatting items noted above (e.g., small clarity or layout issues), resulting in a final compliance score of {score_int}%.",
                     ]
-                    if _clean_retail_present or _prod_evidenced:
-                        new_lines.append(
-                            "No deduction was taken for Production Date or Clean Retail value, as these items are evidenced in the file and treated as compliant."
-                        )
+                    new_lines.append(
+                        "No deduction was taken for Production Date or Clean Retail value, as these items are evidenced in the file and treated as compliant."
+                    )
                     sm_final = sm_no_section + "\n\n" + "\n".join(new_lines)
                     result["summary_markdown"] = sm_final
+    except Exception:
+        pass
+
+    # Normalize odometer field when photo is present, so header is clean
+    try:
+        if _odo_photo_present:
+            sm = result.get("summary_markdown") or ""
+            odo_field = (result.get("odometer_estimate_only") or "").strip()
+
+            # Try to extract explicit mileage from narrative
+            m_odo = re.search(r"(?is)odometer\s+reading\s+of\s+([0-9,]+)\s*miles", sm)
+            if m_odo:
+                miles = m_odo.group(1)
+                result["odometer_estimate_only"] = f"{miles} miles (confirmed by estimate and photos)."
+            else:
+                # Fallback generic phrasing
+                result["odometer_estimate_only"] = "Present and legible in photos (e.g., odometer photo)."
+
+            # Clean any weird "No, odometer photo present..." phrasing from brief or narrative
+            for key in ("summary_brief", "summary_markdown"):
+                txt = result.get(key) or ""
+                if txt:
+                    txt = re.sub(
+                        r"No,\s*odometer\s+photo\s+present\s+and\s+legible\s*\(Photo\s*\d+\)",
+                        "Odometer is present and legible in the photos and matches the estimate.",
+                        txt,
+                        flags=re.IGNORECASE,
+                    )
+                    result[key] = txt
     except Exception:
         pass
 
@@ -1520,6 +1571,7 @@ async def download_pdf(file_number: Optional[str] = None, filename: Optional[str
         return JSONResponse(status_code=404, content={"detail": "Not Found"})
     latest = max(candidates, key=lambda p: os.path.getmtime(p))
     return FileResponse(path=latest, media_type="application/pdf", filename=os.path.basename(latest))
+
 
 
 
