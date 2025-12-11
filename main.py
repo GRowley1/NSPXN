@@ -737,31 +737,55 @@ async def vision_review(
     except Exception as e:
         return JSONResponse(status_code=500, content={"error": f"Model call failed: {e}"})
 
-    def _try_parse_json(raw_text: str):
-        if not raw_text:
+    # --- Hardened JSON parse helper (simplified & trust response_format=json_object) ---
+    def _try_parse_json(raw_text):
+        """
+        Best-effort JSON loader.
+
+        - If the API already returned a dict, just pass it through.
+        - Otherwise, treat content as a string and load it with json.loads.
+        - Only if that fails, do a very light cleanup and retry.
+        """
+        if raw_text is None:
             return None
+
+        # If the SDK already parsed it for us
+        if isinstance(raw_text, dict):
+            return raw_text
+
+        # Ensure we are working with a string
+        if not isinstance(raw_text, str):
+            raw_text = str(raw_text)
+
         raw_local = raw_text.strip()
 
-        for fence in ("```json", "```JSON", "```"):
-            if raw_local.startswith(fence):
-                raw_local = raw_local[len(fence):]
-            if raw_local.endswith("```"):
-                raw_local = raw_local[:-3]
-        raw_local = raw_local.strip()
-        raw_local = raw_local.replace("\ufeff", "").replace("\u200b", "").replace("\u00A0", " ")
-
+        # Fast path: most responses should work here
         try:
             return json.loads(raw_local)
         except Exception:
             pass
 
+        # Fallback: trim to outermost braces in case of any stray logging text
         lb = raw_local.find("{")
         rb = raw_local.rfind("}")
-        chunk = raw_local[lb:rb+1] if (lb != -1 and rb != -1 and rb > lb) else raw_local
+        if lb != -1 and rb != -1 and rb > lb:
+            chunk = raw_local[lb:rb+1]
+        else:
+            chunk = raw_local
 
-        fixes = {"\u2018": "'", "\u2019": "'", "\u201C": '"', "\u201D": '"', "\r": "", "\t": "    "}
+        # Normalize a few common troublesome characters
+        fixes = {
+            "\ufeff": "",   # BOM
+            "\u200b": "",   # zero-width space
+            "\u00A0": " ",  # non-breaking space
+            "\u2018": "'", "\u2019": "'",
+            "\u201C": '"', "\u201D": '"',
+            "\r": "", "\t": "    ",
+        }
         for k, v in fixes.items():
             chunk = chunk.replace(k, v)
+
+        # Remove trailing commas before } or ]
         chunk = re.sub(r",\s*([}\]])", r"\1", chunk)
 
         try:
@@ -775,14 +799,7 @@ async def vision_review(
         log.error(f"LLM returned no content: {e}")
         return JSONResponse(status_code=500, content={"error":"Model returned no content."})
 
-    # NEW: trust direct json.loads first, then fall back to tolerant parser / formatter
-    data = None
-    # First, trust the API's JSON response_format and parse directly.
-    try:
-        data = json.loads(raw)
-    except Exception:
-        # Fallback to legacy tolerant parser if direct parse fails.
-        data = _try_parse_json(raw)
+    data = _try_parse_json(raw)
 
     if data is None:
         try:
@@ -805,10 +822,7 @@ async def vision_review(
                     model=MODEL, messages=fix_prompt, max_tokens=max_tokens, temperature=0, response_format={"type":"json_object"}
                 )
             fixed = (fix_rsp.choices[0].message.content or "")
-            try:
-                data = json.loads(fixed)
-            except Exception:
-                data = _try_parse_json(fixed)
+            data = _try_parse_json(fixed)
         except Exception as e:
             log.error(f"Self-heal reformat failed: {e}")
 
@@ -831,8 +845,7 @@ async def vision_review(
             "estimated_costs_markdown": "N/A",
             "conclusion": "N/A",
         }
-        # keep actual redaction_status flag here
-        skeleton["redaction_status"] = redaction_status
+        skeleton["redaction_status"] = "Redacted PII: Not Applied"
         return skeleton
 
     def _get(k):
@@ -1248,6 +1261,7 @@ async def download_pdf(file_number: Optional[str] = None, filename: Optional[str
 
     latest = max(candidates, key=lambda p: os.path.getmtime(p))
     return FileResponse(path=latest, media_type="application/pdf", filename=os.path.basename(latest))
+
 
 
 
