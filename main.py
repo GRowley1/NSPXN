@@ -733,6 +733,8 @@ async def vision_review(
             "- A production date (Date of Mfr/MFD DATE) is visible on a door label photo. Do not mark Production Date as missing; cite the Photo # and the month/year."
         )
 
+    _ = flags  # currently used only in prompt design above (we keep generation minimal)
+
     parts_payload: List[Dict[str,Any]] = []
     redaction_success = False
     try:
@@ -1110,6 +1112,20 @@ async def vision_review(
                 "minor non-fatal documentation items (not related to Clean Retail value requirement)",
                 sb,
             )
+
+            # --- NEW: scrub release paperwork mentions out of brief as a deduction reason ---
+            if "release paperwork" in sb.lower():
+                sb = re.sub(
+                    r"(?is)\band\s+release\s+paperwork\b",
+                    "",
+                    sb,
+                )
+                sb = re.sub(
+                    r"(?is)\bincomplete\s+release\s+paperwork\b[^\.]*",
+                    "",
+                    sb,
+                )
+
             result["summary_brief"] = sb
         except Exception:
             pass
@@ -1233,6 +1249,29 @@ async def vision_review(
                 repl_line = f"Compliance score math: Adjusted from 100% to {score_str2 or 'the final'}% based on documented minor issues (e.g., overlap/blend explanation), not on Production Date or Clean Retail printout."
                 sm = re.sub(arith_re, repl_line, sm)
 
+        # --- NEW: Release paperwork must never be a compliance deduction ---
+        if "release paperwork" in lower_sm:
+            sm = re.sub(
+                r"(?is)The\s+absence\s+of\s+repair\s+facility\s+information\s+and\s+incomplete\s+release\s+paperwork\s+reduce\s+compliance\s+but\s+do\s+not\s+affect\s+the\s+technical\s+accuracy\s+of\s+the\s+estimate\.",
+                "The absence of repair facility information is noted as a minor documentation item but does not affect the technical accuracy of the estimate.",
+                sm,
+            )
+            sm = re.sub(
+                r"(?im)^\s*[-*]\s*Missing\s+release\s+paperwork[^\n]*$",
+                "",
+                sm,
+            )
+            sm = re.sub(
+                r"(?is)\band\s+release\s+paperwork\b",
+                "",
+                sm,
+            )
+            sm = re.sub(
+                r"(?is)\bincomplete\s+release\s+paperwork\b[^\.]*\.",
+                "",
+                sm,
+            )
+
         # Repair Facility + Owner's location: do NOT deduct
         if "owner's location" in lower_sm and "repair facility" in lower_sm:
             sm = re.sub(
@@ -1277,7 +1316,7 @@ async def vision_review(
                         f"Starting from 100%, a total deduction of {deduction} points was applied for minor, non-fatal documentation/formatting items noted above (e.g., small clarity or layout issues), resulting in a final compliance score of {score_int}%.",
                     ]
                     new_lines.append(
-                        "No deduction was taken for Production Date or Clean Retail value, as these items are evidenced in the file and treated as compliant."
+                        "No deduction was taken for Production Date, Clean Retail value, or Release Paperwork, as these items are either evidenced in the file or outside the scope of this compliance audit."
                     )
                     sm_final = sm_no_section + "\n\n" + "\n".join(new_lines)
                     result["summary_markdown"] = sm_final
@@ -1332,7 +1371,8 @@ async def vision_review(
         def _break(tok: str) -> str:
             if len(tok) <= max_token_len:
                 return tok
-            return " ".join(tok[i:i+max_token_len] for i in range(0, len(tok), max_token_len))
+            return " ".
+join(tok[i:i+max_token_len] for i in range(0, len(tok), max_token_len))
         s = " ".join(_break(t) for t in s.split(" "))
         return s
 
@@ -1571,6 +1611,7 @@ async def download_pdf(file_number: Optional[str] = None, filename: Optional[str
         return JSONResponse(status_code=404, content={"detail": "Not Found"})
     latest = max(candidates, key=lambda p: os.path.getmtime(p))
     return FileResponse(path=latest, media_type="application/pdf", filename=os.path.basename(latest))
+
 
 
 
