@@ -641,12 +641,23 @@ async def vision_review(
 
     SYSTEM = SYSTEM_BASE
 
+    # --- NEW: detect all supplement tags S01, S02, ... in the combined document text ---
+    supplement_versions = sorted(set(re.findall(r"(?i)\bS[0-9]{2}\b", uploaded_text_all or "")))
+    supplement_block = ""
+    if supplement_versions:
+        supplement_block = (
+            "\n\nSUPPLEMENT VERSIONS DETECTED FROM DOCUMENTS:\n"
+            f"- Detected supplement tags: {', '.join(supplement_versions)}.\n"
+            "- Use these exact tags (e.g., 'Supplement S01 and S02') when describing supplements in the narrative.\n"
+        )
+
     prompt_text = (
         f"REQUEST TYPE SELECTED (exact): '{req_label}'. Use this exact string in 'request_type'.\n\n"
         "FILES SEEN (echo verbatim in '## Inputs Used'):\n- "
         + ("\n- ".join(files_seen) if files_seen else "none")
         + "\n\nCLIENT RULES (if provided; else blank):\n"
         + (client_rules[:2000] if client_rules else "")
+        + supplement_block
         + "\n\nANALYSIS LAYOUT (guidance, not strict):\n"
         + DETAIL_TEMPLATES.get(ai_intent, DETAIL_TEMPLATES["comprehensive"])
     )
@@ -686,7 +697,7 @@ async def vision_review(
         prompt_text += (
             "\n\nWhen client_rules text is provided, you MUST include a section titled '## Client Guidelines Comparison' "
             "with 3–8 concise bullets. For each, quote the relevant rule fragment and mark Aligned / Not Aligned / Not Evidenced, "
-            "citing evidence (p#/L#, Photo #). Also weave any material rule alignment/misalignment into the '## Detailed Audit Report' narrative."
+            "citing evidence (p#/L# or Photo #). Also weave any material rule alignment/misalignment into the '## Detailed Audit Report' narrative."
         )
         prompt_text += (
             "\n\nWeave the following static audit questions naturally into the '## Detailed Audit Report' narrative "
@@ -1035,13 +1046,16 @@ async def vision_review(
                 sm,
             )
             sm = re.sub(
+                r"(?is)\bodometer\s+photo\s+not\s+present\b.*?(?:\n|$)", "", sm
+            )
+            sm = re.sub(
                 r"(?is)\bmissing\s+(?:a\s+)?clean\s+retail\s+value\s+printout\b[^\n\.]*",
                 "Clean retail value printout is present via valuation (e.g., NADA/J.D. Power/KBB/Edmunds/Carfax/Cars.com)",
                 sm,
             )
             sm = re.sub(
                 r"(?is)a\s+printout\s+showing\s+the\s+clean\s+retail\s+value[^.]*\.",
-                "A valuation printout (e.g., J.D. Power clean retail/average price page) is present in the file and satisfies this requirement.",
+                "A valuation printout (e.g., J.D. Power or NADA clean retail page) is present in the file and satisfies this requirement.",
                 sm,
             )
             sm = re.sub(
@@ -1443,16 +1457,18 @@ async def vision_review(
         supp_detected_docs = _supp_doc_hit and _no_supp_negation
         if supp_detected_docs:
             mc("Supplement Status: Supplement Estimate detected in documentation")
-            _ver = None
-            _m = re.search(r"(?is)\bEstimate\s+Version:\s*(S0[1-9])\b", _txt_docs)
-            if _m: _ver = _m.group(1)
             _possible_amt = None
             _m = re.search(r"(?is)\bPossible\s+Supplement\s+Amount\s*\$?([0-9,]+\.\d{2})\b", _txt_docs)
-            if _m: _possible_amt = _m.group(1)
+            if _m:
+                _possible_amt = _m.group(1)
             mc("Supplement Details")
-            if _ver: mc(f"- Version: {_ver}")
-            if _possible_amt: mc(f"- Possible amount noted: ${_possible_amt}")
-            if not (_ver or _possible_amt):
+            # NEW: list all supplement tags (S01, S02, ...) instead of a single version only
+            supp_versions_docs = sorted(set(re.findall(r"(?i)\bS[0-9]{2}\b", _txt_docs)))
+            if supp_versions_docs:
+                mc(f"- Supplements detected in documents: {', '.join(supp_versions_docs)}")
+            if _possible_amt:
+                mc(f"- Possible amount noted: ${_possible_amt}")
+            if not (supp_versions_docs or _possible_amt):
                 mc("- Supplement indicators present (e.g., 'Supplement Summary' or S01/S02).")
 
         # --- Total Loss echo (documents-only; no narrative trigger) ---
@@ -1539,8 +1555,19 @@ async def vision_review(
             except Exception:
                 _explicit_tl_email = False
 
+            # NEW: supplement line includes all Sxx tags if present
+            supp_line = ""
+            if supp_detected_docs:
+                supp_versions_email = sorted(set(re.findall(r"(?i)\bS[0-9]{2}\b", _txt_email or "")))
+                if supp_versions_email:
+                    supp_line = (
+                        "Supplement Status: Supplement Estimates detected in documentation "
+                        f"({', '.join(supp_versions_email)})\n"
+                    )
+                else:
+                    supp_line = "Supplement Status: Supplement Estimate detected in documentation\n"
+
             tl_line = "Estimate Type: Total Loss (explicit in documents)\n" if _explicit_tl_email else ""
-            supp_line = "Supplement Status: Supplement Estimate detected in documentation\n" if supp_detected_docs else ""
             subj = f"AI-4-IA Review: {result['claim_number'] or file_number}"
             body = (
                 "NSPXN.com AI Review Report\n\n"
