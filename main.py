@@ -367,7 +367,7 @@ def _add_bytes(parts: List[Dict[str,Any]], files_seen: List[str], raw: bytes, fn
     low = fname.lower()
     if low.endswith(SUPPORTED_PDF_EXTS) and used < max_images:
         try:
-            pages = convert_from_bytes(raw, dpi=200)
+            pages = convert_from_bytes(raw, dpi=220)
             files_seen.append(f"{fname} (pdf, {len(pages)} page(s))")
             _maybe_extract_pdf_text(raw, fname, parts, files_seen)
             OCR_PAGE_CAP = 80
@@ -617,6 +617,9 @@ async def vision_review(
             if len(yy) == 2: yy = "20" + yy
             _prod_date_present = True
             _prod_date_str = f"{mm}/{yy}"
+
+    # treat production date as evidenced if either door label VIN photo or prod date text is seen
+    _prod_evidenced = _prod_date_present or _vin_photo_present
 
     # Lock to 3 intents only
     if ai_intent not in ALLOWED_INTENTS:
@@ -1001,6 +1004,29 @@ async def vision_review(
     except Exception:
         pass
 
+    # ---- AUTO-ADD Compliance Score Rationale with arithmetic when missing ----
+    try:
+        if ai_intent != "damage_report_from_photos":
+            sm = result.get("summary_markdown") or ""
+            score_str = (result.get("compliance_score") or "").strip()
+            if "## Compliance Score Rationale" not in sm and re.fullmatch(r"\d{1,3}", score_str):
+                score_int = max(0, min(100, int(score_str)))
+                if score_int < 100:
+                    deduction = 100 - score_int
+                    rationale_lines = [
+                        "",
+                        "## Compliance Score Rationale",
+                        f"Starting from 100%, a total deduction of {deduction} points was applied based on the minor/non-fatal issues described above, resulting in a final compliance score of {score_int}%.",
+                    ]
+                    if _prod_evidenced or _clean_retail_present:
+                        rationale_lines.append(
+                            "No deduction was applied for Production Date or Clean Retail value, as these items are evidenced in the file and treated as compliant."
+                        )
+                    sm = sm.rstrip() + "\n\n" + "\n".join(rationale_lines)
+                    result["summary_markdown"] = sm
+    except Exception:
+        pass
+
     # Clean Retail deterministic override
     if _clean_retail_present:
         try:
@@ -1081,9 +1107,6 @@ async def vision_review(
             sm = re.sub(r"(?is)\bodometer\s+photo\s+not\s+present\b.*?(?:\n|$)", "", sm)
             sm = re.sub(r"(?is)\bthe\s+odometer\s+(?:photo\s+)?is\s+missing\b.*?(?:\n|$)", "", sm)
 
-        # Treat Production Date evidenced if either we detected prod date text OR VIN-door label photo
-        _prod_evidenced = _prod_date_present or _vin_photo_present
-
         if _prod_evidenced:
             # Remove bullets that say "Missing production date..."
             sm = re.sub(
@@ -1132,6 +1155,17 @@ async def vision_review(
             sm = re.sub(
                 r"(?im)^\s*[-*]\s*High:\s*Missing\s+production\s+date\s*photo[^\n]*$",
                 "",
+                sm,
+            )
+            # Fix the bad sentence where PD was incorrectly treated as an exception
+            sm = re.sub(
+                r"Client rules compliance is mostly met except for the Production date is documented on the driver-door VIN label photo\.",
+                "Client rules compliance is mostly met. Production date is documented on the driver-door VIN label photo.",
+                sm,
+            )
+            sm = re.sub(
+                r"(?is)client rules compliance is mostly met except for the production date is documented on the driver-door vin label photo",
+                "Client rules compliance is mostly met and the Production date is documented on the driver-door VIN label photo",
                 sm,
             )
         elif _prod_date_present:
@@ -1183,10 +1217,10 @@ async def vision_review(
         # and we know clean retail / production date are actually evidenced,
         # replace it with a neutral explanation so we don't memorialize wrong deductions.
         if _clean_retail_present or _prod_evidenced:
-            score_str = str(result.get("compliance_score") or "").strip()
+            score_str2 = str(result.get("compliance_score") or "").strip()
             arith_re = r"(?im)^\s*100\s*-[^\n]*$"
             if re.search(arith_re, sm):
-                repl_line = f"Compliance score math: Adjusted from 100% to {score_str or 'the final'}% based on documented minor issues (e.g., overlap/blend explanation), not on Production Date or Clean Retail printout."
+                repl_line = f"Compliance score math: Adjusted from 100% to {score_str2 or 'the final'}% based on documented minor issues (e.g., overlap/blend explanation), not on Production Date or Clean Retail printout."
                 sm = re.sub(arith_re, repl_line, sm)
 
         sm = re.sub(r"\n{3,}", "\n\n", sm).strip()
@@ -1454,6 +1488,7 @@ async def download_pdf(file_number: Optional[str] = None, filename: Optional[str
         return JSONResponse(status_code=404, content={"detail": "Not Found"})
     latest = max(candidates, key=lambda p: os.path.getmtime(p))
     return FileResponse(path=latest, media_type="application/pdf", filename=os.path.basename(latest))
+
 
 
 
