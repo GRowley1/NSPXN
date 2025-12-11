@@ -775,7 +775,15 @@ async def vision_review(
         log.error(f"LLM returned no content: {e}")
         return JSONResponse(status_code=500, content={"error":"Model returned no content."})
 
-    data = _try_parse_json(raw)
+    # NEW: trust direct json.loads first, then fall back to tolerant parser / formatter
+    data = None
+    # First, trust the API's JSON response_format and parse directly.
+    try:
+        data = json.loads(raw)
+    except Exception:
+        # Fallback to legacy tolerant parser if direct parse fails.
+        data = _try_parse_json(raw)
+
     if data is None:
         try:
             fix_prompt = [
@@ -797,7 +805,10 @@ async def vision_review(
                     model=MODEL, messages=fix_prompt, max_tokens=max_tokens, temperature=0, response_format={"type":"json_object"}
                 )
             fixed = (fix_rsp.choices[0].message.content or "")
-            data = _try_parse_json(fixed)
+            try:
+                data = json.loads(fixed)
+            except Exception:
+                data = _try_parse_json(fixed)
         except Exception as e:
             log.error(f"Self-heal reformat failed: {e}")
 
@@ -820,7 +831,8 @@ async def vision_review(
             "estimated_costs_markdown": "N/A",
             "conclusion": "N/A",
         }
-        skeleton["redaction_status"] = "Redacted PII: Not Applied"
+        # keep actual redaction_status flag here
+        skeleton["redaction_status"] = redaction_status
         return skeleton
 
     def _get(k):
@@ -1236,6 +1248,7 @@ async def download_pdf(file_number: Optional[str] = None, filename: Optional[str
 
     latest = max(candidates, key=lambda p: os.path.getmtime(p))
     return FileResponse(path=latest, media_type="application/pdf", filename=os.path.basename(latest))
+
 
 
 
