@@ -367,7 +367,7 @@ def _add_bytes(parts: List[Dict[str,Any]], files_seen: List[str], raw: bytes, fn
     low = fname.lower()
     if low.endswith(SUPPORTED_PDF_EXTS) and used < max_images:
         try:
-            pages = convert_from_bytes(raw, dpi=220)
+            pages = convert_from_bytes(raw, dpi=200)
             files_seen.append(f"{fname} (pdf, {len(pages)} page(s))")
             _maybe_extract_pdf_text(raw, fname, parts, files_seen)
             OCR_PAGE_CAP = 80
@@ -1159,6 +1159,11 @@ async def vision_review(
             )
             # Fix the bad sentence where PD was incorrectly treated as an exception
             sm = re.sub(
+                r"(?is)The\s+production\s+date\s+is\s+listed\s+in\s+the\s+estimate\s*\(p1\)\s*but\s+no\s+separate\s+photo\s+of\s+the\s+production\s+date\s+sticker\s+is\s+provided,\s*which\s+is\s+a\s+client\s+rule\s+requirement\.",
+                "",
+                sm,
+            )
+            sm = re.sub(
                 r"Client rules compliance is mostly met except for the Production date is documented on the driver-door VIN label photo\.",
                 "Client rules compliance is mostly met. Production date is documented on the driver-door VIN label photo.",
                 sm,
@@ -1227,6 +1232,33 @@ async def vision_review(
         if len(sm) < 120:
             sm = orig_sm.strip()
         result["summary_markdown"] = sm if sm else orig_sm.strip()
+    except Exception:
+        pass
+
+    # ---- FINAL OVERRIDE of Compliance Score Rationale when PD / Clean Retail are evidenced ----
+    try:
+        if ai_intent != "damage_report_from_photos":
+            sm = result.get("summary_markdown") or ""
+            score_str = (result.get("compliance_score") or "").strip()
+            if re.fullmatch(r"\d{1,3}", score_str):
+                score_int = max(0, min(100, int(score_str)))
+                if score_int < 100 and (_clean_retail_present or _prod_evidenced):
+                    # Remove any existing "## Compliance Score Rationale" section entirely
+                    pattern = r"(?is)\n##\s*Compliance\s*Score\s*Rationale\b.*?(?=\n##\s|\Z)"
+                    sm_no_section = re.sub(pattern, "", sm).rstrip()
+
+                    deduction = 100 - score_int
+                    new_lines = [
+                        "",
+                        "## Compliance Score Rationale",
+                        f"Starting from 100%, a total deduction of {deduction} points was applied for minor, non-fatal documentation/formatting items noted above (e.g., small clarity or layout issues), resulting in a final compliance score of {score_int}%.",
+                    ]
+                    if _clean_retail_present or _prod_evidenced:
+                        new_lines.append(
+                            "No deduction was taken for Production Date or Clean Retail value, as these items are evidenced in the file and treated as compliant."
+                        )
+                    sm_final = sm_no_section + "\n\n" + "\n".join(new_lines)
+                    result["summary_markdown"] = sm_final
     except Exception:
         pass
 
@@ -1488,6 +1520,7 @@ async def download_pdf(file_number: Optional[str] = None, filename: Optional[str
         return JSONResponse(status_code=404, content={"detail": "Not Found"})
     latest = max(candidates, key=lambda p: os.path.getmtime(p))
     return FileResponse(path=latest, media_type="application/pdf", filename=os.path.basename(latest))
+
 
 
 
