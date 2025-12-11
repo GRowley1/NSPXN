@@ -2,21 +2,23 @@ from fastapi import FastAPI, File, UploadFile, Form
 from fastapi.responses import JSONResponse, FileResponse
 from fastapi.middleware.cors import CORSMiddleware
 from typing import List, Dict, Any, Optional
-import os, io, re, json, logging, zipfile, glob, base64, smtplib
+import os, io, re, json, base64, logging, zipfile, glob
+import smtplib  # email transport
 from email.message import EmailMessage
+
 from fpdf import FPDF
 from docx import Document
 from pdf2image import convert_from_bytes
 from PIL import Image
 
-# Optional HEIC/HEIF
+# Optional HEIC/HEIF support if available
 try:
     import pillow_heif  # type: ignore
     pillow_heif.register_heif_opener()  # type: ignore
 except Exception:
     pass
 
-# Optional OCR (pytesseract)
+# Optional OCR (pytesseract). Safe no-op if not installed or tesseract binary missing.
 try:
     import pytesseract  # type: ignore
     _OCR_ENABLED = True
@@ -28,7 +30,7 @@ from openai import OpenAI
 # --- PII Redaction (Presidio) ---
 from presidio_analyzer import AnalyzerEngine, Pattern, PatternRecognizer, RecognizerResult
 from presidio_anonymizer import AnonymizerEngine
-from presidio_anonymizer.entities import OperatorConfig
+from presidio_anonymizer.entities import OperatorConfig  # required for anonymizer API
 
 # -----------------------
 # Minimal setup
@@ -40,6 +42,7 @@ logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(levelname)s - %(
 log = logging.getLogger("nspxn")
 log.info(f"Using CLIENT_RULES_DIR={CLIENT_RULES_DIR}")
 
+# Use GPT-4.1 everywhere
 MODEL = os.getenv("OAI_MODEL", "gpt-4.1")
 if not os.getenv("OPENAI_API_KEY"):
     raise RuntimeError("OPENAI_API_KEY missing")
@@ -56,6 +59,7 @@ vin_recognizer = PatternRecognizer(
     supported_entity="VIN",
     patterns=[Pattern(name="vin-17", regex=VIN_PATTERN, score=0.8)],
 )
+
 CLAIM_PATTERN = r"\b(?:(?:Claim|CLM|Clm)\s*#?\s*[:\-]?\s*)?([A-Z0-9]{5,}[A-Z0-9\-]{0,})\b"
 claim_recognizer = PatternRecognizer(
     supported_entity="CLAIM_NUMBER",
@@ -65,15 +69,18 @@ claim_recognizer = PatternRecognizer(
 analyzer.registry.add_recognizer(vin_recognizer)
 analyzer.registry.add_recognizer(claim_recognizer)
 
+# Only redact these entity types (we PRESERVE VIN & CLAIM_NUMBER)
 REDACT_ENTITY_TYPES = {
-    "PERSON","PHONE_NUMBER","EMAIL_ADDRESS","US_SSN","CREDIT_CARD","IBAN_CODE","LOCATION","NRP","ORGANIZATION",
-    "DATE_TIME","IP_ADDRESS","CRYPTO","MEDICAL_LICENSE","URL"
+    "PERSON", "PHONE_NUMBER", "EMAIL_ADDRESS", "US_SSN",
+    "CREDIT_CARD", "IBAN_CODE", "LOCATION", "NRP", "ORGANIZATION",
+    "DATE_TIME", "IP_ADDRESS", "CRYPTO", "MEDICAL_LICENSE", "URL"
 }
 
 def _filter_results(results: List[RecognizerResult]) -> List[RecognizerResult]:
     return [r for r in results if r.entity_type in REDACT_ENTITY_TYPES]
 
 def redact_text_preserve_vin_claim(text: str) -> str:
+    """Mask PII while keeping VIN and Claim # intact. Fail-open to avoid 500s."""
     if not text:
         return text
     results = analyzer.analyze(text=text, language="en")
@@ -94,7 +101,7 @@ def _safe(s: str) -> str:
     return re.sub(r"[^\w.\-]+", "-", (s or "").strip()).strip("-_. ")
 
 # -----------------------
-# Prompt steering
+# Prompt steering (free analysis + detailed narrative)
 # -----------------------
 DETAIL_TEMPLATES = {
     "guidelines_only": (
@@ -112,6 +119,7 @@ DETAIL_TEMPLATES = {
         "## Final\n"
         "- Compliance Score: NN% with one-sentence rationale."
     ),
+
     "comprehensive": (
         "## Inputs Used\n"
         "- List the estimate pages/lines and photo numbers you used, plus any rules text (if provided).\n\n"
@@ -160,6 +168,7 @@ DETAIL_TEMPLATES = {
         "- Compliance Score: NN% with a single-sentence justification. "
         "If no fraud indicators are identified, state 'No material inconsistencies found.' Do not use 'N/A'."
     ),
+
     "damage_report_from_photos": (
         "# AI-4-IA Damage Report\n"
         "Create a concise, professional damage report based only on the provided photos (and any optional text).\n\n"
@@ -173,25 +182,32 @@ DETAIL_TEMPLATES = {
         "- Primary Impact: <area(s)>\n"
         "- Secondary Impact: <area(s) or 'None observed'>\n\n"
         "## Photo-by-Photo Damage Ledger\n"
-        "| Photo # | View/Angle | Panels/Parts Visible | Condition | Identifiers | Legibility |\n"
+        "| Photo # | View/Angle | Panels/Parts Visible | Condition (dent/crease/scrape/misalignment) | Identifiers (VIN/odo/plate/reg) | Legibility |\n"
         "|---:|---|---|---|---|---|\n"
         "- One row per photo used in the analysis (>=6 rows if >=6 photos exist). If an identifier is present but unreadable, mark 'Present — not clearly legible'.\n"
-        "- The ledger is required. Do not omit it.\n\n"
+        "- The ledger is required. Do not omit it. Each row must have a concrete Photo # that exists in the set.\n\n"
         "## Damage Summary\n"
         "- 6–12 bullets with panel/part + condition + suggested op, citing Photo #.\n\n"
         "## Detailed Audit Report\n"
-        "- Provide a detailed appraisal narrative based on the photos; reference specific Photo #s. Minimum 8–12 sentences.\n\n"
+        "- Provide a detailed appraisal narrative based on the photos: impact zones, repair/replace reasoning, "
+        "likely parts source (OEM/LKQ/Aftermarket) when inferable, refinish/overlap notes, and cost implications. "
+        "Reference specific Photo #s. Minimum 8–12 sentences (one continuous narrative, not bullets). "
+        "Cite VIN and odometer with explicit Photo #s; if either is unreadable, write 'Present — not clearly legible' and explain why (glare/blur/angle) instead of 'Missing'.\n\n"
         "## Estimated Repair Costs\n"
-        "- High-level buckets.\n\n"
+        "- Provide a high-level breakdown (Body Labor, Paint Labor, Paint Materials, Parts, Sublet, Tax) and a one-line rationale tying to observed work "
+        "(e.g., '2 panels refinish x 2.5 hr each' or 'rear bumper cover likely replace'). If uncertainty is high, state it explicitly.\n\n"
         "## Fraud & Authenticity Check\n"
-        "- Note any anomalies; if none, say so.\n\n"
+        "- State VIN and odometer with Photo # citations; note any EXIF/date anomalies or duplicate images. If none, say so.\n\n"
         "## Compliance Score Rationale\n"
-        "- Omit this section.\n\n"
+        "- Omit this section entirely for photos-only reports. Do not provide a score.\n\n"
         "## Conclusion\n"
-        "- 1–2 sentences; do not declare Repairable/Total Loss in photos-only mode.\n"
+        "- 1–2 sentences summarizing repairability and scope. "
+        "Do not declare Repairable/Total Loss in photos-only mode. "
+        "If no fraud indicators are identified, state 'No material inconsistencies found.' Do not use 'N/A'.\n"
     ),
 }
 
+# --- Static audit questions ---
 STATIC_AUDIT_QUESTIONS = [
     "Do the photos substantiate the highest-cost operations (frame/sectioning/panel replace)?",
     "Are ADAS calibrations or wheel alignments required and supported by the damage and OEM procedures?",
@@ -208,26 +224,45 @@ STATIC_AUDIT_QUESTIONS = [
     "What is the bottom-line recommendation (approve as-is, adjust items, or request specific evidence)?",
 ]
 
+# --- Identifiers Verification Protocol (prompt-only; no new logic) ---
 IDENTIFIERS_VERIFICATION_PROTOCOL = (
     "\n\nIDENTIFIERS VERIFICATION PROTOCOL (must follow):"
-    "\n1) Search the photos for: windshield VIN plate, driver-door VIN label (with Production Date), odometer cluster."
-    "\n2) Transcribe VIN exactly; cite Photo # for EACH location."
-    "\n3) Compare VINs to estimate VIN; mark MATCH/MISMATCH."
-    "\n4) Transcribe odometer; cite Photo #."
-    "\n5) Grade legibility: 'Clearly legible' / 'Present — not clearly legible' / 'Not present'."
-    "\n6) If present but not legible, say why and what retake is needed."
-    "\n7) Weave these into '## Detailed Audit Report' and keep top-line fields consistent."
-    "\n8) Use distinct Photo #s per VIN location."
-    "\n9) Compare VINs as exact 17-char strings."
-    "\n10) Odometer: transcribe only digits visible in the photo."
+    "\n1) Search the photos for: windshield VIN plate, driver-door VIN label, driver-door VIN label Production date, driver-door VIN label Date of Mfr, odometer cluster."
+    "\n2) Transcribe the VIN exactly as visible and cite Photo # for EACH location you find."
+    "\n3) If multiple VINs, compare them to each other and to the estimate VIN; explicitly state: MATCH / MISMATCH."
+    "\n4) Transcribe the odometer reading exactly as shown and cite Photo #."
+    "\n5) Grade legibility for each identifier as one of: 'Clearly legible' / 'Present — not clearly legible' / 'Not present'."
+    "\n6) If any identifier is present but not clearly legible, say why (glare, blur, angle) and what photo would resolve it."
+    "\n7) Write a one-line bottom line: 'VIN verification: <MATCH/MISMATCH/INCONCLUSIVE>; Odometer: <value or reason>'."
+    "\n8) Weave these facts naturally into the '## Detailed Audit Report' narrative and keep the top-line fields "
+    "(vin, vin_verification, odometer_estimate_only) consistent."
+    "\n9) When citing more than one VIN location (e.g., windshield vs. door label), you must cite DISTINCT Photo #s; "
+    "never reuse the same photo number for two different locations."
+    "\n10) Compare VINs as literal 17-character strings. If any single character differs between sources, report "
+    "MISMATCH, and quote both strings with their Photo #/page references."
+    "\n11) ODOMETER RULES (photos-only especially): transcribe only the digits visible in the odometer photo; "
+    "do not infer from estimate text or metadata. Include the exact Photo #. If any digit is unclear, state 'Present — not clearly legible' and explain why; do not guess."
 )
 
+# --- Consistency Guard (prompt-only; avoid contradictions) ---
 CONSISTENCY_GUARD = (
     "\n\nCONSISTENCY GUARD:"
     "\n- Do not claim any required photo is 'missing' if you graded it 'Clearly legible' or 'Present — not clearly legible'."
     "\n- For VIN, Odometer, and Production Date specifically: if present in any photo, do not write any sentence implying they are absent."
-    "\n- If legibility is the issue, use 'Present — not clearly legible' and explain why; request a retake."
-    "\n- Before finalizing, verify that every referenced Photo # exists and matches its content."
+    "\n- If a legible driver-door VIN label photo is present, treat the Production Date requirement as evidenced (the production month/year appears on the same label). Do NOT deduct or say 'not separately documented'."
+    "\n- Only deduct for missing Repair Facility info when the Closing Report or other documents clearly show the vehicle is at a named repair facility AND the estimate's 'Repair Facility' section does not list that same facility; "
+    "if no repair facility information appears anywhere in the estimate or Closing Report, report 'N/A — not provided' and do NOT deduct."
+    "\n- If legibility is the issue, explicitly say 'Present — not clearly legible' and explain why (glare/blur/angle), and request a precise retake rather than marking it missing."
+    "\n- Before finalizing, re-scan your output: confirm every referenced Photo # matches the content described (e.g., do not cite an Odometer photo as the point-of-impact photo). Correct any mismatches."
+)
+
+# --- Supplement Handling (prompt-only; ensures detection + narrative mention) ---
+SUPPLEMENT_HANDLING = (
+    "\n\nSUPPLEMENT HANDLING:"
+    "\n- Examine the estimate documents for explicit supplement indicators: 'Supplement', 'Supplement of record', 'S01', 'S02', 'Supplement Summary', or similar."
+    "\n- If a supplement is detected, clearly state in the narrative that the estimate is a supplement and summarize what changed: added operations/parts, rate updates, refinish overlap changes, or corrections to prior omissions."
+    "\n- If the supplement corrects earlier deficiencies (e.g., missing materials line, added calibrations), note that improvement explicitly."
+    "\n- If a supplement exists but required supporting evidence (invoices, photos) is still missing, call this out in Risks/Missing Evidence."
 )
 
 ALLOWED_INTENTS = {"guidelines_only","comprehensive","damage_report_from_photos"}
@@ -241,44 +276,79 @@ SYSTEM_BASE = (
     "Use evidence only from the provided inputs. Cite estimate page/line as 'p#/L#' and photos as 'Photo #'. "
     "Avoid guessing; if uncertain, say 'N/A' and why. summary_brief must be <= 280 chars (plain text)."
 )
+
 SYSTEM_BASE += (
     " Do not state or imply any client rule unless it appears verbatim in the provided client_rules text. "
-    "If client_rules is blank, write the report without referencing client rules. "
-    " Except when the request_type is 'Create a Damage Report from Photos', Compliance Score must be 0–100. "
-    "If the request_type is 'Create a Damage Report from Photos', set compliance_score to 'N/A' and omit the score rationale."
-    "If compliance_score < 100, include a dedicated section titled '## Compliance Score Rationale' with evidence and deductions."
+    "If client_rules is blank, write the entire report without referencing client rules. "
+    "If a value cannot be confirmed from the visible evidence, set it to 'N/A' and briefly state why. "
+    " Except when the request_type is 'Create a Damage Report from Photos', Compliance Score must be a numeric percentage 0–100 (never 'N/A'). "
+    "If the request_type is 'Create a Damage Report from Photos', set compliance_score to 'N/A' and omit the '## Compliance Score Rationale' section. "
+    "If no client_rules are supplied, base the score on estimate-photo internal consistency, evidence completeness, and clarity/legibility. "
+    "If compliance_score < 100, include a dedicated section titled '## Compliance Score Rationale' which itemizes every deficiency with exact evidence references "
+    "(estimate p#/L# and/or Photo #), assigns an explicit deduction per item, and shows the arithmetic to the final score. "
+    "Use a consistent scheme (e.g., Minor -5, Moderate -10, Major -20) and never go below 0. "
     "The 'fraud_markdown' section must never be 'N/A'. If nothing material is found, write "
-    "'No material inconsistencies found.' and briefly note checks performed."
-)
-SYSTEM_BASE += (
-    " Focus on a cohesive, professional appraisal and include a section named '## Detailed Audit Report'. "
-    "Avoid placeholders; do not invent data. "
-    "When client_rules are provided, include '## Client Guidelines Comparison' with 3–8 bullets quoting the rule and citing evidence. "
-    "When a valuation/clean retail printout exists but the header doesn’t match VIN/year/trim/mileage, label it 'Present — mismatched' and specify differences."
+    "'No material inconsistencies found.' and briefly note what was checked (VIN match, date/metadata, obvious photo tampering, duplicated images)."
 )
 
+SYSTEM_BASE += (
+    " Focus on a cohesive, professional appraisal. Prefer narrative over rigid tables. "
+    "Include a section named '## Detailed Audit Report'. "
+    "Include '## Compliance Score Rationale' only when compliance_score < 100, and show deductions from 100 with brief evidence refs (p#/L# or Photo #). "
+    "If you include tables, keep them concise and only when they help clarity. "
+    "Avoid placeholder rows/columns; do not invent data. "
+    "When client_rules text is provided, also include a section titled '## Client Guidelines Comparison' with 3–8 concise bullets quoting the relevant rule fragment and citing evidence (p#/L#, Photo #); "
+    "weave any material rule alignment/misalignment into the Detailed Audit Report narrative."
+    "When a valuation/clean retail printout exists but the header doesn’t match the estimate’s VIN/year/trim/mileage, label it “Present — mismatched (detail the differences)” and request a corrected printout; never mark it Missing/Not Evidenced. "
+    "If a legible driver-door VIN label photo is present, treat Production Date as evidenced; do not mark 'missing' or deduct for lack of a separate photo. "
+    "Only deduct for missing Repair Facility info when the Closing Report or other documents clearly show the vehicle is at a named repair facility AND the estimate's 'Repair Facility' section does not list that same facility; "
+    "if no repair facility information appears anywhere in the estimate or Closing Report, report 'N/A — not provided' and do NOT deduct."
+)
+
+SYSTEM_BASE += (
+    " Your 'summary_markdown' MUST include a top-level section named '## Detailed Audit Report' containing a cohesive narrative of at least 10–14 sentences (not bullets). "
+    "It must synthesize: impact zones, per-panel damages, repair vs. replace rationale, parts type (OEM/LKQ/Aftermarket), labor ops, refinish/overlap, rate/materials/sublet/tax handling, and estimate integrity. "
+    "It must cite concrete evidence inline (e.g., p2/L14, Photo 3). "
+    "When evaluating paint materials, recognize that a summary line such as 'Paint Supplies' or 'Paint Materials' with hours and rate in the totals section constitutes a valid cost breakdown. "
+    "Do not mark it missing if such a line is present, even if materials are not listed per-panel. "
+    "Avoid categorical phrases such as 'deemed repairable' or 'deemed total loss' unless that exact determination appears in the provided documents (e.g., estimate header says 'Total Loss' or an ACV comparison is shown). "
+    "Otherwise, use neutral language and do not make a repairability determination."
+)
+
+# -----------------------
+# Supported file types
+# -----------------------
 SUPPORTED_IMAGE_EXTS = (".jpg",".jpeg",".png",".webp",".heic",".heif")
 SUPPORTED_TEXT_EXTS = (".txt",)
 SUPPORTED_DOCX_EXTS = (".docx",)
 SUPPORTED_PDF_EXTS = (".pdf",)
 
+# -----------------------
+# Helpers to add parts from bytes
+# -----------------------
 def _image_part_from_bytes(raw: bytes) -> Dict[str, Any]:
     b64 = base64.b64encode(raw).decode("utf-8")
     return {"type": "image_url", "image_url": {"url": "data:image/jpeg;base64," + b64}}
 
+# Safe PDF text extract helper
 def _maybe_extract_pdf_text(raw: bytes, fname: str, parts: List[Dict[str, Any]], files_seen: List[str]) -> None:
     try:
-        from pdfminer_high_level import extract_text as _pdfminer_extract_text
+        from pdfminer_high_level import extract_text as _x  # type: ignore
     except Exception:
-        from pdfminer.high_level import extract_text as _pdfminer_extract_text  # type: ignore
+        try:
+            from pdfminer.high.level import extract_text as _x  # fallback (note: typo in original kept)
+        except Exception:
+            _x = None
     try:
-        t = (_pdfminer_extract_text(io.BytesIO(raw)) or "")[:12000]
-        if t.strip():
-            parts.insert(0, {"type": "text", "text": t})
-            files_seen.append(f"{fname} (pdf text extracted)")
+        if _x:
+            t = (_x(io.BytesIO(raw)) or "")[:12000]
+            if t.strip():
+                parts.insert(0, {"type": "text", "text": t})
+                files_seen.append(f"{fname} (pdf text extracted)")
     except Exception:
         pass
 
+# Lightweight OCR helper for images
 def _maybe_ocr_image_text(im: Image.Image) -> str:
     if not _OCR_ENABLED:
         return ""
@@ -296,28 +366,23 @@ def _add_bytes(parts: List[Dict[str,Any]], files_seen: List[str], raw: bytes, fn
     low = fname.lower()
     if low.endswith(SUPPORTED_PDF_EXTS) and used < max_images:
         try:
-            pages = convert_from_bytes(raw, dpi=200)  # keep your 200 DPI
+            pages = convert_from_bytes(raw, dpi=200)
             files_seen.append(f"{fname} (pdf, {len(pages)} page(s))")
             _maybe_extract_pdf_text(raw, fname, parts, files_seen)
-
-            OCR_PAGE_CAP = 80  # keep your cap
+            OCR_PAGE_CAP = 80
             ocr_collected = []
-
             for idx, im in enumerate(pages[:max_images - used]):
                 b = io.BytesIO()
                 im.save(b, format="JPEG", quality=75, optimize=True)
                 parts.append(_image_part_from_bytes(b.getvalue()))
                 used += 1
-
                 if idx < OCR_PAGE_CAP:
                     txt = _maybe_ocr_image_text(im)
                     if txt:
                         ocr_collected.append(txt)
-
             if ocr_collected:
                 parts.insert(0, {"type": "text", "text": ("\n".join(ocr_collected))[:12000]})
                 files_seen.append(f"{fname} (ocr text extracted)")
-
         except Exception as e:
             logging.warning(f"pdf2image failed for {fname}: {e}")
             files_seen.append(f"{fname} (pdf, could not be converted)")
@@ -331,11 +396,9 @@ def _add_bytes(parts: List[Dict[str,Any]], files_seen: List[str], raw: bytes, fn
             raw = b.getvalue()
         except Exception:
             im_ref = None
-
         parts.append(_image_part_from_bytes(raw))
         used += 1
         files_seen.append(f"{fname} (photo)")
-
         if im_ref is not None:
             txt = _maybe_ocr_image_text(im_ref)
             if txt:
@@ -381,32 +444,26 @@ app.add_middleware(
 )
 
 # -----------------------
-# Client Rules endpoints
+# Client Rules: fuzzy finder + endpoints
 # -----------------------
 def _find_rules_path(base_name: str, rules_dir: str) -> Optional[str]:
     target = base_name.strip()
     if not target.lower().endswith(".docx"):
         target += ".docx"
-
     p = os.path.join(rules_dir, target)
     if os.path.exists(p):
         return p
-
     pattern = os.path.join(rules_dir, "*.docx")
     candidates = glob.glob(pattern)
     if not candidates:
         return None
-
     low_target = target.lower()
-
     for c in candidates:
         if os.path.basename(c).lower() == low_target:
             return c
-
     for c in candidates:
         if os.path.basename(c).lower().startswith(low_target[:-5]):
             return c
-
     tokens = [t for t in low_target[:-5].split() if t]
     def contains_in_order(name: str) -> bool:
         i = 0
@@ -416,7 +473,6 @@ def _find_rules_path(base_name: str, rules_dir: str) -> Optional[str]:
                 return False
             i += len(tok)
         return True
-
     for c in candidates:
         if contains_in_order(os.path.basename(c).lower()):
             return c
@@ -470,14 +526,14 @@ async def vision_review(
     MAX_IMAGES = 24
     used = 0
 
+    # Anti-zipbomb guardrails
     MAX_ZIP_FILES = 100
-    MAX_ENTRY_SIZE = 15 * 1024 * 1024
+    MAX_ENTRY_SIZE = 15 * 1024 * 1024  # 15 MB
 
     for f in files:
         raw = await f.read()
         fname = f.filename or "upload"
         low = fname.lower()
-
         if low.endswith(".zip"):
             try:
                 zf = zipfile.ZipFile(io.BytesIO(raw))
@@ -502,13 +558,14 @@ async def vision_review(
         else:
             used = _add_bytes(parts, files_seen, raw, fname, used, MAX_IMAGES)
 
+    # Collect uploaded TEXT ONLY for evidence checks
     uploaded_text_blobs = []
     for p in parts:
         if isinstance(p, dict) and p.get("type") == "text" and isinstance(p.get("text"), str):
             uploaded_text_blobs.append(p["text"])
     uploaded_text_all = "\n".join(uploaded_text_blobs)
 
-    # --- Robust detectors (Clean Retail / Advisor) ---
+    # --- Robust detectors (CLEAN RETAIL + ADVISOR) ---
     clean_retail_rx = (
         r"(?i)\b("
         r"NADA|J[.\s-]*D[.\s-]*\s*Power|JDPower\.com|"
@@ -525,26 +582,27 @@ async def vision_review(
     paint_mat_rx = r"(Paint\s+(Suppl(?:ies|y)|Materials)|Materials\s*Line)"
     _paint_materials_present = bool(re.search(paint_mat_rx, uploaded_text_all or "", flags=re.IGNORECASE))
 
-    # --- VIN / ODO presence ---
+    # INSERT #1a: Presence detectors for VIN / Odometer / Production Date (OCR text)
     vin_photo_rx = r"(?i)\bDescription:\s*VIN\b|\bVIN(?:\s*#|:)?\s*[A-HJ-NPR-Z0-9]{17}\b"
     odo_photo_rx = r"(?i)\bDescription:\s*Odometer\b|\bOdometer\b"
-    _vin_photo_present = bool(re.search(vin_photo_rx, uploaded_text_all or ""))
-    _odo_photo_present = bool(re.search(odo_photo_rx, uploaded_text_all or ""))
 
-    # --- Production date on VIN label (robust OCR tolerant) ---
+    # Be generous with labels and separators (OCR tolerant)
     prod_date_rx = (
         r"(?is)\b(Production\s*date|Prod(?:uction)?\s*Date|Date\s*of\s*Mfr|Date\s*of\s*Manufacture|"
         r"MFD\.?\s*(?:BY|DATE)?|MFR\.?\s*DATE|MFG\.?\s*DATE|DATE)\b"
         r".{0,80}?\b(0[1-9]|1[0-2])\s*[-/.\u2013\u2014\u2212:\s]\s*(20\d{2}|\d{2})\b"
     )
+
+    _vin_photo_present = bool(re.search(vin_photo_rx, uploaded_text_all or ""))
+    _odo_photo_present = bool(re.search(odo_photo_rx, uploaded_text_all or ""))
+
+    # presence + extractor
     _prod_date_present = False
     _prod_date_str = None
     m = re.search(prod_date_rx, uploaded_text_all or "")
     if m:
-        mm = m.group(2)
-        yy = m.group(3)
-        if len(yy) == 2:
-            yy = "20" + yy
+        mm = m.group(2); yy = m.group(3)
+        if len(yy) == 2: yy = "20" + yy
         _prod_date_present = True
         _prod_date_str = f"{mm}/{yy}"
     if not _prod_date_present:
@@ -554,17 +612,12 @@ async def vision_review(
         )
         m2 = re.search(loose_prod_rx, uploaded_text_all or "")
         if m2:
-            mm = m2.group(2)
-            yy = m2.group(3)
-            if len(yy) == 2:
-                yy = "20" + yy
+            mm = m2.group(2); yy = m2.group(3)
+            if len(yy) == 2: yy = "20" + yy
             _prod_date_present = True
             _prod_date_str = f"{mm}/{yy}"
 
-    # --- INSERT #1: Shop/Tax-ID guard (only deduct when vehicle is actually at a shop) ---
-    # Already enforced by prompt flags below.
-
-    # Lock intents
+    # Lock to 3 intents only
     if ai_intent not in ALLOWED_INTENTS:
         ai_intent = "comprehensive"
 
@@ -606,85 +659,84 @@ async def vision_review(
         prompt_text += (
             "\n\nPHOTOS-ONLY MODE: Set 'compliance_score' to 'N/A'. "
             "Do NOT include a '## Compliance Score Rationale' section."
-            "\nODOMETER TRANSCRIPTION: Use only the odometer photo for mileage; if unclear, say 'Present — not clearly legible'."
+            "\nODOMETER TRANSCRIPTION: Use only the odometer photo for mileage. "
+            "If the digits are not fully readable, return 'Present — not clearly legible' and explain (glare/blur/angle). "
+            "Do not infer or estimate mileage from other sources."
         )
         prompt_text += (
             "\nABSOLUTE BAN (PHOTOS-ONLY): Do not reference or imply any estimate document. "
-            "If discussing costs, label them as 'photo-based rough costs'."
+            "Do not use phrases like 'the estimate', 'estimate suggests', 'p#/L#', 'CCC', 'labor rate', or any estimate page/line notation. "
+            "If you need to discuss costs, label them as 'photo-based rough costs' with explicit assumptions, and keep them independent of any estimate. "
+            "If no odometer photo is present in the upload set, output 'Missing' for odometer_estimate_only."
         )
     else:
-        prompt_text += (
-            "\n\nSUPPLEMENT HANDLING:"
-            "\n- Examine the estimate documents for explicit supplement indicators: 'Supplement', 'Supplement Summary', 'S01', 'S02', or similar."
-            "\n- If a supplement is detected, clearly state it; summarize changes. "
-            "\n- If absent or negated ('not a supplement'), do not imply it exists."
-        )
+        prompt_text += SUPPLEMENT_HANDLING
 
     if ai_intent == "comprehensive":
         prompt_text += (
-            "\n\nUploader note: If odometer and registration photos are present, report legibility accurately. "
-            "If not present, say 'Missing' plainly."
+            "\n\nUploader note: If odometer and registration photos are present, report their legibility accurately. "
+            "If they are not present, state 'Missing' plainly. Do not assume their presence if they cannot be visually confirmed."
         )
 
     if client_rules.strip():
         prompt_text += (
-            "\n\nWhen client_rules text is provided, include '## Client Guidelines Comparison' with 3–8 bullets "
-            "quoting the rule and citing evidence (p#/L#, Photo #)."
+            "\n\nWhen client_rules text is provided, you MUST include a section titled '## Client Guidelines Comparison' "
+            "with 3–8 concise bullets. For each, quote the relevant rule fragment and mark Aligned / Not Aligned / Not Evidenced, "
+            "citing evidence (p#/L#, Photo #). Also weave any material rule alignment/misalignment into the '## Detailed Audit Report' narrative."
         )
         prompt_text += (
-            "\n\nWeave the following static audit questions naturally into the '## Detailed Audit Report' narrative:\n"
+            "\n\nWeave the following static audit questions naturally into the '## Detailed Audit Report' narrative "
+            "(do NOT present as a separate Q&A list; integrate answers inline and cite evidence with p#/L# and Photo # as applicable):\n"
             + "\n".join(f"- {q}" for q in STATIC_AUDIT_QUESTIONS)
         )
 
     prompt_text += (
-        "\n\nPHOTO NUMBER SANITY CHECK: Verify every referenced Photo # exists and matches its content."
-        "\nCOST RATIONALE: For each cost bucket (Body/Paint/Materials/Parts/Sublet/Tax), include a one-line rationale tied to observed work."
+        "\n\nPHOTO NUMBER SANITY CHECK: Before finalizing, verify that every referenced Photo # actually exists and matches the content described."
+        "\nCOST RATIONALE REQUIREMENT: For each cost bucket (Body/Paint/Materials/Parts/Sublet/Tax), include a one-line rationale tied to observed operations or panel counts when you provide costs."
     )
+
     prompt_text += IDENTIFIERS_VERIFICATION_PROTOCOL
     prompt_text += CONSISTENCY_GUARD
 
-    # --------- Evidence flags (minimal; steer away from false 'missing') ----------
-    flags: List[str] = []
+    # --------- EVIDENCE FLAGS ----------
+    flags = []
     if _paint_materials_present:
         flags.append(
-            "- Paint materials summary line is present in the estimate totals (e.g., 'Paint Supplies'). "
+            "- Paint materials summary line is present in the estimate totals (e.g., 'Paint Supplies' on the totals page). "
             "Treat paint materials as evidenced even if not itemized per panel."
         )
     if _clean_retail_present:
         flags.append(
             "- Clean Retail Value printout is present (e.g., J.D. Power / NADA / KBB / Edmunds / Carfax / Cars.com). "
-            "If year/trim/mileage differ from the estimate, mark 'Present — mismatched' and specify differences; do not mark 'Not Evidenced'."
+            "If the year/trim/mileage do not match the estimate/VIN, state 'Present — mismatched' and specify the differences. "
+            "Do not mark it 'Not Evidenced'."
         )
     if _advisor_present:
-        flags.append("- A refreshed Advisor Report is present; do not state it is missing.")
-
+        flags.append(
+            "- A refreshed copy of the Advisor Report is present in the documents. "
+            "Do not state it is missing."
+        )
     if _vin_photo_present:
         flags.append(
-            "- A VIN label/photo is present in the photo set. Do not mark VIN as missing; compare to the estimate VIN and cite the specific Photo #."
+            "- A driver-door VIN label/photo is present. Treat Production Date as evidenced by the same label; do NOT deduct or claim 'not separately documented'."
         )
-        # Force the model to treat Production Date as satisfied when the door-label VIN photo exists
-        flags.append("- If the driver-door VIN label photo is present, treat the Production Date as satisfied (on the same label). Do not mark Production Date missing; cite the Photo # and month/year if legible.")
-
     if _odo_photo_present:
         flags.append(
             "- An odometer photo is present. Do not mark the odometer as missing; transcribe the digits and cite the Photo #."
         )
-
-    if _prod_date_present and _prod_date_str:
+    if _prod_date_present:
         flags.append(
-            f"- Production date appears on the driver-door VIN label (e.g., {_prod_date_str}). Cite the Photo # and do not mark it missing."
+            "- A production date (Date of Mfr/MFD DATE) is visible on a door label photo. Do not mark Production Date as missing; cite the Photo # and the month/year."
         )
 
     parts_payload: List[Dict[str,Any]] = []
     redaction_success = False
     try:
-        red_prompt = redact_text_preserve_vin_claim(
-            prompt_text + ("\n\nEVIDENCE FLAGS (obey these):\n" + "\n".join(flags) if flags else "")
-        )
+        red_prompt = redact_text_preserve_vin_claim(prompt_text)
         redaction_success = True
     except Exception as e:
         log.warning(f"Redaction failed on prompt_text: {e}")
-        red_prompt = prompt_text + ("\n\nEVIDENCE FLAGS (obey these):\n" + "\n".join(flags) if flags else "")
+        red_prompt = prompt_text
 
     parts_payload.append({"type": "text", "text": red_prompt})
 
@@ -703,10 +755,9 @@ async def vision_review(
 
     redaction_status = "Redacted PII: Successful ✅" if redaction_success else "Redacted PII: Not Applied"
 
-    MAX_TOKENS_BY_INTENT = {"comprehensive": 1500, "guidelines_only": 1000, "damage_report_from_photos": 1100}
-    max_tokens = MAX_TOKENS_BY_INTENT.get(ai_intent, 1000)
-
-    # Keep prompt lean to avoid truncation
+    # -------------------------------
+    # PATCH #1: Keep prompt lean
+    # -------------------------------
     TEXT_PART_LIMIT = 6
     _text_parts = [p for p in parts_payload if p.get("type") == "text"]
     _image_parts = [p for p in parts_payload if p.get("type") != "text"]
@@ -715,79 +766,59 @@ async def vision_review(
             tp["text"] = tp["text"][:8000]
     parts_payload = _text_parts[:TEXT_PART_LIMIT] + _image_parts
 
+    # Token limits
+    # -------------------------------
+    # PATCH #2: Raise token ceilings
+    # -------------------------------
+    MAX_TOKENS_BY_INTENT = {
+        "comprehensive": 2200,
+        "guidelines_only": 1500,
+        "damage_report_from_photos": 1400
+    }
+    max_tokens = MAX_TOKENS_BY_INTENT.get(ai_intent, 1500)
+
+    # Call GPT and parse JSON (JSON hardened)
     try:
-        try:
-            rsp = client.chat_completions.create(  # type: ignore[attr-defined]
-                model=MODEL,
-                messages=[{"role":"system","content": SYSTEM},
-                          {"role":"user","content": parts_payload}],
-                max_tokens=max_tokens,
-                temperature=0,
-                response_format={"type":"json_object"}
-            )
-        except AttributeError:
-            rsp = client.chat.completions.create(
-                model=MODEL,
-                messages=[{"role":"system","content": SYSTEM},
-                          {"role":"user","content": parts_payload}],
-                max_tokens=max_tokens,
-                temperature=0,
-                response_format={"type":"json_object"}
-            )
-    except Exception as e:
-        return JSONResponse(status_code=500, content={"error": f"Model call failed: {e}"})
+        rsp = client.chat_completions.create(  # type: ignore[attr-defined]
+            model=MODEL,
+            messages=[{"role":"system","content": SYSTEM},
+                      {"role":"user","content": parts_payload}],
+            max_tokens=max_tokens,
+            temperature=0,
+            response_format={"type":"json_object"}
+        )
+    except AttributeError:
+        rsp = client.chat.completions.create(
+            model=MODEL,
+            messages=[{"role":"system","content": SYSTEM},
+                      {"role":"user","content": parts_payload}],
+            max_tokens=max_tokens,
+            temperature=0,
+            response_format={"type":"json_object"}
+        )
 
-    # --- Hardened JSON parse helper (simplified & trust response_format=json_object) ---
-    def _try_parse_json(raw_text):
-        """
-        Best-effort JSON loader.
-
-        - If the API already returned a dict, just pass it through.
-        - Otherwise, treat content as a string and load it with json.loads.
-        - Only if that fails, do a very light cleanup and retry.
-        """
-        if raw_text is None:
+    # --- Hardened JSON parse helper
+    def _try_parse_json(raw_text: str):
+        if not raw_text:
             return None
-
-        # If the SDK already parsed it for us
-        if isinstance(raw_text, dict):
-            return raw_text
-
-        # Ensure we are working with a string
-        if not isinstance(raw_text, str):
-            raw_text = str(raw_text)
-
         raw_local = raw_text.strip()
-
-        # Fast path: most responses should work here
+        for fence in ("```json", "```JSON", "```"):
+            if raw_local.startswith(fence):
+                raw_local = raw_local[len(fence):]
+            if raw_local.endswith("```"):
+                raw_local = raw_local[:-3]
+        raw_local = raw_local.strip()
+        raw_local = raw_local.replace("\ufeff", "").replace("\u200b", "").replace("\u00A0", " ")
         try:
             return json.loads(raw_local)
         except Exception:
             pass
-
-        # Fallback: trim to outermost braces in case of any stray logging text
-        lb = raw_local.find("{")
-        rb = raw_local.rfind("}")
-        if lb != -1 and rb != -1 and rb > lb:
-            chunk = raw_local[lb:rb+1]
-        else:
-            chunk = raw_local
-
-        # Normalize a few common troublesome characters
-        fixes = {
-            "\ufeff": "",   # BOM
-            "\u200b": "",   # zero-width space
-            "\u00A0": " ",  # non-breaking space
-            "\u2018": "'", "\u2019": "'",
-            "\u201C": '"', "\u201D": '"',
-            "\r": "", "\t": "    ",
-        }
+        lb = raw_local.find("{"); rb = raw_local.rfind("}")
+        chunk = raw_local[lb:rb+1] if (lb != -1 and rb != -1 and rb > lb) else raw_local
+        fixes = {"\u2018": "'", "\u2019": "'", "\u201C": '"', "\u201D": '"', "\r": "", "\t": "    "}
         for k, v in fixes.items():
             chunk = chunk.replace(k, v)
-
-        # Remove trailing commas before } or ]
         chunk = re.sub(r",\s*([}\]])", r"\1", chunk)
-
         try:
             return json.loads(chunk)
         except Exception:
@@ -799,35 +830,67 @@ async def vision_review(
         log.error(f"LLM returned no content: {e}")
         return JSONResponse(status_code=500, content={"error":"Model returned no content."})
 
-    # First, try direct JSON load (response_format=json_object should already guarantee this)
-    data = None
-    if isinstance(raw, dict):
-        data = raw
-    else:
-        try:
-            data = json.loads(raw)
-        except Exception:
-            data = _try_parse_json(raw)
+    data = _try_parse_json(raw)
 
+    # -------------------------------
+    # PATCH #3: One safe retry on truncation
+    # -------------------------------
+    try:
+        finish_reason = getattr(rsp.choices[0], "finish_reason", None)
+    except Exception:
+        finish_reason = None
+
+    if data is None and (finish_reason == "length" or (raw and raw.strip().endswith("..."))):
+        _text_parts_retry = [p for p in parts_payload if p.get("type") == "text"]
+        _image_parts_retry = [p for p in parts_payload if p.get("type") != "text"]
+        shrunk = _text_parts_retry[: max(3, len(_text_parts_retry)//2)] + _image_parts_retry
+        retry_tokens = min(3000, max_tokens + 600)
+        try:
+            rsp2 = client.chat.completions.create(
+                model=MODEL,
+                messages=[{"role": "system", "content": SYSTEM},
+                          {"role": "user", "content": shrunk}],
+                max_tokens=retry_tokens,
+                temperature=0,
+                response_format={"type": "json_object"}
+            )
+            raw2 = (rsp2.choices[0].message.content or "")
+            data = _try_parse_json(raw2)
+        except Exception:
+            pass
+
+    # Fallback: formatting pass
     if data is None:
         try:
             fix_prompt = [
-                {"role":"system","content": "You are a formatter. Return ONLY a strict JSON object. No prose. No markdown. No code fences."},
+                {"role":"system","content":
+                    "You are a formatter. Return ONLY a strict JSON object. No prose. No markdown. No code fences."
+                },
                 {"role":"user","content":
-                    "Convert the following text into a valid JSON object. Use exactly these keys (all required): "
+                    "Convert the following text into a valid JSON object. "
+                    "Use exactly these keys (all required): "
                     "['file_number','request_type','claim_number','vin','vin_verification','vehicle',"
                     "'odometer_estimate_only','compliance_score','summary_brief','summary_markdown',"
                     "'fraud_markdown','primary_impact','secondary_impact','estimated_costs_markdown','conclusion'] "
-                    "Do not invent new keys. If a field is unavailable, use 'N/A'.\n\n" + raw
+                    "Do not invent new keys. If a field is unavailable, use 'N/A'. "
+                    "Here is the text:\n\n" + raw
                 }
             ]
             try:
                 fix_rsp = client.chat_completions.create(  # type: ignore[attr-defined]
-                    model=MODEL, messages=fix_prompt, max_tokens=max_tokens, temperature=0, response_format={"type":"json_object"}
+                    model=MODEL,
+                    messages=fix_prompt,
+                    max_tokens=max_tokens,
+                    temperature=0,
+                    response_format={"type":"json_object"}
                 )
             except AttributeError:
                 fix_rsp = client.chat.completions.create(
-                    model=MODEL, messages=fix_prompt, max_tokens=max_tokens, temperature=0, response_format={"type":"json_object"}
+                    model=MODEL,
+                    messages=fix_prompt,
+                    max_tokens=max_tokens,
+                    temperature=0,
+                    response_format={"type":"json_object"}
                 )
             fixed = (fix_rsp.choices[0].message.content or "")
             data = _try_parse_json(fixed)
@@ -836,24 +899,15 @@ async def vision_review(
 
     if data is None:
         log.error(f"LLM failure or JSON parse error; first 500 chars:\n" + (raw or "")[:500])
-        skeleton = {
-            "file_number": file_number,
-            "request_type": req_label,
-            "claim_number": "N/A",
-            "vin": "N/A",
-            "vin_verification": "N/A",
-            "vehicle": "N/A",
-            "odometer_estimate_only": "N/A",
-            "compliance_score": "N/A",
-            "summary_brief": "N/A (model output could not be parsed; skeleton returned).",
-            "summary_markdown": "## Detailed Audit Report\nModel output could not be parsed into JSON on this run. Please resubmit.",
-            "fraud_markdown": "No material inconsistencies found.",
-            "primary_impact": "N/A",
-            "secondary_impact": "N/A",
-            "estimated_costs_markdown": "N/A",
-            "conclusion": "N/A",
-        }
-        skeleton["redaction_status"] = "Redacted PII: Not Applied"
+        skeleton = {k: "N/A" for k in KEYS}
+        skeleton["file_number"] = file_number
+        skeleton["request_type"] = req_label
+        skeleton["summary_brief"] = "N/A (model output could not be parsed; skeleton returned)."
+        skeleton["summary_markdown"] = (
+            "## Detailed Audit Report\n"
+            "Model output could not be parsed into JSON on this run. Please resubmit."
+        )
+        skeleton["fraud_markdown"] = "No material inconsistencies found."
         return skeleton
 
     def _get(k):
@@ -879,7 +933,7 @@ async def vision_review(
         "redaction_status": redaction_status,
     }
 
-    # --- Score ↔ narrative sync (conservative)
+    # --- Score ↔ narrative synchronization ---
     def _extract_score_from_text(text: str):
         if not text:
             return None
@@ -894,7 +948,7 @@ async def vision_review(
         m = re.search(r"(?is)\bthe\s+compliance\s+score\s+is\s+set\s+at\s+(\d{1,3})\s*%?\b", text)
         if m:
             try:
-                v = int(m.group(1)); 
+                v = int(m.group(1))
                 if 0 <= v <= 100:
                     return v
             except Exception:
@@ -902,7 +956,7 @@ async def vision_review(
         m = re.search(r"(?is)\bCompliance\s*Score\b[^0-9]{0,10}(\d{1,3})\s*%?\b", text)
         if m:
             try:
-                v = int(m.group(1)); 
+                v = int(m.group(1))
                 if 0 <= v <= 100:
                     return v
             except Exception:
@@ -946,7 +1000,7 @@ async def vision_review(
     except Exception:
         pass
 
-    # --- Clean Retail deterministic override ---
+    # Clean Retail deterministic override
     if _clean_retail_present:
         try:
             sm = result.get("summary_markdown") or ""
@@ -971,42 +1025,33 @@ async def vision_review(
         except Exception:
             pass
 
-    # --- INSERT #2: Narrative cleanup to remove false 'missing' claims when evidence present ---
+    # INSERT #2: Narrative cleanup to remove false "missing" claims if evidence present
     try:
-        sm = result.get('summary_markdown') or ''
+        sm = result.get("summary_markdown") or ""
         orig_sm = sm
         if _odo_photo_present:
-            sm = re.sub(r'(?im)^\s*[-*]\s*Missing\s+odometer\s+photo.*$', '', sm)
-            sm = re.sub(r'(?is)\bodometer\s+photo\s+not\s+present\b.*?(?:\n|$)', '', sm)
-            sm = re.sub(r'(?is)\bthe\s+odometer\s+(?:photo\s+)?is\s+missing\b.*?(?:\n|$)', '', sm)
-        if _prod_date_present:
-            sm = re.sub(r'(?im)^\s*[-*]\s*Missing\s+production\s+date\s*(?:plate|photo)?\b.*$', '', sm)
-            sm = re.sub(r'(?is)\bproduction\s+date\s+(?:plate\s+)?(?:photo\s+)?not\s+present\b.*?(?:\n|$)', '', sm)
-            sm = re.sub(r'(?is)\bno\s+production\s+date(?:\s+(?:plate|photo|image))?\b.*?(?:\n|$)', '', sm)
-            sm = re.sub(r'(?is)\bthe\s+production\s+date(?:\s+(?:plate|photo|image))?\s+is\s+missing\b.*?(?:\n|$)', '', sm)
-        sm = re.sub(r'\n{3,}', '\n\n', sm).strip()
+            sm = re.sub(r"(?im)^\s*[-*]\s*Missing\s+odometer\s+photo.*$", "", sm)
+            sm = re.sub(r"(?is)\bodometer\s+photo\s+not\s+present\b.*?(?:\n|$)", "", sm)
+            sm = re.sub(r"(?is)\bthe\s+odometer\s+(?:photo\s+)?is\s+missing\b.*?(?:\n|$)", "", sm)
+        if _vin_photo_present:
+            # treat PD as evidenced; scrub PD 'missing' and 'not separately documented'
+            sm = re.sub(r"(?im)^\s*[-*]\s*Missing\s+production\s+date\s*(?:plate|photo)?\b.*$", "", sm)
+            sm = re.sub(r"(?is)\bproduction\s+date\s+(?:plate\s+)?(?:photo\s+)?not\s+present\b.*?(?:\n|$)", "", sm)
+            sm = re.sub(r"(?is)\bno\s+production\s+date(?:\s+(?:plate|photo|image))?\b.*?(?:\n|$)", "", sm)
+            sm = re.sub(r"(?is)\bproduction\s+date\s+not\s+separately\s+documented\b.*?(?:\n|$)", "", sm)
+            sm = re.sub(r"(?is)\bthe\s+production\s+date(?:\s+(?:plate|photo|image))?\s+is\s+missing\b.*?(?:\n|$)", "", sm)
+        elif _prod_date_present:
+            sm = re.sub(r"(?im)^\s*[-*]\s*Missing\s+production\s+date\s*(?:plate|photo)?\b.*$", "", sm)
+            sm = re.sub(r"(?is)\bproduction\s+date\s+(?:plate\s+)?(?:photo\s+)?not\s+present\b.*?(?:\n|$)", "", sm)
+            sm = re.sub(r"(?is)\bno\s+production\s+date(?:\s+(?:plate|photo|image))?\b.*?(?:\n|$)", "", sm)
+            sm = re.sub(r"(?is)\bproduction\s+date\s+not\s+separately\s+documented\b.*?(?:\n|$)", "", sm)
+            sm = re.sub(r"(?is)\bthe\s+production\s+date(?:\s+(?:plate|photo|image))?\s+is\s+missing\b.*?(?:\n|$)", "", sm)
+        sm = re.sub(r"\n{3,}", "\n\n", sm).strip()
         if len(sm) < 120:
             sm = orig_sm.strip()
-        result['summary_markdown'] = sm if sm else orig_sm.strip()
+        result["summary_markdown"] = sm if sm else orig_sm.strip()
     except Exception:
         pass
-
-    # --- Minimal narrative safety net ---
-    if not (result.get('summary_markdown') or '').strip():
-        # Build a simple but useful fallback narrative instead of returning an empty section.
-        fallback_lines = [
-            "## Detailed Audit Report",
-            "This automated review completed successfully, but the model did not return a full narrative section in the expected field.",
-            f"File Number: {file_number or 'N/A'}",
-            f"Claim #: {result.get('claim_number') or 'N/A'}",
-            f"Vehicle: {result.get('vehicle') or 'N/A'}",
-            f"Primary Impact: {result.get('primary_impact') or 'N/A'}",
-            f"Secondary Impact: {result.get('secondary_impact') or 'N/A'}",
-            f"Compliance Score: {result.get('compliance_score') or 'N/A'}",
-            "",
-            "Please review the attached estimate, photos, and the rest of this report for the substantive compliance details.",
-        ]
-        result['summary_markdown'] = "\n".join(fallback_lines)
 
     # Non-empty Fraud fallback
     if not result["fraud_markdown"] or result["fraud_markdown"].strip().upper() in {"", "N/A"}:
@@ -1036,7 +1081,7 @@ async def vision_review(
     pdf.set_left_margin(10); pdf.set_right_margin(10)
 
     try:
-        pdf.add_font("DejaVu","", "DejaVuSans.ttf", uni=True); pdf.set_font("DejaVu", size=11)
+        pdf.add_font("DejaVu","", "DejaVuSans.ttf", uni=True); pdf.set_font(size=11)
     except Exception:
         pdf.set_font("Arial", size=11)
 
@@ -1055,6 +1100,7 @@ async def vision_review(
             pdf.set_x(pdf.l_margin)
             pdf.multi_cell(effective_w, 6, (_pdf_sanitize(str(s))[:2000] + " …"))
 
+    # POI-15 Total Loss trigger from uploaded text ONLY
     poi15_hit = False
     try:
         txt = uploaded_text_all.lower()
@@ -1068,6 +1114,7 @@ async def vision_review(
     if ai_intent == "damage_report_from_photos":
         pdf.cell(0,10,"AI-4-IA Damage Report", ln=True, align="C")
         pdf.set_font_size(10); pdf.ln(3)
+
         mc(f"Claim #: {result['claim_number'] or 'N/A'}    File #: {file_number or 'N/A'}")
         pdf_status = result["redaction_status"].replace("✅", "OK")
         pdf.ln(2); mc(pdf_status)
@@ -1075,6 +1122,7 @@ async def vision_review(
         mc("Estimated Repair Costs"); mc((result["estimated_costs_markdown"] or "N/A").strip())
         pdf.ln(2); mc("Fraud & Authenticity Check"); mc((result["fraud_markdown"] or 'N/A').strip())
         pdf.ln(2); mc("Conclusion"); mc((result["conclusion"] or 'N/A').strip())
+
         safe_file = _safe(file_number)
         pdf_filename = f"AI_Damage_Report_{safe_file}.pdf"
     else:
@@ -1085,7 +1133,8 @@ async def vision_review(
         mc(f"Appraiser ID #: {appraiser_id}")
         mc(f"Request Type: {result['request_type']}")
 
-        # --- Supplement header (documents-only; ignore negated mentions) ---
+        # --- Supplement header (documents only; ignore negated mentions) ---
+        smark = result.get("summary_markdown","")
         _txt_docs = uploaded_text_all or ""
         _supp_doc_hit = bool(re.search(
             r"(?is)\b(Supplement\s+(?:Summary|of\s+Record)|Estimate\s+Version:\s*S0[1-9]\b|\bS0[1-9]\b|\bSupplement\s+Estimate\b)",
@@ -1095,20 +1144,19 @@ async def vision_review(
         supp_detected_docs = _supp_doc_hit and _no_supp_negation
         if supp_detected_docs:
             mc("Supplement Status: Supplement Estimate detected in documentation")
-            # Supplement Details (tiny box)
             _ver = None
-            _m = re.search(r"(?is)\bEstimate\s+Version:\s*(S0[1-9])\b", uploaded_text_all or "")
+            _m = re.search(r"(?is)\bEstimate\s+Version:\s*(S0[1-9])\b", _txt_docs)
             if _m: _ver = _m.group(1)
             _possible_amt = None
-            _m = re.search(r"(?is)\b(Possible\s+Supplement\s+Amount)\s*\$?([0-9,]+(?:\.\d{2})?)\b", uploaded_text_all or "")
-            if _m: _possible_amt = _m.group(2)
+            _m = re.search(r"(?is)\bPossible\s+Supplement\s+Amount\s*\$?([0-9,]+\.\d{2})\b", _txt_docs)
+            if _m: _possible_amt = _m.group(1)
             mc("Supplement Details")
             if _ver: mc(f"- Version: {_ver}")
             if _possible_amt: mc(f"- Possible amount noted: ${_possible_amt}")
             if not (_ver or _possible_amt):
                 mc("- Supplement indicators present (e.g., 'Supplement Summary' or S01/S02).")
 
-        # --- Total Loss echo (documents-only) ---
+        # --- Total Loss echo (documents-only; no narrative trigger) ---
         explicit_tl_hit = False
         try:
             txt_docs = uploaded_text_all or ""
@@ -1134,7 +1182,7 @@ async def vision_review(
         mc(f"Compliance Score: {result['compliance_score']}")
         pdf_status = result["redaction_status"].replace("✅", "OK")
         mc(pdf_status)
-        pdf.ln(3); mc("AI-4-IA Review Summary"); mc((result["summary_markdown"] or '').strip())
+        pdf.ln(3); mc("AI-4-IA Review Summary"); mc((smark or '').strip())
         pdf.ln(3); mc("Fraud Detection"); mc((result["fraud_markdown"] or 'N/A').strip())
 
         safe_file = _safe(file_number)
@@ -1143,7 +1191,10 @@ async def vision_review(
     pdf_path = os.path.join(PDF_DIR, pdf_filename)
     try:
         out = pdf.output(dest="S")
-        data_bytes = bytes(out) if isinstance(out, (bytes, bytearray)) else str(out).encode("latin-1", "ignore")
+        if isinstance(out, (bytes, bytearray)):
+            data_bytes = bytes(out)
+        else:
+            data_bytes = str(out).encode("latin-1", "ignore")
         with open(pdf_path, "wb") as f:
             f.write(data_bytes)
     except Exception as e:
@@ -1152,7 +1203,7 @@ async def vision_review(
     pdf_url = f"/download-pdf?filename={pdf_filename}"
 
     # -----------------------
-    # Email — info-only + attach PDF
+    # Email — info-only (attach PDF)
     # -----------------------
     try:
         msg = EmailMessage()
@@ -1166,13 +1217,13 @@ async def vision_review(
                 f"Secondary Impact: {result['secondary_impact'] or 'N/A'}\n\n"
                 f"{result['redaction_status']}\n\n"
                 "Damage Summary\n"
-                f"{result['summary_markdown'] or 'N/A'}\n\n"
+                f"{(result['summary_markdown'] or 'N/A')}\n\n"
                 "Estimated Repair Costs\n"
-                f"{result['estimated_costs_markdown'] or 'N/A'}\n\n"
+                f"{(result['estimated_costs_markdown'] or 'N/A')}\n\n"
                 "Fraud & Authenticity Check\n"
-                f"{result['fraud_markdown'] or 'N/A'}\n\n"
+                f"{(result['fraud_markdown'] or 'N/A')}\n\n"
                 "Conclusion\n"
-                f"{result['conclusion'] or 'N/A'}\n"
+                f"{(result['conclusion'] or 'N/A')}\n"
             )
         else:
             try:
@@ -1190,13 +1241,7 @@ async def vision_review(
                 _explicit_tl_email = False
 
             tl_line = "Estimate Type: Total Loss (explicit in documents)\n" if _explicit_tl_email else ""
-            supp_line = ""
-            if bool(re.search(
-                r"(?is)\b(Supplement\s+(?:Summary|of\s+Record)|Estimate\s+Version:\s*S0[1-9]\b|\bS0[1-9]\b|\bSupplement\s+Estimate\b)",
-                _txt_email
-            )) and not re.search(r"(?is)\b(no|not)\s+(a\s+)?supplement\b", _txt_email):
-                supp_line = "Supplement Status: Supplement Estimate detected in documentation\n"
-
+            supp_line = "Supplement Status: Supplement Estimate detected in documentation\n" if supp_detected_docs else ""
             subj = f"AI-4-IA Review: {result['claim_number'] or file_number}"
             body = (
                 "NSPXN.com AI Review Report\n\n"
@@ -1258,17 +1303,15 @@ async def download_pdf(file_number: Optional[str] = None, filename: Optional[str
         if os.path.exists(path):
             return FileResponse(path=path, media_type="application/pdf", filename=safe)
         return JSONResponse(status_code=404, content={"detail": "Not Found"})
-
     if not file_number:
         return JSONResponse(status_code=400, content={"detail": "Missing query param 'filename' or 'file_number'"})
-
     safe_num = _safe(file_number)
     candidates = glob.glob(os.path.join(PDF_DIR, f"*{safe_num}*.pdf"))
     if not candidates:
         return JSONResponse(status_code=404, content={"detail": "Not Found"})
-
     latest = max(candidates, key=lambda p: os.path.getmtime(p))
     return FileResponse(path=latest, media_type="application/pdf", filename=os.path.basename(latest))
+
 
 
 
