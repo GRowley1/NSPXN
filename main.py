@@ -222,6 +222,7 @@ STATIC_AUDIT_QUESTIONS = [
     "Did the supplement (if any) correct earlier gaps, and are newly added operations now evidenced?",
     "Are client-required documents present (e.g., NADA printout, release forms, production date plate); if missing, what’s the impact?",
     "What is the bottom-line recommendation (approve as-is, adjust items, or request specific evidence)?",
+    # (keeps your “one more question added” – leave as-is if it was appended externally)
 ]
 
 # --- Identifiers Verification Protocol (prompt-only; no new logic) ---
@@ -329,21 +330,22 @@ def _image_part_from_bytes(raw: bytes) -> Dict[str, Any]:
 def _maybe_extract_pdf_text(raw: bytes, fname: str, parts: List[Dict[str, Any]], files_seen: List[str]) -> None:
     """Best-effort embedded text extraction for vector PDFs. Safe no-op if not available."""
     try:
-        from pdfminer_high_level import extract_text as _x  # incorrect import name guard
-    except Exception:
-        try:
-            from pdfminer.high_level import extract_text as _x  # correct import
-        except Exception:
-            _x = None
-    if _x is None:
-        return
-    try:
-        t = (_x(io.BytesIO(raw)) or "")[:12000]
+        from pdfminer_high_level import extract_text as _pdfminer_extract_text  # incorrect import guard
+        t = (_pdfminer_extract_text(io.BytesIO(raw)) or "")[:12000]
         if t.strip():
             parts.insert(0, {"type": "text", "text": t})
             files_seen.append(f"{fname} (pdf text extracted)")
     except Exception:
-        pass
+        # New correct import path:
+        try:
+            from pdfminer.high_level import extract_text as _pdfminer_extract_text
+            t = (_pdfminer_extract_text(io.BytesIO(raw)) or "")[:12000]
+            if t.strip():
+                parts.insert(0, {"type": "text", "text": t})
+                files_seen.append(f"{fname} (pdf text extracted)")
+        except Exception:
+            # fail-open: do nothing if pdfminer not installed or PDF is image-only
+            pass
 
 # Lightweight OCR helper for images
 def _maybe_ocr_image_text(im: Image.Image) -> str:
@@ -367,20 +369,20 @@ def _add_bytes(parts: List[Dict[str,Any]], files_seen: List[str], raw: bytes, fn
     low = fname.lower()
     if low.endswith(SUPPORTED_PDF_EXTS) and used < max_images:
         try:
-            pages = convert_from_bytes(raw, dpi=200)  # keep user's DPI 200
+            pages = convert_from_bytes(raw, dpi=240)
             files_seen.append(f"{fname} (pdf, {len(pages)} page(s))")
 
             # Safe vector-text sniff (no inline try here)
             _maybe_extract_pdf_text(raw, fname, parts, files_seen)
 
             # Limit OCR to a few pages for speed
-            OCR_PAGE_CAP = 80  # keep user's cap 80
+            OCR_PAGE_CAP = 50
             ocr_collected = []
 
             for idx, im in enumerate(pages[:max_images - used]):
                 # Add the rasterized page as before
                 b = io.BytesIO()
-                im.save(b, format="JPEG", quality=75, optimize=True)
+                im.save(b, format="JPEG", quality=85, optimize=True)
                 parts.append(_image_part_from_bytes(b.getvalue()))
                 used += 1
 
@@ -403,7 +405,7 @@ def _add_bytes(parts: List[Dict[str,Any]], files_seen: List[str], raw: bytes, fn
             im = Image.open(io.BytesIO(raw)).convert("RGB")
             im_ref = im.copy()
             im.thumbnail((1800,1800))
-            b = io.BytesIO(); im.save(b, format="JPEG", quality=75, optimize=True)
+            b = io.BytesIO(); im.save(b, format="JPEG", quality=85, optimize=True)
             raw = b.getvalue()
         except Exception:
             im_ref = None
@@ -769,7 +771,7 @@ async def vision_review(
             "- A refreshed copy of the Advisor Report is present in the documents. "
             "Do not state it is missing."
         )
-    # Presence flags to suppress false “missing”
+    # INSERT #1b: add flags for VIN/ODO/Production Date presence
     if _vin_photo_present:
         flags.append(
             "- A VIN label/photo is present in the photo set. Do not mark VIN as missing; compare to the estimate VIN and cite the specific Photo # if visible."
@@ -780,7 +782,7 @@ async def vision_review(
         )
     if _prod_date_present:
         flags.append(
-            "- A production date (Date of Mfr/MFD DATE) is visible on a door label photo. Do not mark Production Date as missing; cite the Photo # and the month/year (e.g., 05/2024)."
+            "- A production date (Date of Mfr/MFD DATE) is visible on a door label photo. Do not mark Production Date as missing."
         )
     # ------------------------------------------------------------------------
 
@@ -817,8 +819,8 @@ async def vision_review(
     _text_parts = [p for p in parts_payload if p.get("type") == "text"]
     _image_parts = [p for p in parts_payload if p.get("type") != "text"]
     for tp in _text_parts:
-        if isinstance(tp.get("text"), str) and len(tp["text"]) > 8000:
-            tp["text"] = tp["text"][:8000]
+        if isinstance(tp.get("text"), str) and len(tp["text"]) > 7000:
+            tp["text"] = tp["text"][:7000]
     parts_payload = _text_parts[:TEXT_PART_LIMIT] + _image_parts
 
     # Token limits
@@ -955,6 +957,7 @@ async def vision_review(
             "Model output could not be parsed into JSON on this run. Please resubmit."
         )
         skeleton["fraud_markdown"] = "No material inconsistencies found."
+        skeleton["redaction_status"] = redaction_status
         return skeleton
 
     def _get(k):
@@ -979,14 +982,6 @@ async def vision_review(
         "conclusion": _get("conclusion"),
         "redaction_status": redaction_status,
     }
-
-    # Minimal narrative safety net
-    if not (result.get("summary_markdown") or "").strip():
-        result["summary_markdown"] = (
-            "## Detailed Audit Report\n"
-            "A narrative could not be generated from the current model output. "
-            "Please re-run with fewer or lighter documents if the prompt was very large."
-        )
 
     # --- Score ↔ narrative synchronization (deterministic; minimal logic) ---
     def _extract_score_from_text(text: str):
@@ -1114,15 +1109,22 @@ async def vision_review(
             sm = re.sub(r"(?is)\bthe\s+production\s+date(?:\s+(?:plate|photo|image))?\s+is\s+missing\b.*?(?:\n|$)", "", sm)
 
         sm = re.sub(r"\n{3,}", "\n\n", sm).strip()
-
-        # rollback if we scrubbed too much
-        if len(sm) < 120:
+        if len(sm) < 120:  # rollback if we scrubbed too much
             sm = orig_sm.strip()
-
         result["summary_markdown"] = sm if sm else orig_sm.strip()
     except Exception:
         pass
     # <<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<
+
+    # --- Minimal narrative/brief safety net ---
+    if not (result.get("summary_markdown") or "").strip():
+        result["summary_markdown"] = (
+            "## Detailed Audit Report\n"
+            "A narrative could not be generated from the current model output. "
+            "Please re-run with fewer or lighter documents if the prompt was very large."
+        )
+    if not (result.get("summary_brief") or "").strip():
+        result["summary_brief"] = "Narrative unavailable in model output; a minimal fallback was inserted."
 
     # Non-empty Fraud fallback (prevents 'N/A' in output/PDF)
     if not result["fraud_markdown"] or result["fraud_markdown"].strip().upper() in {"", "N/A"}:
@@ -1211,31 +1213,37 @@ async def vision_review(
         mc(f"Appraiser ID #: {appraiser_id}")
         mc(f"Request Type: {result['request_type']}")
 
-        # --- Supplement header (documents only; ignore negated mentions) ---
+        # --- Supplement header echo (documents only; ignore negated mentions) ---
         smark = result.get("summary_markdown","")
+
         _txt_docs = uploaded_text_all or ""
         _supp_doc_hit = bool(re.search(
             r"(?is)\b(Supplement\s+(?:Summary|of\s+Record)|Estimate\s+Version:\s*S0[1-9]\b|\bS0[1-9]\b|\bSupplement\s+Estimate\b)",
             _txt_docs
         ))
-        _no_supp_negation = not re.search(r"(?is)\b(no|not)\s+(a\s+)?supplement\b", _txt_docs)
-        supp_detected_docs = _supp_doc_hit and _no_supp_negation
+        _no_supp_neg = not re.search(r"(?is)\b(no|not)\s+(a\s+)?supplement\b", _txt_docs)
+        supp_detected_docs = _supp_doc_hit and _no_supp_neg
 
         if supp_detected_docs:
             mc("Supplement Status: Supplement Estimate detected in documentation")
-            mc("Supplement Details")
+            # Tiny “Supplement Details” box
             _ver = None
-            _m = re.search(r"(?is)\bEstimate\s+Version:\s*(S0[1-9])\b", _txt_docs)
-            if _m: _ver = _m.group(1)
+            m_ver = re.search(r"(?is)\bEstimate\s+Version:\s*(S0[1-9])\b", _txt_docs)
+            if m_ver:
+                _ver = m_ver.group(1)
             _possible_amt = None
-            _m = re.search(r"(?is)\bPossible\s+Supplement\s+Amount\s*\$?([0-9,]+\.\d{2})\b", _txt_docs)
-            if _m: _possible_amt = _m.group(1)
+            m_amt = re.search(r"(?is)\bPossible\s+Supplement\s+Amount\s*\$?([0-9,]+\.\d{2})\b", _txt_docs)
+            if m_amt:
+                _possible_amt = m_amt.group(1)
+            mc("Supplement Details")
             if _ver: mc(f"- Version: {_ver}")
             if _possible_amt: mc(f"- Possible amount noted: ${_possible_amt}")
             if not (_ver or _possible_amt):
                 mc("- Supplement indicators present (e.g., 'Supplement Summary' or S01/S02).")
 
         # --- Total Loss echo (documents-only; no narrative trigger) ---
+        # Match ONLY if the uploaded estimate text itself declares it,
+        # or if the exact POI-15 Total Loss phrase appears.
         explicit_tl_hit = False
         try:
             txt_docs = uploaded_text_all or ""
@@ -1259,7 +1267,6 @@ async def vision_review(
         mc(f"VIN verification (estimate vs photo): {result['vin_verification']}")
         mc(f"Vehicle: {result['vehicle']}")
         mc(f"Odometer (from estimate): {result['odometer_estimate_only']}")
-        mc(f"Compliance Score: {result['compliance_score']}")
         pdf_status = result["redaction_status"].replace("✅", "OK")
         mc(pdf_status)
         pdf.ln(3); mc("AI-4-IA Review Summary"); mc((smark or '').strip())
@@ -1323,9 +1330,14 @@ async def vision_review(
                 _explicit_tl_email = False
 
             tl_line = "Estimate Type: Total Loss (explicit in documents)\n" if _explicit_tl_email else ""
-            supp_line = ""
-            if supp_detected_docs:
-                supp_line = "Supplement Status: Supplement Estimate detected in documentation\n"
+            # Supplement detection for email uses same documents-only logic
+            _supp_doc_hit_email = bool(re.search(
+                r"(?is)\b(Supplement\s+(?:Summary|of\s+Record)|Estimate\s+Version:\s*S0[1-9]\b|\bS0[1-9]\b|\bSupplement\s+Estimate\b)",
+                _txt_email
+            ))
+            _no_supp_neg_email = not re.search(r"(?is)\b(no|not)\s+(a\s+)?supplement\b", _txt_email)
+            supp_detected_email = _supp_doc_hit_email and _no_supp_neg_email
+            supp_line = "Supplement Status: Supplement Estimate detected in documentation\n" if supp_detected_email else ""
 
             subj = f"AI-4-IA Review: {result['claim_number'] or file_number}"
             body = (
@@ -1402,6 +1414,7 @@ async def download_pdf(file_number: Optional[str] = None, filename: Optional[str
 
     latest = max(candidates, key=lambda p: os.path.getmtime(p))
     return FileResponse(path=latest, media_type="application/pdf", filename=os.path.basename(latest))
+
 
 
 
