@@ -268,7 +268,10 @@ def _image_part_from_bytes(raw: bytes) -> Dict[str, Any]:
 
 def _maybe_extract_pdf_text(raw: bytes, fname: str, parts: List[Dict[str, Any]], files_seen: List[str]) -> None:
     try:
-        from pdfminer.high_level import extract_text as _pdfminer_extract_text
+        from pdfminer_high_level import extract_text as _pdfminer_extract_text
+    except Exception:
+        from pdfminer.high_level import extract_text as _pdfminer_extract_text  # type: ignore
+    try:
         t = (_pdfminer_extract_text(io.BytesIO(raw)) or "")[:12000]
         if t.strip():
             parts.insert(0, {"type": "text", "text": t})
@@ -957,11 +960,20 @@ async def vision_review(
 
     # --- Minimal narrative safety net ---
     if not (result.get('summary_markdown') or '').strip():
-        result['summary_markdown'] = (
-            '## Detailed Audit Report\n'
-            'A narrative could not be generated from the current model output. '
-            'Please re-run with fewer/lighter documents if the prompt was very large.'
-        )
+        # Build a simple but useful fallback narrative instead of returning an empty section.
+        fallback_lines = [
+            "## Detailed Audit Report",
+            "This automated review completed successfully, but the model did not return a full narrative section in the expected field.",
+            f"File Number: {file_number or 'N/A'}",
+            f"Claim #: {result.get('claim_number') or 'N/A'}",
+            f"Vehicle: {result.get('vehicle') or 'N/A'}",
+            f"Primary Impact: {result.get('primary_impact') or 'N/A'}",
+            f"Secondary Impact: {result.get('secondary_impact') or 'N/A'}",
+            f"Compliance Score: {result.get('compliance_score') or 'N/A'}",
+            "",
+            "Please review the attached estimate, photos, and the rest of this report for the substantive compliance details.",
+        ]
+        result['summary_markdown'] = "\n".join(fallback_lines)
 
     # Non-empty Fraud fallback
     if not result["fraud_markdown"] or result["fraud_markdown"].strip().upper() in {"", "N/A"}:
@@ -1224,6 +1236,7 @@ async def download_pdf(file_number: Optional[str] = None, filename: Optional[str
 
     latest = max(candidates, key=lambda p: os.path.getmtime(p))
     return FileResponse(path=latest, media_type="application/pdf", filename=os.path.basename(latest))
+
 
 
 
