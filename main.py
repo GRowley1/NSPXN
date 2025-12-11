@@ -227,7 +227,7 @@ CONSISTENCY_GUARD = (
     "\n- Do not claim any required photo is 'missing' if you graded it 'Clearly legible' or 'Present — not clearly legible'."
     "\n- For VIN, Odometer, and Production Date specifically: if present in any photo, do not write any sentence implying they are absent."
     "\n- If legibility is the issue, use 'Present — not clearly legible' and explain why; request a retake."
-    "\n- Before finalizing, verify that every referenced Photo # actually exists and matches its content."
+    "\n- Before finalizing, verify that every referenced Photo # exists and matches its content."
 )
 
 ALLOWED_INTENTS = {"guidelines_only","comprehensive","damage_report_from_photos"}
@@ -799,7 +799,15 @@ async def vision_review(
         log.error(f"LLM returned no content: {e}")
         return JSONResponse(status_code=500, content={"error":"Model returned no content."})
 
-    data = _try_parse_json(raw)
+    # First, try direct JSON load (response_format=json_object should already guarantee this)
+    data = None
+    if isinstance(raw, dict):
+        data = raw
+    else:
+        try:
+            data = json.loads(raw)
+        except Exception:
+            data = _try_parse_json(raw)
 
     if data is None:
         try:
@@ -1261,6 +1269,7 @@ async def download_pdf(file_number: Optional[str] = None, filename: Optional[str
 
     latest = max(candidates, key=lambda p: os.path.getmtime(p))
     return FileResponse(path=latest, media_type="application/pdf", filename=os.path.basename(latest))
+
 
 
 
