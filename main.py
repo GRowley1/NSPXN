@@ -744,7 +744,12 @@ async def vision_review(
             "- A production date (Date of Mfr/MFD DATE) is visible on a door label photo. Do not mark Production Date as missing; cite the Photo # and the month/year."
         )
 
-    _ = flags  # currently used only in prompt design above (we keep generation minimal)
+    # ✅ FIX #1: Actually inject evidence flags into the prompt (previously you computed flags but never used them)
+    if flags:
+        prompt_text += (
+            "\n\nEVIDENCE FLAGS (obey these and do NOT contradict them):\n"
+            + "\n".join(flags)
+        )
 
     parts_payload: List[Dict[str,Any]] = []
     redaction_success = False
@@ -945,6 +950,24 @@ async def vision_review(
         "redaction_status": redaction_status,
     }
 
+    # ✅ FIX #2: Hard fallback so UI never gets an empty narrative ("No narrative generated")
+    try:
+        sm_tmp = (result.get("summary_markdown") or "").strip()
+        if not sm_tmp:
+            result["summary_markdown"] = (
+                "## Detailed Audit Report\n"
+                "Narrative fallback: The model returned an empty narrative field. "
+                "Please re-run with the same inputs; core identifiers and score fields were still returned.\n\n"
+                "## Overall Assessment\n"
+                f"Request Type: {result.get('request_type','N/A')}\n"
+                f"Compliance Score: {result.get('compliance_score','N/A')}\n"
+            )
+        elif "## Detailed Audit Report" not in sm_tmp:
+            # Keep minimal: do not re-write content; just prepend the required header to avoid downstream display rules.
+            result["summary_markdown"] = "## Detailed Audit Report\n" + sm_tmp
+    except Exception:
+        pass
+
     # --- Score ↔ narrative synchronization ---
     def _extract_score_from_text(text: str):
         if not text:
@@ -1127,7 +1150,7 @@ async def vision_review(
                 sb,
             )
 
-            # --- NEW: scrub release paperwork mentions out of brief as a deduction reason ---
+            # --- scrub release paperwork mentions out of brief as a deduction reason ---
             if "release paperwork" in sb.lower():
                 sb = re.sub(
                     r"(?is)\band\s+release\s+paperwork\b",
@@ -1253,17 +1276,7 @@ async def vision_review(
                 sm,
             )
 
-        # Clean retail risk bullet already handled above when _clean_retail_present
-
-        # If arithmetic line exists and PD/Clean Retail are evidenced, rephrase
-        if _clean_retail_present or _prod_evidenced:
-            score_str2 = str(result.get("compliance_score") or "").strip()
-            arith_re = r"(?im)^\s*100\s*-[^\n]*$"
-            if re.search(arith_re, sm):
-                repl_line = f"Compliance score math: Adjusted from 100% to {score_str2 or 'the final'}% based on documented minor issues (e.g., overlap/blend explanation), not on Production Date or Clean Retail printout."
-                sm = re.sub(arith_re, repl_line, sm)
-
-        # --- NEW: Release paperwork must never be a compliance deduction ---
+        # --- Release paperwork must never be a compliance deduction ---
         if "release paperwork" in lower_sm:
             sm = re.sub(
                 r"(?is)The\s+absence\s+of\s+repair\s+facility\s+information\s+and\s+incomplete\s+release\s+paperwork\s+reduce\s+compliance\s+but\s+do\s+not\s+affect\s+the\s+technical\s+accuracy\s+of\s+the\s+estimate\.",
@@ -1637,6 +1650,7 @@ async def download_pdf(file_number: Optional[str] = None, filename: Optional[str
         return JSONResponse(status_code=404, content={"detail": "Not Found"})
     latest = max(candidates, key=lambda p: os.path.getmtime(p))
     return FileResponse(path=latest, media_type="application/pdf", filename=os.path.basename(latest))
+
 
 
 
