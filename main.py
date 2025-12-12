@@ -333,6 +333,7 @@ def _image_part_from_bytes(raw: bytes) -> Dict[str, Any]:
 
 # Safe PDF text extract helper
 def _maybe_extract_pdf_text(raw: bytes, fname: str, parts: List[Dict[str, Any]], files_seen: List[str], pdf_text_fulls: Optional[List[str]] = None) -> None:
+    full = ""
     try:
         from pdfminer_high_level import extract_text as _x  # type: ignore
     except Exception:
@@ -343,6 +344,20 @@ def _maybe_extract_pdf_text(raw: bytes, fname: str, parts: List[Dict[str, Any]],
     try:
         if _x:
             full = (_x(io.BytesIO(raw)) or "")
+    except Exception:
+        full = ""
+
+    # ✅ Added: PyMuPDF fallback for later pages / supplement tags (safe if not installed)
+    if not full.strip():
+        try:
+            import fitz  # type: ignore
+            doc = fitz.open(stream=raw, filetype="pdf")
+            full = "\n".join((page.get_text("text") or "") for page in doc)
+        except Exception:
+            full = ""
+
+    try:
+        if full.strip():
             if pdf_text_fulls is not None and full.strip():
                 pdf_text_fulls.append(full)
             t = full[:12000]
@@ -1253,6 +1268,14 @@ async def vision_review(
                 "Client rules compliance is mostly met and the Production date is documented on the driver-door VIN label photo",
                 sm,
             )
+
+            # ✅ NEW FIX: remove/flip the inverted “main compliance issues are … production date is documented …” sentence
+            sm = re.sub(
+                r"(?is)\bthe\s+main\s+compliance\s+issues\s+are\s+the\s+production\s+date\s+is\s+documented\s+on\s+the\s+driver-door\s+vin\s+label\s+photo\.?",
+                "Production date is documented on the driver-door VIN label photo and is compliant.",
+                sm,
+            )
+
         elif _prod_date_present:
             sm = re.sub(
                 r"(?im)^\s*[-*]\s*Missing\s+production\s+date\s*(?:plate|photo)?[^\n]*$",
@@ -1489,8 +1512,8 @@ async def vision_review(
             if _m:
                 _possible_amt = _m.group(1)
             mc("Supplement Details")
-            # NEW: list all supplement tags (S01, S02, ...) instead of a single version only
-            supp_versions_docs = sorted(set(re.findall(r"(?i)\bS[0-9]{2}\b", _txt_docs)))
+            # ✅ FIX: use full supplement_versions (includes S02 on later pages) instead of re-scanning only _txt_docs
+            supp_versions_docs = supplement_versions[:]  # was: sorted(set(re.findall(..., _txt_docs)))
             if supp_versions_docs:
                 mc(f"- Supplements detected in documents: {', '.join(supp_versions_docs)}")
             if _possible_amt:
@@ -1582,10 +1605,10 @@ async def vision_review(
             except Exception:
                 _explicit_tl_email = False
 
-            # NEW: supplement line includes all Sxx tags if present
+            # ✅ FIX: supplement line includes all Sxx tags using supplement_versions (includes S02 on later pages)
             supp_line = ""
             if supp_detected_docs:
-                supp_versions_email = sorted(set(re.findall(r"(?i)\bS[0-9]{2}\b", _txt_email or "")))
+                supp_versions_email = supplement_versions[:]  # was: sorted(set(re.findall(..., _txt_email or "")))
                 if supp_versions_email:
                     supp_line = (
                         "Supplement Status: Supplement Estimates detected in documentation "
@@ -1664,6 +1687,7 @@ async def download_pdf(file_number: Optional[str] = None, filename: Optional[str
         return JSONResponse(status_code=404, content={"detail": "Not Found"})
     latest = max(candidates, key=lambda p: os.path.getmtime(p))
     return FileResponse(path=latest, media_type="application/pdf", filename=os.path.basename(latest))
+
 
 
 
