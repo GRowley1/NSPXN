@@ -332,7 +332,7 @@ def _image_part_from_bytes(raw: bytes) -> Dict[str, Any]:
     return {"type": "image_url", "image_url": {"url": "data:image/jpeg;base64," + b64}}
 
 # Safe PDF text extract helper
-def _maybe_extract_pdf_text(raw: bytes, fname: str, parts: List[Dict[str, Any]], files_seen: List[str]) -> None:
+def _maybe_extract_pdf_text(raw: bytes, fname: str, parts: List[Dict[str, Any]], files_seen: List[str], pdf_text_fulls: Optional[List[str]] = None) -> None:
     try:
         from pdfminer_high_level import extract_text as _x  # type: ignore
     except Exception:
@@ -342,7 +342,10 @@ def _maybe_extract_pdf_text(raw: bytes, fname: str, parts: List[Dict[str, Any]],
             _x = None
     try:
         if _x:
-            t = (_x(io.BytesIO(raw)) or "")[:12000]
+            full = (_x(io.BytesIO(raw)) or "")
+            if pdf_text_fulls is not None and full.strip():
+                pdf_text_fulls.append(full)
+            t = full[:12000]
             if t.strip():
                 parts.insert(0, {"type": "text", "text": t})
                 files_seen.append(f"{fname} (pdf text extracted)")
@@ -363,13 +366,13 @@ def _maybe_ocr_image_text(im: Image.Image) -> str:
     except Exception:
         return ""
 
-def _add_bytes(parts: List[Dict[str,Any]], files_seen: List[str], raw: bytes, fname: str, used: int, max_images: int) -> int:
+def _add_bytes(parts: List[Dict[str,Any]], files_seen: List[str], raw: bytes, fname: str, used: int, max_images: int, pdf_text_fulls: Optional[List[str]] = None) -> int:
     low = fname.lower()
     if low.endswith(SUPPORTED_PDF_EXTS) and used < max_images:
         try:
             pages = convert_from_bytes(raw, dpi=200)
             files_seen.append(f"{fname} (pdf, {len(pages)} page(s))")
-            _maybe_extract_pdf_text(raw, fname, parts, files_seen)
+            _maybe_extract_pdf_text(raw, fname, parts, files_seen, pdf_text_fulls=pdf_text_fulls)
             OCR_PAGE_CAP = 100
             ocr_collected = []
             for idx, im in enumerate(pages[:max_images - used]):
@@ -526,6 +529,7 @@ async def vision_review(
     files_seen: List[str] = []
     MAX_IMAGES = 24
     used = 0
+    pdf_text_fulls: List[str] = []  # full PDF text for supplement detection
 
     # Anti-zipbomb guardrails
     MAX_ZIP_FILES = 100
@@ -555,9 +559,9 @@ async def vision_review(
                     data = zf.read(zi)
                 except Exception as e:
                     files_seen.append(f"{fname}::{inner_name} (read error: {e})"); continue
-                used = _add_bytes(parts, files_seen, data, f"{fname}::{inner_name}", used, MAX_IMAGES)
+                used = _add_bytes(parts, files_seen, data, f"{fname}::{inner_name}", used, MAX_IMAGES, pdf_text_fulls=pdf_text_fulls)
         else:
-            used = _add_bytes(parts, files_seen, raw, fname, used, MAX_IMAGES)
+            used = _add_bytes(parts, files_seen, raw, fname, used, MAX_IMAGES, pdf_text_fulls=pdf_text_fulls)
 
     # Collect uploaded TEXT ONLY for evidence checks
     uploaded_text_blobs = []
@@ -565,6 +569,8 @@ async def vision_review(
         if isinstance(p, dict) and p.get("type") == "text" and isinstance(p.get("text"), str):
             uploaded_text_blobs.append(p["text"])
     uploaded_text_all = "\n".join(uploaded_text_blobs)
+
+    photos_provided = any(isinstance(p, dict) and p.get('type') != 'text' for p in parts)
 
     # --- Robust detectors (CLEAN RETAIL + ADVISOR) ---
     clean_retail_rx = (
@@ -642,7 +648,8 @@ async def vision_review(
     SYSTEM = SYSTEM_BASE
 
     # --- NEW: detect all supplement tags S01, S02, ... in the combined document text ---
-    supplement_versions = sorted(set(re.findall(r"(?i)\bS[0-9]{2}\b", uploaded_text_all or "")))
+    combined_detection_text = (uploaded_text_all or "") + "\n" + "\n".join(pdf_text_fulls or [])
+    supplement_versions = sorted(set(re.findall(r"(?i)\bS[0-9]{2}\b", combined_detection_text)))
     supplement_block = ""
     if supplement_versions:
         supplement_block = (
@@ -669,6 +676,13 @@ async def vision_review(
         "'fraud_markdown','primary_impact','secondary_impact','estimated_costs_markdown','conclusion'] "
         "and no extra text before or after.\n\n"
     ) + prompt_text
+
+    if photos_provided:
+        prompt_text += (
+            "\n\nPHOTOS PROVIDED: This upload includes photos/images. "
+            "Do NOT say 'photos not provided', 'not provided here', or similar. "
+            "Assess provided photos and do not mark required photos as missing unless they are truly absent."
+        )
 
     if ai_intent == "damage_report_from_photos":
         prompt_text += (
