@@ -683,7 +683,15 @@ async def vision_review(
         + "\n\nANALYSIS LAYOUT (guidance, not strict):\n"
         + DETAIL_TEMPLATES.get(ai_intent, DETAIL_TEMPLATES["comprehensive"])
     )
-
+    prompt_text += (
+        "\n\nCLOSING REPORT INSPECTION RESULTS CROSS-CHECK (MANDATORY):\n"
+        "- If a 'Closing Report' exists in the upload, locate the section titled 'Inspection Results'.\n"
+        "- Extract the key findings as short bullets and cite where they came from (p#/L# if text, otherwise cite the PDF page image as best you can).\n"
+        "- In '## Detailed Audit Report', explicitly reconcile your narrative to those Inspection Results:\n"
+        "  * State whether each key Inspection Result is: Reflected / Partially Reflected / Not Reflected.\n"
+        "  * If not reflected, explain why (e.g., not supported by photos/estimate lines) and what evidence would be needed.\n"
+        "- Do NOT claim Inspection Results are missing unless you actually cannot find that section.\n"
+    )
     prompt_text = (
         "OUTPUT FORMAT (MANDATORY): Return ONLY a single strict JSON object with keys "
         "['file_number','request_type','claim_number','vin','vin_verification','vehicle',"
