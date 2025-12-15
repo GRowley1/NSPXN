@@ -134,7 +134,7 @@ DETAIL_TEMPLATES = {
         "Close with compliance to any provided client rules and a clear final recommendation (Repairable vs. Total Loss). "
         "Do not declare Repairable/Total Loss unless the estimate itself explicitly marks 'Total Loss' or an ACV comparison is provided. "
         "If the shop info is listed under Repair Facility, add only the shop name to the Detailed Audit Report narrative. "
-        "If a Printout showing the Clean Retail Value or Estimated Trade-In Value of the unit is present which may include ANY of the following: NADA, J.D. Power, Kelly Blue Book, Edmunds, Carfax, or Cars.com, DO NOT declare as missing if any of these are present. "
+        "If a Printout showing the Clean Retail Value or Estimated Trade-In Value of the unit is present which may include ANY of the following: NADA, J.D. Power, Kelly Blue Book, Edmunds, Carfax, Cars.com, DO NOT declare as missing if any of these are present. "
         "Minimum 10–14 sentences (one continuous narrative, not bullets).\n\n"
         "## Photo-by-Photo Damage Ledger\n"
         "| Photo # | View/Angle | Panels/Parts Visible | Condition (dent/crease/scrape/misalignment) | Identifiers (VIN/odo/plate/reg) | Legibility |\n"
@@ -265,6 +265,15 @@ SUPPLEMENT_HANDLING = (
     "\n- If a supplement exists but required supporting evidence (invoices, photos) is still missing, call this out in Risks/Missing Evidence."
 )
 
+# --- Closing Report "Inspection Results" cross-check (prompt-only) ---
+CLOSING_REPORT_CROSSCHECK = (
+    "\n\nCLOSING REPORT CROSS-CHECK:"
+    "\n- If the Closing Report contains an 'Inspection Results' section, summarize its key findings (repair facility, location, photos/measurements captured, identifiers) and compare it to your '## Detailed Audit Report'."
+    "\n- If there is any discrepancy (e.g., Closing Report says odometer/VIN/photos present but you did not cite them), correct your narrative to align with the evidence and cite the relevant page/photo references."
+    "\n- Do not invent or assume items not actually shown; base the comparison strictly on the provided documents."
+)
+
+
 ALLOWED_INTENTS = {"guidelines_only","comprehensive","damage_report_from_photos"}
 
 SYSTEM_BASE = (
@@ -333,7 +342,6 @@ def _image_part_from_bytes(raw: bytes) -> Dict[str, Any]:
 
 # Safe PDF text extract helper
 def _maybe_extract_pdf_text(raw: bytes, fname: str, parts: List[Dict[str, Any]], files_seen: List[str], pdf_text_fulls: Optional[List[str]] = None) -> None:
-    full = ""
     try:
         from pdfminer_high_level import extract_text as _x  # type: ignore
     except Exception:
@@ -344,20 +352,6 @@ def _maybe_extract_pdf_text(raw: bytes, fname: str, parts: List[Dict[str, Any]],
     try:
         if _x:
             full = (_x(io.BytesIO(raw)) or "")
-    except Exception:
-        full = ""
-
-    # ✅ Added: PyMuPDF fallback for later pages / supplement tags (safe if not installed)
-    if not full.strip():
-        try:
-            import fitz  # type: ignore
-            doc = fitz.open(stream=raw, filetype="pdf")
-            full = "\n".join((page.get_text("text") or "") for page in doc)
-        except Exception:
-            full = ""
-
-    try:
-        if full.strip():
             if pdf_text_fulls is not None and full.strip():
                 pdf_text_fulls.append(full)
             t = full[:12000]
@@ -662,16 +656,39 @@ async def vision_review(
 
     SYSTEM = SYSTEM_BASE
 
-    # --- NEW: detect all supplement tags S01, S02, ... in the combined document text ---
+    # --- Supplement / Possible Supplement detection (documents only) ---
     combined_detection_text = (uploaded_text_all or "") + "\n" + "\n".join(pdf_text_fulls or [])
-    supplement_versions = sorted(set(re.findall(r"(?i)\bS[0-9]{2}\b", combined_detection_text)))
+
+    # Detect an explicit supplement only when the documents clearly indicate "Supplement" or an "Estimate Version"
+    # (do NOT treat bare 'S01/S02' occurrences as a supplement by themselves).
+    supplement_versions = sorted(set(
+        re.findall(r"(?i)\b(?:Estimate\s*Version\s*:\s*|Supplement\s*\(?)(S[0-9]{2})\b", combined_detection_text)
+    ))
+    supplement_word_hit = bool(re.search(r"(?i)\bSupplement\b", combined_detection_text))
+    estimate_version_hit = bool(re.search(r"(?i)\bEstimate\s*Version\s*:\s*S[0-9]{2}\b", combined_detection_text))
+
+    # Some Closing Reports include "Possible Supplement Amount" even when the estimate is NOT a supplement.
+    possible_supp_amount = None
+    _ps = re.search(r"(?i)\bPossible\s+Supplement\s+Amount\b\s*\$?\s*([0-9]{1,3}(?:,[0-9]{3})*(?:\.[0-9]{2})?)", combined_detection_text)
+    if _ps:
+        possible_supp_amount = _ps.group(1)
+
+    supplement_detected = bool((supplement_word_hit or estimate_version_hit) and supplement_versions)
+
     supplement_block = ""
-    if supplement_versions:
+    if supplement_detected:
         supplement_block = (
             "\n\nSUPPLEMENT VERSIONS DETECTED FROM DOCUMENTS:\n"
             f"- Detected supplement tags: {', '.join(supplement_versions)}.\n"
             "- Use these exact tags (e.g., 'Supplement S01 and S02') when describing supplements in the narrative.\n"
         )
+    elif possible_supp_amount:
+        supplement_block = (
+            "\n\nPOSSIBLE SUPPLEMENT AMOUNT (Closing Report):\n"
+            f"- The documentation references a Possible Supplement Amount of ${possible_supp_amount}.\n"
+            "- Do NOT label the estimate as a supplement unless the estimate itself is explicitly a supplement.\n"
+        )
+
 
     prompt_text = (
         f"REQUEST TYPE SELECTED (exact): '{req_label}'. Use this exact string in 'request_type'.\n\n"
@@ -692,6 +709,7 @@ async def vision_review(
         "  * If not reflected, explain why (e.g., not supported by photos/estimate lines) and what evidence would be needed.\n"
         "- Do NOT claim Inspection Results are missing unless you actually cannot find that section.\n"
     )
+   
     prompt_text = (
         "OUTPUT FORMAT (MANDATORY): Return ONLY a single strict JSON object with keys "
         "['file_number','request_type','claim_number','vin','vin_verification','vehicle',"
@@ -723,6 +741,7 @@ async def vision_review(
         )
     else:
         prompt_text += SUPPLEMENT_HANDLING
+        prompt_text += CLOSING_REPORT_CROSSCHECK
 
     if ai_intent == "comprehensive":
         prompt_text += (
@@ -1276,14 +1295,6 @@ async def vision_review(
                 "Client rules compliance is mostly met and the Production date is documented on the driver-door VIN label photo",
                 sm,
             )
-
-            # ✅ NEW FIX: remove/flip the inverted “main compliance issues are … production date is documented …” sentence
-            sm = re.sub(
-                r"(?is)\bthe\s+main\s+compliance\s+issues\s+are\s+the\s+production\s+date\s+is\s+documented\s+on\s+the\s+driver-door\s+vin\s+label\s+photo\.?",
-                "Production date is documented on the driver-door VIN label photo and is compliant.",
-                sm,
-            )
-
         elif _prod_date_present:
             sm = re.sub(
                 r"(?im)^\s*[-*]\s*Missing\s+production\s+date\s*(?:plate|photo)?[^\n]*$",
@@ -1504,30 +1515,27 @@ async def vision_review(
         mc(f"Appraiser ID #: {appraiser_id}")
         mc(f"Request Type: {result['request_type']}")
 
-        # --- Supplement header (documents only; ignore negated mentions) ---
+        # --- Supplement / Possible Supplement header (documents only) ---
         smark = result.get("summary_markdown","")
         _txt_docs = uploaded_text_all or ""
-        _supp_doc_hit = bool(re.search(
-            r"(?is)\b(Supplement\s+(?:Summary|of\s+Record)|Estimate\s+Version:\s*S0[1-9]\b|\bS0[1-9]\b|\bSupplement\s+Estimate\b)",
-            _txt_docs
-        ))
         _no_supp_negation = not re.search(r"(?is)\b(no|not)\s+(a\s+)?supplement\b", _txt_docs)
-        supp_detected_docs = _supp_doc_hit and _no_supp_negation
+
+        # Use the earlier, context-aware supplement detection (do not trigger on bare Sxx tokens).
+        supp_detected_docs = bool(supplement_detected and _no_supp_negation)
+
         if supp_detected_docs:
             mc("Supplement Status: Supplement Estimate detected in documentation")
-            _possible_amt = None
-            _m = re.search(r"(?is)\bPossible\s+Supplement\s+Amount\s*\$?([0-9,]+\.\d{2})\b", _txt_docs)
-            if _m:
-                _possible_amt = _m.group(1)
             mc("Supplement Details")
-            # ✅ FIX: use full supplement_versions (includes S02 on later pages) instead of re-scanning only _txt_docs
-            supp_versions_docs = supplement_versions[:]  # was: sorted(set(re.findall(..., _txt_docs)))
+            supp_versions_docs = supplement_versions[:]  # already context-filtered
             if supp_versions_docs:
                 mc(f"- Supplements detected in documents: {', '.join(supp_versions_docs)}")
-            if _possible_amt:
-                mc(f"- Possible amount noted: ${_possible_amt}")
-            if not (supp_versions_docs or _possible_amt):
-                mc("- Supplement indicators present (e.g., 'Supplement Summary' or S01/S02).")
+            else:
+                mc("- Supplement indicators present (e.g., 'Supplement Summary' or 'Estimate Version: S01').")
+
+        # If the Closing Report shows a Possible Supplement Amount but the estimate is not explicitly a supplement,
+        # show it as informational only (do not label the file as a supplement).
+        if (not supp_detected_docs) and possible_supp_amount:
+            mc(f"Possible Supplement Amount (Closing Report): ${possible_supp_amount}")
 
         # --- Total Loss echo (documents-only; no narrative trigger) ---
         explicit_tl_hit = False
@@ -1613,10 +1621,10 @@ async def vision_review(
             except Exception:
                 _explicit_tl_email = False
 
-            # ✅ FIX: supplement line includes all Sxx tags using supplement_versions (includes S02 on later pages)
+            # Supplement / Possible Supplement (email header)
             supp_line = ""
             if supp_detected_docs:
-                supp_versions_email = supplement_versions[:]  # was: sorted(set(re.findall(..., _txt_email or "")))
+                supp_versions_email = supplement_versions[:]
                 if supp_versions_email:
                     supp_line = (
                         "Supplement Status: Supplement Estimates detected in documentation "
@@ -1624,6 +1632,8 @@ async def vision_review(
                     )
                 else:
                     supp_line = "Supplement Status: Supplement Estimate detected in documentation\n"
+            elif possible_supp_amount:
+                supp_line = f"Possible Supplement Amount (Closing Report): ${possible_supp_amount}\n"
 
             tl_line = "Estimate Type: Total Loss (explicit in documents)\n" if _explicit_tl_email else ""
             subj = f"AI-4-IA Review: {result['claim_number'] or file_number}"
@@ -1695,6 +1705,7 @@ async def download_pdf(file_number: Optional[str] = None, filename: Optional[str
         return JSONResponse(status_code=404, content={"detail": "Not Found"})
     latest = max(candidates, key=lambda p: os.path.getmtime(p))
     return FileResponse(path=latest, media_type="application/pdf", filename=os.path.basename(latest))
+
 
 
 
