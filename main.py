@@ -134,7 +134,7 @@ DETAIL_TEMPLATES = {
         "Close with compliance to any provided client rules and a clear final recommendation (Repairable vs. Total Loss). "
         "Do not declare Repairable/Total Loss unless the estimate itself explicitly marks 'Total Loss' or an ACV comparison is provided. "
         "If the shop info is listed under Repair Facility, add only the shop name to the Detailed Audit Report narrative. "
-        "If a Printout showing the Clean Retail Value or Estimated Trade-In Value of the unit is present which may include ANY of the following: NADA, J.D. Power, Kelly Blue Book, Edmunds, Carfax, Cars.com, DO NOT declare as missing if any of these are present. "
+        "If a Printout showing the Clean Retail Value or Estimated Trade-In Value of the unit is present which may include ANY of the following: NADA, J.D. Power, Kelly Blue Book, Edmunds, Carfax, or Cars.com, DO NOT declare as missing if any of these are present. "
         "Minimum 10–14 sentences (one continuous narrative, not bullets).\n\n"
         "## Photo-by-Photo Damage Ledger\n"
         "| Photo # | View/Angle | Panels/Parts Visible | Condition (dent/crease/scrape/misalignment) | Identifiers (VIN/odo/plate/reg) | Legibility |\n"
@@ -264,15 +264,6 @@ SUPPLEMENT_HANDLING = (
     "\n- If the supplement corrects earlier deficiencies (e.g., missing materials line, added calibrations), note that improvement explicitly."
     "\n- If a supplement exists but required supporting evidence (invoices, photos) is still missing, call this out in Risks/Missing Evidence."
 )
-
-# --- Closing Report "Inspection Results" cross-check (prompt-only) ---
-CLOSING_REPORT_CROSSCHECK = (
-    "\n\nCLOSING REPORT CROSS-CHECK:"
-    "\n- If the Closing Report contains an 'Inspection Results' section, summarize its key findings (repair facility, location, photos/measurements captured, identifiers) and compare it to your '## Detailed Audit Report'."
-    "\n- If there is any discrepancy (e.g., Closing Report says odometer/VIN/photos present but you did not cite them), correct your narrative to align with the evidence and cite the relevant page/photo references."
-    "\n- Do not invent or assume items not actually shown; base the comparison strictly on the provided documents."
-)
-
 
 ALLOWED_INTENTS = {"guidelines_only","comprehensive","damage_report_from_photos"}
 
@@ -661,11 +652,15 @@ async def vision_review(
 
     # Detect an explicit supplement only when the documents clearly indicate "Supplement" or an "Estimate Version"
     # (do NOT treat bare 'S01/S02' occurrences as a supplement by themselves).
+    supplement_word_hit = bool(re.search(r"(?i)\bSupplement\b", combined_detection_text))
+    estimate_version_hit = bool(re.search(r"(?i)\bEstimate\s*Version\s*:\s*S[0-9]{2}\b", combined_detection_text))
+
+    # Capture supplement version tags. If "Supplement" appears anywhere in the docs, also allow bare Sxx tags.
     supplement_versions = sorted(set(
         re.findall(r"(?i)\b(?:Estimate\s*Version\s*:\s*|Supplement\s*\(?)(S[0-9]{2})\b", combined_detection_text)
     ))
-    supplement_word_hit = bool(re.search(r"(?i)\bSupplement\b", combined_detection_text))
-    estimate_version_hit = bool(re.search(r"(?i)\bEstimate\s*Version\s*:\s*S[0-9]{2}\b", combined_detection_text))
+    if supplement_word_hit:
+        supplement_versions = sorted(set(supplement_versions) | set(re.findall(r"(?i)\bS[0-9]{2}\b", combined_detection_text)))
 
     # Some Closing Reports include "Possible Supplement Amount" even when the estimate is NOT a supplement.
     possible_supp_amount = None
@@ -673,7 +668,7 @@ async def vision_review(
     if _ps:
         possible_supp_amount = _ps.group(1)
 
-    supplement_detected = bool((supplement_word_hit or estimate_version_hit) and supplement_versions)
+    supplement_detected = bool((estimate_version_hit or supplement_word_hit) and supplement_versions)
 
     supplement_block = ""
     if supplement_detected:
@@ -682,13 +677,6 @@ async def vision_review(
             f"- Detected supplement tags: {', '.join(supplement_versions)}.\n"
             "- Use these exact tags (e.g., 'Supplement S01 and S02') when describing supplements in the narrative.\n"
         )
-    elif possible_supp_amount:
-        supplement_block = (
-            "\n\nPOSSIBLE SUPPLEMENT AMOUNT (Closing Report):\n"
-            f"- The documentation references a Possible Supplement Amount of ${possible_supp_amount}.\n"
-            "- Do NOT label the estimate as a supplement unless the estimate itself is explicitly a supplement.\n"
-        )
-
 
     prompt_text = (
         f"REQUEST TYPE SELECTED (exact): '{req_label}'. Use this exact string in 'request_type'.\n\n"
@@ -700,16 +688,7 @@ async def vision_review(
         + "\n\nANALYSIS LAYOUT (guidance, not strict):\n"
         + DETAIL_TEMPLATES.get(ai_intent, DETAIL_TEMPLATES["comprehensive"])
     )
-    prompt_text += (
-        "\n\nCLOSING REPORT INSPECTION RESULTS CROSS-CHECK (MANDATORY):\n"
-        "- If a 'Closing Report' exists in the upload, locate the section titled 'Inspection Results'.\n"
-        "- Extract the key findings as short bullets and cite where they came from (p#/L# if text, otherwise cite the PDF page image as best you can).\n"
-        "- In '## Detailed Audit Report', explicitly reconcile your narrative to those Inspection Results:\n"
-        "  * State whether each key Inspection Result is: Reflected / Partially Reflected / Not Reflected.\n"
-        "  * If not reflected, explain why (e.g., not supported by photos/estimate lines) and what evidence would be needed.\n"
-        "- Do NOT claim Inspection Results are missing unless you actually cannot find that section.\n"
-    )
-   
+
     prompt_text = (
         "OUTPUT FORMAT (MANDATORY): Return ONLY a single strict JSON object with keys "
         "['file_number','request_type','claim_number','vin','vin_verification','vehicle',"
@@ -741,7 +720,6 @@ async def vision_review(
         )
     else:
         prompt_text += SUPPLEMENT_HANDLING
-        prompt_text += CLOSING_REPORT_CROSSCHECK
 
     if ai_intent == "comprehensive":
         prompt_text += (
@@ -1295,6 +1273,13 @@ async def vision_review(
                 "Client rules compliance is mostly met and the Production date is documented on the driver-door VIN label photo",
                 sm,
             )
+
+            # Robust scrub: never treat "Production date is documented..." as a deficiency.
+            sm = re.sub(
+                r"(?is)\b(?:Compliance\s+with\s+client\s+rules\s+is\s+mostly\s+met|Client\s+rules\s+compliance\s+is\s+mostly\s+met)\s*[,\-–:]*\s*except\s+for\s+the\s+production\s+date\s+is\s+documented\s+on\s+the\s+driver[-\s]?door\s+VIN\s+label\s+photo\.?\b",
+                "Client rules compliance is mostly met. Production date is documented on the driver-door VIN label photo.",
+                sm,
+            )
         elif _prod_date_present:
             sm = re.sub(
                 r"(?im)^\s*[-*]\s*Missing\s+production\s+date\s*(?:plate|photo)?[^\n]*$",
@@ -1621,10 +1606,10 @@ async def vision_review(
             except Exception:
                 _explicit_tl_email = False
 
-            # Supplement / Possible Supplement (email header)
+            # NEW: supplement line includes all Sxx tags if present
             supp_line = ""
             if supp_detected_docs:
-                supp_versions_email = supplement_versions[:]
+                supp_versions_email = supplement_versions[:]  # already computed
                 if supp_versions_email:
                     supp_line = (
                         "Supplement Status: Supplement Estimates detected in documentation "
@@ -1632,8 +1617,6 @@ async def vision_review(
                     )
                 else:
                     supp_line = "Supplement Status: Supplement Estimate detected in documentation\n"
-            elif possible_supp_amount:
-                supp_line = f"Possible Supplement Amount (Closing Report): ${possible_supp_amount}\n"
 
             tl_line = "Estimate Type: Total Loss (explicit in documents)\n" if _explicit_tl_email else ""
             subj = f"AI-4-IA Review: {result['claim_number'] or file_number}"
