@@ -570,7 +570,27 @@ async def vision_review(
             uploaded_text_blobs.append(p["text"])
     uploaded_text_all = "\n".join(uploaded_text_blobs)
 
-    photos_provided = any(isinstance(p, dict) and p.get('type') != 'text' for p in parts)
+    # Derive whether repair facility information is actually required
+    # Heuristic: only required when documentation clearly indicates the vehicle is at a shop/repair facility.
+    _repair_facility_required = False
+    _txt_lower = (uploaded_text_all or "").lower()
+    try:
+        inspection_owner = bool(re.search(r"inspection\s+location\s*[:\-]\s*owner", _txt_lower))
+        inspection_owner_res = bool(re.search(r"owner\s+residence/work", _txt_lower))
+        not_at_shop = bool(re.search(r"agreed\s+price\s+w/shop\s*[:\-]\s*not\s+at\s+shop", _txt_lower))
+        repair_facility_named = bool(re.search(r"repair\s+facility\s+name\s*:\s*\S+", _txt_lower))
+        inspection_shop = bool(re.search(r"inspection\s+location\s*[:\-]\s*(shop|repair\s+facility)", _txt_lower))
+    except Exception:
+        inspection_owner = inspection_owner_res = not_at_shop = False
+        repair_facility_named = inspection_shop = False
+
+    # Base rule: if documentation explicitly shows a named repair facility or inspection at a shop, require it.
+    if repair_facility_named or inspection_shop:
+        _repair_facility_required = True
+
+    # Override: if documentation clearly indicates owner location / not-at-shop, do NOT require repair facility info.
+    if inspection_owner or inspection_owner_res or not_at_shop:
+        _repair_facility_required = False
 
     # --- Robust detectors (CLEAN RETAIL + ADVISOR) ---
     clean_retail_rx = (
@@ -647,31 +667,11 @@ async def vision_review(
 
     SYSTEM = SYSTEM_BASE
 
-    # --- Supplement / Possible Supplement detection (documents only) ---
+    # --- NEW: detect all supplement tags S01, S02, ... in the combined document text ---
     combined_detection_text = (uploaded_text_all or "") + "\n" + "\n".join(pdf_text_fulls or [])
-
-    # Detect an explicit supplement only when the documents clearly indicate "Supplement" or an "Estimate Version"
-    # (do NOT treat bare 'S01/S02' occurrences as a supplement by themselves).
-    supplement_word_hit = bool(re.search(r"(?i)\bSupplement\b", combined_detection_text))
-    estimate_version_hit = bool(re.search(r"(?i)\bEstimate\s*Version\s*:\s*S[0-9]{2}\b", combined_detection_text))
-
-    # Capture supplement version tags. If "Supplement" appears anywhere in the docs, also allow bare Sxx tags.
-    supplement_versions = sorted(set(
-        re.findall(r"(?i)\b(?:Estimate\s*Version\s*:\s*|Supplement\s*\(?)(S[0-9]{2})\b", combined_detection_text)
-    ))
-    if supplement_word_hit:
-        supplement_versions = sorted(set(supplement_versions) | set(re.findall(r"(?i)\bS[0-9]{2}\b", combined_detection_text)))
-
-    # Some Closing Reports include "Possible Supplement Amount" even when the estimate is NOT a supplement.
-    possible_supp_amount = None
-    _ps = re.search(r"(?i)\bPossible\s+Supplement\s+Amount\b\s*\$?\s*([0-9]{1,3}(?:,[0-9]{3})*(?:\.[0-9]{2})?)", combined_detection_text)
-    if _ps:
-        possible_supp_amount = _ps.group(1)
-
-    supplement_detected = bool((estimate_version_hit or supplement_word_hit) and supplement_versions)
-
+    supplement_versions = sorted(set(re.findall(r"(?i)\bS[0-9]{2}\b", combined_detection_text)))
     supplement_block = ""
-    if supplement_detected:
+    if supplement_versions:
         supplement_block = (
             "\n\nSUPPLEMENT VERSIONS DETECTED FROM DOCUMENTS:\n"
             f"- Detected supplement tags: {', '.join(supplement_versions)}.\n"
@@ -696,6 +696,8 @@ async def vision_review(
         "'fraud_markdown','primary_impact','secondary_impact','estimated_costs_markdown','conclusion'] "
         "and no extra text before or after.\n\n"
     ) + prompt_text
+
+    photos_provided = any(isinstance(p, dict) and p.get('type') != 'text' for p in parts)
 
     if photos_provided:
         prompt_text += (
@@ -897,7 +899,7 @@ async def vision_review(
         shrunk = _text_parts_retry[: max(3, len(_text_parts_retry)//2)] + _image_parts_retry
         retry_tokens = min(3000, max_tokens + 600)
         try:
-            rsp2 = client.chat.completions.create(
+            rsp2 = client.chat_completions.create(
                 model=MODEL,
                 messages=[{"role": "system", "content": SYSTEM},
                           {"role": "user", "content": shrunk}],
@@ -1196,6 +1198,23 @@ async def vision_review(
                     "",
                     sb,
                 )
+            # --- scrub repair facility as a deduction reason when not actually required (owner-location / not-at-shop cases) ---
+            if (not _repair_facility_required) and "repair facility" in sb.lower():
+                sb = re.sub(
+                    r"(?is)missing\s+repair\s+facility\s+information[^\.]*\.",
+                    "",
+                    sb,
+                )
+                sb = re.sub(
+                    r"(?is)missing\s+repair\s+facility\s+info[^\.]*\.",
+                    "",
+                    sb,
+                )
+                sb = re.sub(
+                    r"(?is)due\s+to\s+missing\s+repair\s+facility\s+info[^\.]*\.",
+                    "",
+                    sb,
+                )
 
             result["summary_brief"] = sb
         except Exception:
@@ -1249,7 +1268,7 @@ async def vision_review(
                 sm,
             )
             sm = re.sub(
-                r'(?im)^-?\s*"Production\s+Date\s+Photo\s+is\s+mandatory"\s*-\s*Not\s+Evidenced[^\n]*$',
+                r'(?im)^-?\s*"Production\s+Date\s+Photo\s+is\s+mandatory"\s*-\s*Not\s+(?:Evidenced|Aligned)[^\n]*$',
                 '- "Production Date Photo is mandatory" - Aligned (production date documented on the driver-door VIN label photo).',
                 sm,
             )
@@ -1273,13 +1292,18 @@ async def vision_review(
                 "Client rules compliance is mostly met and the Production date is documented on the driver-door VIN label photo",
                 sm,
             )
-
-            # Robust scrub: never treat "Production date is documented..." as a deficiency.
+            # If any risk bullets or summary lines incorrectly flag a documented production date as a compliance issue, remove or neutralize them.
             sm = re.sub(
-                r"(?is)\b(?:Compliance\s+with\s+client\s+rules\s+is\s+mostly\s+met|Client\s+rules\s+compliance\s+is\s+mostly\s+met)\s*[,\-–:]*\s*except\s+for\s+the\s+production\s+date\s+is\s+documented\s+on\s+the\s+driver[-\s]?door\s+VIN\s+label\s+photo\.?\b",
-                "Client rules compliance is mostly met. Production date is documented on the driver-door VIN label photo.",
+                r'(?im)^\s*[-*]\s*High:\s*Production\s+date\s+is\s+documented\s+on\s+the\s+driver-door\s+VIN\s+label\s+photo\.[^\n]*$',
+                "",
                 sm,
             )
+            sm = re.sub(
+                r"(?is)The\s+main\s+compliance\s+issues\s+are\s+the\s+Production\s+date\s+is\s+documented\s+on\s+the\s+driver-door\s+VIN\s+label\s+photo\.",
+                "There are no material compliance issues related to Production Date; it is documented on the driver-door VIN label photo.",
+                sm,
+            )
+
         elif _prod_date_present:
             sm = re.sub(
                 r"(?im)^\s*[-*]\s*Missing\s+production\s+date\s*(?:plate|photo)?[^\n]*$",
@@ -1340,8 +1364,9 @@ async def vision_review(
                 sm,
             )
 
-        # Repair Facility + Owner's location: do NOT deduct
-        if "owner's location" in lower_sm and "repair facility" in lower_sm:
+        # Repair Facility handling: when the vehicle is clearly NOT at a shop, do NOT treat missing repair facility info as a compliance issue.
+        if (not _repair_facility_required) or (("owner's location" in lower_sm or "owner residence/work" in lower_sm or "owner residence" in lower_sm) and "repair facility" in lower_sm):
+            # Strip narrative sentences that treat missing repair facility info as a deduction when the unit is at the owner location / not at a shop.
             sm = re.sub(
                 r"(?is)However,\s+the\s+file\s+lacks\s+repair\s+facility\s+information[^\.]*\.",
                 "",
@@ -1357,6 +1382,47 @@ async def vision_review(
                 "",
                 sm,
             )
+            sm = re.sub(
+                r"(?is)the\s+estimate\s+lacks\s+repair\s+facility\s+information[^\.]*\.",
+                "",
+                sm,
+            )
+            # Convert any Client Guidelines bullet about repair facility at a shop from Not Aligned/Not Evidenced to Not Applicable.
+            sm = re.sub(
+                r'(?im)^-?\s*"Repair\s+Facility\s+information\s+must\s+be\s+filled\s+in\s+on\s+all\s+estimates\s+whenever\s+the\s+vehicle\s+is\s+at\s+a\s+shop"\s*-\s*(?:Not\s+Aligned|Not\s+Evidenced)[^\n]*$',
+                '- "Repair Facility information must be filled in on all estimates whenever the vehicle is at a shop" - Not Applicable (vehicle inspected at owner location / not at a shop).',
+                sm,
+            )
+            # Remove any risk bullet that treats missing repair facility info as a compliance risk in this not-at-shop scenario.
+            sm = re.sub(
+                r"(?im)^\s*[-*]\s*Medium:\s*Repair\s+facility\s+info\s+missing[^\n]*$",
+                "",
+                sm,
+            )
+
+        # Final Evaluation cleanup: if score line blames missing Production Date or Repair Facility
+        # but Production Date is evidenced or repair facility info is not actually required, strip that reason text.
+        try:
+            if "## Final Evaluation" in sm:
+                def _fix_final_eval_line(match):
+                    line = match.group(0)
+                    if _prod_evidenced or not _repair_facility_required:
+                        line = re.sub(
+                            r"\s+due\s+to\s+missing[^\.]*",
+                            "",
+                            line,
+                            flags=re.IGNORECASE,
+                        )
+                        line = re.sub(r"\s+\.", ".", line)
+                    return line
+                sm = re.sub(
+                    r"(?im)^Compliance\s+Score:\s*\d{1,3}\b[^\n]*$",
+                    _fix_final_eval_line,
+                    sm,
+                    flags=re.MULTILINE,
+                )
+        except Exception:
+            pass
 
         sm = re.sub(r"\n{3,}", "\n\n", sm).strip()
         if len(sm) < 120:
@@ -1500,27 +1566,30 @@ async def vision_review(
         mc(f"Appraiser ID #: {appraiser_id}")
         mc(f"Request Type: {result['request_type']}")
 
-        # --- Supplement / Possible Supplement header (documents only) ---
+        # --- Supplement header (documents only; ignore negated mentions) ---
         smark = result.get("summary_markdown","")
         _txt_docs = uploaded_text_all or ""
+        _supp_doc_hit = bool(re.search(
+            r"(?is)\b(Supplement\s+(?:Summary|of\s+Record)|Estimate\s+Version:\s*S0[1-9]\b|\bS0[1-9]\b|\bSupplement\s+Estimate\b)",
+            _txt_docs
+        ))
         _no_supp_negation = not re.search(r"(?is)\b(no|not)\s+(a\s+)?supplement\b", _txt_docs)
-
-        # Use the earlier, context-aware supplement detection (do not trigger on bare Sxx tokens).
-        supp_detected_docs = bool(supplement_detected and _no_supp_negation)
-
+        supp_detected_docs = _supp_doc_hit and _no_supp_negation
         if supp_detected_docs:
             mc("Supplement Status: Supplement Estimate detected in documentation")
+            _possible_amt = None
+            _m = re.search(r"(?is)\bPossible\s+Supplement\s+Amount\s*\$?([0-9,]+\.\d{2})\b", _txt_docs)
+            if _m:
+                _possible_amt = _m.group(1)
             mc("Supplement Details")
-            supp_versions_docs = supplement_versions[:]  # already context-filtered
+            # NEW: list all supplement tags (S01, S02, ...) instead of a single version only
+            supp_versions_docs = sorted(set(re.findall(r"(?i)\bS[0-9]{2}\b", _txt_docs)))
             if supp_versions_docs:
                 mc(f"- Supplements detected in documents: {', '.join(supp_versions_docs)}")
-            else:
-                mc("- Supplement indicators present (e.g., 'Supplement Summary' or 'Estimate Version: S01').")
-
-        # If the Closing Report shows a Possible Supplement Amount but the estimate is not explicitly a supplement,
-        # show it as informational only (do not label the file as a supplement).
-        if (not supp_detected_docs) and possible_supp_amount:
-            mc(f"Possible Supplement Amount (Closing Report): ${possible_supp_amount}")
+            if _possible_amt:
+                mc(f"- Possible amount noted: ${_possible_amt}")
+            if not (supp_versions_docs or _possible_amt):
+                mc("- Supplement indicators present (e.g., 'Supplement Summary' or S01/S02).")
 
         # --- Total Loss echo (documents-only; no narrative trigger) ---
         explicit_tl_hit = False
@@ -1609,7 +1678,7 @@ async def vision_review(
             # NEW: supplement line includes all Sxx tags if present
             supp_line = ""
             if supp_detected_docs:
-                supp_versions_email = supplement_versions[:]  # already computed
+                supp_versions_email = sorted(set(re.findall(r"(?i)\bS[0-9]{2}\b", _txt_email or "")))
                 if supp_versions_email:
                     supp_line = (
                         "Supplement Status: Supplement Estimates detected in documentation "
@@ -1688,6 +1757,7 @@ async def download_pdf(file_number: Optional[str] = None, filename: Optional[str
         return JSONResponse(status_code=404, content={"detail": "Not Found"})
     latest = max(candidates, key=lambda p: os.path.getmtime(p))
     return FileResponse(path=latest, media_type="application/pdf", filename=os.path.basename(latest))
+
 
 
 
