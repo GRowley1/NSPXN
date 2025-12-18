@@ -572,6 +572,9 @@ async def vision_review(
 
     photos_provided = any(isinstance(p, dict) and p.get('type') != 'text' for p in parts)
 
+    # Closing Report shop-status detector (documents-only; used to prevent false Repair Facility deductions)
+    _not_at_shop = bool(re.search(r"(?i)\bNot at Shop\b|\bInspection\s+Location\s*:?\s*Owner\b|\bInspection\s+Location\s+Owner\b", uploaded_text_all or ""))
+
     # --- Robust detectors (CLEAN RETAIL + ADVISOR) ---
     clean_retail_rx = (
         r"(?i)\b("
@@ -596,7 +599,7 @@ async def vision_review(
     # Production date patterns (label)
     prod_date_rx = (
         r"(?is)\b(Production\s*date|Prod(?:uction)?\s*Date|Date\s*of\s*Mfr|Date\s*of\s*Manufacture|"
-        r"MFD\.?\s*(?:BY|DATE)?|MFR\.?\s*DATE|MFG\.?\s*DATE|MFG\.?\s*DATE|DATE)\b"
+        r"MFD\.?\s*(?:BY|DATE)?|MFR\.?\s*DATE|MFG\.?\s*DATE|DATE)\b"
         r".{0,80}?\b(0[1-9]|1[0-2])\s*[-/.\u2013\u2014\u2212:\s]\s*(20\d{2}|\d{2})\b"
     )
 
@@ -756,6 +759,11 @@ async def vision_review(
     if _prod_date_present:
         flags.append(
             "- A production date (Date of Mfr/MFD DATE) is visible on a door label photo. Do not mark Production Date as missing; cite the Photo # and the month/year."
+        )
+
+    if _not_at_shop:
+        flags.append(
+            "- Closing Report indicates inspection was at the owner's location / 'Not at Shop'. Do NOT deduct for missing Repair Facility information unless a named shop is explicitly indicated in the documents."
         )
 
     # ✅ FIX #1: Actually inject evidence flags into the prompt (previously you computed flags but never used them)
@@ -1144,7 +1152,7 @@ async def vision_review(
             sm_fixed = sm_fixed.replace(
                 "Clean retail value printout: Not Evidenced (NADA/J.D. Power/KBB/etc. required on all files).",
                 "Clean retail value printout: Evidenced (Clean Retail printout present via NADA/J.D. Power/KBB/etc.).",
-            )
+                )
             result["summary_markdown"] = sm_fixed
 
             sb = result.get("summary_brief") or ""
@@ -1248,6 +1256,22 @@ async def vision_review(
                 "Client rules compliance is mostly met. Production date is documented on the driver-door VIN label photo.",
                 sm,
             )
+            # Also scrub the common wrong variants that treat "Production date is documented..." as a deficiency.
+            sm = re.sub(
+                r"(?is)\bCompliance\s+is\s+reduced\s+due\s+to\s+Production\s+date\s+is\s+documented\s+on\s+the\s+driver-door\s+VIN\s+label\s+photo\b[^\n\.]*\.?\s*",
+                "Production date is documented on the driver-door VIN label photo. ",
+                sm,
+            )
+            sm = re.sub(
+                r"(?is)\bThe\s+file\s+is\s+mostly\s+compliant\s+with\s+client\s+rules\s+except\s+for\s+Production\s+date\s+is\s+documented\s+on\s+the\s+driver-door\s+VIN\s+label\s+photo\b[^\n\.]*\.?\s*",
+                "The file is mostly compliant with client rules; production date is documented on the driver-door VIN label photo. ",
+                sm,
+            )
+            sm = re.sub(
+                r"(?is)\bexcept\s+for\s+Production\s+date\s+is\s+documented\s+on\s+the\s+driver-door\s+VIN\s+label\s+photo\b[^\n\.]*\.?\s*",
+                "",
+                sm,
+            )
             sm = re.sub(
                 r"(?is)client rules compliance is mostly met except for the production date is documented on the driver-door vin label photo",
                 "Client rules compliance is mostly met and the Production date is documented on the driver-door VIN label photo",
@@ -1331,13 +1355,18 @@ async def vision_review(
                 sm,
             )
 
+        # Repair Facility: if Closing Report indicates "Not at Shop" / owner inspection, do NOT treat repair facility as required.
+        if _not_at_shop and "repair facility" in lower_sm:
+            sm = re.sub(r"(?is)\bThe\s+estimate\s+lacks\s+repair\s+facility\s+information[^\.]*\.(?:\s*)", "", sm)
+            sm = re.sub(r"(?is)\bMissing\s+repair\s+facility\s+info[^\.]*\.(?:\s*)", "", sm)
+            sm = re.sub(r"(?is)\bmissing\s+repair\s+facility\s+information\b[^\.]*\.(?:\s*)", "", sm)
+            sm = re.sub(r"(?is)\bCompliance\s+is\s+reduced\s+due\s+to\s+missing\s+repair\s+facility[^\.]*\.(?:\s*)", "", sm)
         sm = re.sub(r"\n{3,}", "\n\n", sm).strip()
         if len(sm) < 120:
             sm = orig_sm.strip()
         result["summary_markdown"] = sm if sm else orig_sm.strip()
     except Exception:
         pass
-
 
     # --- Scrub Conclusion / Brief of forbidden deductions (Production Date / Repair Facility / Release Paperwork / Clean Retail) ---
     try:
@@ -1351,29 +1380,35 @@ async def vision_review(
                 _t = re.sub(r"(?is)\bmissing\s+(?:mandatory\s+)?production\s+date\s+(?:photo|plate|sticker)\b[^.\n]*[\.]?", "", _t)
                 _t = re.sub(r"(?is)\bmissing\s+production\s+date\s+photos?\b[^.\n]*[\.]?", "", _t)
                 _t = re.sub(r"(?is)\bdue\s+to\s+missing\s+mandatory\s+production\s+date\s+photo\b", "due to minor non-fatal documentation items", _t)
+                # Also remove the common contradiction where "Production date is documented..." is incorrectly treated as an exception.
+                _t = re.sub(r"(?is)\bexcept\s+for\s+Production\s+date\s+is\s+documented\s+on\s+the\s+driver-door\s+VIN\s+label\s+photo\b[^.\n]*[\.]?", "", _t)
+                _t = re.sub(r"(?is)\bCompliance\s+is\s+reduced\s+due\s+to\s+Production\s+date\s+is\s+documented\s+on\s+the\s+driver-door\s+VIN\s+label\s+photo\b[^.\n]*[\.]?", "Production date is documented on the driver-door VIN label photo.", _t)
+                _t = re.sub(r"(?is)\bproduction\s+date\s+photo\s+is\s+mandatory\b", "production date is documented on the driver-door VIN label photo", _t)
 
-            # Clean Retail value: if present, never state missing.
+            # Clean Retail: if detected, don't call it missing/absent.
             if _clean_retail_present:
                 _t = re.sub(r"(?is)\bmissing\s+(?:a\s+)?clean\s+retail\s+value\s+printout\b[^.\n]*[\.]?", "", _t)
+                _t = re.sub(r"(?is)\babsence\s+of\s+a\s+clean\s+retail\s+value\s+printout\b", "clean retail value printout is present", _t)
 
-            # Release paperwork: never a compliance deduction or requirement in these outputs.
+            # Release paperwork is outside the scope; never claim compliance reduction for it.
             _t = re.sub(r"(?is)\bmissing\s+release\s+paperwork\b[^.\n]*[\.]?", "", _t)
             _t = re.sub(r"(?is)\bincomplete\s+release\s+paperwork\b[^.\n]*[\.]?", "", _t)
 
             # Repair Facility: only required when docs clearly indicate vehicle is at a named shop.
-            _repair_fac_required = False
+            # If Closing Report indicates 'Not at Shop' / owner inspection, scrub any repair-facility-missing language.
+            if _not_at_shop:
+                _t = re.sub(r"(?is)\bmissing\s+repair\s+facility\s+(?:info|information)\b[^.\n]*[\.]?", "", _t)
+                _t = re.sub(r"(?is)\bdue\s+to\s+missing\s+repair\s+facility\s+(?:info|information)\b[^.\n]*[\.]?", "due to minor non-fatal documentation items", _t)
+
             try:
-                _txt_docs_local = uploaded_text_all or ""
-                # Heuristic: shop context when a Repair Facility section exists AND a shop-like name/descriptor exists
-                if re.search(r"(?i)\bRepair\s+Facility\b", _txt_docs_local) and re.search(r"(?i)\b(Body\s*Shop|Collision|Auto\s+Body|Repair\s+Center|Shop\s+Name)\b", _txt_docs_local):
-                    _repair_fac_required = True
+                if not _not_at_shop:
+                    # only scrub if it's incorrectly presented as mandatory when no shop context exists
+                    pass
             except Exception:
-                _repair_fac_required = False
+                pass
 
-            if not _repair_fac_required:
-                _t = re.sub(r"(?is)\bmissing\s+repair\s+facility(?:\s+information|\s+info)?\b[^.\n]*[\.]?", "", _t)
-                _t = re.sub(r"(?is)\bdue\s+to\s+missing\s+repair\s+facility(?:\s+information|\s+info)?\b", "due to minor non-fatal documentation items", _t)
-
+            # General: remove double spaces / broken punctuation
+            _t = re.sub(r"\s{2,}", " ", _t)
             _t = re.sub(r"[ \t]{2,}", " ", _t)
             _t = re.sub(r"\n{3,}", "\n\n", _t).strip()
             return _t
@@ -1384,6 +1419,49 @@ async def vision_review(
 
         _sm_before = result.get("summary_markdown") or ""
         _sm_after = _scrub_forbidden(_sm_before)
+
+        # SCORE OVERRIDE: If the only apparent deductions are forbidden ones (Production Date when door-label is present,
+        # or Repair Facility when Closing Report indicates 'Not at Shop'), restore score to 100 and remove the rationale section.
+        try:
+            if ai_intent != "damage_report_from_photos":
+                _sm_work = _sm_after if _sm_after else _sm_before
+                score_str = (result.get("compliance_score") or "").strip()
+                if re.fullmatch(r"\d{1,3}", score_str):
+                    score_int = max(0, min(100, int(score_str)))
+                    if score_int < 100:
+                        lower = (_sm_work or "").lower()
+
+                        forbidden_hit = False
+                        if _prod_evidenced and ("production date" in lower) and (("missing" in lower) or ("reduced due" in lower) or ("except for" in lower)):
+                            forbidden_hit = True
+                        if _not_at_shop and ("repair facility" in lower) and (("missing" in lower) or ("reduced due" in lower) or ("except for" in lower)):
+                            forbidden_hit = True
+
+                        tmp = lower
+                        for w in ["production date", "repair facility", "release paperwork", "clean retail"]:
+                            tmp = tmp.replace(w, "")
+                        other_issue = bool(re.search(r"\bmissing\b|\bnot evidenced\b|\bnon-compliant\b|\bdeduction\b", tmp)) and not bool(re.search(r"\bno\s+missing\b", tmp))
+
+                        if forbidden_hit and not other_issue:
+                            score_int = 100
+                            result["compliance_score"] = str(score_int)
+
+                            # strip rationale section if present
+                            _sm_work = re.sub(r"(?is)\n##\s*Compliance\s*Score\s*Rationale\b.*?(?=\n##\s|\Z)", "", _sm_work).strip()
+
+                            # remove any lingering forbidden phrases
+                            _sm_work = re.sub(r"(?is)\bCompliance\s+is\s+reduced\s+due\s+to\s+[^.]*\bproduction\s+date\b[^.]*\.", "", _sm_work)
+                            _sm_work = re.sub(r"(?is)\bCompliance\s+is\s+reduced\s+due\s+to\s+[^.]*\brepair\s+facility\b[^.]*\.", "", _sm_work)
+
+                            # ensure score line is consistent
+                            _sm_work = re.sub(r"(?im)^\s*(Final\s*score|Compliance\s*Score)\s*[:\-–]\s*\d{1,3}\s*%?\s*$", "", _sm_work)
+                            _sm_work = re.sub(r"\n{3,}", "\n\n", _sm_work).strip()
+                            _sm_work = (_sm_work + f"\n\nCompliance Score: {score_int}").strip()
+
+                            _sm_after = _sm_work
+        except Exception:
+            pass
+
         result["summary_markdown"] = _sm_after if _sm_after else _sm_before
     except Exception:
         pass
@@ -1714,6 +1792,7 @@ async def download_pdf(file_number: Optional[str] = None, filename: Optional[str
         return JSONResponse(status_code=404, content={"detail": "Not Found"})
     latest = max(candidates, key=lambda p: os.path.getmtime(p))
     return FileResponse(path=latest, media_type="application/pdf", filename=os.path.basename(latest))
+
 
 
 
