@@ -570,27 +570,7 @@ async def vision_review(
             uploaded_text_blobs.append(p["text"])
     uploaded_text_all = "\n".join(uploaded_text_blobs)
 
-    # Derive whether repair facility information is actually required
-    # Heuristic: only required when documentation clearly indicates the vehicle is at a shop/repair facility.
-    _repair_facility_required = False
-    _txt_lower = (uploaded_text_all or "").lower()
-    try:
-        inspection_owner = bool(re.search(r"inspection\s+location\s*[:\-]\s*owner", _txt_lower))
-        inspection_owner_res = bool(re.search(r"owner\s+residence/work", _txt_lower))
-        not_at_shop = bool(re.search(r"agreed\s+price\s+w/shop\s*[:\-]\s*not\s+at\s+shop", _txt_lower))
-        repair_facility_named = bool(re.search(r"repair\s+facility\s+name\s*:\s*\S+", _txt_lower))
-        inspection_shop = bool(re.search(r"inspection\s+location\s*[:\-]\s*(shop|repair\s+facility)", _txt_lower))
-    except Exception:
-        inspection_owner = inspection_owner_res = not_at_shop = False
-        repair_facility_named = inspection_shop = False
-
-    # Base rule: if documentation explicitly shows a named repair facility or inspection at a shop, require it.
-    if repair_facility_named or inspection_shop:
-        _repair_facility_required = True
-
-    # Override: if documentation clearly indicates owner location / not-at-shop, do NOT require repair facility info.
-    if inspection_owner or inspection_owner_res or not_at_shop:
-        _repair_facility_required = False
+    photos_provided = any(isinstance(p, dict) and p.get('type') != 'text' for p in parts)
 
     # --- Robust detectors (CLEAN RETAIL + ADVISOR) ---
     clean_retail_rx = (
@@ -616,7 +596,7 @@ async def vision_review(
     # Production date patterns (label)
     prod_date_rx = (
         r"(?is)\b(Production\s*date|Prod(?:uction)?\s*Date|Date\s*of\s*Mfr|Date\s*of\s*Manufacture|"
-        r"MFD\.?\s*(?:BY|DATE)?|MFR\.?\s*DATE|MFG\.?\s*DATE|DATE)\b"
+        r"MFD\.?\s*(?:BY|DATE)?|MFR\.?\s*DATE|MFG\.?\s*DATE|MFG\.?\s*DATE|DATE)\b"
         r".{0,80}?\b(0[1-9]|1[0-2])\s*[-/.\u2013\u2014\u2212:\s]\s*(20\d{2}|\d{2})\b"
     )
 
@@ -696,8 +676,6 @@ async def vision_review(
         "'fraud_markdown','primary_impact','secondary_impact','estimated_costs_markdown','conclusion'] "
         "and no extra text before or after.\n\n"
     ) + prompt_text
-
-    photos_provided = any(isinstance(p, dict) and p.get('type') != 'text' for p in parts)
 
     if photos_provided:
         prompt_text += (
@@ -899,7 +877,7 @@ async def vision_review(
         shrunk = _text_parts_retry[: max(3, len(_text_parts_retry)//2)] + _image_parts_retry
         retry_tokens = min(3000, max_tokens + 600)
         try:
-            rsp2 = client.chat_completions.create(
+            rsp2 = client.chat.completions.create(
                 model=MODEL,
                 messages=[{"role": "system", "content": SYSTEM},
                           {"role": "user", "content": shrunk}],
@@ -1198,23 +1176,6 @@ async def vision_review(
                     "",
                     sb,
                 )
-            # --- scrub repair facility as a deduction reason when not actually required (owner-location / not-at-shop cases) ---
-            if (not _repair_facility_required) and "repair facility" in sb.lower():
-                sb = re.sub(
-                    r"(?is)missing\s+repair\s+facility\s+information[^\.]*\.",
-                    "",
-                    sb,
-                )
-                sb = re.sub(
-                    r"(?is)missing\s+repair\s+facility\s+info[^\.]*\.",
-                    "",
-                    sb,
-                )
-                sb = re.sub(
-                    r"(?is)due\s+to\s+missing\s+repair\s+facility\s+info[^\.]*\.",
-                    "",
-                    sb,
-                )
 
             result["summary_brief"] = sb
         except Exception:
@@ -1268,7 +1229,7 @@ async def vision_review(
                 sm,
             )
             sm = re.sub(
-                r'(?im)^-?\s*"Production\s+Date\s+Photo\s+is\s+mandatory"\s*-\s*Not\s+(?:Evidenced|Aligned)[^\n]*$',
+                r'(?im)^-?\s*"Production\s+Date\s+Photo\s+is\s+mandatory"\s*-\s*Not\s+Evidenced[^\n]*$',
                 '- "Production Date Photo is mandatory" - Aligned (production date documented on the driver-door VIN label photo).',
                 sm,
             )
@@ -1292,18 +1253,6 @@ async def vision_review(
                 "Client rules compliance is mostly met and the Production date is documented on the driver-door VIN label photo",
                 sm,
             )
-            # If any risk bullets or summary lines incorrectly flag a documented production date as a compliance issue, remove or neutralize them.
-            sm = re.sub(
-                r'(?im)^\s*[-*]\s*High:\s*Production\s+date\s+is\s+documented\s+on\s+the\s+driver-door\s+VIN\s+label\s+photo\.[^\n]*$',
-                "",
-                sm,
-            )
-            sm = re.sub(
-                r"(?is)The\s+main\s+compliance\s+issues\s+are\s+the\s+Production\s+date\s+is\s+documented\s+on\s+the\s+driver-door\s+VIN\s+label\s+photo\.",
-                "There are no material compliance issues related to Production Date; it is documented on the driver-door VIN label photo.",
-                sm,
-            )
-
         elif _prod_date_present:
             sm = re.sub(
                 r"(?im)^\s*[-*]\s*Missing\s+production\s+date\s*(?:plate|photo)?[^\n]*$",
@@ -1364,9 +1313,8 @@ async def vision_review(
                 sm,
             )
 
-        # Repair Facility handling: when the vehicle is clearly NOT at a shop, do NOT treat missing repair facility info as a compliance issue.
-        if (not _repair_facility_required) or (("owner's location" in lower_sm or "owner residence/work" in lower_sm or "owner residence" in lower_sm) and "repair facility" in lower_sm):
-            # Strip narrative sentences that treat missing repair facility info as a deduction when the unit is at the owner location / not at a shop.
+        # Repair Facility + Owner's location: do NOT deduct
+        if "owner's location" in lower_sm and "repair facility" in lower_sm:
             sm = re.sub(
                 r"(?is)However,\s+the\s+file\s+lacks\s+repair\s+facility\s+information[^\.]*\.",
                 "",
@@ -1382,52 +1330,61 @@ async def vision_review(
                 "",
                 sm,
             )
-            sm = re.sub(
-                r"(?is)the\s+estimate\s+lacks\s+repair\s+facility\s+information[^\.]*\.",
-                "",
-                sm,
-            )
-            # Convert any Client Guidelines bullet about repair facility at a shop from Not Aligned/Not Evidenced to Not Applicable.
-            sm = re.sub(
-                r'(?im)^-?\s*"Repair\s+Facility\s+information\s+must\s+be\s+filled\s+in\s+on\s+all\s+estimates\s+whenever\s+the\s+vehicle\s+is\s+at\s+a\s+shop"\s*-\s*(?:Not\s+Aligned|Not\s+Evidenced)[^\n]*$',
-                '- "Repair Facility information must be filled in on all estimates whenever the vehicle is at a shop" - Not Applicable (vehicle inspected at owner location / not at a shop).',
-                sm,
-            )
-            # Remove any risk bullet that treats missing repair facility info as a compliance risk in this not-at-shop scenario.
-            sm = re.sub(
-                r"(?im)^\s*[-*]\s*Medium:\s*Repair\s+facility\s+info\s+missing[^\n]*$",
-                "",
-                sm,
-            )
-
-        # Final Evaluation cleanup: if score line blames missing Production Date or Repair Facility
-        # but Production Date is evidenced or repair facility info is not actually required, strip that reason text.
-        try:
-            if "## Final Evaluation" in sm:
-                def _fix_final_eval_line(match):
-                    line = match.group(0)
-                    if _prod_evidenced or not _repair_facility_required:
-                        line = re.sub(
-                            r"\s+due\s+to\s+missing[^\.]*",
-                            "",
-                            line,
-                            flags=re.IGNORECASE,
-                        )
-                        line = re.sub(r"\s+\.", ".", line)
-                    return line
-                sm = re.sub(
-                    r"(?im)^Compliance\s+Score:\s*\d{1,3}\b[^\n]*$",
-                    _fix_final_eval_line,
-                    sm,
-                    flags=re.MULTILINE,
-                )
-        except Exception:
-            pass
 
         sm = re.sub(r"\n{3,}", "\n\n", sm).strip()
         if len(sm) < 120:
             sm = orig_sm.strip()
         result["summary_markdown"] = sm if sm else orig_sm.strip()
+    except Exception:
+        pass
+
+
+    # --- Scrub Conclusion / Brief of forbidden deductions (Production Date / Repair Facility / Release Paperwork / Clean Retail) ---
+    try:
+        def _scrub_forbidden(_t_in: str) -> str:
+            if not _t_in:
+                return _t_in
+            _t = str(_t_in)
+
+            # Production Date: if door-label VIN photo or prod date is evidenced, never call it missing or deduct for it.
+            if _prod_evidenced:
+                _t = re.sub(r"(?is)\bmissing\s+(?:mandatory\s+)?production\s+date\s+(?:photo|plate|sticker)\b[^.\n]*[\.]?", "", _t)
+                _t = re.sub(r"(?is)\bmissing\s+production\s+date\s+photos?\b[^.\n]*[\.]?", "", _t)
+                _t = re.sub(r"(?is)\bdue\s+to\s+missing\s+mandatory\s+production\s+date\s+photo\b", "due to minor non-fatal documentation items", _t)
+
+            # Clean Retail value: if present, never state missing.
+            if _clean_retail_present:
+                _t = re.sub(r"(?is)\bmissing\s+(?:a\s+)?clean\s+retail\s+value\s+printout\b[^.\n]*[\.]?", "", _t)
+
+            # Release paperwork: never a compliance deduction or requirement in these outputs.
+            _t = re.sub(r"(?is)\bmissing\s+release\s+paperwork\b[^.\n]*[\.]?", "", _t)
+            _t = re.sub(r"(?is)\bincomplete\s+release\s+paperwork\b[^.\n]*[\.]?", "", _t)
+
+            # Repair Facility: only required when docs clearly indicate vehicle is at a named shop.
+            _repair_fac_required = False
+            try:
+                _txt_docs_local = uploaded_text_all or ""
+                # Heuristic: shop context when a Repair Facility section exists AND a shop-like name/descriptor exists
+                if re.search(r"(?i)\bRepair\s+Facility\b", _txt_docs_local) and re.search(r"(?i)\b(Body\s*Shop|Collision|Auto\s+Body|Repair\s+Center|Shop\s+Name)\b", _txt_docs_local):
+                    _repair_fac_required = True
+            except Exception:
+                _repair_fac_required = False
+
+            if not _repair_fac_required:
+                _t = re.sub(r"(?is)\bmissing\s+repair\s+facility(?:\s+information|\s+info)?\b[^.\n]*[\.]?", "", _t)
+                _t = re.sub(r"(?is)\bdue\s+to\s+missing\s+repair\s+facility(?:\s+information|\s+info)?\b", "due to minor non-fatal documentation items", _t)
+
+            _t = re.sub(r"[ \t]{2,}", " ", _t)
+            _t = re.sub(r"\n{3,}", "\n\n", _t).strip()
+            return _t
+
+        # Apply scrubber to conclusion, brief, and narrative (prevents contradictory final evaluation lines)
+        result["conclusion"] = _scrub_forbidden(result.get("conclusion") or "")
+        result["summary_brief"] = _scrub_forbidden(result.get("summary_brief") or "")
+
+        _sm_before = result.get("summary_markdown") or ""
+        _sm_after = _scrub_forbidden(_sm_before)
+        result["summary_markdown"] = _sm_after if _sm_after else _sm_before
     except Exception:
         pass
 
@@ -1757,6 +1714,7 @@ async def download_pdf(file_number: Optional[str] = None, filename: Optional[str
         return JSONResponse(status_code=404, content={"detail": "Not Found"})
     latest = max(candidates, key=lambda p: os.path.getmtime(p))
     return FileResponse(path=latest, media_type="application/pdf", filename=os.path.basename(latest))
+
 
 
 
