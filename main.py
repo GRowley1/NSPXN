@@ -613,7 +613,7 @@ async def vision_review(
 
     # Presence detectors for VIN / Odometer / Production Date (OCR text)
     vin_photo_rx = r"(?i)\bDescription:\s*VIN\b|\bVIN(?:\s*#|:)?\s*[A-HJ-NPR-Z0-9]{17}\b"
-    odo_photo_rx = r"(?i)\bDescription:\s*Odometer\b|\bOdometer\b"
+    odo_photo_rx = r"(?i)\bDescription:\s*Odometer\b|\bOdometer\s*Photo\b|\bPhoto\s*[:#]?\s*Odometer\b"
 
     # Production date patterns (label)
     prod_date_rx = (
@@ -1431,26 +1431,44 @@ async def vision_review(
             sm = result.get("summary_markdown") or ""
             odo_field = (result.get("odometer_estimate_only") or "").strip()
 
-            # Try to extract explicit mileage from narrative
-            m_odo = re.search(r"(?is)odometer\s+reading\s+of\s+([0-9,]+)\s*miles", sm)
-            if m_odo:
-                miles = m_odo.group(1)
-                result["odometer_estimate_only"] = f"{miles} miles (confirmed by estimate and photos)."
-            else:
-                # Fallback generic phrasing
-                result["odometer_estimate_only"] = "Present and legible in photos (e.g., odometer photo)."
+            # Narrative overrides header: if the narrative says mileage is unknown or explicitly indicates
+            # there is no odometer photo, do NOT force "Present and legible in photos...".
+            _narr_says_no_odo = bool(re.search(
+                r"(?is)\b("
+                r"no\s+odometer\s+photo|"
+                r"odometer\s+photo\s+is\s+missing|"
+                r"mileage\s+is\s+unknown|"
+                r"mileage\s+not\s+documented|"
+                r"odometer\s+reading\s+is\s+(?:marked\s+)?unknown"
+                r")\b",
+                sm,
+            ))
 
-            # Clean any weird "No, odometer photo present..." phrasing from brief or narrative
-            for key in ("summary_brief", "summary_markdown"):
-                txt = result.get(key) or ""
-                if txt:
-                    txt = re.sub(
-                        r"No,\s*odometer\s+photo\s+present\s+and\s+legible\s*\(Photo\s*\d+\)",
-                        "Odometer is present and legible in the photos and matches the estimate.",
-                        txt,
-                        flags=re.IGNORECASE,
-                    )
-                    result[key] = txt
+            if _narr_says_no_odo:
+                _odo_photo_present = False
+                if odo_field in {"", "N/A"}:
+                    result["odometer_estimate_only"] = "UNK / Unknown (no odometer photo provided)."
+            else:
+                # Try to extract explicit mileage from narrative
+                m_odo = re.search(r"(?is)odometer\s+reading\s+of\s+([0-9,]+)\s*miles", sm)
+                if m_odo:
+                    miles = m_odo.group(1)
+                    result["odometer_estimate_only"] = f"{miles} miles (confirmed by estimate and photos)."
+                else:
+                    # Fallback generic phrasing
+                    result["odometer_estimate_only"] = "Present and legible in photos (e.g., odometer photo)."
+
+                # Clean any weird "No, odometer photo present..." phrasing from brief or narrative
+                for key in ("summary_brief", "summary_markdown"):
+                    txt = result.get(key) or ""
+                    if txt:
+                        txt = re.sub(
+                            r"No,\s*odometer\s+photo\s+present\s+and\s+legible\s*\(Photo\s*\d+\)",
+                            "Odometer is present and legible in the photos and matches the estimate.",
+                            txt,
+                            flags=re.IGNORECASE,
+                        )
+                        result[key] = txt
     except Exception:
         pass
 
