@@ -704,11 +704,19 @@ async def vision_review(
         + ("\n- ".join(files_seen) if files_seen else "none")
         + "\n\nCLIENT RULES (if provided; else blank):\n"
         + (client_rules[:2000] if client_rules else "")
+        + "\n\nADD'L NOTES FOR AI REVIEW (priority focus; only applies to guidelines/review items):\n"
+        + ((ai_notes or "").strip()[:2000] if (ai_notes or "").strip() else "")
         + supplement_block
         + "\n\nANALYSIS LAYOUT (guidance, not strict):\n"
         + DETAIL_TEMPLATES.get(ai_intent, DETAIL_TEMPLATES["comprehensive"])
     )
-
+    
+    if (ai_notes or "").strip():
+        prompt_text += (
+            "\n\nAI NOTES INSTRUCTIONS (MANDATORY): "
+            "You MUST explicitly address the Add'l Notes in the '## Detailed Audit Report' narrative and/or '## Key Issues & Actions'. "
+            "If a note cannot be verified from evidence, say so and state what evidence would be needed."
+        )
     prompt_text = (
         "OUTPUT FORMAT (MANDATORY): Return ONLY a single strict JSON object with keys "
         "['file_number','request_type','claim_number','vin','vin_verification','vehicle',"
