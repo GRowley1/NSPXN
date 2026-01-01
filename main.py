@@ -520,6 +520,7 @@ async def list_client_rules():
 async def vision_review(
     files: List[UploadFile] = File(...),
     client_rules: str = Form(""),
+    ai_notes: str = Form(""),
     file_number: str = Form(...),
     ia_company: str = Form(""),
     appraiser_id: str = Form(""),
