@@ -256,6 +256,15 @@ CONSISTENCY_GUARD = (
     "\n- Before finalizing, re-scan your output: confirm every referenced Photo # matches the content described (e.g., do not cite an Odometer photo as the point-of-impact photo). Correct any mismatches."
 )
 
+# --- Parts Source Guard (prompt-only; prevents OEM vs Aftermarket drift) ---
+PARTS_SOURCE_GUARD = (
+    "\n\nPARTS SOURCE GUARD (MANDATORY):"
+    "\n- Do NOT claim 'aftermarket', 'A/M', 'quality replacement', 'non-OEM', or 'LKQ/used/recycled' parts were used unless the estimate LINE ITEMS explicitly label them as such."
+    "\n- Generic disclosure/boilerplate text about aftermarket crash parts does NOT prove aftermarket parts were used."
+    "\n- If the Closing Report states no aftermarket/LKQ parts were included, your narrative must not claim they were used."
+    "\n- When parts source is not explicit, state that it is not explicitly labeled and avoid guessing; default to OEM only when supported by part numbers/labels."
+)
+
 # --- Supplement Handling (prompt-only; ensures detection + narrative mention) ---
 SUPPLEMENT_HANDLING = (
     "\n\nSUPPLEMENT HANDLING:"
@@ -612,6 +621,25 @@ async def vision_review(
     paint_mat_rx = r"(Paint\s+(Suppl(?:ies|y)|Materials)|Materials\s*Line)"
     _paint_materials_present = bool(re.search(paint_mat_rx, uploaded_text_all or "", flags=re.IGNORECASE))
 
+    # --- Parts source guardrail (OEM vs Aftermarket/LKQ) ---
+    # Detect explicit non-OEM indicators in estimate LINE ITEMS only (ignore generic boilerplate/disclosures).
+    _explicit_non_oem_parts = False
+    try:
+        # Heuristic: look for non-OEM keywords on the same line as an operation/part line (starts with line #).
+        _explicit_non_oem_parts = bool(re.search(
+            r"(?im)^\s*\d+\s+.*\b(A/M|AFTERMARKET|NON\s*OEM|CAPA|NSF|LKQ|RCY|RECYCLED|USED|RECOND)\b",
+            uploaded_text_all or "",
+        ))
+    except Exception:
+        _explicit_non_oem_parts = False
+
+    # Closing report sometimes explicitly states no aftermarket/LKQ parts were included.
+    _closing_no_aftermarket = False
+    try:
+        _closing_no_aftermarket = bool(re.search(r"(?i)\bno\s+aftermarket\b|\bno\s+aftermarket\s+or\s+lkq\b", uploaded_text_all or ""))
+    except Exception:
+        _closing_no_aftermarket = False
+
     # Presence detectors for VIN / Odometer / Production Date (OCR text)
     vin_photo_rx = r"(?i)\bDescription:\s*VIN\b|\bVIN(?:\s*#|:)?\s*[A-HJ-NPR-Z0-9]{17}\b"
     odo_photo_rx = r"(?i)\bDescription:\s*Odometer\b|\bOdometer\s*Photo\b|\bPhoto\s*[:#]?\s*Odometer\b"
@@ -790,6 +818,7 @@ async def vision_review(
 
     prompt_text += IDENTIFIERS_VERIFICATION_PROTOCOL
     prompt_text += CONSISTENCY_GUARD
+    prompt_text += PARTS_SOURCE_GUARD
 
     # --------- EVIDENCE FLAGS ----------
     flags = []
@@ -825,6 +854,16 @@ async def vision_review(
     if _prod_date_present:
         flags.append(
             "- A production date (Date of Mfr/MFD DATE) is visible on a door label photo. Do not mark Production Date as missing; cite the Photo # and the month/year."
+        )
+    if _closing_no_aftermarket and not _explicit_non_oem_parts:
+        flags.append(
+            "- Closing Report states no aftermarket/LKQ parts were included and the estimate line items do not explicitly indicate non-OEM parts. "
+            "Do NOT describe any replaced parts as aftermarket/A/M/LKQ; treat them as OEM unless line items explicitly say otherwise."
+        )
+    elif _explicit_non_oem_parts:
+        flags.append(
+            "- Non-OEM parts indicators (A/M/Aftermarket/LKQ/etc.) appear in the estimate line items. "
+            "If you discuss parts type, be specific and cite the exact estimate line(s) showing the indicator."
         )
 
     # ✅ FIX #1: Actually inject evidence flags into the prompt (previously you computed flags but never used them)
@@ -1213,7 +1252,7 @@ async def vision_review(
             sm_fixed = sm_fixed.replace(
                 "Clean retail value printout: Not Evidenced (NADA/J.D. Power/KBB/etc. required on all files).",
                 "Clean retail value printout: Evidenced (Clean Retail printout present via NADA/J.D. Power/KBB/etc.).",
-            )
+                )
             result["summary_markdown"] = sm_fixed
 
             sb = result.get("summary_brief") or ""
@@ -1518,6 +1557,19 @@ async def vision_review(
             if _clean_retail_present:
                 _t = re.sub(r"(?is)\bmissing\s+(?:a\s+)?clean\s+retail\s+value\s+printout\b[^.\n]*[\.]?", "", _t)
                 _t = re.sub(r"(?is)\babsence\s+of\s+(?:a\s+)?clean\s+retail\s+value\s+printout\b[^.\n]*[\.]?", "", _t)
+
+            # Parts source: prevent false aftermarket/LKQ statements when not evidenced in line items.
+            if _closing_no_aftermarket and not _explicit_non_oem_parts:
+                # Replace common phrasing that incorrectly asserts aftermarket/LKQ usage.
+                _t = re.sub(r"(?i)\b(aftermarket|a/m|non\s*oem|quality\s+replacement)\b(?=\s+(parts?|components?))", "OEM", _t)
+                _t = re.sub(r"(?i)\b(lkq|recycled|used|rcy)\b(?=\s+(parts?|components?))", "OEM", _t)
+                _t = re.sub(r"(?is)\busing\s+oem\s+oem\b", "using OEM", _t)
+                # Remove any broad sentence that still claims aftermarket was used (keep disclaimers if present).
+                _t = re.sub(
+                    r"(?is)\bthe\s+estimate\s+calls\s+for\b[^.\n]{0,220}\baftermarket\b[^.\n]{0,220}\.",
+                    "The estimate specifies replacement parts without explicit non-OEM indicators in the line items; do not label them as aftermarket unless the line items say so.",
+                    _t,
+                )
 
             # Release paperwork is outside the scope; never claim compliance reduction for it.
             _t = re.sub(r"(?is)\bmissing\s+release\s+paperwork\b[^.\n]*[\.]?", "", _t)
