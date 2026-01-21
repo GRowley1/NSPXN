@@ -263,6 +263,8 @@ DAMAGE_SIDE_GUARD = (
     "\n- Use the most natural phrasing based on what is visually obvious."
     "\n- Do NOT suppress side-level damage descriptions when damage is clearly visible."
     "\n- Avoid guessing only when orientation is genuinely unclear."
+    "\n- Minimum coverage: include at least 2 distinct panels checked on the passenger/right side and 2 on the driver/left side (even if undamaged)."
+    "\n- Do not say 'passenger/right side undamaged' unless you name the specific panels you checked (e.g., RF fender, RF door, RR door/quarter)."
 )
 
 # --- Parts Source Guard (prompt-only; prevents OEM vs Aftermarket drift) ---
@@ -1873,7 +1875,7 @@ async def vision_review(
         msg["Subject"] = subj
         msg["From"] = "info@nspxn.com"
         msg["To"] = "info@nspxn.com"
-        msg["Cc"] = "growley505@gmail.com"
+        msg["Cc"] = "growley@ractrak.com"
         msg.set_content(body)
 
         try:
