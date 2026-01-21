@@ -258,23 +258,7 @@ CONSISTENCY_GUARD = (
 
 # --- Damage Side / Orientation Guard (prompt-only; prevents left/right drift) ---
 DAMAGE_SIDE_GUARD = (
-    "\n\nDAMAGE SIDE / ORIENTATION GUARD (MANDATORY):"
-    "\n- Prefer 'Driver Side' / 'Passenger Side' over left/right whenever describing damage location."
-    "\n- If you use left/right, you MUST anchor it to a cited photo that clearly establishes orientation."
-    "\n- ORIENTATION ANCHOR STEP (MANDATORY): Determine driver vs passenger side first."
-    "\n  * Use an interior cockpit photo showing the steering wheel: if steering wheel is on the LEFT, the vehicle is LHD (typical US) and Driver Side = LEFT; Passenger Side = RIGHT."
-    "\n  * If steering wheel is on the RIGHT, the vehicle is RHD and Driver Side = RIGHT; Passenger Side = LEFT."
-    "\n- FRONT-VIEW MAPPING RULE: In a straight-on front photo, 'viewer-right' corresponds to vehicle-LEFT; 'viewer-left' corresponds to vehicle-RIGHT. Use this to confirm which front corner is damaged."
-    "\n- You MUST cite the photo(s) used for the orientation anchor and the front-view mapping when you declare LF/RF or left/right."
-    "\n- Do not declare an impact corner (LF/RF/LR/RR) unless you can cite a photo that clearly shows that corner."
-    "\n- PROHIBITED: You may not write 'left side appears intact/undamaged' or 'right side appears intact/undamaged' unless you first list the panels checked for that side (e.g., LF fender, LF door, rocker; RF fender, RF door, rocker) AND cite at least one photo showing that side."
-    "\n- If wide shots show damage on the driver-side front, you must explicitly discuss LF/driver-front damages "
-    "and list the affected panels/parts in the '## Detailed Audit Report' narrative."
-    "\n- If orientation is uncertain, say 'driver side' or 'passenger side' and explain the uncertainty; do not guess."
-    "\n- You MUST address BOTH sides with MINIMUM COVERAGE: include at least 2 distinct driver/left-side panels and 2 distinct passenger/right-side panels in the narrative (even if undamaged), and cite at least one photo for EACH side."
-    "\n- You may not use a blanket phrase like 'right side appears undamaged' unless you also list the panels you checked (e.g., RF fender, RF door, RR door/quarter, rocker, mirror, wheel) and cite at least one right-side photo."
-    "\n- In '## Detailed Audit Report', include a 1–2 sentence check for BOTH driver/left and passenger/right sides, naming the specific panels checked, and cite at least one photo for EACH side."
-    "\n- If any passenger/right-side damage is visible in any photo, you must explicitly describe it in the narrative and include it in the panel/part list; do not omit it."
+    "\n- Use Driver/Passenger terms and cite photos.” 
 )
 
 # --- Parts Source Guard (prompt-only; prevents OEM vs Aftermarket drift) ---
