@@ -256,6 +256,17 @@ CONSISTENCY_GUARD = (
     "\n- Before finalizing, re-scan your output: confirm every referenced Photo # matches the content described (e.g., do not cite an Odometer photo as the point-of-impact photo). Correct any mismatches."
 )
 
+# --- Damage Side / Orientation Guard (prompt-only; prevents left/right drift) ---
+DAMAGE_SIDE_GUARD = (
+    "\n\nDAMAGE SIDE / ORIENTATION GUARD (MANDATORY):"
+    "\n- Prefer 'Driver Side' / 'Passenger Side' over left/right whenever describing damage location."
+    "\n- If you use left/right, you MUST anchor it to a cited photo that clearly establishes orientation."
+    "\n- Do not declare an impact corner (LF/RF/LR/RR) unless you can cite a photo that clearly shows that corner."
+    "\n- If wide shots show damage on the driver-side front, you must explicitly discuss LF/driver-front damages "
+    "and list the affected panels/parts in the '## Detailed Audit Report' narrative."
+    "\n- If orientation is uncertain, say 'driver side' or 'passenger side' and explain the uncertainty; do not guess."
+)
+
 # --- Parts Source Guard (prompt-only; prevents OEM vs Aftermarket drift) ---
 PARTS_SOURCE_GUARD = (
     "\n\nPARTS SOURCE GUARD (MANDATORY):"
@@ -818,6 +829,7 @@ async def vision_review(
 
     prompt_text += IDENTIFIERS_VERIFICATION_PROTOCOL
     prompt_text += CONSISTENCY_GUARD
+    prompt_text += DAMAGE_SIDE_GUARD
     prompt_text += PARTS_SOURCE_GUARD
 
     # --------- EVIDENCE FLAGS ----------
