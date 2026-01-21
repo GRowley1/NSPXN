@@ -256,19 +256,13 @@ CONSISTENCY_GUARD = (
     "\n- Before finalizing, re-scan your output: confirm every referenced Photo # matches the content described (e.g., do not cite an Odometer photo as the point-of-impact photo). Correct any mismatches."
 )
 
-OBSERVATION_FIRST_GUARD = (
-    "\n\nOBSERVATION-FIRST RULE (MANDATORY):"
-    "\n- Do NOT declare a 'primary impact zone' or summarize damage by corner or side at the start."
-    "\n- First, enumerate visible damage panel-by-panel based strictly on what is seen in the photos."
-    "\n- Only after listing observed damaged panels may you summarize the overall damage pattern."
-    "\n- You may not state that an entire side or area is undamaged unless you explicitly list the panels you checked."
-)
-
 # --- Damage Side / Orientation Guard (prompt-only; prevents left/right drift) ---
 DAMAGE_SIDE_GUARD = (
-    "\n\nDAMAGE SIDE REFERENCE (LIGHT CONSTRAINT):"
-    "\n- Prefer Driver Side / Passenger Side over left/right."
-    "\n- Do not summarize an entire side as undamaged unless you list the panels checked."
+    "\n\nDAMAGE SIDE GUIDANCE:"
+    "\n- Describe damage on any side (Driver, Passenger, Left, Right) when it is visible in photos."
+    "\n- Use the most natural phrasing based on what is visually obvious."
+    "\n- Do NOT suppress side-level damage descriptions when damage is clearly visible."
+    "\n- Avoid guessing only when orientation is genuinely unclear."
 )
 
 # --- Parts Source Guard (prompt-only; prevents OEM vs Aftermarket drift) ---
@@ -299,6 +293,7 @@ SYSTEM_BASE = (
     "'fraud_markdown','primary_impact','secondary_impact','estimated_costs_markdown',"
     "'conclusion']. "
     "Use evidence only from the provided inputs. Cite estimate page/line as 'p#/L#' and photos as 'Photo #'. "
+    "The narrative may describe more damage than the primary/secondary impact fields; do not suppress observed damage to force alignment."
     "Avoid guessing; if uncertain, say 'N/A' and why. summary_brief must be <= 280 chars (plain text)."
 )
 
@@ -839,7 +834,6 @@ async def vision_review(
 
     prompt_text += IDENTIFIERS_VERIFICATION_PROTOCOL
     prompt_text += CONSISTENCY_GUARD
-    prompt_text += OBSERVATION_FIRST_GUARD
     prompt_text += DAMAGE_SIDE_GUARD
     prompt_text += PARTS_SOURCE_GUARD
 
