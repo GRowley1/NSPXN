@@ -1868,7 +1868,7 @@ async def vision_review(
         msg["Subject"] = subj
         msg["From"] = "info@nspxn.com"
         msg["To"] = "info@nspxn.com"
-        msg["Cc"] = "growley505@gmail.com"
+        msg["Cc"] = "growley@ractrak.com"
         msg.set_content(body)
 
         try:
