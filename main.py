@@ -265,6 +265,10 @@ DAMAGE_SIDE_GUARD = (
     "\n- If wide shots show damage on the driver-side front, you must explicitly discuss LF/driver-front damages "
     "and list the affected panels/parts in the '## Detailed Audit Report' narrative."
     "\n- If orientation is uncertain, say 'driver side' or 'passenger side' and explain the uncertainty; do not guess."
+    "\n- You MUST address BOTH sides: Driver-side (left) AND Passenger-side (right)."
+    "\n- You may not use a blanket phrase like 'right side appears undamaged' unless you also list the panels you checked (e.g., RF fender, RF door, RR door/quarter, rocker, mirror, wheel) and cite at least one right-side photo."
+    "\n- In '## Detailed Audit Report', include a 1–2 sentence passenger/right-side check even if no damage is found, and cite at least one right-side photo."
+    "\n- If any passenger/right-side damage is visible in any photo, you must explicitly describe it in the narrative and include it in the panel/part list; do not omit it."
 )
 
 # --- Parts Source Guard (prompt-only; prevents OEM vs Aftermarket drift) ---
