@@ -256,9 +256,19 @@ CONSISTENCY_GUARD = (
     "\n- Before finalizing, re-scan your output: confirm every referenced Photo # matches the content described (e.g., do not cite an Odometer photo as the point-of-impact photo). Correct any mismatches."
 )
 
+OBSERVATION_FIRST_GUARD = (
+    "\n\nOBSERVATION-FIRST RULE (MANDATORY):"
+    "\n- Do NOT declare a 'primary impact zone' or summarize damage by corner or side at the start."
+    "\n- First, enumerate visible damage panel-by-panel based strictly on what is seen in the photos."
+    "\n- Only after listing observed damaged panels may you summarize the overall damage pattern."
+    "\n- You may not state that an entire side or area is undamaged unless you explicitly list the panels you checked."
+)
+
 # --- Damage Side / Orientation Guard (prompt-only; prevents left/right drift) ---
 DAMAGE_SIDE_GUARD = (
-    "\n- Use Driver/Passenger terms and cite photos.” 
+    "\n\nDAMAGE SIDE REFERENCE (LIGHT CONSTRAINT):"
+    "\n- Prefer Driver Side / Passenger Side over left/right."
+    "\n- Do not summarize an entire side as undamaged unless you list the panels checked."
 )
 
 # --- Parts Source Guard (prompt-only; prevents OEM vs Aftermarket drift) ---
@@ -829,6 +839,7 @@ async def vision_review(
 
     prompt_text += IDENTIFIERS_VERIFICATION_PROTOCOL
     prompt_text += CONSISTENCY_GUARD
+    prompt_text += OBSERVATION_FIRST_GUARD
     prompt_text += DAMAGE_SIDE_GUARD
     prompt_text += PARTS_SOURCE_GUARD
 
@@ -1868,7 +1879,7 @@ async def vision_review(
         msg["Subject"] = subj
         msg["From"] = "info@nspxn.com"
         msg["To"] = "info@nspxn.com"
-        msg["Cc"] = "growley@ractrak.com"
+        msg["Cc"] = "growley505@gmail.com"
         msg.set_content(body)
 
         try:
