@@ -273,19 +273,12 @@ DAMAGE_SIDE_GUARD = (
 
 # --- Side Coverage Check Guard (prompt-only; forces a real both-sides scan without micromanaging) ---
 SIDE_COVERAGE_GUARD = (
-    "
-
-SIDE COVERAGE CHECK (MANDATORY, MINIMAL):"
-    "
-- In '## Detailed Audit Report', include a short 'Side Checks' subsection that explicitly addresses BOTH sides:"
-    "
-  * Driver/Left side: name at least 2 specific exterior panels checked and note any visible damage (or say 'not clearly shown; cannot assess')."
-    "
-  * Passenger/Right side: name at least 2 specific exterior panels checked and note any visible damage (or say 'not clearly shown; cannot assess')."
-    "
-- Do not use blanket sentences like 'left side undamaged' or 'right side undamaged' without naming the panels you checked and citing the relevant Photo #s."
+    "\n\nSIDE COVERAGE CHECK (MANDATORY):"
+    "\n- In '## Detailed Audit Report', include a short 'Side Checks' subsection that explicitly addresses BOTH:"
+    "\n  * Driver/Left side: name at least 2 panels checked and note any visible damage."
+    "\n  * Passenger/Right side: name at least 2 panels checked and note any visible damage."
+    "\n- Do not use blanket sentences like 'right side undamaged' without naming the panels you checked."
 )
-
 
 # --- Parts Source Guard (prompt-only; prevents OEM vs Aftermarket drift) ---
 PARTS_SOURCE_GUARD = (
