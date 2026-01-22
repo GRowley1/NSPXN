@@ -255,6 +255,13 @@ CONSISTENCY_GUARD = (
     "\n- If legibility is the issue, explicitly say 'Present — not clearly legible' and explain why (glare/blur/angle), and request a precise retake rather than marking it missing."
     "\n- Before finalizing, re-scan your output: confirm every referenced Photo # matches the content described (e.g., do not cite an Odometer photo as the point-of-impact photo). Correct any mismatches."
 )
+SIDE_EVIDENCE_GUARD = (
+    "\n\nSIDE EVIDENCE RULE (MANDATORY, MINIMAL):"
+    "\n- You may NOT state 'left/driver side shows no damage' unless at least one photo clearly shows the left/driver-side exterior."
+    "\n- You may NOT state 'right/passenger side shows no damage' unless at least one photo clearly shows the right/passenger-side exterior."
+    "\n- If a side is not clearly shown, you must say: 'Left/driver-side exterior not shown clearly in photos; cannot assess' (or same for right)."
+    "\n- Do NOT use blanket side-wide 'no damage' statements without side-specific photo evidence."
+)
 
 # --- Damage Side / Orientation Guard (prompt-only; prevents left/right drift) ---
 DAMAGE_SIDE_GUARD = (
@@ -841,6 +848,7 @@ async def vision_review(
 
     prompt_text += IDENTIFIERS_VERIFICATION_PROTOCOL
     prompt_text += CONSISTENCY_GUARD
+    prompt_text += SIDE_EVIDENCE_GUARD
     prompt_text += DAMAGE_SIDE_GUARD
     if ai_intent == "damage_report_from_photos":
         prompt_text += SIDE_COVERAGE_GUARD
