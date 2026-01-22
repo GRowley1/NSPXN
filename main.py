@@ -258,13 +258,19 @@ CONSISTENCY_GUARD = (
 
 # --- Damage Side / Orientation Guard (prompt-only; prevents left/right drift) ---
 DAMAGE_SIDE_GUARD = (
-    "\n\nDAMAGE SIDE GUIDANCE:"
-    "\n- Describe damage on any side (Driver, Passenger, Left, Right) when it is visible in photos."
-    "\n- Use the most natural phrasing based on what is visually obvious."
-    "\n- Do NOT suppress side-level damage descriptions when damage is clearly visible."
+    "\n\nDAMAGE SIDE GUIDANCE (MINIMAL):"
+    "\n- Describe any visible damage on any side; do not suppress side-level descriptions."
+    "\n- Use Driver/Passenger or Left/Right—whichever is visually obvious from the photos."
     "\n- Avoid guessing only when orientation is genuinely unclear."
-    "\n- Minimum coverage: include at least 2 distinct panels checked on the passenger/right side and 2 on the driver/left side (even if undamaged)."
-    "\n- Do not say 'passenger/right side undamaged' unless you name the specific panels you checked (e.g., RF fender, RF door, RR door/quarter)."
+)
+
+# --- Side Coverage Check Guard (prompt-only; forces a real both-sides scan without micromanaging) ---
+SIDE_COVERAGE_GUARD = (
+    "\n\nSIDE COVERAGE CHECK (MANDATORY):"
+    "\n- In '## Detailed Audit Report', include a short 'Side Checks' subsection that explicitly addresses BOTH:"
+    "\n  * Driver/Left side: name at least 2 panels checked and note any visible damage."
+    "\n  * Passenger/Right side: name at least 2 panels checked and note any visible damage."
+    "\n- Do not use blanket sentences like 'right side undamaged' without naming the panels you checked."
 )
 
 # --- Parts Source Guard (prompt-only; prevents OEM vs Aftermarket drift) ---
@@ -295,7 +301,6 @@ SYSTEM_BASE = (
     "'fraud_markdown','primary_impact','secondary_impact','estimated_costs_markdown',"
     "'conclusion']. "
     "Use evidence only from the provided inputs. Cite estimate page/line as 'p#/L#' and photos as 'Photo #'. "
-    "The narrative may describe more damage than the primary/secondary impact fields; do not suppress observed damage to force alignment."
     "Avoid guessing; if uncertain, say 'N/A' and why. summary_brief must be <= 280 chars (plain text)."
 )
 
@@ -837,6 +842,8 @@ async def vision_review(
     prompt_text += IDENTIFIERS_VERIFICATION_PROTOCOL
     prompt_text += CONSISTENCY_GUARD
     prompt_text += DAMAGE_SIDE_GUARD
+    if ai_intent == "damage_report_from_photos":
+        prompt_text += SIDE_COVERAGE_GUARD
     prompt_text += PARTS_SOURCE_GUARD
 
     # --------- EVIDENCE FLAGS ----------
