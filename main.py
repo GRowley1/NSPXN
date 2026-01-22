@@ -256,15 +256,15 @@ CONSISTENCY_GUARD = (
     "\n- Before finalizing, re-scan your output: confirm every referenced Photo # matches the content described (e.g., do not cite an Odometer photo as the point-of-impact photo). Correct any mismatches."
 )
 
-# --- Damage Side / Location Guidance (prompt-only; minimal; prevents side flip-flop without over-steering) ---
+# --- Damage Side / Orientation Guard (prompt-only; prevents left/right drift) ---
 DAMAGE_SIDE_GUARD = (
-    "\n\nDAMAGE LOCATION GUIDANCE (MINIMAL):"
+    "\n\nDAMAGE LOCATION GUIDANCE (MINIMAL, ANTI-OMISSION):"
     "\n- Describe any visible damage wherever it appears; do not suppress side-level descriptions."
-    "\n- Prefer 'Driver Side' / 'Passenger Side' when visually clear; otherwise use neutral wording and cite the Photo #."
-    "\n- You may NOT claim an entire side is undamaged unless that side is clearly shown in at least one photo; otherwise say 'not clearly shown; cannot assess'."
-    "\n- If BOTH driver/left and passenger/right exterior sides are clearly shown in photos, you MUST mention BOTH in the narrative (even if one side shows no damage), with Photo # citations."
+    "\n- Use Driver/Passenger or Left/Right—whichever is visually obvious from the photos; if unclear, say so and cite the Photo #."
+    "\n- STRICT BAN: Do not use blanket statements like 'entire left side' / 'entire right side' / 'entire rear' showing no damage."
+    "\n- If you state a side has no visible damage, you must (a) cite at least one exterior photo showing that side and (b) name at least 2 specific panels you checked on that side (e.g., 'LF door, LR quarter')."
+    "\n- In the '## Detailed Audit Report' narrative, include one sentence covering Driver/Left exterior and one sentence covering Passenger/Right exterior (damage found OR explicitly 'no visible damage observed on <panels>'), each with Photo # citations."
 )
-
 
 
 # --- Parts Source Guard (prompt-only; prevents OEM vs Aftermarket drift) ---
@@ -294,7 +294,7 @@ SYSTEM_BASE = (
     "'odometer_estimate_only','compliance_score','summary_brief','summary_markdown',"
     "'fraud_markdown','primary_impact','secondary_impact','estimated_costs_markdown',"
     "'conclusion']. "
-    "Use evidence only from the provided inputs. Cite estimate page/line as 'p#/L#' and photos as 'Photo #'. "
+    "Use evidence only from the provided inputs. Cite estimate page/line as 'p#/L#' and photos as 'Photo #'. Do not let primary_impact/secondary_impact labels limit the damage descriptions; report all observed damage regardless of impact labels. "
     "Avoid guessing; if uncertain, say 'N/A' and why. summary_brief must be <= 280 chars (plain text)."
 )
 
@@ -386,7 +386,7 @@ def _maybe_ocr_image_text(im: Image.Image) -> str:
     except Exception:
         return ""
 
-def _add_bytes(parts: List[Dict[str,Any]], files_seen: List[str], photo_index: Optional[List[str]], raw: bytes, fname: str, used: int, max_images: int, pdf_text_fulls: Optional[List[str]] = None) -> int:
+def _add_bytes(parts: List[Dict[str,Any]], files_seen: List[str], raw: bytes, fname: str, used: int, max_images: int, pdf_text_fulls: Optional[List[str]] = None) -> int:
     low = fname.lower()
     if low.endswith(SUPPORTED_PDF_EXTS) and used < max_images:
         try:
@@ -400,8 +400,6 @@ def _add_bytes(parts: List[Dict[str,Any]], files_seen: List[str], photo_index: O
                 im.save(b, format="JPEG", quality=75, optimize=True)
                 parts.append(_image_part_from_bytes(b.getvalue()))
                 used += 1
-                if photo_index is not None:
-                    photo_index.append(f"{fname}::page_{idx+1}")
                 if idx < OCR_PAGE_CAP:
                     txt = _maybe_ocr_image_text(im)
                     if txt:
@@ -424,8 +422,6 @@ def _add_bytes(parts: List[Dict[str,Any]], files_seen: List[str], photo_index: O
             im_ref = None
         parts.append(_image_part_from_bytes(raw))
         used += 1
-        if photo_index is not None:
-            photo_index.append(fname)
         files_seen.append(f"{fname} (photo)")
         if im_ref is not None:
             txt = _maybe_ocr_image_text(im_ref)
@@ -552,7 +548,6 @@ async def vision_review(
 ):
     parts: List[Dict[str, Any]] = []
     files_seen: List[str] = []
-    photo_index: List[str] = []  # stable Photo # -> filename mapping for citations
     MAX_IMAGES = 24
     used = 0
     pdf_text_fulls: List[str] = []  # full PDF text for supplement detection
@@ -561,7 +556,7 @@ async def vision_review(
     MAX_ZIP_FILES = 100
     MAX_ENTRY_SIZE = 15 * 1024 * 1024  # 15 MB
 
-    for f in sorted(files, key=lambda x: (x.filename or "")):
+    for f in files:
         raw = await f.read()
         fname = f.filename or "upload"
         low = fname.lower()
@@ -585,9 +580,9 @@ async def vision_review(
                     data = zf.read(zi)
                 except Exception as e:
                     files_seen.append(f"{fname}::{inner_name} (read error: {e})"); continue
-                used = _add_bytes(parts, files_seen, photo_index, data, f"{fname}::{inner_name}", used, MAX_IMAGES, pdf_text_fulls=pdf_text_fulls)
+                used = _add_bytes(parts, files_seen, data, f"{fname}::{inner_name}", used, MAX_IMAGES, pdf_text_fulls=pdf_text_fulls)
         else:
-            used = _add_bytes(parts, files_seen, photo_index, raw, fname, used, MAX_IMAGES, pdf_text_fulls=pdf_text_fulls)
+            used = _add_bytes(parts, files_seen, raw, fname, used, MAX_IMAGES, pdf_text_fulls=pdf_text_fulls)
 
     # Collect uploaded TEXT ONLY for evidence checks
     uploaded_text_blobs = []
@@ -828,9 +823,7 @@ async def vision_review(
         )
 
     prompt_text += (
-        "\n\nPHOTO INDEX (MANDATORY — use this mapping for ALL Photo # citations):\n"
-        + ("\n".join([f"Photo {i+1}: {name}" for i, name in enumerate(photo_index)]) if photo_index else "No photos were included.")
-        + "\n\nPHOTO NUMBER SANITY CHECK: Before finalizing, verify that every referenced Photo # actually exists and matches the content described."
+        "\n\nPHOTO NUMBER SANITY CHECK: Before finalizing, verify that every referenced Photo # actually exists and matches the content described."
         "\nCOST RATIONALE REQUIREMENT: For each cost bucket (Body/Paint/Materials/Parts/Sublet/Tax), include a one-line rationale tied to observed operations or panel counts when you provide costs."
     )
 
