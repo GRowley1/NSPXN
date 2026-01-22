@@ -255,30 +255,16 @@ CONSISTENCY_GUARD = (
     "\n- If legibility is the issue, explicitly say 'Present — not clearly legible' and explain why (glare/blur/angle), and request a precise retake rather than marking it missing."
     "\n- Before finalizing, re-scan your output: confirm every referenced Photo # matches the content described (e.g., do not cite an Odometer photo as the point-of-impact photo). Correct any mismatches."
 )
-SIDE_EVIDENCE_GUARD = (
-    "\n\nSIDE EVIDENCE RULE (MANDATORY, MINIMAL):"
-    "\n- You may NOT state 'left/driver side shows no damage' unless at least one photo clearly shows the left/driver-side exterior."
-    "\n- You may NOT state 'right/passenger side shows no damage' unless at least one photo clearly shows the right/passenger-side exterior."
-    "\n- If a side is not clearly shown, you must say: 'Left/driver-side exterior not shown clearly in photos; cannot assess' (or same for right)."
-    "\n- Do NOT use blanket side-wide 'no damage' statements without side-specific photo evidence."
-)
 
-# --- Damage Side / Orientation Guard (prompt-only; prevents left/right drift) ---
+# --- Damage Side / Location Guidance (prompt-only; minimal; prevents side flip-flop without over-steering) ---
 DAMAGE_SIDE_GUARD = (
-    "\n\nDAMAGE SIDE GUIDANCE (MINIMAL):"
-    "\n- Describe any visible damage on any side; do not suppress side-level descriptions."
-    "\n- Use Driver/Passenger or Left/Right—whichever is visually obvious from the photos."
-    "\n- Avoid guessing only when orientation is genuinely unclear."
+    "\n\nDAMAGE LOCATION GUIDANCE (MINIMAL):"
+    "\n- Describe any visible damage wherever it appears; do not suppress side-level descriptions."
+    "\n- Prefer 'Driver Side' / 'Passenger Side' when visually clear; otherwise use neutral wording and cite the Photo #."
+    "\n- You may NOT claim an entire side is undamaged unless that side is clearly shown in at least one photo; otherwise say 'not clearly shown; cannot assess'."
+    "\n- If BOTH driver/left and passenger/right exterior sides are clearly shown in photos, you MUST mention BOTH in the narrative (even if one side shows no damage), with Photo # citations."
 )
 
-# --- Side Coverage Check Guard (prompt-only; forces a real both-sides scan without micromanaging) ---
-SIDE_COVERAGE_GUARD = (
-    "\n\nSIDE CHECKS (MINIMAL, MANDATORY):"
-    "\n- In '## Detailed Audit Report', include 1–2 sentences that explicitly address BOTH sides:"
-    "\n  * Driver/Left: describe any visible damage OR state 'not clearly shown; cannot assess' (cite Photo # when possible)."
-    "\n  * Passenger/Right: describe any visible damage OR state 'not clearly shown; cannot assess' (cite Photo # when possible)."
-    "\n- Do NOT use blanket side-wide 'undamaged' statements unless that side is clearly shown in at least one photo."
-)
 
 
 # --- Parts Source Guard (prompt-only; prevents OEM vs Aftermarket drift) ---
@@ -308,7 +294,7 @@ SYSTEM_BASE = (
     "'odometer_estimate_only','compliance_score','summary_brief','summary_markdown',"
     "'fraud_markdown','primary_impact','secondary_impact','estimated_costs_markdown',"
     "'conclusion']. "
-    "Use evidence only from the provided inputs. Cite estimate page/line as 'p#/L#' and photos as 'Photo #'. Do not let 'primary_impact' or 'secondary_impact' limit your damage descriptions; list all observed damage regardless of impact labels. "
+    "Use evidence only from the provided inputs. Cite estimate page/line as 'p#/L#' and photos as 'Photo #'. "
     "Avoid guessing; if uncertain, say 'N/A' and why. summary_brief must be <= 280 chars (plain text)."
 )
 
@@ -400,7 +386,7 @@ def _maybe_ocr_image_text(im: Image.Image) -> str:
     except Exception:
         return ""
 
-def _add_bytes(parts: List[Dict[str,Any]], files_seen: List[str], photo_index: List[str], raw: bytes, fname: str, used: int, max_images: int, pdf_text_fulls: Optional[List[str]] = None) -> int:
+def _add_bytes(parts: List[Dict[str,Any]], files_seen: List[str], photo_index: Optional[List[str]], raw: bytes, fname: str, used: int, max_images: int, pdf_text_fulls: Optional[List[str]] = None) -> int:
     low = fname.lower()
     if low.endswith(SUPPORTED_PDF_EXTS) and used < max_images:
         try:
@@ -414,7 +400,8 @@ def _add_bytes(parts: List[Dict[str,Any]], files_seen: List[str], photo_index: L
                 im.save(b, format="JPEG", quality=75, optimize=True)
                 parts.append(_image_part_from_bytes(b.getvalue()))
                 used += 1
-                photo_index.append(f"{fname}::page_{idx+1}")
+                if photo_index is not None:
+                    photo_index.append(f"{fname}::page_{idx+1}")
                 if idx < OCR_PAGE_CAP:
                     txt = _maybe_ocr_image_text(im)
                     if txt:
@@ -437,7 +424,8 @@ def _add_bytes(parts: List[Dict[str,Any]], files_seen: List[str], photo_index: L
             im_ref = None
         parts.append(_image_part_from_bytes(raw))
         used += 1
-        photo_index.append(fname)
+        if photo_index is not None:
+            photo_index.append(fname)
         files_seen.append(f"{fname} (photo)")
         if im_ref is not None:
             txt = _maybe_ocr_image_text(im_ref)
@@ -564,7 +552,7 @@ async def vision_review(
 ):
     parts: List[Dict[str, Any]] = []
     files_seen: List[str] = []
-    photo_index: List[str] = []  # ordered list of image-like items sent to the model (stable Photo # mapping)
+    photo_index: List[str] = []  # stable Photo # -> filename mapping for citations
     MAX_IMAGES = 24
     used = 0
     pdf_text_fulls: List[str] = []  # full PDF text for supplement detection
@@ -573,7 +561,7 @@ async def vision_review(
     MAX_ZIP_FILES = 100
     MAX_ENTRY_SIZE = 15 * 1024 * 1024  # 15 MB
 
-    for f in files:
+    for f in sorted(files, key=lambda x: (x.filename or "")):
         raw = await f.read()
         fname = f.filename or "upload"
         low = fname.lower()
@@ -758,9 +746,6 @@ async def vision_review(
         f"REQUEST TYPE SELECTED (exact): '{req_label}'. Use this exact string in 'request_type'.\n\n"
         "FILES SEEN (echo verbatim in '## Inputs Used'):\n- "
         + ("\n- ".join(files_seen) if files_seen else "none")
-        + "\n\nPHOTO INDEX (MANDATORY — use this mapping for ALL Photo # citations):\n"
-        + ("\n".join([f"Photo {i+1}: {name}" for i, name in enumerate(photo_index)]) if photo_index else "No photos were included.")
-        + "\n\n"
         + "\n\nCLIENT RULES (if provided; else blank):\n"
         + (client_rules[:2000] if client_rules else "")
         + "\n\nADD'L NOTES FOR AI REVIEW (priority focus; only applies to guidelines/review items):\n"
@@ -843,16 +828,15 @@ async def vision_review(
         )
 
     prompt_text += (
-        "\n\nPHOTO NUMBER SANITY CHECK: Before finalizing, verify that every referenced Photo # actually exists and matches the content described."
+        "\n\nPHOTO INDEX (MANDATORY — use this mapping for ALL Photo # citations):\n"
+        + ("\n".join([f"Photo {i+1}: {name}" for i, name in enumerate(photo_index)]) if photo_index else "No photos were included.")
+        + "\n\nPHOTO NUMBER SANITY CHECK: Before finalizing, verify that every referenced Photo # actually exists and matches the content described."
         "\nCOST RATIONALE REQUIREMENT: For each cost bucket (Body/Paint/Materials/Parts/Sublet/Tax), include a one-line rationale tied to observed operations or panel counts when you provide costs."
     )
 
     prompt_text += IDENTIFIERS_VERIFICATION_PROTOCOL
     prompt_text += CONSISTENCY_GUARD
-    prompt_text += SIDE_EVIDENCE_GUARD
     prompt_text += DAMAGE_SIDE_GUARD
-    if photos_provided and ai_intent in ("damage_report_from_photos", "comprehensive"):
-        prompt_text += SIDE_COVERAGE_GUARD
     prompt_text += PARTS_SOURCE_GUARD
 
     # --------- EVIDENCE FLAGS ----------
