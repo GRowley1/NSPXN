@@ -273,12 +273,13 @@ DAMAGE_SIDE_GUARD = (
 
 # --- Side Coverage Check Guard (prompt-only; forces a real both-sides scan without micromanaging) ---
 SIDE_COVERAGE_GUARD = (
-    "\n\nSIDE COVERAGE CHECK (MANDATORY):"
-    "\n- In '## Detailed Audit Report', include a short 'Side Checks' subsection that explicitly addresses BOTH:"
-    "\n  * Driver/Left side: name at least 2 panels checked and note any visible damage."
-    "\n  * Passenger/Right side: name at least 2 panels checked and note any visible damage."
-    "\n- Do not use blanket sentences like 'right side undamaged' without naming the panels you checked."
+    "\n\nSIDE CHECKS (MINIMAL, MANDATORY):"
+    "\n- In '## Detailed Audit Report', include 1–2 sentences that explicitly address BOTH sides:"
+    "\n  * Driver/Left: describe any visible damage OR state 'not clearly shown; cannot assess' (cite Photo # when possible)."
+    "\n  * Passenger/Right: describe any visible damage OR state 'not clearly shown; cannot assess' (cite Photo # when possible)."
+    "\n- Do NOT use blanket side-wide 'undamaged' statements unless that side is clearly shown in at least one photo."
 )
+
 
 # --- Parts Source Guard (prompt-only; prevents OEM vs Aftermarket drift) ---
 PARTS_SOURCE_GUARD = (
@@ -307,7 +308,7 @@ SYSTEM_BASE = (
     "'odometer_estimate_only','compliance_score','summary_brief','summary_markdown',"
     "'fraud_markdown','primary_impact','secondary_impact','estimated_costs_markdown',"
     "'conclusion']. "
-    "Use evidence only from the provided inputs. Cite estimate page/line as 'p#/L#' and photos as 'Photo #'. "
+    "Use evidence only from the provided inputs. Cite estimate page/line as 'p#/L#' and photos as 'Photo #'. Do not let 'primary_impact' or 'secondary_impact' limit your damage descriptions; list all observed damage regardless of impact labels. "
     "Avoid guessing; if uncertain, say 'N/A' and why. summary_brief must be <= 280 chars (plain text)."
 )
 
