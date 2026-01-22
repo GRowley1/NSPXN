@@ -273,12 +273,19 @@ DAMAGE_SIDE_GUARD = (
 
 # --- Side Coverage Check Guard (prompt-only; forces a real both-sides scan without micromanaging) ---
 SIDE_COVERAGE_GUARD = (
-    "\n\nSIDE COVERAGE CHECK (MANDATORY):"
-    "\n- In '## Detailed Audit Report', include a short 'Side Checks' subsection that explicitly addresses BOTH:"
-    "\n  * Driver/Left side: name at least 2 panels checked and note any visible damage."
-    "\n  * Passenger/Right side: name at least 2 panels checked and note any visible damage."
-    "\n- Do not use blanket sentences like 'right side undamaged' without naming the panels you checked."
+    "
+
+SIDE COVERAGE CHECK (MANDATORY, MINIMAL):"
+    "
+- In '## Detailed Audit Report', include a short 'Side Checks' subsection that explicitly addresses BOTH sides:"
+    "
+  * Driver/Left side: name at least 2 specific exterior panels checked and note any visible damage (or say 'not clearly shown; cannot assess')."
+    "
+  * Passenger/Right side: name at least 2 specific exterior panels checked and note any visible damage (or say 'not clearly shown; cannot assess')."
+    "
+- Do not use blanket sentences like 'left side undamaged' or 'right side undamaged' without naming the panels you checked and citing the relevant Photo #s."
 )
+
 
 # --- Parts Source Guard (prompt-only; prevents OEM vs Aftermarket drift) ---
 PARTS_SOURCE_GUARD = (
@@ -850,7 +857,7 @@ async def vision_review(
     prompt_text += CONSISTENCY_GUARD
     prompt_text += SIDE_EVIDENCE_GUARD
     prompt_text += DAMAGE_SIDE_GUARD
-    if ai_intent == "damage_report_from_photos":
+    if photos_provided and ai_intent in ("damage_report_from_photos", "comprehensive"):
         prompt_text += SIDE_COVERAGE_GUARD
     prompt_text += PARTS_SOURCE_GUARD
 
@@ -1934,32 +1941,3 @@ async def download_pdf(file_number: Optional[str] = None, filename: Optional[str
         return JSONResponse(status_code=404, content={"detail": "Not Found"})
     latest = max(candidates, key=lambda p: os.path.getmtime(p))
     return FileResponse(path=latest, media_type="application/pdf", filename=os.path.basename(latest))
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
