@@ -183,14 +183,14 @@ DETAIL_TEMPLATES = {
         "## Photo-by-Photo Damage Ledger (REQUIRED — one row per photo)\n"
         "| Photo # | View/Side                  | Key Panels/Parts Visible                  | Condition Description (damage or 'No visible damage') |\n"
         "|-------:|----------------------------|-------------------------------------------|-------------------------------------------------------|\n"
-        "- Cover EVERY provided photo. For undamaged views, explicitly write 'No visible damage on [panels/side]'. Do NOT skip rows or omit photos.\n\n"
+        "- Cover EVERY provided photo. If no damage is obvious from that angle, write 'No obvious damage visible from provided angle' (do NOT claim 'intact' unless clearly shown). Do NOT skip rows or omit photos.\n\n"
         "## Per-Side Exterior & Interior Condition (MANDATORY section — use bullets)\n"
-        "- **Front**: bumper, grille, headlights, hood, left fender, right fender — describe each, cite Photo #s, note damage or 'no visible damage'.\n"
+        "- **Front**: bumper, grille, headlights, hood, left fender, right fender — describe each, cite Photo #s, if no damage is obvious from the provided angles, say 'No obvious damage visible from provided angle' (do not declare 'intact' unless clearly visible).\n"
         "- **Driver/Left Side**: fender, doors, quarter panel — describe each, cite Photo #s.\n"
         "- **Passenger/Right Side**: fender, doors, quarter panel — describe each, cite Photo #s.\n"
         "- **Rear**: bumper, tail lights, hatch — describe each, cite Photo #s.\n"
         "- **Roof / Other visible**: any damage or 'no visible damage'.\n"
-        "- **Interior** (if shown): seats, dash, airbags — 'no deployment / no visible damage' or describe issues.\n"
+        "- **Interior** (if shown): seats, dash, airbags — state deployment/condition; if no issues are obvious, say 'No obvious issues visible from provided angle' or describe issues.\n"
         "- Explicitly flag any bilateral (both sides) or secondary damage, even if minor or partial in angle.\n\n"
         "## Detailed Audit Report (narrative)\n"
         "- Synthesize the per-side findings into a continuous 10–15 sentence professional narrative.\n"
@@ -855,8 +855,13 @@ async def vision_review(
     prompt_text += IDENTIFIERS_VERIFICATION_PROTOCOL
     prompt_text += CONSISTENCY_GUARD
     prompt_text += DAMAGE_SIDE_GUARD
-    prompt_text += INTACT_CLAIMS_GUARD
     prompt_text += BILATERAL_DAMAGE_MANDATE
+    prompt_text += (
+        "\n\nDAMAGE PRIORITY RULE (MANDATORY):"
+        "\n- If damage is visible on BOTH sides in any photo, you MUST describe BOTH sides."
+        "\n- Do NOT default any side/panel to 'no visible damage' when that side/panel appears in any photo with visible distortion, cracking, scrape, deformation, misalignment, or refinish cues."
+        "\n- If you are uncertain, state 'possible damage visible' and explain what is seen; do not declare it intact."
+    )
     prompt_text += PARTS_SOURCE_GUARD
 
     # --------- EVIDENCE FLAGS ----------
