@@ -42,8 +42,8 @@ logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(levelname)s - %(
 log = logging.getLogger("nspxn")
 log.info(f"Using CLIENT_RULES_DIR={CLIENT_RULES_DIR}")
 
-# Use GPT-4.1 everywhere
-MODEL = os.getenv("OAI_MODEL", "gpt-4.1")
+# Use GPT-4o everywhere
+MODEL = os.getenv("OAI_MODEL", "gpt-4o")
 if not os.getenv("OPENAI_API_KEY"):
     raise RuntimeError("OPENAI_API_KEY missing")
 client = OpenAI(api_key=os.environ["OPENAI_API_KEY"])
@@ -171,39 +171,44 @@ DETAIL_TEMPLATES = {
 
     "damage_report_from_photos": (
         "# AI-4-IA Damage Report\n"
-        "Create a concise, professional damage report based only on the provided photos (and any optional text).\n\n"
+        "Create a concise, professional damage report based ONLY on the provided photos. MUST cover ALL visible sides and panels exhaustively — do NOT summarize or omit undamaged areas.\n\n"
         "## Inputs Used\n"
-        "- List exact Photo #s and any text used.\n"
-        "- Include a one-line count of photos and list the exact photo labels used (e.g., 'Photo 1–12; used 1–9, 11').\n\n"
+        "- List exact Photo #s used and total photos provided.\n\n"
         "## Quick Stats\n"
         "- Claim # (if visible): <value or N/A>\n"
-        "- File # (echo from request): <value or N/A>\n"
+        "- File #: <value or N/A>\n"
         "- Odometer (if visible): <value or 'Present — not clearly legible'>\n"
-        "- Primary Impact: <area(s)>\n"
-        "- Secondary Impact: <area(s) or 'None observed'>\n\n"
-        "## Photo-by-Photo Damage Ledger\n"
-        "| Photo # | View/Angle | Panels/Parts Visible | Condition (dent/crease/scrape/misalignment) | Identifiers (VIN/odo/plate/reg) | Legibility |\n"
-        "|---:|---|---|---|---|---|\n"
-        "- One row per photo used in the analysis (>=6 rows if >=6 photos exist). If an identifier is present but unreadable, mark 'Present — not clearly legible'.\n"
-        "- The ledger is required. Do not omit it. Each row must have a concrete Photo # that exists in the set.\n\n"
-        "## Damage Summary\n"
-        "- 6–12 bullets with panel/part + condition + suggested op, citing Photo #.\n\n"
-        "## Detailed Audit Report\n"
-        "- Provide a detailed appraisal narrative based on the photos: impact zones, repair/replace reasoning, "
-        "likely parts source (OEM/LKQ/Aftermarket) when inferable, refinish/overlap notes, and cost implications. "
-        "Reference specific Photo #s. Minimum 8–12 sentences (one continuous narrative, not bullets). "
-        "Cite VIN and odometer with explicit Photo #s; if either is unreadable, write 'Present — not clearly legible' and explain why (glare/blur/angle) instead of 'Missing'.\n\n"
-        "## Estimated Repair Costs\n"
-        "- Provide a high-level breakdown (Body Labor, Paint Labor, Paint Materials, Parts, Sublet, Tax) and a one-line rationale tying to observed work "
-        "(e.g., '2 panels refinish x 2.5 hr each' or 'rear bumper cover likely replace'). If uncertainty is high, state it explicitly.\n\n"
+        "- Primary Impact: <main area(s)>\n"
+        "- Secondary / Bilateral Impact: <any additional areas or 'None clearly visible'>\n\n"
+        "## Photo-by-Photo Damage Ledger (REQUIRED — one row per photo)\n"
+        "| Photo # | View/Side                  | Key Panels/Parts Visible                  | Condition Description (damage or 'No visible damage') |\n"
+        "|-------:|----------------------------|-------------------------------------------|-------------------------------------------------------|\n"
+        "- Cover EVERY provided photo. For undamaged views, explicitly write 'No visible damage on [panels/side]'. Do NOT skip rows or omit photos.\n\n"
+        "## Per-Side Exterior & Interior Condition (MANDATORY section — use bullets)\n"
+        "- **Front**: bumper, grille, headlights, hood, left fender, right fender — describe each, cite Photo #s, note damage or 'no visible damage'.\n"
+        "- **Driver/Left Side**: fender, doors, quarter panel — describe each, cite Photo #s.\n"
+        "- **Passenger/Right Side**: fender, doors, quarter panel — describe each, cite Photo #s.\n"
+        "- **Rear**: bumper, tail lights, hatch — describe each, cite Photo #s.\n"
+        "- **Roof / Other visible**: any damage or 'no visible damage'.\n"
+        "- **Interior** (if shown): seats, dash, airbags — 'no deployment / no visible damage' or describe issues.\n"
+        "- Explicitly flag any bilateral (both sides) or secondary damage, even if minor or partial in angle.\n\n"
+        "## Detailed Audit Report (narrative)\n"
+        "- Synthesize the per-side findings into a continuous 10–15 sentence professional narrative.\n"
+        "- Describe impact zones, repair vs replace logic, parts implications, refinish needs.\n"
+        "- MUST reference the per-side bullets above — do NOT contradict them.\n"
+        "- Cite VIN / odometer with Photo #s; if unreadable explain why.\n"
+        "- Balance coverage: do NOT focus only on primary damage.\n\n"
+        "## Estimated Repair Costs (photo-based rough only)\n"
+        "- Body Labor: ...\n"
+        "- Paint Labor / Materials: ...\n"
+        "- Parts: ...\n"
+        "- Sublet / Tax: ...\n"
+        "- Rationale tied to observed panels / sides.\n\n"
         "## Fraud & Authenticity Check\n"
-        "- State VIN and odometer with Photo # citations; note any EXIF/date anomalies or duplicate images. If none, say so.\n\n"
-        "## Compliance Score Rationale\n"
-        "- Omit this section entirely for photos-only reports. Do not provide a score.\n\n"
+        "- VIN match, odometer legibility, no tampering/duplicates/metadata issues.\n\n"
         "## Conclusion\n"
-        "- 1–2 sentences summarizing repairability and scope. "
-        "Do not declare Repairable/Total Loss in photos-only mode. "
-        "If no fraud indicators are identified, state 'No material inconsistencies found.' Do not use 'N/A'.\n"
+        "- Summarize scope and repair implications in 1–3 sentences.\n"
+        "- 'No fraud indicators identified' if clean.\n"
     ),
 }
 
@@ -271,6 +276,12 @@ INTACT_CLAIMS_GUARD = (
     "\n- You may only declare a specific component intact (e.g., 'left headlight intact') if that component is clearly visible in at least one photo you cite."
     "\n- If visibility is partial/unclear (angle, distance, glare), write 'no obvious damage visible from provided angle' or 'not clearly shown' instead of 'intact'."
     "\n- Do NOT make side-wide blanket claims ('entire left side undamaged'). If you believe a side shows no obvious damage, name 1–2 panels you actually saw and cite the photo(s)."
+)
+BILATERAL_DAMAGE_MANDATE = (
+    "\n\nBILATERAL / SECONDARY DAMAGE MANDATE (STRICT):\n"
+    "- In frontal impacts, ALWAYS explicitly inspect and report condition of BOTH left and right front fenders, even if damage appears asymmetric.\n"
+    "- If a photo shows partial view of the opposite side with visible distortion/misalignment/crush, describe it — do NOT default to 'intact' or 'no damage' without citing clear evidence.\n"
+    "- Contradicting visible photo evidence (e.g. calling a crushed fender 'intact') is forbidden."
 )
 
 # --- Parts Source Guard (prompt-only; prevents OEM vs Aftermarket drift) ---
@@ -845,6 +856,7 @@ async def vision_review(
     prompt_text += CONSISTENCY_GUARD
     prompt_text += DAMAGE_SIDE_GUARD
     prompt_text += INTACT_CLAIMS_GUARD
+    prompt_text += BILATERAL_DAMAGE_MANDATE
     prompt_text += PARTS_SOURCE_GUARD
 
     # --------- EVIDENCE FLAGS ----------
@@ -941,7 +953,7 @@ async def vision_review(
     MAX_TOKENS_BY_INTENT = {
         "comprehensive": 2200,
         "guidelines_only": 1500,
-        "damage_report_from_photos": 1400
+        "damage_report_from_photos": 2400
     }
     max_tokens = MAX_TOKENS_BY_INTENT.get(ai_intent, 1500)
 
