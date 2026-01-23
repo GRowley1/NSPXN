@@ -258,23 +258,19 @@ CONSISTENCY_GUARD = (
 
 # --- Damage Side / Orientation Guard (prompt-only; prevents left/right drift) ---
 DAMAGE_SIDE_GUARD = (
-    "\n\nDAMAGE SIDE / ORIENTATION GUARD (MANDATORY):"
-    "\n- Prefer 'Driver Side' / 'Passenger Side' over left/right whenever describing damage location."
-    "\n- If you use left/right, you MUST anchor it to a cited photo that clearly establishes orientation."
-    "\n- ORIENTATION ANCHOR STEP (MANDATORY): Determine driver vs passenger side first."
-    "\n  * Use an interior cockpit photo showing the steering wheel: if steering wheel is on the LEFT, the vehicle is LHD (typical US) and Driver Side = LEFT; Passenger Side = RIGHT."
-    "\n  * If steering wheel is on the RIGHT, the vehicle is RHD and Driver Side = RIGHT; Passenger Side = LEFT."
-    "\n- FRONT-VIEW MAPPING RULE: In a straight-on front photo, 'viewer-right' corresponds to vehicle-LEFT; 'viewer-left' corresponds to vehicle-RIGHT. Use this to confirm which front corner is damaged."
-    "\n- You MUST cite the photo(s) used for the orientation anchor and the front-view mapping when you declare LF/RF or left/right."
-    "\n- Do not declare an impact corner (LF/RF/LR/RR) unless you can cite a photo that clearly shows that corner."
-    "\n- PROHIBITED: You may not write 'left side appears intact/undamaged' or 'right side appears intact/undamaged' unless you first list the panels checked for that side (e.g., LF fender, LF door, rocker; RF fender, RF door, rocker) AND cite at least one photo showing that side."
-    "\n- If wide shots show damage on the driver-side front, you must explicitly discuss LF/driver-front damages "
-    "and list the affected panels/parts in the '## Detailed Audit Report' narrative."
-    "\n- If orientation is uncertain, say 'driver side' or 'passenger side' and explain the uncertainty; do not guess."
-    "\n- You MUST address BOTH sides with MINIMUM COVERAGE: include at least 2 distinct driver/left-side panels and 2 distinct passenger/right-side panels in the narrative (even if undamaged), and cite at least one photo for EACH side."
-    "\n- You may not use a blanket phrase like 'right side appears undamaged' unless you also list the panels you checked (e.g., RF fender, RF door, RR door/quarter, rocker, mirror, wheel) and cite at least one right-side photo."
-    "\n- In '## Detailed Audit Report', include a 1–2 sentence check for BOTH driver/left and passenger/right sides, naming the specific panels checked, and cite at least one photo for EACH side."
-    "\n- If any passenger/right-side damage is visible in any photo, you must explicitly describe it in the narrative and include it in the panel/part list; do not omit it."
+    "\n\nDAMAGE SIDE GUIDANCE (MINIMAL):"
+    "\n- Describe any visible damage on any side (Driver/Passenger or Left/Right) when it is visible in photos."
+    "\n- Do NOT suppress side-level damage descriptions when damage is clearly visible."
+    "\n- If orientation is genuinely unclear, say so and avoid guessing."
+)
+
+# --- Intact/No-Damage Claim Guard (prompt-only; prevents false 'intact' statements) ---
+INTACT_CLAIMS_GUARD = (
+    "\n\nINTACT / NO-DAMAGE CLAIMS (MANDATORY):"
+    "\n- Be conservative when stating a panel/component is 'intact', 'undamaged', or 'no visible damage'."
+    "\n- You may only declare a specific component intact (e.g., 'left headlight intact') if that component is clearly visible in at least one photo you cite."
+    "\n- If visibility is partial/unclear (angle, distance, glare), write 'no obvious damage visible from provided angle' or 'not clearly shown' instead of 'intact'."
+    "\n- Do NOT make side-wide blanket claims ('entire left side undamaged'). If you believe a side shows no obvious damage, name 1–2 panels you actually saw and cite the photo(s)."
 )
 
 # --- Parts Source Guard (prompt-only; prevents OEM vs Aftermarket drift) ---
@@ -396,7 +392,7 @@ def _maybe_ocr_image_text(im: Image.Image) -> str:
     except Exception:
         return ""
 
-def _add_bytes(parts: List[Dict[str,Any]], files_seen: List[str], raw: bytes, fname: str, used: int, max_images: int, pdf_text_fulls: Optional[List[str]] = None) -> int:
+def _add_bytes(parts: List[Dict[str,Any]], files_seen: List[str], photo_index: Optional[List[str]], raw: bytes, fname: str, used: int, max_images: int, pdf_text_fulls: Optional[List[str]] = None) -> int:
     low = fname.lower()
     if low.endswith(SUPPORTED_PDF_EXTS) and used < max_images:
         try:
@@ -410,6 +406,8 @@ def _add_bytes(parts: List[Dict[str,Any]], files_seen: List[str], raw: bytes, fn
                 im.save(b, format="JPEG", quality=75, optimize=True)
                 parts.append(_image_part_from_bytes(b.getvalue()))
                 used += 1
+                if photo_index is not None:
+                    photo_index.append(f"{fname}::page_{idx+1}")
                 if idx < OCR_PAGE_CAP:
                     txt = _maybe_ocr_image_text(im)
                     if txt:
@@ -432,6 +430,8 @@ def _add_bytes(parts: List[Dict[str,Any]], files_seen: List[str], raw: bytes, fn
             im_ref = None
         parts.append(_image_part_from_bytes(raw))
         used += 1
+        if photo_index is not None:
+            photo_index.append(fname)
         files_seen.append(f"{fname} (photo)")
         if im_ref is not None:
             txt = _maybe_ocr_image_text(im_ref)
@@ -558,7 +558,8 @@ async def vision_review(
 ):
     parts: List[Dict[str, Any]] = []
     files_seen: List[str] = []
-    MAX_IMAGES = 40
+    photo_index: List[str] = []
+    MAX_IMAGES = 24
     used = 0
     pdf_text_fulls: List[str] = []  # full PDF text for supplement detection
 
@@ -566,7 +567,7 @@ async def vision_review(
     MAX_ZIP_FILES = 100
     MAX_ENTRY_SIZE = 15 * 1024 * 1024  # 15 MB
 
-    for f in sorted(files, key=lambda _f: ((_f.filename or 'upload').lower())):
+    for f in sorted(files, key=lambda _f: ((_f.filename or '').lower())):
         raw = await f.read()
         fname = f.filename or "upload"
         low = fname.lower()
@@ -590,9 +591,9 @@ async def vision_review(
                     data = zf.read(zi)
                 except Exception as e:
                     files_seen.append(f"{fname}::{inner_name} (read error: {e})"); continue
-                used = _add_bytes(parts, files_seen, data, f"{fname}::{inner_name}", used, MAX_IMAGES, pdf_text_fulls=pdf_text_fulls)
+                used = _add_bytes(parts, files_seen, photo_index, data, f"{fname}::{inner_name}", used, MAX_IMAGES, pdf_text_fulls=pdf_text_fulls)
         else:
-            used = _add_bytes(parts, files_seen, raw, fname, used, MAX_IMAGES, pdf_text_fulls=pdf_text_fulls)
+            used = _add_bytes(parts, files_seen, photo_index, raw, fname, used, MAX_IMAGES, pdf_text_fulls=pdf_text_fulls)
 
     # Collect uploaded TEXT ONLY for evidence checks
     uploaded_text_blobs = []
@@ -751,6 +752,9 @@ async def vision_review(
         f"REQUEST TYPE SELECTED (exact): '{req_label}'. Use this exact string in 'request_type'.\n\n"
         "FILES SEEN (echo verbatim in '## Inputs Used'):\n- "
         + ("\n- ".join(files_seen) if files_seen else "none")
+        + "\n\nPHOTO INDEX (MANDATORY — use this mapping for ALL Photo # citations):\n"
+        + ("\n".join([f"Photo {i+1}: {name}" for i, name in enumerate(photo_index)]) if photo_index else "No photos were included.")
+        + "\n\n"
         + "\n\nCLIENT RULES (if provided; else blank):\n"
         + (client_rules[:2000] if client_rules else "")
         + "\n\nADD'L NOTES FOR AI REVIEW (priority focus; only applies to guidelines/review items):\n"
@@ -759,20 +763,8 @@ async def vision_review(
         + "\n\nANALYSIS LAYOUT (guidance, not strict):\n"
         + DETAIL_TEMPLATES.get(ai_intent, DETAIL_TEMPLATES["comprehensive"])
     )
-    # --- Photo index mapping (stabilizes Photo # references across runs) ---
-    if photo_index:
-        # Keep this concise to avoid blowing the context window
-        max_map = 60
-        mapping_lines = [f"- Photo {i+1}: {name}" for i, name in enumerate(photo_index[:max_map])]
-        if len(photo_index) > max_map:
-            mapping_lines.append(f"- ... ({len(photo_index) - max_map} more)")
-        prompt_text += (
-            "\n\nPHOTO INDEX (use these exact Photo #s; do NOT invent Photo numbers):\n"
-            + "\n".join(mapping_lines)
-        )
-
+    
     if (ai_notes or "").strip():
-
         prompt_text += (
             "\n\nAI NOTES INSTRUCTIONS (MANDATORY): "
             "You MUST explicitly address the Add'l Notes in the '## Detailed Audit Report' narrative and/or '## Key Issues & Actions'. "
@@ -852,6 +844,7 @@ async def vision_review(
     prompt_text += IDENTIFIERS_VERIFICATION_PROTOCOL
     prompt_text += CONSISTENCY_GUARD
     prompt_text += DAMAGE_SIDE_GUARD
+    prompt_text += INTACT_CLAIMS_GUARD
     prompt_text += PARTS_SOURCE_GUARD
 
     # --------- EVIDENCE FLAGS ----------
