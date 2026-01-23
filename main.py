@@ -258,19 +258,23 @@ CONSISTENCY_GUARD = (
 
 # --- Damage Side / Orientation Guard (prompt-only; prevents left/right drift) ---
 DAMAGE_SIDE_GUARD = (
-    "\n\nDAMAGE SIDE GUIDANCE (MINIMAL):"
-    "\n- Describe any visible damage on any side (Driver/Passenger or Left/Right) when it is visible in photos."
-    "\n- Do NOT suppress side-level damage descriptions when damage is clearly visible."
-    "\n- If orientation is genuinely unclear, say so and avoid guessing."
-)
-
-# --- Intact/No-Damage Claim Guard (prompt-only; prevents false 'intact' statements) ---
-INTACT_CLAIMS_GUARD = (
-    "\n\nINTACT / NO-DAMAGE CLAIMS (MANDATORY):"
-    "\n- Be conservative when stating a panel/component is 'intact', 'undamaged', or 'no visible damage'."
-    "\n- You may only declare a specific component intact (e.g., 'left headlight intact') if that component is clearly visible in at least one photo you cite."
-    "\n- If visibility is partial/unclear (angle, distance, glare), write 'no obvious damage visible from provided angle' or 'not clearly shown' instead of 'intact'."
-    "\n- Do NOT make side-wide blanket claims ('entire left side undamaged'). If you believe a side shows no obvious damage, name 1–2 panels you actually saw and cite the photo(s)."
+    "\n\nDAMAGE SIDE / ORIENTATION GUARD (MANDATORY):"
+    "\n- Prefer 'Driver Side' / 'Passenger Side' over left/right whenever describing damage location."
+    "\n- If you use left/right, you MUST anchor it to a cited photo that clearly establishes orientation."
+    "\n- ORIENTATION ANCHOR STEP (MANDATORY): Determine driver vs passenger side first."
+    "\n  * Use an interior cockpit photo showing the steering wheel: if steering wheel is on the LEFT, the vehicle is LHD (typical US) and Driver Side = LEFT; Passenger Side = RIGHT."
+    "\n  * If steering wheel is on the RIGHT, the vehicle is RHD and Driver Side = RIGHT; Passenger Side = LEFT."
+    "\n- FRONT-VIEW MAPPING RULE: In a straight-on front photo, 'viewer-right' corresponds to vehicle-LEFT; 'viewer-left' corresponds to vehicle-RIGHT. Use this to confirm which front corner is damaged."
+    "\n- You MUST cite the photo(s) used for the orientation anchor and the front-view mapping when you declare LF/RF or left/right."
+    "\n- Do not declare an impact corner (LF/RF/LR/RR) unless you can cite a photo that clearly shows that corner."
+    "\n- PROHIBITED: You may not write 'left side appears intact/undamaged' or 'right side appears intact/undamaged' unless you first list the panels checked for that side (e.g., LF fender, LF door, rocker; RF fender, RF door, rocker) AND cite at least one photo showing that side."
+    "\n- If wide shots show damage on the driver-side front, you must explicitly discuss LF/driver-front damages "
+    "and list the affected panels/parts in the '## Detailed Audit Report' narrative."
+    "\n- If orientation is uncertain, say 'driver side' or 'passenger side' and explain the uncertainty; do not guess."
+    "\n- You MUST address BOTH sides with MINIMUM COVERAGE: include at least 2 distinct driver/left-side panels and 2 distinct passenger/right-side panels in the narrative (even if undamaged), and cite at least one photo for EACH side."
+    "\n- You may not use a blanket phrase like 'right side appears undamaged' unless you also list the panels you checked (e.g., RF fender, RF door, RR door/quarter, rocker, mirror, wheel) and cite at least one right-side photo."
+    "\n- In '## Detailed Audit Report', include a 1–2 sentence check for BOTH driver/left and passenger/right sides, naming the specific panels checked, and cite at least one photo for EACH side."
+    "\n- If any passenger/right-side damage is visible in any photo, you must explicitly describe it in the narrative and include it in the panel/part list; do not omit it."
 )
 
 # --- Parts Source Guard (prompt-only; prevents OEM vs Aftermarket drift) ---
@@ -554,7 +558,7 @@ async def vision_review(
 ):
     parts: List[Dict[str, Any]] = []
     files_seen: List[str] = []
-    MAX_IMAGES = 24
+    MAX_IMAGES = 40
     used = 0
     pdf_text_fulls: List[str] = []  # full PDF text for supplement detection
 
@@ -562,7 +566,7 @@ async def vision_review(
     MAX_ZIP_FILES = 100
     MAX_ENTRY_SIZE = 15 * 1024 * 1024  # 15 MB
 
-    for f in files:
+    for f in sorted(files, key=lambda _f: ((_f.filename or 'upload').lower())):
         raw = await f.read()
         fname = f.filename or "upload"
         low = fname.lower()
@@ -572,7 +576,7 @@ async def vision_review(
             except Exception as e:
                 files_seen.append(f"{fname} (zip, unreadable: {e})")
                 continue
-            members = [zi for zi in zf.infolist() if not zi.is_dir()]
+            members = sorted([zi for zi in zf.infolist() if not zi.is_dir()], key=lambda _zi: (_zi.filename or '').lower())
             if len(members) > MAX_ZIP_FILES:
                 files_seen.append(f"{fname} (zip, too many entries: {len(members)})")
                 members = members[:MAX_ZIP_FILES]
@@ -755,8 +759,20 @@ async def vision_review(
         + "\n\nANALYSIS LAYOUT (guidance, not strict):\n"
         + DETAIL_TEMPLATES.get(ai_intent, DETAIL_TEMPLATES["comprehensive"])
     )
-    
+    # --- Photo index mapping (stabilizes Photo # references across runs) ---
+    if photo_index:
+        # Keep this concise to avoid blowing the context window
+        max_map = 60
+        mapping_lines = [f"- Photo {i+1}: {name}" for i, name in enumerate(photo_index[:max_map])]
+        if len(photo_index) > max_map:
+            mapping_lines.append(f"- ... ({len(photo_index) - max_map} more)")
+        prompt_text += (
+            "\n\nPHOTO INDEX (use these exact Photo #s; do NOT invent Photo numbers):\n"
+            + "\n".join(mapping_lines)
+        )
+
     if (ai_notes or "").strip():
+
         prompt_text += (
             "\n\nAI NOTES INSTRUCTIONS (MANDATORY): "
             "You MUST explicitly address the Add'l Notes in the '## Detailed Audit Report' narrative and/or '## Key Issues & Actions'. "
@@ -836,7 +852,6 @@ async def vision_review(
     prompt_text += IDENTIFIERS_VERIFICATION_PROTOCOL
     prompt_text += CONSISTENCY_GUARD
     prompt_text += DAMAGE_SIDE_GUARD
-    prompt_text += INTACT_CLAIMS_GUARD
     prompt_text += PARTS_SOURCE_GUARD
 
     # --------- EVIDENCE FLAGS ----------
