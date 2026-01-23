@@ -258,14 +258,20 @@ CONSISTENCY_GUARD = (
 
 # --- Damage Side / Orientation Guard (prompt-only; prevents left/right drift) ---
 DAMAGE_SIDE_GUARD = (
-    "\n\nDAMAGE LOCATION GUIDANCE (MINIMAL, ANTI-OMISSION):"
-    "\n- Describe any visible damage wherever it appears; do not suppress side-level descriptions."
-    "\n- Use Driver/Passenger or Left/Right—whichever is visually obvious from the photos; if unclear, say so and cite the Photo #."
-    "\n- STRICT BAN: Do not use blanket statements like 'entire left side' / 'entire right side' / 'entire rear' showing no damage."
-    "\n- If you state a side has no visible damage, you must (a) cite at least one exterior photo showing that side and (b) name at least 2 specific panels you checked on that side (e.g., 'LF door, LR quarter')."
-    "\n- In the '## Detailed Audit Report' narrative, include one sentence covering Driver/Left exterior and one sentence covering Passenger/Right exterior (damage found OR explicitly 'no visible damage observed on <panels>'), each with Photo # citations."
+    "\n\nDAMAGE SIDE GUIDANCE (MINIMAL):"
+    "\n- Describe any visible damage on any side (Driver/Passenger or Left/Right) when it is visible in photos."
+    "\n- Do NOT suppress side-level damage descriptions when damage is clearly visible."
+    "\n- If orientation is genuinely unclear, say so and avoid guessing."
 )
 
+# --- Intact/No-Damage Claim Guard (prompt-only; prevents false 'intact' statements) ---
+INTACT_CLAIMS_GUARD = (
+    "\n\nINTACT / NO-DAMAGE CLAIMS (MANDATORY):"
+    "\n- Be conservative when stating a panel/component is 'intact', 'undamaged', or 'no visible damage'."
+    "\n- You may only declare a specific component intact (e.g., 'left headlight intact') if that component is clearly visible in at least one photo you cite."
+    "\n- If visibility is partial/unclear (angle, distance, glare), write 'no obvious damage visible from provided angle' or 'not clearly shown' instead of 'intact'."
+    "\n- Do NOT make side-wide blanket claims ('entire left side undamaged'). If you believe a side shows no obvious damage, name 1–2 panels you actually saw and cite the photo(s)."
+)
 
 # --- Parts Source Guard (prompt-only; prevents OEM vs Aftermarket drift) ---
 PARTS_SOURCE_GUARD = (
@@ -294,7 +300,7 @@ SYSTEM_BASE = (
     "'odometer_estimate_only','compliance_score','summary_brief','summary_markdown',"
     "'fraud_markdown','primary_impact','secondary_impact','estimated_costs_markdown',"
     "'conclusion']. "
-    "Use evidence only from the provided inputs. Cite estimate page/line as 'p#/L#' and photos as 'Photo #'. Do not let primary_impact/secondary_impact labels limit the damage descriptions; report all observed damage regardless of impact labels. "
+    "Use evidence only from the provided inputs. Cite estimate page/line as 'p#/L#' and photos as 'Photo #'. "
     "Avoid guessing; if uncertain, say 'N/A' and why. summary_brief must be <= 280 chars (plain text)."
 )
 
@@ -830,6 +836,7 @@ async def vision_review(
     prompt_text += IDENTIFIERS_VERIFICATION_PROTOCOL
     prompt_text += CONSISTENCY_GUARD
     prompt_text += DAMAGE_SIDE_GUARD
+    prompt_text += INTACT_CLAIMS_GUARD
     prompt_text += PARTS_SOURCE_GUARD
 
     # --------- EVIDENCE FLAGS ----------
