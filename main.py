@@ -183,14 +183,14 @@ DETAIL_TEMPLATES = {
         "## Photo-by-Photo Damage Ledger (REQUIRED — one row per photo)\n"
         "| Photo # | View/Side                  | Key Panels/Parts Visible                  | Condition Description (damage or 'No visible damage') |\n"
         "|-------:|----------------------------|-------------------------------------------|-------------------------------------------------------|\n"
-        "- Cover EVERY provided photo. If no damage is obvious from that angle, write 'No obvious damage visible from provided angle' (do NOT claim 'intact' unless clearly shown). Do NOT skip rows or omit photos.\n\n"
+        "- Cover EVERY provided photo. For undamaged views, explicitly write 'No visible damage on [panels/side]'. Do NOT skip rows or omit photos.\n\n"
         "## Per-Side Exterior & Interior Condition (MANDATORY section — use bullets)\n"
-        "- **Front**: bumper, grille, headlights, hood, left fender, right fender — describe each, cite Photo #s, if no damage is obvious from the provided angles, say 'No obvious damage visible from provided angle' (do not declare 'intact' unless clearly visible).\n"
+        "- **Front**: bumper, grille, headlights, hood, left fender, right fender — describe each, cite Photo #s, note damage or 'no visible damage'.\n"
         "- **Driver/Left Side**: fender, doors, quarter panel — describe each, cite Photo #s.\n"
         "- **Passenger/Right Side**: fender, doors, quarter panel — describe each, cite Photo #s.\n"
         "- **Rear**: bumper, tail lights, hatch — describe each, cite Photo #s.\n"
         "- **Roof / Other visible**: any damage or 'no visible damage'.\n"
-        "- **Interior** (if shown): seats, dash, airbags — state deployment/condition; if no issues are obvious, say 'No obvious issues visible from provided angle' or describe issues.\n"
+        "- **Interior** (if shown): seats, dash, airbags — 'no deployment / no visible damage' or describe issues.\n"
         "- Explicitly flag any bilateral (both sides) or secondary damage, even if minor or partial in angle.\n\n"
         "## Detailed Audit Report (narrative)\n"
         "- Synthesize the per-side findings into a continuous 10–15 sentence professional narrative.\n"
@@ -260,6 +260,14 @@ CONSISTENCY_GUARD = (
     "\n- If legibility is the issue, explicitly say 'Present — not clearly legible' and explain why (glare/blur/angle), and request a precise retake rather than marking it missing."
     "\n- Before finalizing, re-scan your output: confirm every referenced Photo # matches the content described (e.g., do not cite an Odometer photo as the point-of-impact photo). Correct any mismatches."
 )
+
+# --- No-intact-if-damaged rule (prompt-only; prevents false 'intact' claims) ---
+NO_INTACT_IF_DAMAGED_RULE = (
+    "\n\nNO 'INTACT' IF DAMAGE ELSEWHERE RULE:"
+    "\n- If any photo indicates damage to a panel/component, do NOT state that same panel/component is intact/undamaged elsewhere."
+    "\n- If different photos conflict, label it as 'Conflicting views' and recommend closer inspection; cite BOTH photo references."
+)
+
 
 # --- Damage Side / Orientation Guard (prompt-only; prevents left/right drift) ---
 DAMAGE_SIDE_GUARD = (
@@ -812,6 +820,8 @@ async def vision_review(
             "Assess provided photos and do not mark required photos as missing unless they are truly absent."
         )
 
+    prompt_text += NO_INTACT_IF_DAMAGED_RULE
+
     if ai_intent == "damage_report_from_photos":
         prompt_text += (
             "\n\nPHOTOS-ONLY MODE: Set 'compliance_score' to 'N/A'. "
@@ -855,13 +865,8 @@ async def vision_review(
     prompt_text += IDENTIFIERS_VERIFICATION_PROTOCOL
     prompt_text += CONSISTENCY_GUARD
     prompt_text += DAMAGE_SIDE_GUARD
+    prompt_text += INTACT_CLAIMS_GUARD
     prompt_text += BILATERAL_DAMAGE_MANDATE
-    prompt_text += (
-        "\n\nDAMAGE PRIORITY RULE (MANDATORY):"
-        "\n- If damage is visible on BOTH sides in any photo, you MUST describe BOTH sides."
-        "\n- Do NOT default any side/panel to 'no visible damage' when that side/panel appears in any photo with visible distortion, cracking, scrape, deformation, misalignment, or refinish cues."
-        "\n- If you are uncertain, state 'possible damage visible' and explain what is seen; do not declare it intact."
-    )
     prompt_text += PARTS_SOURCE_GUARD
 
     # --------- EVIDENCE FLAGS ----------
@@ -1681,7 +1686,73 @@ async def vision_review(
     except Exception:
         pass
 
-    # -----------------------
+    
+    # --- Panel contradiction resolver (minimal; prevents "intact/no visible damage" when same panel is described as damaged elsewhere) ---
+    def _resolve_panel_contradictions(narr: str) -> str:
+        if not narr:
+            return narr
+        try:
+            nl = narr.lower()
+            damage_re = re.compile(r"\b(damage|damaged|crush|crushed|dent|dented|crease|creased|broken|fracture|fractured|torn|tear|scrape|scuff|gouge|bent|buckl|misalign|displace|missing|crack|cracked|hole|puncture|caved|collapsed)\b", re.I)
+            intact_re = re.compile(r"(no visible damage|appears? intact|undamaged|no damage)\b", re.I)
+
+            # Common panel/component phrases with optional side modifiers
+            part_re = re.compile(
+                r"\b((?:left|right|driver|passenger)\s+(?:front|rear)?\s*(?:bumper|fender|door|quarter(?:\s*panel)?|headlight|lamp|hood|grille|mirror|rocker|wheel|rim|tire|pillar|roof|trunk|liftgate|tailgate|taillight))\b",
+                re.I
+            )
+            abbr_re = re.compile(r"\b(LF|RF|LR|RR)\s+(?:bumper|fender|door|quarter|headlight|hood|grille|mirror|rocker)\b", re.I)
+
+            def _panel_has_damage(panel: str) -> bool:
+                p = panel.lower()
+                start = 0
+                while True:
+                    i = nl.find(p, start)
+                    if i == -1:
+                        return False
+                    w0 = max(0, i - 140)
+                    w1 = min(len(nl), i + len(p) + 140)
+                    if damage_re.search(nl[w0:w1]):
+                        return True
+                    start = i + len(p)
+
+            # Split into sentences conservatively
+            sentences = re.split(r"(?<=[\.\!\?])\s+", narr)
+            changed = False
+            out = []
+            for s in sentences:
+                if not s or not intact_re.search(s):
+                    out.append(s)
+                    continue
+                panels = set([p.strip().lower() for p in part_re.findall(s)] + [p.strip().lower() for p in abbr_re.findall(s)])
+                if not panels:
+                    out.append(s)
+                    continue
+                # If any panel mentioned in an "intact/no damage" sentence is also described as damaged elsewhere, rewrite this sentence.
+                conflict_panels = [p for p in panels if _panel_has_damage(p)]
+                if conflict_panels:
+                    # preserve trailing photo citation parentheses if present
+                    cite = ""
+                    m_cite = re.search(r"(\((?:Photos?|photo)\s*[^)]*\))\s*$", s, re.I)
+                    if m_cite:
+                        cite = " " + m_cite.group(1).strip()
+                    panel_list = ", ".join(sorted(set(conflict_panels)))
+                    out.append(f"Conflicting views across photos: at least one image suggests damage to {panel_list}; avoid stating it is intact/no-damage and recommend closer inspection.{cite}")
+                    changed = True
+                else:
+                    out.append(s)
+            return " ".join([x for x in out if x is not None]).strip() if changed else narr
+        except Exception:
+            return narr
+
+    try:
+        _sm = (result.get("summary_markdown") or "")
+        if _sm:
+            result["summary_markdown"] = _resolve_panel_contradictions(_sm)
+    except Exception:
+        pass
+
+# -----------------------
     # PDF helpers
     # -----------------------
     def _pdf_sanitize(text: str, max_token_len: int = 60) -> str:
