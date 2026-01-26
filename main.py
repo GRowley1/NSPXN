@@ -184,7 +184,7 @@ DETAIL_TEMPLATES = {
         "| Photo # | View/Side                  | Key Panels/Parts Visible                  | Condition Description (damage or 'No obvious damage visible from angle') |\n"
         "|-------:|----------------------------|-------------------------------------------|-------------------------------------------------------|\n"
         "- Cover EVERY provided photo. For undamaged views, explicitly write 'No obvious damage visible from this angle on [panels/side]'. Do NOT skip rows or omit photos.\n\n"
-        "## Per-Side Exterior & Interior Condition (MANDATORY section — use bullets)\n"
+        "## Per-Side Exterior & Interior Condition (MANDATORY section — use bullets)\n"        "Include a \"Side Checks\" subsection EXACTLY in this format (always include BOTH bullets):\n"        "- **Driver/Left Side**: <what is visible on left/driver side; cite at least one Photo #>\n"        "- **Passenger/Right Side**: <what is visible on right/passenger side; cite at least one Photo #>\n"        "\n"        "Rules:\n"        "- If a side is shown but looks clean, say \"No obvious damage visible from this angle\" (do NOT say \"no visible damage\" or \"intact\").\n"        "- If a side is NOT shown clearly, say \"Not clearly shown in provided photos; cannot assess\" (and do NOT guess).\n"        "\n"
         "- **Front**: bumper, grille, headlights, hood, left fender, right fender — describe each, cite Photo #s, note damage or 'no obvious damage visible from this angle'.\n"
         "- **Driver/Left Side**: fender, doors, quarter panel — describe each, cite Photo #s.\n"
         "- **Passenger/Right Side**: fender, doors, quarter panel — describe each, cite Photo #s.\n"
@@ -1139,6 +1139,20 @@ async def vision_review(
     except Exception:
         pass
 
+
+    # --- Side Checks enforcement (photos-only): ensure Driver/Left Side bullet exists if Passenger/Right Side exists ---
+    try:
+        if ai_intent == "damage_report_from_photos":
+            _sm_sc = (result.get("summary_markdown") or "")
+            if ("**Passenger/Right Side**" in _sm_sc) and ("**Driver/Left Side**" not in _sm_sc):
+                result["summary_markdown"] = _sm_sc.replace(
+                    "**Passenger/Right Side**",
+                    "**Driver/Left Side**: Not clearly addressed in model output; review left/driver-side photos and add notes if needed.\n- **Passenger/Right Side**",
+                    1
+                )
+    except Exception:
+        pass
+
     # --- Score ↔ narrative synchronization ---
     def _extract_score_from_text(text: str):
         if not text:
@@ -2014,3 +2028,4 @@ async def download_pdf(file_number: Optional[str] = None, filename: Optional[str
         return JSONResponse(status_code=404, content={"detail": "Not Found"})
     latest = max(candidates, key=lambda p: os.path.getmtime(p))
     return FileResponse(path=latest, media_type="application/pdf", filename=os.path.basename(latest))
+
