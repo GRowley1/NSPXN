@@ -1765,6 +1765,44 @@ async def vision_review(
     except Exception:
         pass
 
+
+    # --- Photos-only cleanup: remove risky "no damage/intact" claims for specific front-corner panels ---
+    # Rationale: In photos-only mode, the model can mis-orient left/right; it's safer to omit
+    # "no obvious/visible damage" declarations for left/right front fender/bumper/headlamp unless clearly supported.
+    def _scrub_front_corner_no_damage_claims(text: str) -> str:
+        if not text:
+            return text
+        t = str(text)
+
+        # Remove bullet-lines that assert "no damage" / "no obvious damage" on specific front-corner components.
+        bad_line = re.compile(
+            r"(?im)^\s*[-*]\s*\*\*(?:Driver/Left Side|Passenger/Right Side)\*\*:\s*.*\b(?:left|right)\s+front\b.*\b(?:fender|bumper|headlight|lamp|corner)\b.*\b(?:no\s+obvious\s+damage|no\s+visible\s+damage|undamaged|intact)\b.*$"
+        )
+        t = re.sub(bad_line, "", t)
+
+        bad_line2 = re.compile(
+            r"(?im)^\s*[-*]\s*(?:left|right)\s+front\b.*\b(?:fender|bumper|headlight|lamp|corner)\b.*\b(?:no\s+obvious\s+damage|no\s+visible\s+damage|undamaged|intact)\b.*$"
+        )
+        t = re.sub(bad_line2, "", t)
+
+        # Remove sentence-level claims inside paragraphs.
+        bad_sent = re.compile(
+            r"(?is)\b(?:left|right)\s+front\b[^.]{0,120}\b(?:fender|bumper|headlight|lamp|corner)\b[^.]{0,120}\b(?:no\s+obvious\s+damage|no\s+visible\s+damage|undamaged|intact)\b[^.]{0,80}\."
+        )
+        t = re.sub(bad_sent, "", t)
+
+        # Clean up spacing.
+        t = re.sub(r"\n{3,}", "\n\n", t).strip()
+        return t
+
+    try:
+        if ai_intent == "damage_report_from_photos":
+            _sm2 = (result.get("summary_markdown") or "")
+            if _sm2:
+                result["summary_markdown"] = _scrub_front_corner_no_damage_claims(_sm2)
+    except Exception:
+        pass
+
 # -----------------------
     # PDF helpers
     # -----------------------
