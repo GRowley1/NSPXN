@@ -263,11 +263,10 @@ CONSISTENCY_GUARD = (
 
 # --- No-intact-if-damaged rule (prompt-only; prevents false 'intact' claims) ---
 NO_INTACT_IF_DAMAGED_RULE = (
-    "\n\nNO 'INTACT' IF DAMAGE ELSEWHERE RULE:"
-    "\n- If any photo indicates damage to a panel/component, do NOT state that same panel/component is intact/undamaged elsewhere."
-    "\n- If different photos conflict, label it as 'Conflicting views' and recommend closer inspection; cite BOTH photo references."
+    "\n\nNO 'INTACT/NO-DAMAGE' OVERRIDE RULE (DO NOT PRINT CONFLICT WARNINGS):"
+    "\n- If any photo indicates damage to a panel/component, you may NOT state that same panel/component is intact/undamaged/no visible damage anywhere."
+    "\n- If photos appear inconsistent, DO NOT write a conflict warning; instead, remove/avoid the intact/no-damage claim and describe only what appears damaged with citations."
 )
-
 
 # --- Damage Side / Orientation Guard (prompt-only; prevents left/right drift) ---
 DAMAGE_SIDE_GUARD = (
@@ -1736,8 +1735,7 @@ async def vision_review(
                     m_cite = re.search(r"(\((?:Photos?|photo)\s*[^)]*\))\s*$", s, re.I)
                     if m_cite:
                         cite = " " + m_cite.group(1).strip()
-                    panel_list = ", ".join(sorted(set(conflict_panels)))
-                    out.append(f"Conflicting views across photos: at least one image suggests damage to {panel_list}; avoid stating it is intact/no-damage and recommend closer inspection.{cite}")
+                    out.append(None)  # conflict detected: drop intact/no-damage sentence (do not print conflict notes)
                     changed = True
                 else:
                     out.append(s)
