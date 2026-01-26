@@ -181,16 +181,16 @@ DETAIL_TEMPLATES = {
         "- Primary Impact: <main area(s)>\n"
         "- Secondary / Bilateral Impact: <any additional areas or 'None clearly visible'>\n\n"
         "## Photo-by-Photo Damage Ledger (REQUIRED — one row per photo)\n"
-        "| Photo # | View/Side                  | Key Panels/Parts Visible                  | Condition Description (damage or 'No visible damage') |\n"
+        "| Photo # | View/Side                  | Key Panels/Parts Visible                  | Condition Description (damage or 'No obvious damage visible from angle') |\n"
         "|-------:|----------------------------|-------------------------------------------|-------------------------------------------------------|\n"
-        "- Cover EVERY provided photo. For undamaged views, explicitly write 'No visible damage on [panels/side]'. Do NOT skip rows or omit photos.\n\n"
+        "- Cover EVERY provided photo. For undamaged views, explicitly write 'No obvious damage visible from this angle on [panels/side]'. Do NOT skip rows or omit photos.\n\n"
         "## Per-Side Exterior & Interior Condition (MANDATORY section — use bullets)\n"
-        "- **Front**: bumper, grille, headlights, hood, left fender, right fender — describe each, cite Photo #s, note damage or 'no visible damage'.\n"
+        "- **Front**: bumper, grille, headlights, hood, left fender, right fender — describe each, cite Photo #s, note damage or 'no obvious damage visible from this angle'.\n"
         "- **Driver/Left Side**: fender, doors, quarter panel — describe each, cite Photo #s.\n"
         "- **Passenger/Right Side**: fender, doors, quarter panel — describe each, cite Photo #s.\n"
         "- **Rear**: bumper, tail lights, hatch — describe each, cite Photo #s.\n"
-        "- **Roof / Other visible**: any damage or 'no visible damage'.\n"
-        "- **Interior** (if shown): seats, dash, airbags — 'no deployment / no visible damage' or describe issues.\n"
+        "- **Roof / Other visible**: any damage or 'no obvious damage visible from this angle'.\n"
+        "- **Interior** (if shown): seats, dash, airbags — 'no deployment / no obvious damage visible from this angle' or describe issues.\n"
         "- Explicitly flag any bilateral (both sides) or secondary damage, even if minor or partial in angle.\n\n"
         "## Detailed Audit Report (narrative)\n"
         "- Synthesize the per-side findings into a continuous 10–15 sentence professional narrative.\n"
@@ -819,7 +819,7 @@ async def vision_review(
             "Assess provided photos and do not mark required photos as missing unless they are truly absent."
         )
 
-    prompt_text += NO_INTACT_IF_DAMAGED_RULE
+    # (removed duplicate NO_INTACT_IF_DAMAGED_RULE append; applied later with other guards)
 
     if ai_intent == "damage_report_from_photos":
         prompt_text += (
