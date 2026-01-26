@@ -421,7 +421,7 @@ def _add_bytes(parts: List[Dict[str,Any]], files_seen: List[str], photo_index: O
             ocr_collected = []
             for idx, im in enumerate(pages[:max_images - used]):
                 b = io.BytesIO()
-                im.save(b, format="JPEG", quality=75, optimize=True)
+                im.save(b, format="JPEG", quality=65, optimize=True)
                 parts.append(_image_part_from_bytes(b.getvalue()))
                 used += 1
                 if photo_index is not None:
@@ -441,8 +441,8 @@ def _add_bytes(parts: List[Dict[str,Any]], files_seen: List[str], photo_index: O
         try:
             im = Image.open(io.BytesIO(raw)).convert("RGB")
             im_ref = im.copy()
-            im.thumbnail((1800,1800))
-            b = io.BytesIO(); im.save(b, format="JPEG", quality=75, optimize=True)
+            im.thumbnail((1400,1400))
+            b = io.BytesIO(); im.save(b, format="JPEG", quality=65, optimize=True)
             raw = b.getvalue()
         except Exception:
             im_ref = None
@@ -577,7 +577,7 @@ async def vision_review(
     parts: List[Dict[str, Any]] = []
     files_seen: List[str] = []
     photo_index: List[str] = []
-    MAX_IMAGES = 24
+    MAX_IMAGES = 48
     used = 0
     pdf_text_fulls: List[str] = []  # full PDF text for supplement detection
 
