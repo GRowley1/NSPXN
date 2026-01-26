@@ -276,19 +276,19 @@ DAMAGE_SIDE_GUARD = (
     "\n- If orientation is genuinely unclear, say so and avoid guessing."
 )
 
-# --- Intact/No-Damage Claim Guard (prompt-only; prevents false 'intact' statements) ---
-INTACT_CLAIMS_GUARD = (
-    "\n\nINTACT / NO-DAMAGE CLAIMS (MANDATORY):"
-    "\n- Be conservative when stating a panel/component is 'intact', 'undamaged', or 'no visible damage'."
-    "\n- You may only declare a specific component intact (e.g., 'left headlight intact') if that component is clearly visible in at least one photo you cite."
-    "\n- If visibility is partial/unclear (angle, distance, glare), write 'no obvious damage visible from provided angle' or 'not clearly shown' instead of 'intact'."
-    "\n- Do NOT make side-wide blanket claims ('entire left side undamaged'). If you believe a side shows no obvious damage, name 1–2 panels you actually saw and cite the photo(s)."
-)
 BILATERAL_DAMAGE_MANDATE = (
     "\n\nBILATERAL / SECONDARY DAMAGE MANDATE (STRICT):\n"
-    "- In frontal impacts, ALWAYS explicitly inspect and report condition of BOTH left and right front fenders, even if damage appears asymmetric.\n"
+    "- In frontal impacts, explicitly address BOTH front corners (driver-side and passenger-side if clear; otherwise ‘front corner A/B’ or ‘front corner (viewed)’)\n"
     "- If a photo shows partial view of the opposite side with visible distortion/misalignment/crush, describe it — do NOT default to 'intact' or 'no damage' without citing clear evidence.\n"
     "- Contradicting visible photo evidence (e.g. calling a crushed fender 'intact') is forbidden."
+)
+
+FRONT_CORNER_ORIENTATION_GUARD = (
+    "\n\nFRONT CORNER ORIENTATION (MANDATORY, MINIMAL):"
+    "\n- Do NOT label front damage as LF/RF (or 'left/right headlight/fender') unless the photo angle clearly establishes the vehicle orientation."
+    "\n- If you have a straight-on FRONT photo: viewer-right corresponds to vehicle-LEFT; viewer-left corresponds to vehicle-RIGHT."
+    "\n- If orientation is not clear, use neutral wording: 'front corner' / 'front headlamp area' instead of left/right."
+    "\n- You may NOT state 'left front fender/headlight intact' or 'right front fender/headlight intact' unless orientation is established; otherwise say 'not clearly shown from this angle.'"
 )
 
 # --- Parts Source Guard (prompt-only; prevents OEM vs Aftermarket drift) ---
@@ -863,8 +863,9 @@ async def vision_review(
 
     prompt_text += IDENTIFIERS_VERIFICATION_PROTOCOL
     prompt_text += CONSISTENCY_GUARD
+    prompt_text += NO_INTACT_IF_DAMAGED_RULE
     prompt_text += DAMAGE_SIDE_GUARD
-    prompt_text += INTACT_CLAIMS_GUARD
+    prompt_text += FRONT_CORNER_ORIENTATION_GUARD
     prompt_text += BILATERAL_DAMAGE_MANDATE
     prompt_text += PARTS_SOURCE_GUARD
 
