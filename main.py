@@ -179,23 +179,12 @@ DETAIL_TEMPLATES = {
         "- File #: <value or N/A>\n"
         "- Odometer (if visible): <value or 'Present — not clearly legible'>\n"
         "- Primary Impact: <main area(s)>\n"
-        "- Secondary Impact: <any additional areas or 'None clearly visible'>\n\n"
+        "- Secondary / Bilateral Impact: <any additional areas or 'None clearly visible'>\n\n"
         "## Photo-by-Photo Damage Ledger (REQUIRED — one row per photo)\n"
         "| Photo # | View/Side                  | Key Panels/Parts Visible                  | Condition Description (damage or 'No obvious damage visible from angle') |\n"
         "|-------:|----------------------------|-------------------------------------------|-------------------------------------------------------|\n"
         "- Cover EVERY provided photo. For undamaged views, explicitly write 'No obvious damage visible from this angle on [panels/side]'. Do NOT skip rows or omit photos.\n\n"
-        "## Per-Side Exterior & Interior Condition (MANDATORY section — use bullets)\n"
-        "Include a \"Side Checks\" subsection EXACTLY in this format (always include BOTH bullets):\n"
-        "- **Driver/Left Side**: <what is visible on left/driver side; cite at least one Photo #>\n"
-        "- **Passenger/Right Side**: <what is visible on right/passenger side; cite at least one Photo #>\n"
-        "\nRules:\n"
-        "- If a side is shown but looks clean, say \"No obvious damage visible from this angle\" "
-        "(do NOT say \"no visible damage\" or \"intact\").\n"
-        "- If a side is NOT shown clearly, say \"Not clearly shown in provided photos; cannot assess\" "
-        "(and do NOT guess).\n"
-        "- Do NOT make blanket statements like \"both sides show no visible damage\". "
-        "You must address Driver/Left and Passenger/Right separately in Side Checks with citations.\n"
-
+        "## Per-Side Exterior & Interior Condition (MANDATORY section — use bullets)\n"        "Include a \"Side Checks\" subsection EXACTLY in this format (always include BOTH bullets):\n"        "- **Driver/Left Side**: <what is visible on left/driver side; cite at least one Photo #>\n"        "- **Passenger/Right Side**: <what is visible on right/passenger side; cite at least one Photo #>\n"        "\n"        "Rules:\n"        "- If a side is shown but looks clean, say \"No obvious damage visible from this angle\" (do NOT say \"no visible damage\" or \"intact\").\n"        "- If a side is NOT shown clearly, say \"Not clearly shown in provided photos; cannot assess\" (and do NOT guess).\n"        "\n"
         "- **Front**: bumper, grille, headlights, hood, left fender, right fender — describe each, cite Photo #s, note damage or 'no obvious damage visible from this angle'.\n"
         "- **Driver/Left Side**: fender, doors, quarter panel — describe each, cite Photo #s.\n"
         "- **Passenger/Right Side**: fender, doors, quarter panel — describe each, cite Photo #s.\n"
@@ -1712,7 +1701,40 @@ async def vision_review(
         pass
 
     
-    # --- Panel contradiction resolver (minimal; prevents "intact/no visible damage" when same panel is described as damaged elsewhere) ---
+    
+    # --- Airbag deployment contradiction resolver (silent; prevents "no deployment" when deployment is also stated) ---
+    # If any portion of the output indicates an airbag is deployed, remove any conflicting "no airbag deployment" claims.
+    def _resolve_airbag_contradictions(text: str) -> str:
+        if not text:
+            return text
+        try:
+            t = str(text)
+            tl = t.lower()
+
+            pos = bool(re.search(r"(?i)\b(airbag|air\s*bag)\b[^.\n]{0,60}\b(deploy(?:ed|ment)|deployed)\b", t)) or \
+                  bool(re.search(r"(?i)\b(deployed)\b[^.\n]{0,60}\b(airbag|air\s*bag)\b", t))
+            neg = bool(re.search(r"(?i)\bno\s+(airbag|air\s*bag)\s+deployment\b|\bno\s+airbags\s+deployed\b|\bwithout\s+airbag\s+deployment\b", t))
+
+            if not (pos and neg):
+                return t
+
+            # Remove sentence(s) that assert no deployment.
+            sentences = re.split(r"(?<=[\.\!\?])\s+", t)
+            keep = []
+            for s in sentences:
+                if re.search(r"(?i)\bno\s+(airbag|air\s*bag)\s+deployment\b|\bno\s+airbags\s+deployed\b|\bwithout\s+airbag\s+deployment\b", s):
+                    continue
+                keep.append(s)
+            out = " ".join(keep).strip()
+
+            # Also remove any standalone bullet/line variants.
+            out = re.sub(r"(?im)^\s*[-*]\s*.*\bno\s+(airbag|air\s*bag)\s+deployment\b.*$\n?", "", out)
+            out = re.sub(r"\n{3,}", "\n\n", out).strip()
+            return out
+        except Exception:
+            return text
+
+# --- Panel contradiction resolver (minimal; prevents "intact/no visible damage" when same panel is described as damaged elsewhere) ---
     def _resolve_panel_contradictions(narr: str) -> str:
         if not narr:
             return narr
@@ -1776,109 +1798,17 @@ async def vision_review(
     except Exception:
         pass
 
-
-    
-    # --- Silent Left/Right Front-Corner Swap Gate (photos-only; fixes LF/RF drift) ---
-    # Purpose: If the model labels the primary front-corner damage as "right/front-right" but also claims the
-    # opposite "left/front-left" corner is clean/intact/no-damage, this commonly indicates a left/right orientation flip.
-    # This gate silently swaps left/right *front-corner* labels in the output text to align the narrative internally.
-    # It prints NOTHING and only triggers on a tight contradiction pattern.
-    def _silent_lr_front_corner_swap(text: str) -> str:
-        if not text:
-            return text
-        t = str(text)
-
-        tl = t.lower()
-
-        damage_re = re.compile(r"\b(damage|damaged|crush|crushed|dent|dented|crease|creased|broken|fracture|fractured|torn|tear|scrape|scuff|gouge|bent|buckl|misalign|displace|missing|crack|cracked|hole|puncture|caved|collapsed)\b", re.I)
-        nodmg_re = re.compile(r"\b(no\s+obvious\s+damage|no\s+visible\s+damage|undamaged|appears?\s+intact|intact)\b", re.I)
-
-        # Windowed checks for "right-front damaged" AND "left-front no-damage"
-        def _window_hit(anchor: str, rx: re.Pattern, window: int = 140) -> bool:
-            a = anchor.lower()
-            start = 0
-            while True:
-                i = tl.find(a, start)
-                if i == -1:
-                    return False
-                w0 = max(0, i - window)
-                w1 = min(len(tl), i + len(a) + window)
-                if rx.search(tl[w0:w1]):
-                    return True
-                start = i + len(a)
-
-        right_dmg = (
-            _window_hit("front right", damage_re) or
-            _window_hit("right front", damage_re) or
-            _window_hit("rf ", damage_re) or
-            _window_hit("passenger/right", damage_re) or
-            _window_hit("passenger side", damage_re)
-        )
-        left_clean = (
-            _window_hit("front left", nodmg_re) or
-            _window_hit("left front", nodmg_re) or
-            _window_hit("lf ", nodmg_re) or
-            _window_hit("driver/left", nodmg_re) or
-            _window_hit("driver side", nodmg_re)
-        )
-
-        if not (right_dmg and left_clean):
-            return t
-
-        # If the text also explicitly describes LEFT-front as damaged, do NOT swap (avoid harming true bilateral cases).
-        left_dmg = _window_hit("front left", damage_re) or _window_hit("left front", damage_re) or _window_hit("lf ", damage_re)
-        if left_dmg:
-            return t
-
-        # Perform a safe swap using temporary tokens (front-corner components only).
-        swaps = [
-            (r"\bleft\s+front\b", "__TMP_RF__"),
-            (r"\bright\s+front\b", "__TMP_LF__"),
-            (r"\bfront\s+left\b", "__TMP_FR__"),
-            (r"\bfront\s+right\b", "__TMP_FL__"),
-            (r"\bLF\b", "__TMP_RF_ABBR__"),
-            (r"\bRF\b", "__TMP_LF_ABBR__"),
-            (r"\bleft\s+(headlight|lamp)\b", "__TMP_RHL__"),
-            (r"\bright\s+(headlight|lamp)\b", "__TMP_LHL__"),
-            (r"\bleft\s+fender\b", "__TMP_RFENDER__"),
-            (r"\bright\s+fender\b", "__TMP_LFENDER__"),
-            (r"\bleft\s+bumper\b", "__TMP_RBUMPER__"),
-            (r"\bright\s+bumper\b", "__TMP_LBUMPER__"),
-            (r"\bleft\s+corner\b", "__TMP_RCORNER__"),
-            (r"\bright\s+corner\b", "__TMP_LCORNER__"),
-        ]
-        for pat, rep in swaps:
-            t = re.sub(pat, rep, t, flags=re.IGNORECASE)
-
-        # Swap back
-        t = t.replace("__TMP_RF__", "right front")
-        t = t.replace("__TMP_LF__", "left front")
-        t = t.replace("__TMP_FR__", "front right")
-        t = t.replace("__TMP_FL__", "front left")
-        t = t.replace("__TMP_RF_ABBR__", "RF")
-        t = t.replace("__TMP_LF_ABBR__", "LF")
-        t = t.replace("__TMP_RHL__", "right headlight")
-        t = t.replace("__TMP_LHL__", "left headlight")
-        t = t.replace("__TMP_RFENDER__", "right fender")
-        t = t.replace("__TMP_LFENDER__", "left fender")
-        t = t.replace("__TMP_RBUMPER__", "right bumper")
-        t = t.replace("__TMP_LBUMPER__", "left bumper")
-        t = t.replace("__TMP_RCORNER__", "right corner")
-        t = t.replace("__TMP_LCORNER__", "left corner")
-
-        return t
-
+    # --- Airbag deployment contradiction resolver (silent) ---
     try:
-        if ai_intent == "damage_report_from_photos":
-            # Apply to all user-facing narrative fields that can carry LF/RF claims.
-            result["summary_markdown"] = _silent_lr_front_corner_swap(result.get("summary_markdown") or "")
-            result["primary_impact"] = _silent_lr_front_corner_swap(result.get("primary_impact") or "")
-            result["secondary_impact"] = _silent_lr_front_corner_swap(result.get("secondary_impact") or "")
-            result["conclusion"] = _silent_lr_front_corner_swap(result.get("conclusion") or "")
+        for _k in ("summary_markdown", "summary_brief", "conclusion"):
+            if result.get(_k):
+                result[_k] = _resolve_airbag_contradictions(result.get(_k) or "")
     except Exception:
         pass
 
-# --- Photos-only cleanup: remove risky "no damage/intact" claims for specific front-corner panels ---
+
+
+    # --- Photos-only cleanup: remove risky "no damage/intact" claims for specific front-corner panels ---
     # Rationale: In photos-only mode, the model can mis-orient left/right; it's safer to omit
     # "no obvious/visible damage" declarations for left/right front fender/bumper/headlamp unless clearly supported.
     def _scrub_front_corner_no_damage_claims(text: str) -> str:
