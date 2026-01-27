@@ -184,15 +184,17 @@ DETAIL_TEMPLATES = {
         "| Photo # | View/Side                  | Key Panels/Parts Visible                  | Condition Description (damage or 'No obvious damage visible from angle') |\n"
         "|-------:|----------------------------|-------------------------------------------|-------------------------------------------------------|\n"
         "- Cover EVERY provided photo. For undamaged views, explicitly write 'No obvious damage visible from this angle on [panels/side]'. Do NOT skip rows or omit photos.\n\n"
-        "## Per-Side Exterior & Interior Condition (MANDATORY section — use bullets)
-Include a "Side Checks" subsection EXACTLY in this format (always include BOTH bullets):
-- **Driver/Left Side**: <what is visible on left/driver side; cite at least one Photo #>
-- **Passenger/Right Side**: <what is visible on right/passenger side; cite at least one Photo #>
-
-Rules:
-- If a side is shown but looks clean, say "No obvious damage visible from this angle" (do NOT say "no visible damage" or "intact").
-- If a side is NOT shown clearly, say "Not clearly shown in provided photos; cannot assess" (and do NOT guess).
-- Do NOT make blanket statements like "both sides show no visible damage". You must address Driver/Left and Passenger/Right separately in Side Checks with citations.
+        "## Per-Side Exterior & Interior Condition (MANDATORY section — use bullets)\n"
+        "Include a \"Side Checks\" subsection EXACTLY in this format (always include BOTH bullets):\n"
+        "- **Driver/Left Side**: <what is visible on left/driver side; cite at least one Photo #>\n"
+        "- **Passenger/Right Side**: <what is visible on right/passenger side; cite at least one Photo #>\n"
+        "\nRules:\n"
+        "- If a side is shown but looks clean, say \"No obvious damage visible from this angle\" "
+        "(do NOT say \"no visible damage\" or \"intact\").\n"
+        "- If a side is NOT shown clearly, say \"Not clearly shown in provided photos; cannot assess\" "
+        "(and do NOT guess).\n"
+        "- Do NOT make blanket statements like \"both sides show no visible damage\". "
+        "You must address Driver/Left and Passenger/Right separately in Side Checks with citations.\n"
 
 - **Front**: bumper, grille, headlights, hood, left fender, right fender — describe each, cite Photo #s, note damage or 'no obvious damage visible from this angle'.\n"
         "- **Driver/Left Side**: fender, doors, quarter panel — describe each, cite Photo #s.\n"
