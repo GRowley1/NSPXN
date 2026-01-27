@@ -196,7 +196,7 @@ DETAIL_TEMPLATES = {
         "- Do NOT make blanket statements like \"both sides show no visible damage\". "
         "You must address Driver/Left and Passenger/Right separately in Side Checks with citations.\n"
 
-- **Front**: bumper, grille, headlights, hood, left fender, right fender — describe each, cite Photo #s, note damage or 'no obvious damage visible from this angle'.\n"
+        "- **Front**: bumper, grille, headlights, hood, left fender, right fender — describe each, cite Photo #s, note damage or 'no obvious damage visible from this angle'.\n"
         "- **Driver/Left Side**: fender, doors, quarter panel — describe each, cite Photo #s.\n"
         "- **Passenger/Right Side**: fender, doors, quarter panel — describe each, cite Photo #s.\n"
         "- **Rear**: bumper, tail lights, hatch — describe each, cite Photo #s.\n"
@@ -2178,5 +2178,4 @@ async def download_pdf(file_number: Optional[str] = None, filename: Optional[str
         return JSONResponse(status_code=404, content={"detail": "Not Found"})
     latest = max(candidates, key=lambda p: os.path.getmtime(p))
     return FileResponse(path=latest, media_type="application/pdf", filename=os.path.basename(latest))
-
 
