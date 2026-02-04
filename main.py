@@ -291,16 +291,6 @@ FRONT_CORNER_ORIENTATION_GUARD = (
     "\n- You may NOT state 'left front fender/headlight intact' or 'right front fender/headlight intact' unless orientation is established; otherwise say 'not clearly shown from this angle.'"
 )
 
-# --- Neutral side labeling unless orientation is proven (prompt-only; avoids wrong left/right) ---
-NEUTRAL_SIDES_UNLESS_PROVEN_GUARD = (
-    "\n\nSIDE LABELING RULE (CRITICAL):"
-    "\n- Do NOT use 'left/right', 'LF/RF/LR/RR', or 'driver/passenger' side labels unless you can cite a photo that PROVES orientation "
-    "(e.g., steering wheel clearly visible OR an open driver door/door-jamb VIN label that establishes the driver side)."
-    "\n- If orientation is not proven, use neutral terms like 'front corner', 'rear corner', 'front headlamp area', 'fender area', 'one side', or 'opposite side' "
-    "and describe the damage without side labels."
-    "\n- Never guess side labels from a 3/4 view or mirrored image; if uncertain, stay neutral."
-)
-
 # --- Parts Source Guard (prompt-only; prevents OEM vs Aftermarket drift) ---
 PARTS_SOURCE_GUARD = (
     "\n\nPARTS SOURCE GUARD (MANDATORY):"
@@ -420,39 +410,7 @@ def _maybe_ocr_image_text(im: Image.Image) -> str:
     except Exception:
         return ""
 
-# --- Odometer OCR extractor (contained; used to prevent false 'odometer not visible' statements) ---
-def _extract_odometer_from_ocr(txt: str) -> Optional[str]:
-    """Return normalized mileage string like '72261 mi' if detectable from OCR text."""
-    if not txt:
-        return None
-    t = " ".join(str(txt).replace("\n", " ").replace("\r", " ").split())
-    tl = t.lower()
-
-    # Prefer patterns that explicitly include units.
-    m = re.search(r"\b(\d{1,3}(?:,\d{3}){1,2}|\d{4,7})\s*(mi|miles|km|kilometers)\b", tl, re.IGNORECASE)
-    if m:
-        num = m.group(1).replace(",", "")
-        unit = m.group(2).lower()
-        unit = "mi" if unit.startswith("mi") else ("km" if unit.startswith("km") else unit)
-        return f"{num} {unit}"
-
-    # If 'mi' appears but is separated, pick a nearby 4–7 digit token.
-    if "mi" in tl or "miles" in tl:
-        tokens = re.findall(r"\b\d{4,7}\b", t)
-        if tokens:
-            # choose the most plausible (largest length then value)
-            tokens_sorted = sorted(tokens, key=lambda s: (len(s), int(s)), reverse=True)
-            return f"{tokens_sorted[0]} mi"
-
-    if "km" in tl or "kilometer" in tl:
-        tokens = re.findall(r"\b\d{4,7}\b", t)
-        if tokens:
-            tokens_sorted = sorted(tokens, key=lambda s: (len(s), int(s)), reverse=True)
-            return f"{tokens_sorted[0]} km"
-
-    return None
-
-def _add_bytes(parts: List[Dict[str,Any]], files_seen: List[str], photo_index: Optional[List[str]], raw: bytes, fname: str, used: int, max_images: int, pdf_text_fulls: Optional[List[str]] = None, odo_hits: Optional[List[Dict[str,str]]] = None) -> int:
+def _add_bytes(parts: List[Dict[str,Any]], files_seen: List[str], photo_index: Optional[List[str]], raw: bytes, fname: str, used: int, max_images: int, pdf_text_fulls: Optional[List[str]] = None) -> int:
     low = fname.lower()
     if low.endswith(SUPPORTED_PDF_EXTS) and used < max_images:
         try:
@@ -498,13 +456,6 @@ def _add_bytes(parts: List[Dict[str,Any]], files_seen: List[str], photo_index: O
             if txt:
                 parts.insert(0, {"type":"text", "text": txt[:12000]})
                 files_seen.append(f"{fname} (ocr text extracted)")
-                # Odometer detection from OCR (prevents false 'odometer not visible' statements)
-                try:
-                    odo_val = _extract_odometer_from_ocr(txt)
-                    if odo_val and odo_hits is not None:
-                        odo_hits.append({"photo_name": fname, "value": odo_val})
-                except Exception:
-                    pass
     elif low.endswith(SUPPORTED_DOCX_EXTS):
         try:
             text = "\n".join([p.text for p in Document(io.BytesIO(raw)).paragraphs if p.text.strip()])
@@ -626,8 +577,6 @@ async def vision_review(
     parts: List[Dict[str, Any]] = []
     files_seen: List[str] = []
     photo_index: List[str] = []
-    odo_hits: List[Dict[str,str]] = []  # from OCR; used to lock odometer presence/value
-
     MAX_IMAGES = 48
     used = 0
     pdf_text_fulls: List[str] = []  # full PDF text for supplement detection
@@ -660,9 +609,9 @@ async def vision_review(
                     data = zf.read(zi)
                 except Exception as e:
                     files_seen.append(f"{fname}::{inner_name} (read error: {e})"); continue
-                used = _add_bytes(parts, files_seen, photo_index, data, f"{fname}::{inner_name}", used, MAX_IMAGES, pdf_text_fulls=pdf_text_fulls, odo_hits=odo_hits)
+                used = _add_bytes(parts, files_seen, photo_index, data, f"{fname}::{inner_name}", used, MAX_IMAGES, pdf_text_fulls=pdf_text_fulls)
         else:
-            used = _add_bytes(parts, files_seen, photo_index, raw, fname, used, MAX_IMAGES, pdf_text_fulls=pdf_text_fulls, odo_hits=odo_hits)
+            used = _add_bytes(parts, files_seen, photo_index, raw, fname, used, MAX_IMAGES, pdf_text_fulls=pdf_text_fulls)
 
     # Collect uploaded TEXT ONLY for evidence checks
     uploaded_text_blobs = []
@@ -670,6 +619,23 @@ async def vision_review(
         if isinstance(p, dict) and p.get("type") == "text" and isinstance(p.get("text"), str):
             uploaded_text_blobs.append(p["text"])
     uploaded_text_all = "\n".join(uploaded_text_blobs)
+
+    # --- ODOMETER OCR LOCK (extract mileage from OCR text if visible) ---
+    # This makes it impossible for the narrative to claim the odometer is not visible when OCR captured a mileage value.
+    odometer_value = None
+    try:
+        _odo_txt = uploaded_text_all or ""
+        # Common mileage patterns from digital clusters: "72,261 mi", "72261 mi", "72261 miles", "116000 km"
+        _m = re.search(r"(?i)\b(\d{1,3}(?:,\d{3})+|\d{4,7})\s*(mi|miles|km)\b", _odo_txt)
+        if _m:
+            _digits = _m.group(1).replace(",", "")
+            _unit = _m.group(2).lower()
+            if _unit == "miles":
+                _unit = "mi"
+            odometer_value = f"{int(_digits):,} {_unit}"
+    except Exception:
+        odometer_value = None
+
 
     # --- Closing Report: extract "Inspection Results" section for deterministic cross-check + shop-status ---
     def _extract_inspection_results_block(_txt: str) -> str:
@@ -744,20 +710,6 @@ async def vision_review(
 
     _vin_photo_present = bool(re.search(vin_photo_rx, uploaded_text_all or ""))
     _odo_photo_present = bool(re.search(odo_photo_rx, uploaded_text_all or ""))
-
-# Lock odometer presence/value when OCR clearly captured mileage (prevents false 'odometer not visible').
-_odo_photo_value: Optional[str] = None
-_odo_photo_ref: Optional[str] = None
-if odo_hits:
-    try:
-        # Pick the first detected hit (highest confidence patterns return earliest).
-        hit = odo_hits[0]
-        _odo_photo_present = True
-        _odo_photo_value = hit.get("value") or None
-        if photo_index and hit.get("photo_name") in photo_index:
-            _odo_photo_ref = str(photo_index.index(hit["photo_name"]) + 1)
-    except Exception:
-        pass
 
     # presence + extractor
     _prod_date_present = False
@@ -930,7 +882,6 @@ if odo_hits:
     prompt_text += CONSISTENCY_GUARD
     prompt_text += NO_INTACT_IF_DAMAGED_RULE
     prompt_text += DAMAGE_SIDE_GUARD
-    prompt_text += NEUTRAL_SIDES_UNLESS_PROVEN_GUARD
     prompt_text += FRONT_CORNER_ORIENTATION_GUARD
     prompt_text += BILATERAL_DAMAGE_MANDATE
     prompt_text += PARTS_SOURCE_GUARD
@@ -963,14 +914,9 @@ if odo_hits:
             "- A driver-door VIN label/photo is present. Treat Production Date as evidenced by the same label; do NOT deduct or claim 'not separately documented'."
         )
     if _odo_photo_present:
-        if _odo_photo_value and _odo_photo_ref:
-            flags.append(
-                f"- ODOMETER IS VISIBLE: {_odo_photo_value} (Photo {_odo_photo_ref}). Do not say mileage is unknown or not visible."
-            )
-        else:
-            flags.append(
-                "- An odometer photo is present. Do not mark the odometer as missing; transcribe the digits and cite the Photo #."
-            )
+        flags.append(
+            "- An odometer photo is present. Do not mark the odometer as missing; transcribe the digits and cite the Photo #."
+        )
     if _prod_date_present:
         flags.append(
             "- A production date (Date of Mfr/MFD DATE) is visible on a door label photo. Do not mark Production Date as missing; cite the Photo # and the month/year."
@@ -1209,6 +1155,27 @@ if odo_hits:
             result["summary_markdown"] = "## Detailed Audit Report\n" + sm_tmp
     except Exception:
         pass
+
+    # --- ODOMETER CONSISTENCY ENFORCER (SILENT) ---
+    # If OCR captured a mileage value, remove any statements implying the odometer/mileage is not visible/unknown,
+    # and ensure the output mentions the mileage at least once.
+    try:
+        if odometer_value:
+            _neg_rx = r"(?is)(^|[\n\.\!\?])\s*(?:the\s+)?(?:odometer|mileage)[^\n\.\!\?]*(?:not\s+visible|cannot\s+be\s+confirmed|unknown|unconfirmed|cannot\s+confirm)[^\n\.\!\?]*[\n\.\!\?]"
+            for _k in ("summary_markdown", "summary_brief", "vin_verification", "conclusion"):
+                _t = result.get(_k)
+                if isinstance(_t, str) and _t:
+                    _t2 = re.sub(_neg_rx, "\n", _t)
+                    result[_k] = _t2
+
+            # Ensure at least one explicit odometer line exists in summary_markdown
+            _sm = result.get("summary_markdown") or ""
+            if isinstance(_sm, str) and not re.search(r"(?i)\bodometer\b.*\d", _sm):
+                result["summary_markdown"] = _sm.rstrip() + f"\n\nOdometer visible: {odometer_value}.\n"
+    except Exception:
+        pass
+
+
 
 
     # --- Side Checks enforcement (photos-only): ensure Driver/Left Side bullet exists if Passenger/Right Side exists ---
@@ -1626,46 +1593,21 @@ if odo_hits:
                 sm,
             ))
 
-            # If OCR already captured a mileage value, do not allow the narrative to override it.
-            if _odo_photo_value:
-                _narr_says_no_odo = False
-
-
             if _narr_says_no_odo:
                 _odo_photo_present = False
                 if odo_field in {"", "N/A"}:
                     result["odometer_estimate_only"] = "UNK / Unknown (no odometer photo provided)."
             else:
-                
-                # Prefer OCR-locked mileage when available (this is the authoritative source for the header).
-                if _odo_photo_value:
-                    ref = f" (Photo {_odo_photo_ref})" if _odo_photo_ref else ""
-                    result["odometer_estimate_only"] = f"{_odo_photo_value}{ref}"
+                # Try to extract explicit mileage from narrative
+                m_odo = re.search(r"(?is)odometer\s+reading\s+of\s+([0-9,]+)\s*miles", sm)
+                if m_odo:
+                    miles = m_odo.group(1)
+                    result["odometer_estimate_only"] = f"{miles} miles (confirmed by estimate and photos)."
                 else:
-                    # Try to extract explicit mileage from narrative
-                    m_odo = re.search(r"(?is)odometer\s+reading\s+of\s+([0-9,]+)\s*miles", sm)
-                    if m_odo:
-                        miles = m_odo.group(1)
-                        result["odometer_estimate_only"] = f"{miles} miles (confirmed by estimate and photos)."
-                    else:
-                        # Fallback generic phrasing
-                        result["odometer_estimate_only"] = "Present and legible in photos (e.g., odometer photo)."
+                    # Fallback generic phrasing
+                    result["odometer_estimate_only"] = "Present and legible in photos (e.g., odometer photo)."
 
-                # If odometer is present, remove any "not visible/unknown" sentences from the narrative output.
-                if _odo_photo_value or _odo_photo_present:
-                    for key in ("summary_brief", "summary_markdown"):
-                        txt2 = result.get(key) or ""
-                        if txt2:
-                            txt2 = re.sub(
-                                r"(?is)\b(the\s+odometer\s+reading\s+is\s+not\s+visible[^.]*\.|"
-                                r"mileage\s+cannot\s+be\s+confirmed[^.]*\.|"
-                                r"mileage\s+is\s+unknown[^.]*\.|"
-                                r"odometer\s+photo\s+is\s+missing[^.]*\.)\s*",
-                                "",
-                                txt2,
-                            )
-                            result[key] = txt2.strip()
-# Clean any weird "No, odometer photo present..." phrasing from brief or narrative
+                # Clean any weird "No, odometer photo present..." phrasing from brief or narrative
                 for key in ("summary_brief", "summary_markdown"):
                     txt = result.get(key) or ""
                     if txt:
@@ -1894,68 +1836,7 @@ if odo_hits:
     except Exception:
         pass
 
-    
-    # --- Neutralize side labels unless orientation is explicitly proven in the narrative (silent) ---
-    def _neutralize_side_labels_unless_proven(text: str) -> str:
-        """
-        If the model did not explicitly prove orientation (steering wheel / LHD-RHD or driver-door VIN label),
-        avoid wrong 'left/right' or LF/RF claims by neutralizing side labels.
-        This is conservative by design: it prevents confidently-wrong side assignments.
-        """
-        if not text:
-            return text
-
-        t_low = text.lower()
-        # Evidence that orientation was proven somewhere in the narrative
-        has_orientation_proof = any(
-            key in t_low for key in (
-                "orientation established",
-                "lhd", "rhd", "left-hand drive", "right-hand drive",
-                "steering wheel on the",  # e.g., "steering wheel on the left"
-                "driver door", "door-jamb", "door jamb", "vin label", "vin plate", "door label",
-            )
-        )
-        if has_orientation_proof:
-            return text
-
-        # Neutralize common side labels (front corners are the biggest source of errors)
-        out = text
-
-        # Abbreviations
-        out = re.sub(r"\bLF\b", "front corner", out)
-        out = re.sub(r"\bRF\b", "front corner", out)
-        out = re.sub(r"\bLR\b", "rear corner", out)
-        out = re.sub(r"\bRR\b", "rear corner", out)
-
-        # Driver/Passenger side phrases
-        out = re.sub(r"\b(driver|passenger)\s*/\s*(left|right)\b", "one side", out, flags=re.I)
-        out = re.sub(r"\b(driver|passenger)\s+side\b", "one side", out, flags=re.I)
-
-        # Left/Right + front/rear
-        out = re.sub(r"\b(left|right)\s+front\b", "front corner", out, flags=re.I)
-        out = re.sub(r"\b(front)\s+(left|right)\b", "front corner", out, flags=re.I)
-        out = re.sub(r"\b(left|right)\s+rear\b", "rear corner", out, flags=re.I)
-        out = re.sub(r"\b(rear)\s+(left|right)\b", "rear corner", out, flags=re.I)
-
-        # Left/Right component labels -> neutral component area
-        out = re.sub(r"\b(left|right)\s+(headlight|headlamp)\b", r"\2 area", out, flags=re.I)
-        out = re.sub(r"\b(left|right)\s+fender\b", "fender area", out, flags=re.I)
-        out = re.sub(r"\b(left|right)\s+bumper\b", "bumper area", out, flags=re.I)
-        out = re.sub(r"\b(left|right)\s+door\b", "door area", out, flags=re.I)
-        out = re.sub(r"\b(left|right)\s+quarter\b", "quarter area", out, flags=re.I)
-        out = re.sub(r"\b(left|right)\s+mirror\b", "mirror area", out, flags=re.I)
-
-        return out
-
-
-    try:
-        for _k in ("summary_markdown", "summary_brief", "conclusion", "gpt_output"):
-            if result.get(_k):
-                result[_k] = _neutralize_side_labels_unless_proven(result[_k])
-    except Exception:
-        pass
-
-# --- Airbag deployment contradiction resolver (silent) ---
+    # --- Airbag deployment contradiction resolver (silent) ---
     try:
         for _k in ("summary_markdown", "summary_brief", "conclusion"):
             if result.get(_k):
@@ -2265,6 +2146,7 @@ async def download_pdf(file_number: Optional[str] = None, filename: Optional[str
         return JSONResponse(status_code=404, content={"detail": "Not Found"})
     latest = max(candidates, key=lambda p: os.path.getmtime(p))
     return FileResponse(path=latest, media_type="application/pdf", filename=os.path.basename(latest))
+
 
 
 
