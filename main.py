@@ -291,16 +291,6 @@ FRONT_CORNER_ORIENTATION_GUARD = (
     "\n- You may NOT state 'left front fender/headlight intact' or 'right front fender/headlight intact' unless orientation is established; otherwise say 'not clearly shown from this angle.'"
 )
 
-# --- Neutral side labeling unless orientation is proven (prompt-only; avoids wrong left/right) ---
-NEUTRAL_SIDES_UNLESS_PROVEN_GUARD = (
-    "\n\nSIDE LABELING RULE (CRITICAL):"
-    "\n- Do NOT use 'left/right', 'LF/RF/LR/RR', or 'driver/passenger' side labels unless you can cite a photo that PROVES orientation "
-    "(e.g., steering wheel clearly visible OR an open driver door/door-jamb VIN label that establishes the driver side)."
-    "\n- If orientation is not proven, use neutral terms like 'front corner', 'rear corner', 'front headlamp area', 'fender area', 'one side', or 'opposite side' "
-    "and describe the damage without side labels."
-    "\n- Never guess side labels from a 3/4 view or mirrored image; if uncertain, stay neutral."
-)
-
 # --- Parts Source Guard (prompt-only; prevents OEM vs Aftermarket drift) ---
 PARTS_SOURCE_GUARD = (
     "\n\nPARTS SOURCE GUARD (MANDATORY):"
@@ -385,6 +375,35 @@ def _image_part_from_bytes(raw: bytes) -> Dict[str, Any]:
     b64 = base64.b64encode(raw).decode("utf-8")
     return {"type": "image_url", "image_url": {"url": "data:image/jpeg;base64," + b64}}
 
+
+# --- Image augmentation (single contained patch) ---
+# Improves review robustness on rotated/mirrored uploads by providing a few safe variants.
+# NOTE: Side/orientation labeling is handled separately (Option A neutral sides unless proven).
+def _augment_image_variants(raw: bytes) -> List[bytes]:
+    """Return [base, mirror, rot180] JPEG bytes when possible (capped). Fail-open to [raw]."""
+    if not raw:
+        return [raw]
+    try:
+        from PIL import ImageOps  # local import to keep patch contained
+        im = Image.open(io.BytesIO(raw)).convert("RGB")
+        im = ImageOps.exif_transpose(im)  # normalize EXIF rotation
+
+        def _to_jpeg_bytes(img: Image.Image) -> bytes:
+            img2 = img.copy()
+            img2.thumbnail((1400, 1400))
+            b = io.BytesIO()
+            img2.save(b, format="JPEG", quality=65, optimize=True)
+            return b.getvalue()
+
+        base = _to_jpeg_bytes(im)
+        mirror = _to_jpeg_bytes(ImageOps.mirror(im))
+        rot180 = _to_jpeg_bytes(im.rotate(180, expand=True))
+
+        # Keep deterministic ordering; do not dedupe aggressively (different bytes can be useful).
+        return [base, mirror, rot180]
+    except Exception:
+        return [raw]
+
 # Safe PDF text extract helper
 def _maybe_extract_pdf_text(raw: bytes, fname: str, parts: List[Dict[str, Any]], files_seen: List[str], pdf_text_fulls: Optional[List[str]] = None) -> None:
     try:
@@ -447,22 +466,44 @@ def _add_bytes(parts: List[Dict[str,Any]], files_seen: List[str], photo_index: O
             logging.warning(f"pdf2image failed for {fname}: {e}")
             files_seen.append(f"{fname} (pdf, could not be converted)")
     elif low.endswith(SUPPORTED_IMAGE_EXTS) and used < max_images:
-        im_ref = None
+        # Normalize EXIF orientation and add a couple of safe visual variants (mirror + 180 rotate)
+        # to help the model detect subtle damage (hood creases, glare-dependent dents, etc.).
+        # Variants are capped by max_images and do NOT require photo labeling changes.
         try:
-            im = Image.open(io.BytesIO(raw)).convert("RGB")
-            im_ref = im.copy()
-            im.thumbnail((1400,1400))
-            b = io.BytesIO(); im.save(b, format="JPEG", quality=65, optimize=True)
-            raw = b.getvalue()
+            variants = _augment_image_variants(raw)
         except Exception:
-            im_ref = None
-        parts.append(_image_part_from_bytes(raw))
-        used += 1
-        if photo_index is not None:
-            photo_index.append(fname)
-        files_seen.append(f"{fname} (photo)")
-        if im_ref is not None:
-            txt = _maybe_ocr_image_text(im_ref)
+            variants = [raw]
+
+        # Attach base + variants (as capacity allows). The first variant is treated as the "base" photo for OCR.
+        base_im_for_ocr = None
+        try:
+            # Re-open the first (base) variant for OCR reference if possible
+            base_im_for_ocr = Image.open(io.BytesIO(variants[0])).convert("RGB")
+        except Exception:
+            base_im_for_ocr = None
+
+        for vi, vb in enumerate(variants):
+            if used >= max_images:
+                break
+            parts.append(_image_part_from_bytes(vb))
+            used += 1
+            if photo_index is not None:
+                if vi == 0:
+                    photo_index.append(fname)
+                elif vi == 1:
+                    photo_index.append(fname + "::mirror")
+                else:
+                    photo_index.append(fname + "::rot180")
+            if vi == 0:
+                files_seen.append(f"{fname} (photo)")
+            elif vi == 1:
+                files_seen.append(f"{fname} (photo mirror variant)")
+            else:
+                files_seen.append(f"{fname} (photo 180-rot variant)")
+
+        # OCR only on the base (non-variant) view to avoid duplicating OCR text
+        if base_im_for_ocr is not None:
+            txt = _maybe_ocr_image_text(base_im_for_ocr)
             if txt:
                 parts.insert(0, {"type":"text", "text": txt[:12000]})
                 files_seen.append(f"{fname} (ocr text extracted)")
@@ -875,7 +916,6 @@ async def vision_review(
     prompt_text += CONSISTENCY_GUARD
     prompt_text += NO_INTACT_IF_DAMAGED_RULE
     prompt_text += DAMAGE_SIDE_GUARD
-    prompt_text += NEUTRAL_SIDES_UNLESS_PROVEN_GUARD
     prompt_text += FRONT_CORNER_ORIENTATION_GUARD
     prompt_text += BILATERAL_DAMAGE_MANDATE
     prompt_text += PARTS_SOURCE_GUARD
@@ -1809,68 +1849,7 @@ async def vision_review(
     except Exception:
         pass
 
-    
-    # --- Neutralize side labels unless orientation is explicitly proven in the narrative (silent) ---
-    def _neutralize_side_labels_unless_proven(text: str) -> str:
-        """
-        If the model did not explicitly prove orientation (steering wheel / LHD-RHD or driver-door VIN label),
-        avoid wrong 'left/right' or LF/RF claims by neutralizing side labels.
-        This is conservative by design: it prevents confidently-wrong side assignments.
-        """
-        if not text:
-            return text
-
-        t_low = text.lower()
-        # Evidence that orientation was proven somewhere in the narrative
-        has_orientation_proof = any(
-            key in t_low for key in (
-                "orientation established",
-                "lhd", "rhd", "left-hand drive", "right-hand drive",
-                "steering wheel on the",  # e.g., "steering wheel on the left"
-                "driver door", "door-jamb", "door jamb", "vin label", "vin plate", "door label",
-            )
-        )
-        if has_orientation_proof:
-            return text
-
-        # Neutralize common side labels (front corners are the biggest source of errors)
-        out = text
-
-        # Abbreviations
-        out = re.sub(r"\bLF\b", "front corner", out)
-        out = re.sub(r"\bRF\b", "front corner", out)
-        out = re.sub(r"\bLR\b", "rear corner", out)
-        out = re.sub(r"\bRR\b", "rear corner", out)
-
-        # Driver/Passenger side phrases
-        out = re.sub(r"\b(driver|passenger)\s*/\s*(left|right)\b", "one side", out, flags=re.I)
-        out = re.sub(r"\b(driver|passenger)\s+side\b", "one side", out, flags=re.I)
-
-        # Left/Right + front/rear
-        out = re.sub(r"\b(left|right)\s+front\b", "front corner", out, flags=re.I)
-        out = re.sub(r"\b(front)\s+(left|right)\b", "front corner", out, flags=re.I)
-        out = re.sub(r"\b(left|right)\s+rear\b", "rear corner", out, flags=re.I)
-        out = re.sub(r"\b(rear)\s+(left|right)\b", "rear corner", out, flags=re.I)
-
-        # Left/Right component labels -> neutral component area
-        out = re.sub(r"\b(left|right)\s+(headlight|headlamp)\b", r"\2 area", out, flags=re.I)
-        out = re.sub(r"\b(left|right)\s+fender\b", "fender area", out, flags=re.I)
-        out = re.sub(r"\b(left|right)\s+bumper\b", "bumper area", out, flags=re.I)
-        out = re.sub(r"\b(left|right)\s+door\b", "door area", out, flags=re.I)
-        out = re.sub(r"\b(left|right)\s+quarter\b", "quarter area", out, flags=re.I)
-        out = re.sub(r"\b(left|right)\s+mirror\b", "mirror area", out, flags=re.I)
-
-        return out
-
-
-    try:
-        for _k in ("summary_markdown", "summary_brief", "conclusion", "gpt_output"):
-            if result.get(_k):
-                result[_k] = _neutralize_side_labels_unless_proven(result[_k])
-    except Exception:
-        pass
-
-# --- Airbag deployment contradiction resolver (silent) ---
+    # --- Airbag deployment contradiction resolver (silent) ---
     try:
         for _k in ("summary_markdown", "summary_brief", "conclusion"):
             if result.get(_k):
@@ -2180,5 +2159,6 @@ async def download_pdf(file_number: Optional[str] = None, filename: Optional[str
         return JSONResponse(status_code=404, content={"detail": "Not Found"})
     latest = max(candidates, key=lambda p: os.path.getmtime(p))
     return FileResponse(path=latest, media_type="application/pdf", filename=os.path.basename(latest))
+
 
 
