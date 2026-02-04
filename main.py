@@ -291,6 +291,16 @@ FRONT_CORNER_ORIENTATION_GUARD = (
     "\n- You may NOT state 'left front fender/headlight intact' or 'right front fender/headlight intact' unless orientation is established; otherwise say 'not clearly shown from this angle.'"
 )
 
+# --- Neutral side labeling unless orientation is proven (prompt-only; avoids wrong left/right) ---
+NEUTRAL_SIDES_UNLESS_PROVEN_GUARD = (
+    "\n\nSIDE LABELING RULE (CRITICAL):"
+    "\n- Do NOT use 'left/right', 'LF/RF/LR/RR', or 'driver/passenger' side labels unless you can cite a photo that PROVES orientation "
+    "(e.g., steering wheel clearly visible OR an open driver door/door-jamb VIN label that establishes the driver side)."
+    "\n- If orientation is not proven, use neutral terms like 'front corner', 'rear corner', 'front headlamp area', 'fender area', 'one side', or 'opposite side' "
+    "and describe the damage without side labels."
+    "\n- Never guess side labels from a 3/4 view or mirrored image; if uncertain, stay neutral."
+)
+
 # --- Parts Source Guard (prompt-only; prevents OEM vs Aftermarket drift) ---
 PARTS_SOURCE_GUARD = (
     "\n\nPARTS SOURCE GUARD (MANDATORY):"
@@ -865,6 +875,7 @@ async def vision_review(
     prompt_text += CONSISTENCY_GUARD
     prompt_text += NO_INTACT_IF_DAMAGED_RULE
     prompt_text += DAMAGE_SIDE_GUARD
+    prompt_text += NEUTRAL_SIDES_UNLESS_PROVEN_GUARD
     prompt_text += FRONT_CORNER_ORIENTATION_GUARD
     prompt_text += BILATERAL_DAMAGE_MANDATE
     prompt_text += PARTS_SOURCE_GUARD
@@ -1798,7 +1809,68 @@ async def vision_review(
     except Exception:
         pass
 
-    # --- Airbag deployment contradiction resolver (silent) ---
+    
+    # --- Neutralize side labels unless orientation is explicitly proven in the narrative (silent) ---
+    def _neutralize_side_labels_unless_proven(text: str) -> str:
+        """
+        If the model did not explicitly prove orientation (steering wheel / LHD-RHD or driver-door VIN label),
+        avoid wrong 'left/right' or LF/RF claims by neutralizing side labels.
+        This is conservative by design: it prevents confidently-wrong side assignments.
+        """
+        if not text:
+            return text
+
+        t_low = text.lower()
+        # Evidence that orientation was proven somewhere in the narrative
+        has_orientation_proof = any(
+            key in t_low for key in (
+                "orientation established",
+                "lhd", "rhd", "left-hand drive", "right-hand drive",
+                "steering wheel on the",  # e.g., "steering wheel on the left"
+                "driver door", "door-jamb", "door jamb", "vin label", "vin plate", "door label",
+            )
+        )
+        if has_orientation_proof:
+            return text
+
+        # Neutralize common side labels (front corners are the biggest source of errors)
+        out = text
+
+        # Abbreviations
+        out = re.sub(r"\bLF\b", "front corner", out)
+        out = re.sub(r"\bRF\b", "front corner", out)
+        out = re.sub(r"\bLR\b", "rear corner", out)
+        out = re.sub(r"\bRR\b", "rear corner", out)
+
+        # Driver/Passenger side phrases
+        out = re.sub(r"\b(driver|passenger)\s*/\s*(left|right)\b", "one side", out, flags=re.I)
+        out = re.sub(r"\b(driver|passenger)\s+side\b", "one side", out, flags=re.I)
+
+        # Left/Right + front/rear
+        out = re.sub(r"\b(left|right)\s+front\b", "front corner", out, flags=re.I)
+        out = re.sub(r"\b(front)\s+(left|right)\b", "front corner", out, flags=re.I)
+        out = re.sub(r"\b(left|right)\s+rear\b", "rear corner", out, flags=re.I)
+        out = re.sub(r"\b(rear)\s+(left|right)\b", "rear corner", out, flags=re.I)
+
+        # Left/Right component labels -> neutral component area
+        out = re.sub(r"\b(left|right)\s+(headlight|headlamp)\b", r"\2 area", out, flags=re.I)
+        out = re.sub(r"\b(left|right)\s+fender\b", "fender area", out, flags=re.I)
+        out = re.sub(r"\b(left|right)\s+bumper\b", "bumper area", out, flags=re.I)
+        out = re.sub(r"\b(left|right)\s+door\b", "door area", out, flags=re.I)
+        out = re.sub(r"\b(left|right)\s+quarter\b", "quarter area", out, flags=re.I)
+        out = re.sub(r"\b(left|right)\s+mirror\b", "mirror area", out, flags=re.I)
+
+        return out
+
+
+    try:
+        for _k in ("summary_markdown", "summary_brief", "conclusion", "gpt_output"):
+            if result.get(_k):
+                result[_k] = _neutralize_side_labels_unless_proven(result[_k])
+    except Exception:
+        pass
+
+# --- Airbag deployment contradiction resolver (silent) ---
     try:
         for _k in ("summary_markdown", "summary_brief", "conclusion"):
             if result.get(_k):
@@ -2108,4 +2180,5 @@ async def download_pdf(file_number: Optional[str] = None, filename: Optional[str
         return JSONResponse(status_code=404, content={"detail": "Not Found"})
     latest = max(candidates, key=lambda p: os.path.getmtime(p))
     return FileResponse(path=latest, media_type="application/pdf", filename=os.path.basename(latest))
+
 
