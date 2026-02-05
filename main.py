@@ -170,45 +170,68 @@ DETAIL_TEMPLATES = {
     ),
 
     "damage_report_from_photos": (
-        "# AI-4-IA Damage Report\n"
-        "Create a concise, professional damage report based ONLY on the provided photos. MUST cover ALL visible sides and panels exhaustively — do NOT summarize or omit undamaged areas.\n\n"
-        "## Inputs Used\n"
-        "- List exact Photo #s used and total photos provided.\n\n"
-        "## Quick Stats\n"
-        "- Claim # (if visible): <value or N/A>\n"
-        "- File #: <value or N/A>\n"
-        "- Odometer (if visible): <value or 'Present — not clearly legible'>\n"
-        "- Primary Impact: <main area(s)>\n"
-        "- Secondary / Bilateral Impact: <any additional areas or 'None clearly visible'>\n\n"
-        "## Photo-by-Photo Damage Ledger (REQUIRED — one row per photo)\n"
-        "| Photo # | View/Side                  | Key Panels/Parts Visible                  | Condition Description (damage or 'No obvious damage visible from angle') |\n"
-        "|-------:|----------------------------|-------------------------------------------|-------------------------------------------------------|\n"
-        "- Cover EVERY provided photo. For undamaged views, explicitly write 'No obvious damage visible from this angle on [panels/side]'. Do NOT skip rows or omit photos.\n\n"
-        "## Per-Side Exterior & Interior Condition (MANDATORY section — use bullets)\n"        "Include a \"Side Checks\" subsection EXACTLY in this format (always include BOTH bullets):\n"        "- **Driver/Left Side**: <what is visible on left/driver side; cite at least one Photo #>\n"        "- **Passenger/Right Side**: <what is visible on right/passenger side; cite at least one Photo #>\n"        "\n"        "Rules:\n"        "- If a side is shown but looks clean, say \"No obvious damage visible from this angle\" (do NOT say \"no visible damage\" or \"intact\").\n"        "- If a side is NOT shown clearly, say \"Not clearly shown in provided photos; cannot assess\" (and do NOT guess).\n"        "\n"
-        "- **Front**: bumper, grille, headlights, hood, left fender, right fender — describe each, cite Photo #s, note damage or 'no obvious damage visible from this angle'.\n"
-        "- **Driver/Left Side**: fender, doors, quarter panel — describe each, cite Photo #s.\n"
-        "- **Passenger/Right Side**: fender, doors, quarter panel — describe each, cite Photo #s.\n"
-        "- **Rear**: bumper, tail lights, hatch — describe each, cite Photo #s.\n"
-        "- **Roof / Other visible**: any damage or 'no obvious damage visible from this angle'.\n"
-        "- **Interior** (if shown): seats, dash, airbags — 'no deployment / no obvious damage visible from this angle' or describe issues.\n"
-        "- Explicitly flag any bilateral (both sides) or secondary damage, even if minor or partial in angle.\n\n"
-        "## Detailed Audit Report (narrative)\n"
-        "- Synthesize the per-side findings into a continuous 10–15 sentence professional narrative.\n"
-        "- Describe impact zones, repair vs replace logic, parts implications, refinish needs.\n"
-        "- MUST reference the per-side bullets above — do NOT contradict them.\n"
-        "- Cite VIN / odometer with Photo #s; if unreadable explain why.\n"
-        "- Balance coverage: do NOT focus only on primary damage.\n\n"
-        "## Estimated Repair Costs (photo-based rough only)\n"
-        "- Body Labor: ...\n"
-        "- Paint Labor / Materials: ...\n"
-        "- Parts: ...\n"
-        "- Sublet / Tax: ...\n"
-        "- Rationale tied to observed panels / sides.\n\n"
-        "## Fraud & Authenticity Check\n"
-        "- VIN match, odometer legibility, no tampering/duplicates/metadata issues.\n\n"
-        "## Conclusion\n"
-        "- Summarize scope and repair implications in 1–3 sentences.\n"
-        "- 'No fraud indicators identified' if clean.\n"
+        """# AI-4-IA Damage Report
+Create a concise, professional damage report based ONLY on the provided photos. Cover all visible sides and panels exhaustively. Do not omit panels like the hood.
+
+## Inputs Used
+- List exact Photo #s used and total photos provided.
+
+## Quick Stats
+- Claim # (if visible): <value or N/A>
+- File #: <value or N/A>
+- Odometer (if visible): <value or 'Present - not clearly legible'>
+- Primary Impact: <main area(s)>
+- Secondary / Bilateral Impact: <any additional areas or 'None clearly visible'>
+
+## Photo-by-Photo Damage Ledger (REQUIRED - one row per photo)
+| Photo # | View/Side | Key Panels/Parts Visible | Condition Description (damage or 'No obvious damage visible from this angle') |
+|-------:|-----------|---------------------------|--------------------------------------------------------------------------------|
+- Cover EVERY provided photo. For clean views, explicitly write 'No obvious damage visible from this angle on [panels/side]'. Do NOT skip rows or omit photos.
+
+## Side Checks (MANDATORY - always include BOTH bullets)
+- **Driver/Left Side**: <what is visible on left/driver side; cite at least one Photo #>
+- **Passenger/Right Side**: <what is visible on right/passenger side; cite at least one Photo #>
+
+Rules:
+- If a side is shown but looks clean, say "No obvious damage visible from this angle" (do NOT say "no visible damage" or "intact").
+- If a side is NOT shown clearly, say "Not clearly shown in provided photos; cannot assess" (and do NOT guess).
+- Do NOT make blanket statements like "both sides show no visible damage". Address Driver/Left and Passenger/Right separately with citations.
+
+## Front-End Checklist (MANDATORY - DO NOT OMIT HOOD)
+You MUST fill every line below. If unclear, say "Not clearly shown; cannot assess" (do not guess). If gaps/misalignment/buckling are visible, treat that as damage.
+- Hood: <dent/crease/buckle/misalignment/gap issue or 'No obvious damage visible from this angle'> (Photo #)
+- Front bumper cover: <condition> (Photo #)
+- Grille: <condition> (Photo #)
+- Driver-side headlamp: <condition> (Photo #)
+- Passenger-side headlamp: <condition> (Photo #)
+- Driver-side front fender: <condition> (Photo #)
+- Passenger-side front fender: <condition> (Photo #)
+
+## Other Views (use bullets; cite Photo #s)
+- **Rear**: bumper, tail lamps, hatch/trunk - describe each.
+- **Roof / upper body**: any damage or 'No obvious damage visible from this angle'.
+- **Interior** (if shown): seats, dash, airbags - describe deployment or "No obvious damage visible from this angle".
+
+## Detailed Audit Report (narrative)
+- Write a continuous 10-15 sentence professional narrative that synthesizes the Side Checks and Front-End Checklist (do NOT contradict them).
+- Describe impact zones, visible misalignment/gap issues, repair vs replace logic (photo-based).
+- Cite VIN / odometer with Photo #s; if unreadable explain why.
+- Balance coverage: do NOT focus only on primary damage.
+
+## Estimated Repair Costs (photo-based rough only)
+- Body Labor: ...
+- Paint Labor / Materials: ...
+- Parts: ...
+- Sublet / Tax: ...
+- Rationale tied to observed panels / sides.
+
+## Fraud & Authenticity Check
+- VIN match, odometer legibility, no tampering/duplicates/metadata issues.
+
+## Conclusion
+- Summarize scope and repair implications in 1-3 sentences.
+- 'No fraud indicators identified' if clean.
+"""
     ),
 }
 
@@ -2146,6 +2169,7 @@ async def download_pdf(file_number: Optional[str] = None, filename: Optional[str
         return JSONResponse(status_code=404, content={"detail": "Not Found"})
     latest = max(candidates, key=lambda p: os.path.getmtime(p))
     return FileResponse(path=latest, media_type="application/pdf", filename=os.path.basename(latest))
+
 
 
 
