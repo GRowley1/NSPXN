@@ -612,7 +612,7 @@ async def vision_review(
     files_seen: List[str] = []
     photo_index: List[str] = []
     thumbnail_paths: List[str] = []
-    upload_vin_candidates: set = set()
+    vin_candidates: List[str] = []  # collected from filenames and OCR text
     MAX_IMAGES = 48
     used = 0
     pdf_text_fulls: List[str] = []  # full PDF text for supplement detection
@@ -625,12 +625,8 @@ async def vision_review(
         raw = await f.read()
         fname = f.filename or "upload"
         low = fname.lower()
-
-        # Capture any VIN-looking tokens from upload filenames (including ZIP name) as a fallback.
-        # This helps when the model fails to return VIN even though images are VIN-labeled.
         try:
-            for _cand in re.findall(r"[A-HJ-NPR-Z0-9]{17}", fname.upper()):
-                upload_vin_candidates.add(_cand)
+            vin_candidates += re.findall(VIN_PATTERN, fname.upper())
         except Exception:
             pass
         if low.endswith(".zip"):
@@ -645,10 +641,8 @@ async def vision_review(
                 members = members[:MAX_ZIP_FILES]
             for zi in members:
                 inner_name = zi.filename
-                # VIN fallback from zip member filename (some users name images with VIN prefix)
                 try:
-                    for _cand in re.findall(r"[A-HJ-NPR-Z0-9]{17}", (inner_name or "").upper()):
-                        upload_vin_candidates.add(_cand)
+                    vin_candidates += re.findall(VIN_PATTERN, inner_name.upper())
                 except Exception:
                     pass
                 if ".." in inner_name or inner_name.startswith(("/", "\\")):
@@ -669,6 +663,16 @@ async def vision_review(
         if isinstance(p, dict) and p.get("type") == "text" and isinstance(p.get("text"), str):
             uploaded_text_blobs.append(p["text"])
     uploaded_text_all = "\n".join(uploaded_text_blobs)
+    try:
+        vin_candidates += re.findall(VIN_PATTERN, uploaded_text_all.upper())
+    except Exception:
+        pass
+    # normalize + keep unique order
+    _seen_v = set(); _tmp_v=[]
+    for _v in vin_candidates:
+        if _v and _v not in _seen_v:
+            _seen_v.add(_v); _tmp_v.append(_v)
+    vin_candidates = _tmp_v
 
     # --- ODOMETER OCR LOCK (extract mileage from OCR text if visible) ---
     # This makes it impossible for the narrative to claim the odometer is not visible when OCR captured a mileage value.
@@ -1225,52 +1229,53 @@ async def vision_review(
     except Exception:
         pass
 
-    # --- VIN HARD RULES (SILENT, DETERMINISTIC) ---
-    # Goals:
-    # 1) If a VIN is present/verified, it MUST appear in the narrative.
-    # 2) Never allow phrases like "matches provided VIN" when no VIN value exists.
-    # 3) Reduce repeated sections in narrative that confuse reviewers.
-    try:
-        # Fallback VIN from uploaded filenames (ZIP name / member names), if model returned none.
-        _vin = (result.get("vin") or "").strip().upper()
-        if (not _is_real_vin(_vin)) and upload_vin_candidates:
-            _vin = sorted(upload_vin_candidates)[0]
-            result["vin"] = _vin
-            # Only set vin_verification if it's empty-ish; don't overwrite real verification.
-            if not (result.get("vin_verification") or "").strip():
-                result["vin_verification"] = "VIN detected from uploaded filename (fallback)."
+# --- VIN: ELIMINATE FALSE "PROVIDED VIN" + FORCE VERIFIED VIN IN NARRATIVE ---
+# Goal:
+# 1) Never claim "provided VIN" / "VIN matches" unless we actually have a 17-char VIN value.
+# 2) If we have a VIN value AND verification indicates a match/verified, force the VIN string into the narrative.
+# 3) If model omitted VIN but OCR/filename produced one, backfill result['vin'] deterministically.
+try:
+    _cand_vins = vin_candidates[:] if isinstance(vin_candidates, list) else []
+    _vin_val = (result.get("vin") or "").strip()
+    _vin_ver = (result.get("vin_verification") or "").strip()
 
-        _vin = (result.get("vin") or "").strip().upper()
-        _sm = result.get("summary_markdown") or ""
-        _sv = (result.get("vin_verification") or "")
+    def _is_real_vin(v: str) -> bool:
+        return bool(re.fullmatch(r"[A-HJ-NPR-Z0-9]{17}", (v or "").strip().upper()))
 
+    # Backfill VIN if missing/placeholder and we have candidates from OCR/filename
+    if (not _is_real_vin(_vin_val)) and _cand_vins:
+        for _v in _cand_vins:
+            if _is_real_vin(_v):
+                _vin_val = _v.strip().upper()
+                result["vin"] = _vin_val
+                break
+
+    _has_vin = _is_real_vin(_vin_val)
+    # If we don't have a real VIN, scrub any "provided VIN" / "VIN matches" language from narrative-related fields
+    if not _has_vin:
+        _bad = r"(?is)\b(vin\s+(?:matches|matched|verified|confirm(?:ed|s)|consistent)\s+(?:the\s+)?provided\s+vin|provided\s+vin)\b.*?(?:\.|\n)"
+        for _k in ("summary_markdown", "summary_brief", "vin_verification", "conclusion"):
+            _t = result.get(_k)
+            if isinstance(_t, str) and _t:
+                result[_k] = re.sub(_bad, "", _t).strip()
+
+    # Determine "verified" status only if we have VIN and verification says so OR narrative implies verified
+    _vin_verified = False
+    if _has_vin:
+        if re.search(r"(?i)\b(match|matched|verified|confirm(?:ed|s)|consistent)\b", _vin_ver):
+            _vin_verified = True
+        else:
+            # If model narrative already says VIN verified/matched, treat as verified
+            _sm0 = (result.get("summary_markdown") or "")
+            if isinstance(_sm0, str) and re.search(r"(?i)\bvin\b.*\b(verified|matched|match|confirmed|consistent)\b", _sm0):
+                _vin_verified = True
+
+    # Force VIN string into narrative when verified (and avoid duplicates)
+    if _has_vin and _vin_verified:
+        _sm = (result.get("summary_markdown") or "")
         if isinstance(_sm, str):
-            # If VIN is missing, strip "provided VIN" / "matches provided VIN" claims.
-            if not _is_real_vin(_vin):
-                _sm = re.sub(r"(?i)\bmatches\s+provided\s+vin\b", "VIN label visible (VIN value not captured)", _sm)
-                _sm = re.sub(r"(?i)\bprovided\s+vin\b", "VIN label", _sm)
-                result["vin_verification"] = re.sub(r"(?i)\bmatches\s+provided\s+vin\b", "VIN label visible (VIN value not captured)", _sv or "") or (_sv or "")
-            else:
-                # If VIN exists, make "provided VIN" statements explicit with the actual VIN value.
-                _sm = re.sub(r"(?i)\bmatches\s+provided\s+vin\b", f"matches VIN {_vin}", _sm)
-                _sm = re.sub(r"(?i)\bprovided\s+vin\b", f"VIN {_vin}", _sm)
-
-            # De-dupe common repeated sections that have been showing up in outputs
-            _sm = _dedupe_markdown_sections(
-                _sm,
-                titles=[
-                    "Estimated Repair Costs",
-                    "Fraud & Authenticity Check",
-                    "Conclusion",
-                    "Fraud & Authenticity Checks",
-                    "Estimated Repair Cost",
-                ],
-            )
-
-            # If VIN is real and verification text indicates match/verified/confirmed, force a VIN line near top.
-            _vin_verified = _is_real_vin(_vin) and bool(re.search(r"(?i)\b(match|matched|verified|confirm(?:ed|s)|consistent)\b", (_sv or _sm)))
-            if _vin_verified and (_vin not in _sm):
-                vin_line = f"VIN verified: {_vin}."
+            if _vin_val not in _sm:
+                vin_line = f"VIN verified: {_vin_val}."
                 if "## Detailed Audit Report" in _sm:
                     _sm = re.sub(
                         r"(##\s*Detailed\s+Audit\s+Report\s*\n)",
@@ -1280,10 +1285,72 @@ async def vision_review(
                         flags=re.IGNORECASE,
                     )
                 else:
-                    _sm = ("## Detailed Audit Report\n" + vin_line + "\n\n" + _sm).strip() + "\n"
-            result["summary_markdown"] = _sm
-    except Exception:
-        pass
+                    _sm = ("## Detailed Audit Report\n" + vin_line + "\n\n" + _sm).strip()
+                result["summary_markdown"] = _sm
+
+            # Keep brief consistent if room
+            _sb = (result.get("summary_brief") or "")
+            if isinstance(_sb, str) and _vin_val not in _sb:
+                cand = (_sb.strip() + f" VIN verified: {_vin_val}.").strip()
+                if len(cand) <= 280:
+                    result["summary_brief"] = cand
+except Exception:
+    pass
+
+# --- DEDUPE REPEATED SECTIONS IN NARRATIVE (MODEL OCCASIONALLY REPEATS) ---
+try:
+    _sm = (result.get("summary_markdown") or "")
+    if isinstance(_sm, str) and _sm:
+        # Treat these headings as section boundaries even if missing leading "##"
+        _section_names = [
+            "Estimated Repair Costs",
+            "Fraud & Authenticity Check",
+            "Fraud and Authenticity Check",
+            "Conclusion",
+        ]
+        # Build a regex that catches both "## Heading" and plain "Heading" at line start
+        _head_rx = re.compile(r"(?m)^(##\s*)?(" + "|".join(re.escape(s) for s in _section_names) + r")\s*$")
+        lines = _sm.splitlines()
+        out = []
+        seen = set()
+        skip_mode = False
+        current_head = None
+
+        i = 0
+        while i < len(lines):
+            line = lines[i]
+            m = _head_rx.match(line.strip())
+            if m:
+                head = m.group(2)
+                # normalize
+                key = head.lower()
+                if key in seen:
+                    # skip this repeated section entirely until next recognized heading
+                    skip_mode = True
+                    current_head = key
+                    i += 1
+                    # consume until next heading (but do not consume that heading; loop will handle)
+                    while i < len(lines):
+                        if _head_rx.match(lines[i].strip()):
+                            break
+                        i += 1
+                    continue
+                else:
+                    seen.add(key)
+                    skip_mode = False
+                    current_head = key
+                    # Keep heading as-is
+                    out.append(line)
+                    i += 1
+                    continue
+            if not skip_mode:
+                out.append(line)
+            i += 1
+
+        result["summary_markdown"] = "\n".join(out).strip()
+except Exception:
+    pass
+
 
 
 
@@ -2034,53 +2101,6 @@ async def vision_review(
             pdf.multi_cell(effective_w, 6, (_pdf_sanitize(str(s))[:2000] + " …"))
 
 
-    
-    def _is_real_vin(v: str) -> bool:
-        try:
-            v = (v or "").strip().upper()
-            return bool(re.fullmatch(r"[A-HJ-NPR-Z0-9]{17}", v))
-        except Exception:
-            return False
-
-    def _dedupe_markdown_sections(md: str, titles=None) -> str:
-        """Remove repeated '##' sections by title (keeps first occurrence)."""
-        if not isinstance(md, str) or not md.strip():
-            return md
-        titles = set(t.lower() for t in (titles or []))
-        out = []
-        seen = set()
-        cur_title = None
-        cur_buf = []
-
-        def flush():
-            nonlocal cur_title, cur_buf
-            if cur_title is None:
-                out.extend(cur_buf)
-            else:
-                key = cur_title.lower().strip()
-                if (not titles) or (key in titles):
-                    if key in seen:
-                        # drop duplicate section
-                        cur_buf = []
-                        cur_title = None
-                        return
-                    seen.add(key)
-                out.extend(cur_buf)
-            cur_buf = []
-            cur_title = None
-
-        lines = md.splitlines()
-        for line in lines:
-            m = re.match(r"^##\s+(.*)\s*$", line)
-            if m:
-                flush()
-                cur_title = m.group(1).strip()
-                cur_buf = [line]
-            else:
-                cur_buf.append(line)
-        flush()
-        return "\n".join(out).strip() + "\n"
-
     def add_thumbnail_page(pdf_obj: FPDF, image_paths: List[str]) -> None:
         """Append exactly ONE page containing thumbnails of all uploaded photos (as space allows)."""
         if not image_paths:
@@ -2366,7 +2386,6 @@ async def download_pdf(file_number: Optional[str] = None, filename: Optional[str
         return JSONResponse(status_code=404, content={"detail": "Not Found"})
     latest = max(candidates, key=lambda p: os.path.getmtime(p))
     return FileResponse(path=latest, media_type="application/pdf", filename=os.path.basename(latest))
-
 
 
 
