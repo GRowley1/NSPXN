@@ -1968,7 +1968,7 @@ async def vision_review(
             pdf_obj.set_font("Helvetica", "B", 12)
         except Exception:
             pdf_obj.set_font("Arial", "B", 12)
-        pdf_obj.cell(0, 8, "Uploaded Photo Thumbnails (Reference Only)", ln=True)
+        pdf_obj.cell(0, 8, "Uploaded Photo Thumbnails", ln=True)
         pdf_obj.ln(2)
 
         # Layout (single-page, grid)
