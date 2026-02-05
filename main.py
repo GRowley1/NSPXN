@@ -1957,7 +1957,7 @@ async def vision_review(
         poi15_hit = False
 
     if ai_intent == "damage_report_from_photos":
-        pdf.cell(0,10,"AI-4-IA Damage Report", ln=True, align="C")
+        pdf.cell(0,10,"NSPXN.com Damage Report", ln=True, align="C")
         pdf.set_font_size(10); pdf.ln(3)
 
         mc(f"Claim #: {result['claim_number'] or 'N/A'}    File #: {file_number or 'N/A'}")
@@ -1971,7 +1971,7 @@ async def vision_review(
         safe_file = _safe(file_number)
         pdf_filename = f"AI_Damage_Report_{safe_file}.pdf"
     else:
-        pdf.cell(0,10,"NSPXN.com AI Review Report", ln=True, align="C")
+        pdf.cell(0,10,"NSPXN.com Review Report", ln=True, align="C")
         pdf.set_font_size(10); pdf.ln(3)
         mc(f"File Number: {file_number}")
         mc(f"IA Company: {ia_company}")
@@ -2029,7 +2029,7 @@ async def vision_review(
         mc(f"Compliance Score: {result['compliance_score']}")
         pdf_status = result["redaction_status"].replace("✅", "OK")
         mc(pdf_status)
-        pdf.ln(3); mc("AI-4-IA Review Summary"); mc((smark or '').strip())
+        pdf.ln(3); mc("NSPXN.com Review Summary"); mc((smark or '').strip())
         pdf.ln(3); mc("Fraud Detection"); mc((result["fraud_markdown"] or 'N/A').strip())
 
         safe_file = _safe(file_number)
@@ -2055,9 +2055,9 @@ async def vision_review(
     try:
         msg = EmailMessage()
         if ai_intent == "damage_report_from_photos":
-            subj = f"AI Damage Report: {file_number or ''} {result['claim_number'] or ''}".strip()
+            subj = f"NSPXN.com Damage Report: {file_number or ''} {result['claim_number'] or ''}".strip()
             body = (
-                "AI-4-IA Damage Report\n\n"
+                "NSPXN.com Damage Report\n\n"
                 f"IA Company: {ia_company}\n"
                 f"Claim #: {result['claim_number'] or 'N/A'}    File #: {file_number or 'N/A'}\n"
                 f"Odometer: {result['odometer_estimate_only'] or 'N/A'}    Primary Impact: {result['primary_impact'] or 'N/A'}\n"
@@ -2100,9 +2100,9 @@ async def vision_review(
                     supp_line = "Supplement Status: Supplement Estimate detected in documentation\n"
 
             tl_line = "Estimate Type: Total Loss (explicit in documents)\n" if _explicit_tl_email else ""
-            subj = f"AI-4-IA Review: {result['claim_number'] or file_number}"
+            subj = f"NSPXN.com Review: {result['claim_number'] or file_number}"
             body = (
-                "NSPXN.com AI Review Report\n\n"
+                "NSPXN.com Review Report\n\n"
                 f"File Number: {file_number}\n"
                 f"IA Company: {ia_company}\n"
                 f"Appraiser ID #: {appraiser_id}\n"
@@ -2116,7 +2116,7 @@ async def vision_review(
                 f"Odometer (from estimate): {result['odometer_estimate_only']}\n"
                 f"Compliance Score: {result['compliance_score']}\n\n"
                 f"{result['redaction_status']}\n\n"
-                "AI-4-IA Review Summary\n"
+                "NSPXN.com Review Summary\n"
                 f"{result['summary_markdown']}\n\n"
                 "Fraud Detection\n"
                 f"{result['fraud_markdown']}\n"
