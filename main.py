@@ -2,7 +2,7 @@ from fastapi import FastAPI, File, UploadFile, Form
 from fastapi.responses import JSONResponse, FileResponse
 from fastapi.middleware.cors import CORSMiddleware
 from typing import List, Dict, Any, Optional
-import os, io, re, json, base64, logging, zipfile, glob
+import os, io, re, json, base64, logging, zipfile, glob, uuid
 import smtplib  # email transport
 from email.message import EmailMessage
 
@@ -433,7 +433,7 @@ def _maybe_ocr_image_text(im: Image.Image) -> str:
     except Exception:
         return ""
 
-def _add_bytes(parts: List[Dict[str,Any]], files_seen: List[str], photo_index: Optional[List[str]], raw: bytes, fname: str, used: int, max_images: int, pdf_text_fulls: Optional[List[str]] = None) -> int:
+def _add_bytes(parts: List[Dict[str,Any]], files_seen: List[str], photo_index: Optional[List[str]], thumb_paths: Optional[List[str]], raw: bytes, fname: str, used: int, max_images: int, pdf_text_fulls: Optional[List[str]] = None) -> int:
     low = fname.lower()
     if low.endswith(SUPPORTED_PDF_EXTS) and used < max_images:
         try:
@@ -474,6 +474,17 @@ def _add_bytes(parts: List[Dict[str,Any]], files_seen: List[str], photo_index: O
         if photo_index is not None:
             photo_index.append(fname)
         files_seen.append(f"{fname} (photo)")
+        # Keep a local copy of each uploaded photo for the PDF thumbnail appendix page.
+        if thumb_paths is not None:
+            try:
+                im_save = im_ref if im_ref is not None else Image.open(io.BytesIO(raw)).convert("RGB")
+                im_save.thumbnail((900, 900))
+                thumb_name = f"thumb_{uuid.uuid4().hex}.jpg"
+                thumb_path = os.path.join(PDF_DIR, thumb_name)
+                im_save.save(thumb_path, format="JPEG", quality=75, optimize=True)
+                thumb_paths.append(thumb_path)
+            except Exception:
+                pass
         if im_ref is not None:
             txt = _maybe_ocr_image_text(im_ref)
             if txt:
@@ -600,6 +611,7 @@ async def vision_review(
     parts: List[Dict[str, Any]] = []
     files_seen: List[str] = []
     photo_index: List[str] = []
+    thumbnail_paths: List[str] = []
     MAX_IMAGES = 48
     used = 0
     pdf_text_fulls: List[str] = []  # full PDF text for supplement detection
@@ -632,9 +644,9 @@ async def vision_review(
                     data = zf.read(zi)
                 except Exception as e:
                     files_seen.append(f"{fname}::{inner_name} (read error: {e})"); continue
-                used = _add_bytes(parts, files_seen, photo_index, data, f"{fname}::{inner_name}", used, MAX_IMAGES, pdf_text_fulls=pdf_text_fulls)
+                used = _add_bytes(parts, files_seen, photo_index, thumbnail_paths, data, f"{fname}::{inner_name}", used, MAX_IMAGES, pdf_text_fulls=pdf_text_fulls)
         else:
-            used = _add_bytes(parts, files_seen, photo_index, raw, fname, used, MAX_IMAGES, pdf_text_fulls=pdf_text_fulls)
+            used = _add_bytes(parts, files_seen, photo_index, thumbnail_paths, raw, fname, used, MAX_IMAGES, pdf_text_fulls=pdf_text_fulls)
 
     # Collect uploaded TEXT ONLY for evidence checks
     uploaded_text_blobs = []
@@ -1945,6 +1957,61 @@ async def vision_review(
             pdf.set_x(pdf.l_margin)
             pdf.multi_cell(effective_w, 6, (_pdf_sanitize(str(s))[:2000] + " …"))
 
+
+    def add_thumbnail_page(pdf_obj: FPDF, image_paths: List[str]) -> None:
+        """Append exactly ONE page containing thumbnails of all uploaded photos (as space allows)."""
+        if not image_paths:
+            return
+
+        pdf_obj.add_page()
+        try:
+            pdf_obj.set_font("Helvetica", "B", 12)
+        except Exception:
+            pdf_obj.set_font("Arial", "B", 12)
+        pdf_obj.cell(0, 8, "Uploaded Photo Thumbnails (Reference Only)", ln=True)
+        pdf_obj.ln(2)
+
+        # Layout (single-page, grid)
+        cols = 4
+        gutter = 3.0
+        usable_w = pdf_obj.w - pdf_obj.l_margin - pdf_obj.r_margin
+        thumb_w = (usable_w - gutter * (cols - 1)) / cols
+        x0 = pdf_obj.l_margin
+        y = pdf_obj.get_y()
+        x = x0
+        col = 0
+
+        placed = 0
+        total = len(image_paths)
+
+        for p in image_paths:
+            # Hard-stop to keep this as ONE PAGE ONLY
+            if y + thumb_w > (pdf_obj.h - pdf_obj.b_margin - 10):
+                break
+            try:
+                pdf_obj.image(p, x=x, y=y, w=thumb_w)
+                placed += 1
+            except Exception:
+                pass
+
+            col += 1
+            if col >= cols:
+                col = 0
+                x = x0
+                y += thumb_w + gutter
+            else:
+                x += thumb_w + gutter
+
+        # Footer note if truncated by the 1-page rule
+        if placed < total:
+            try:
+                pdf_obj.set_font_size(9)
+            except Exception:
+                pass
+            pdf_obj.set_y(pdf_obj.h - pdf_obj.b_margin - 8)
+            pdf_obj.set_x(pdf_obj.l_margin)
+            pdf_obj.cell(0, 6, f"Showing {placed} of {total} uploaded photos (1-page appendix limit).", ln=True)
+
     # POI-15 Total Loss trigger from uploaded text ONLY
     poi15_hit = False
     try:
@@ -2034,6 +2101,13 @@ async def vision_review(
 
         safe_file = _safe(file_number)
         pdf_filename = f"{safe_file}.pdf"
+
+
+    # --- One-page photo thumbnail appendix (all uploaded photos) ---
+    try:
+        add_thumbnail_page(pdf, thumbnail_paths)
+    except Exception:
+        pass
 
     pdf_path = os.path.join(PDF_DIR, pdf_filename)
     try:
