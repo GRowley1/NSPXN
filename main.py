@@ -1213,6 +1213,43 @@ async def vision_review(
 
 
 
+    # --- VIN MUST APPEAR IN NARRATIVE WHEN VERIFIED (SILENT, DETERMINISTIC) ---
+    # If the VIN is read/verified (i.e., a non-N/A VIN exists and verification indicates MATCH/VERIFIED),
+    # force at least one explicit VIN sentence into the '## Detailed Audit Report' narrative.
+    try:
+        _vin_val = (result.get("vin") or "").strip()
+        _vin_ver = (result.get("vin_verification") or "").strip()
+        _vin_is_real = bool(re.fullmatch(r"[A-HJ-NPR-Z0-9]{17}", _vin_val))
+        _vin_verified = _vin_is_real and bool(re.search(r"(?i)\b(match|matched|verified|confirm(?:ed|s)|consistent)\b", _vin_ver))
+        if _vin_verified:
+            _sm = (result.get("summary_markdown") or "")
+            if isinstance(_sm, str):
+                # If VIN isn't already present anywhere in the narrative, inject it immediately after the Detailed Audit header.
+                if _vin_val not in _sm:
+                    vin_line = f"The VIN was read and verified as {_vin_val} (see VIN photo evidence)."
+                    if "## Detailed Audit Report" in _sm:
+                        _sm = re.sub(
+                            r"(##\s*Detailed\s+Audit\s+Report\s*\n)",
+                            r"\1" + vin_line + "\n",
+                            _sm,
+                            count=1,
+                            flags=re.IGNORECASE,
+                        )
+                    else:
+                        _sm = ("## Detailed Audit Report\n" + vin_line + "\n\n" + _sm).strip()
+                    result["summary_markdown"] = _sm
+                # Brief should also not contradict verified VIN
+                _sb = (result.get("summary_brief") or "")
+                if isinstance(_sb, str) and _vin_val and _vin_val not in _sb:
+                    # Keep within 280 chars requirement; append only if it fits, else leave as-is.
+                    cand = (_sb.strip() + f" VIN verified: {_vin_val}.").strip()
+                    if len(cand) <= 280:
+                        result["summary_brief"] = cand
+    except Exception:
+        pass
+
+
+
     # --- Side Checks enforcement (photos-only): ensure Driver/Left Side bullet exists if Passenger/Right Side exists ---
     try:
         if ai_intent == "damage_report_from_photos":
