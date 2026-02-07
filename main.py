@@ -1270,24 +1270,21 @@ async def vision_review(
     try:
         _notes_raw = (ai_notes or "").strip()
         if _notes_raw:
-            _notes_l = _notes_raw.lower()
-
             def _corners_from_notes(t: str):
                 corners = set()
-                # Normalize common corner references to LF/RF/LR/RR
-                repl = t.lower()
+                s = (t or "").lower()
                 # explicit abbreviations
                 for ab in ("lf","rf","lr","rr"):
-                    if re.search(r"\b" + ab + r"\b", repl):
+                    if re.search(r"\b" + ab + r"\b", s):
                         corners.add(ab.upper())
                 # full words
-                if re.search(r"\bleft\s+rear\b|\bdriver\s+rear\b", repl):
+                if re.search(r"\bleft\s+rear\b|\bdriver\s+rear\b", s):
                     corners.add("LR")
-                if re.search(r"\bright\s+rear\b|\bpassenger\s+rear\b", repl):
+                if re.search(r"\bright\s+rear\b|\bpassenger\s+rear\b", s):
                     corners.add("RR")
-                if re.search(r"\bleft\s+front\b|\bdriver\s+front\b", repl):
+                if re.search(r"\bleft\s+front\b|\bdriver\s+front\b", s):
                     corners.add("LF")
-                if re.search(r"\bright\s+front\b|\bpassenger\s+front\b", repl):
+                if re.search(r"\bright\s+front\b|\bpassenger\s+front\b", s):
                     corners.add("RF")
                 return corners
 
@@ -1297,44 +1294,52 @@ async def vision_review(
             if _note_corners and _note_mentions_wheel:
                 _sm = (result.get("summary_markdown") or "")
                 if isinstance(_sm, str) and _sm:
-                    # Remove conflicting wheel/rim/tire sentences that name a different corner than the note.
-                    # Keep the note-corner statements (and neutral statements without a corner).
-                    damage_hint = re.compile(r"(?i)\b(spare|missing|damage|damaged|bent|crack|cracked|suspension|alignment|wheel\s+or\s+suspension)\b")
-                    wheel_hint = re.compile(r"(?i)\b(wheel|rim|tire|tyre|hub|axle|suspension)\b")
-                    corner_hint = re.compile(r"(?i)\b(left\s+front|right\s+front|left\s+rear|right\s+rear|driver\s+front|passenger\s+front|driver\s+rear|passenger\s+rear|\bLF\b|\bRF\b|\bLR\b|\bRR\b)\b")
+                    # Stronger than sentence-level keep/remove:
+                    # Remove ANY line/sentence that discusses wheel/rim/tire/suspension and names a different corner
+                    # than requested in Add'l Notes — even if the same sentence also contains the requested corner elsewhere.
+                    # Split on punctuation OR newlines to catch wrapped sentences.
+                    wheel_hint = re.compile(r"(?i)\b(wheel|rim|tire|tyre|hub|axle|suspension|spare)\b")
+                    damage_hint = re.compile(r"(?i)\b(spare|missing|flat|damage|damaged|bent|crack|cracked|worn|suspension|alignment)\b")
 
-                    def _sent_has_note_corner(s: str) -> bool:
-                        sl = s.lower()
-                        if "LR" in _note_corners and re.search(r"\bleft\s+rear\b|\bdriver\s+rear\b|\bLR\b", s, re.I):
-                            return True
-                        if "RR" in _note_corners and re.search(r"\bright\s+rear\b|\bpassenger\s+rear\b|\bRR\b", s, re.I):
-                            return True
-                        if "LF" in _note_corners and re.search(r"\bleft\s+front\b|\bdriver\s+front\b|\bLF\b", s, re.I):
-                            return True
-                        if "RF" in _note_corners and re.search(r"\bright\s+front\b|\bpassenger\s+front\b|\bRF\b", s, re.I):
-                            return True
+                    # Corner phrases normalized
+                    CORNER_RX = {
+                        "LR": re.compile(r"(?i)\b(left\s+rear|driver\s+rear|LR)\b"),
+                        "RR": re.compile(r"(?i)\b(right\s+rear|passenger\s+rear|RR)\b"),
+                        "LF": re.compile(r"(?i)\b(left\s+front|driver\s+front|LF|front\s+left)\b"),
+                        "RF": re.compile(r"(?i)\b(right\s+front|passenger\s+front|RF|front\s+right)\b"),
+                    }
+
+                    # Determine which corners are "allowed" (from the note). Usually one, but support multiple.
+                    allowed = set(_note_corners)
+
+                    def _mentions_disallowed_corner(chunk: str) -> bool:
+                        for c, rx in CORNER_RX.items():
+                            if c in allowed:
+                                continue
+                            if rx.search(chunk):
+                                return True
                         return False
 
-                    sentences = re.split(r"(?<=[\.\!\?])\s+", _sm)
+                    def _mentions_allowed_corner(chunk: str) -> bool:
+                        return any(CORNER_RX[c].search(chunk) for c in allowed if c in CORNER_RX)
+
+                    pieces = re.split(r"(?<=[\.!\?])\s+|\n+", _sm)
                     kept = []
                     removed_any = False
-                    for s in sentences:
-                        if not s:
+                    for piece in pieces:
+                        if not piece.strip():
                             continue
-                        if wheel_hint.search(s) and damage_hint.search(s) and corner_hint.search(s):
-                            # If sentence talks about wheel/rim/tire damage and names a corner,
-                            # drop it if it conflicts with the note corner(s).
-                            if not _sent_has_note_corner(s):
-                                removed_any = True
-                                continue
-                        kept.append(s)
-                    _sm2 = " ".join(kept).strip()
+                        if wheel_hint.search(piece) and damage_hint.search(piece) and _mentions_disallowed_corner(piece):
+                            # If it references a disallowed corner for wheel/tire/suspension damage, drop it.
+                            removed_any = True
+                            continue
+                        kept.append(piece.strip())
+                    _sm2 = "\n".join(kept).strip()
 
-                    # Ensure the Add'l Notes section explicitly states the requested corner to prevent substitution.
-                    corner_phrase = ", ".join(sorted(_note_corners))
+                    # Ensure Add'l Notes section explicitly states requested corner focus.
+                    corner_phrase = ", ".join(sorted(allowed))
                     corner_line = f"- Requested corner focus: {corner_phrase} (from Add'l Notes). Do not substitute other corners for this request.\n"
                     if re.search(r"(?i)###\s*Add['’]l\s+Notes\s+Addressed\b", _sm2):
-                        # insert the corner line right after the Note line if not present
                         if re.search(r"(?i)Requested\s+corner\s+focus", _sm2) is None:
                             _sm2 = re.sub(
                                 r"(?im)(^###\s*Add['’]l\s+Notes\s+Addressed\s*\n(?:.*\n){0,3})",
@@ -1342,6 +1347,18 @@ async def vision_review(
                                 _sm2,
                                 count=1,
                             )
+
+                    # If we removed disallowed-corner wheel statements, add an explicit clarification line so reviewers understand why.
+                    if removed_any and re.search(r"(?i)###\s*Add['’]l\s+Notes\s+Addressed\b", _sm2):
+                        clar = "- Clarification: Wheel/tire observations for other corners were omitted to avoid substituting for the requested corner in Add'l Notes.\n"
+                        if "Clarification:" not in _sm2:
+                            _sm2 = re.sub(
+                                r"(?im)(^###\s*Add['’]l\s+Notes\s+Addressed\s*\n(?:.*\n){0,6})",
+                                lambda m: m.group(1) + clar,
+                                _sm2,
+                                count=1,
+                            )
+
                     result["summary_markdown"] = _sm2
     except Exception:
         pass
@@ -2503,6 +2520,7 @@ async def download_pdf(file_number: Optional[str] = None, filename: Optional[str
         return JSONResponse(status_code=404, content={"detail": "Not Found"})
     latest = max(candidates, key=lambda p: os.path.getmtime(p))
     return FileResponse(path=latest, media_type="application/pdf", filename=os.path.basename(latest))
+
 
 
 
