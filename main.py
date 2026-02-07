@@ -1262,7 +1262,91 @@ async def vision_review(
         pass
 
 
-    # --- VIN: ELIMINATE FALSE "PROVIDED VIN" + FORCE VERIFIED VIN IN NARRATIVE ---
+    
+    # --- ADD'L NOTES CORNER / COMPONENT CONTRADICTION GUARD (SILENT, DETERMINISTIC) ---
+    # Purpose: If Add'l Notes specify a specific corner (e.g., "left rear wheel"), do NOT allow the narrative to
+    # substitute a different corner (e.g., "front left wheel") for the same component (wheel/rim/tire/suspension).
+    # This prevents the model from "fulfilling" the note using the wrong corner.
+    try:
+        _notes_raw = (ai_notes or "").strip()
+        if _notes_raw:
+            _notes_l = _notes_raw.lower()
+
+            def _corners_from_notes(t: str):
+                corners = set()
+                # Normalize common corner references to LF/RF/LR/RR
+                repl = t.lower()
+                # explicit abbreviations
+                for ab in ("lf","rf","lr","rr"):
+                    if re.search(r"\b" + ab + r"\b", repl):
+                        corners.add(ab.upper())
+                # full words
+                if re.search(r"\bleft\s+rear\b|\bdriver\s+rear\b", repl):
+                    corners.add("LR")
+                if re.search(r"\bright\s+rear\b|\bpassenger\s+rear\b", repl):
+                    corners.add("RR")
+                if re.search(r"\bleft\s+front\b|\bdriver\s+front\b", repl):
+                    corners.add("LF")
+                if re.search(r"\bright\s+front\b|\bpassenger\s+front\b", repl):
+                    corners.add("RF")
+                return corners
+
+            _note_corners = _corners_from_notes(_notes_raw)
+            _note_mentions_wheel = bool(re.search(r"(?i)\b(wheel|rim|tire|tyre|hub|axle|suspension)\b", _notes_raw))
+
+            if _note_corners and _note_mentions_wheel:
+                _sm = (result.get("summary_markdown") or "")
+                if isinstance(_sm, str) and _sm:
+                    # Remove conflicting wheel/rim/tire sentences that name a different corner than the note.
+                    # Keep the note-corner statements (and neutral statements without a corner).
+                    damage_hint = re.compile(r"(?i)\b(spare|missing|damage|damaged|bent|crack|cracked|suspension|alignment|wheel\s+or\s+suspension)\b")
+                    wheel_hint = re.compile(r"(?i)\b(wheel|rim|tire|tyre|hub|axle|suspension)\b")
+                    corner_hint = re.compile(r"(?i)\b(left\s+front|right\s+front|left\s+rear|right\s+rear|driver\s+front|passenger\s+front|driver\s+rear|passenger\s+rear|\bLF\b|\bRF\b|\bLR\b|\bRR\b)\b")
+
+                    def _sent_has_note_corner(s: str) -> bool:
+                        sl = s.lower()
+                        if "LR" in _note_corners and re.search(r"\bleft\s+rear\b|\bdriver\s+rear\b|\bLR\b", s, re.I):
+                            return True
+                        if "RR" in _note_corners and re.search(r"\bright\s+rear\b|\bpassenger\s+rear\b|\bRR\b", s, re.I):
+                            return True
+                        if "LF" in _note_corners and re.search(r"\bleft\s+front\b|\bdriver\s+front\b|\bLF\b", s, re.I):
+                            return True
+                        if "RF" in _note_corners and re.search(r"\bright\s+front\b|\bpassenger\s+front\b|\bRF\b", s, re.I):
+                            return True
+                        return False
+
+                    sentences = re.split(r"(?<=[\.\!\?])\s+", _sm)
+                    kept = []
+                    removed_any = False
+                    for s in sentences:
+                        if not s:
+                            continue
+                        if wheel_hint.search(s) and damage_hint.search(s) and corner_hint.search(s):
+                            # If sentence talks about wheel/rim/tire damage and names a corner,
+                            # drop it if it conflicts with the note corner(s).
+                            if not _sent_has_note_corner(s):
+                                removed_any = True
+                                continue
+                        kept.append(s)
+                    _sm2 = " ".join(kept).strip()
+
+                    # Ensure the Add'l Notes section explicitly states the requested corner to prevent substitution.
+                    corner_phrase = ", ".join(sorted(_note_corners))
+                    corner_line = f"- Requested corner focus: {corner_phrase} (from Add'l Notes). Do not substitute other corners for this request.\n"
+                    if re.search(r"(?i)###\s*Add['’]l\s+Notes\s+Addressed\b", _sm2):
+                        # insert the corner line right after the Note line if not present
+                        if re.search(r"(?i)Requested\s+corner\s+focus", _sm2) is None:
+                            _sm2 = re.sub(
+                                r"(?im)(^###\s*Add['’]l\s+Notes\s+Addressed\s*\n(?:.*\n){0,3})",
+                                lambda m: m.group(1) + corner_line,
+                                _sm2,
+                                count=1,
+                            )
+                    result["summary_markdown"] = _sm2
+    except Exception:
+        pass
+
+# --- VIN: ELIMINATE FALSE "PROVIDED VIN" + FORCE VERIFIED VIN IN NARRATIVE ---
     # Goal:
     # 1) Never claim "provided VIN" / "VIN matches" unless we actually have a 17-char VIN value.
     # 2) If we have a VIN value AND verification indicates a match/verified, force the VIN string into the narrative.
