@@ -854,10 +854,13 @@ async def vision_review(
     )
     
     if (ai_notes or "").strip():
+        _note = (ai_notes or "").strip()[:2000]
         prompt_text += (
-            "\n\nAI NOTES INSTRUCTIONS (MANDATORY): "
-            "You MUST explicitly address the Add'l Notes in the '## Detailed Audit Report' narrative and/or '## Key Issues & Actions'. "
-            "If a note cannot be verified from evidence, say so and state what evidence would be needed."
+            "\n\nADD'L NOTES ENFORCEMENT (HARD REQUIREMENT):\n"
+            "- You MUST include a short subsection titled \"### Add'l Notes Addressed\" inside '## Detailed Audit Report'.\n"
+            "- Quote the note verbatim, then respond to it as a CHECK ITEM (do not reinterpret locations like front/rear/left/right from the note).\n"
+            "- If the requested item is not clearly visible in photos, write: 'Not verifiable from provided photos' and specify the exact photo needed.\n"
+            f"- Note to address (verbatim): \"{_note}\"\n"
         )
     prompt_text = (
         "OUTPUT FORMAT (MANDATORY): Return ONLY a single strict JSON object with keys "
@@ -1228,6 +1231,36 @@ async def vision_review(
                 result["summary_markdown"] = _sm.rstrip() + f"\n\nOdometer visible: {odometer_value}.\n"
     except Exception:
         pass
+
+
+    # --- ADD'L NOTES MUST APPEAR IN NARRATIVE (SILENT, DETERMINISTIC) ---
+    # If the user provided Add'l Notes, force an '### Add'l Notes Addressed' subsection into the
+    # '## Detailed Audit Report' narrative so the note cannot be ignored.
+    try:
+        _notes = (ai_notes or "").strip()
+        if _notes:
+            _notes = _notes[:500]  # keep PDF/email safe; full note remains in prompt_text
+            _sm = (result.get("summary_markdown") or "")
+            if isinstance(_sm, str) and _sm:
+                if re.search(r"(?i)###\s*Add['’]l\s+Notes\s+Addressed\b", _sm) is None:
+                    inject = (
+                        "### Add'l Notes Addressed\n"
+                        f"- Note: \"{_notes}\"\n"
+                        "- Status: Treated as a checklist item. If not clearly shown in the provided photos, it is not verifiable and a close-up photo is required.\n"
+                    )
+                    if re.search(r"(?i)^##\s*Detailed\s+Audit\s+Report\b", _sm, flags=re.M):
+                        _sm = re.sub(
+                            r"(?im)(^##\s*Detailed\s+Audit\s+Report\s*\n)",
+                            r"\1" + inject + "\n",
+                            _sm,
+                            count=1,
+                        )
+                    else:
+                        _sm = ("## Detailed Audit Report\n" + inject + "\n" + _sm).strip()
+                    result["summary_markdown"] = _sm
+    except Exception:
+        pass
+
 
 # --- VIN: ELIMINATE FALSE "PROVIDED VIN" + FORCE VERIFIED VIN IN NARRATIVE ---
 # Goal:
@@ -2386,7 +2419,6 @@ async def download_pdf(file_number: Optional[str] = None, filename: Optional[str
         return JSONResponse(status_code=404, content={"detail": "Not Found"})
     latest = max(candidates, key=lambda p: os.path.getmtime(p))
     return FileResponse(path=latest, media_type="application/pdf", filename=os.path.basename(latest))
-
 
 
 
