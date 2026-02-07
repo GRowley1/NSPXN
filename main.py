@@ -1262,127 +1262,127 @@ async def vision_review(
         pass
 
 
-# --- VIN: ELIMINATE FALSE "PROVIDED VIN" + FORCE VERIFIED VIN IN NARRATIVE ---
-# Goal:
-# 1) Never claim "provided VIN" / "VIN matches" unless we actually have a 17-char VIN value.
-# 2) If we have a VIN value AND verification indicates a match/verified, force the VIN string into the narrative.
-# 3) If model omitted VIN but OCR/filename produced one, backfill result['vin'] deterministically.
-try:
-    _cand_vins = vin_candidates[:] if isinstance(vin_candidates, list) else []
-    _vin_val = (result.get("vin") or "").strip()
-    _vin_ver = (result.get("vin_verification") or "").strip()
+    # --- VIN: ELIMINATE FALSE "PROVIDED VIN" + FORCE VERIFIED VIN IN NARRATIVE ---
+    # Goal:
+    # 1) Never claim "provided VIN" / "VIN matches" unless we actually have a 17-char VIN value.
+    # 2) If we have a VIN value AND verification indicates a match/verified, force the VIN string into the narrative.
+    # 3) If model omitted VIN but OCR/filename produced one, backfill result['vin'] deterministically.
+    try:
+        _cand_vins = vin_candidates[:] if isinstance(vin_candidates, list) else []
+        _vin_val = (result.get("vin") or "").strip()
+        _vin_ver = (result.get("vin_verification") or "").strip()
 
-    def _is_real_vin(v: str) -> bool:
-        return bool(re.fullmatch(r"[A-HJ-NPR-Z0-9]{17}", (v or "").strip().upper()))
+        def _is_real_vin(v: str) -> bool:
+            return bool(re.fullmatch(r"[A-HJ-NPR-Z0-9]{17}", (v or "").strip().upper()))
 
-    # Backfill VIN if missing/placeholder and we have candidates from OCR/filename
-    if (not _is_real_vin(_vin_val)) and _cand_vins:
-        for _v in _cand_vins:
-            if _is_real_vin(_v):
-                _vin_val = _v.strip().upper()
-                result["vin"] = _vin_val
-                break
+        # Backfill VIN if missing/placeholder and we have candidates from OCR/filename
+        if (not _is_real_vin(_vin_val)) and _cand_vins:
+            for _v in _cand_vins:
+                if _is_real_vin(_v):
+                    _vin_val = _v.strip().upper()
+                    result["vin"] = _vin_val
+                    break
 
-    _has_vin = _is_real_vin(_vin_val)
-    # If we don't have a real VIN, scrub any "provided VIN" / "VIN matches" language from narrative-related fields
-    if not _has_vin:
-        _bad = r"(?is)\b(vin\s+(?:matches|matched|verified|confirm(?:ed|s)|consistent)\s+(?:the\s+)?provided\s+vin|provided\s+vin)\b.*?(?:\.|\n)"
-        for _k in ("summary_markdown", "summary_brief", "vin_verification", "conclusion"):
-            _t = result.get(_k)
-            if isinstance(_t, str) and _t:
-                result[_k] = re.sub(_bad, "", _t).strip()
+        _has_vin = _is_real_vin(_vin_val)
+        # If we don't have a real VIN, scrub any "provided VIN" / "VIN matches" language from narrative-related fields
+        if not _has_vin:
+            _bad = r"(?is)\b(vin\s+(?:matches|matched|verified|confirm(?:ed|s)|consistent)\s+(?:the\s+)?provided\s+vin|provided\s+vin)\b.*?(?:\.|\n)"
+            for _k in ("summary_markdown", "summary_brief", "vin_verification", "conclusion"):
+                _t = result.get(_k)
+                if isinstance(_t, str) and _t:
+                    result[_k] = re.sub(_bad, "", _t).strip()
 
-    # Determine "verified" status only if we have VIN and verification says so OR narrative implies verified
-    _vin_verified = False
-    if _has_vin:
-        if re.search(r"(?i)\b(match|matched|verified|confirm(?:ed|s)|consistent)\b", _vin_ver):
-            _vin_verified = True
-        else:
-            # If model narrative already says VIN verified/matched, treat as verified
-            _sm0 = (result.get("summary_markdown") or "")
-            if isinstance(_sm0, str) and re.search(r"(?i)\bvin\b.*\b(verified|matched|match|confirmed|consistent)\b", _sm0):
+        # Determine "verified" status only if we have VIN and verification says so OR narrative implies verified
+        _vin_verified = False
+        if _has_vin:
+            if re.search(r"(?i)\b(match|matched|verified|confirm(?:ed|s)|consistent)\b", _vin_ver):
                 _vin_verified = True
+            else:
+                # If model narrative already says VIN verified/matched, treat as verified
+                _sm0 = (result.get("summary_markdown") or "")
+                if isinstance(_sm0, str) and re.search(r"(?i)\bvin\b.*\b(verified|matched|match|confirmed|consistent)\b", _sm0):
+                    _vin_verified = True
 
-    # Force VIN string into narrative when verified (and avoid duplicates)
-    if _has_vin and _vin_verified:
+        # Force VIN string into narrative when verified (and avoid duplicates)
+        if _has_vin and _vin_verified:
+            _sm = (result.get("summary_markdown") or "")
+            if isinstance(_sm, str):
+                if _vin_val not in _sm:
+                    vin_line = f"VIN verified: {_vin_val}."
+                    if "## Detailed Audit Report" in _sm:
+                        _sm = re.sub(
+                            r"(##\s*Detailed\s+Audit\s+Report\s*\n)",
+                            r"\1" + vin_line + "\n",
+                            _sm,
+                            count=1,
+                            flags=re.IGNORECASE,
+                        )
+                    else:
+                        _sm = ("## Detailed Audit Report\n" + vin_line + "\n\n" + _sm).strip()
+                    result["summary_markdown"] = _sm
+
+                # Keep brief consistent if room
+                _sb = (result.get("summary_brief") or "")
+                if isinstance(_sb, str) and _vin_val not in _sb:
+                    cand = (_sb.strip() + f" VIN verified: {_vin_val}.").strip()
+                    if len(cand) <= 280:
+                        result["summary_brief"] = cand
+    except Exception:
+        pass
+
+    # --- DEDUPE REPEATED SECTIONS IN NARRATIVE (MODEL OCCASIONALLY REPEATS) ---
+    try:
         _sm = (result.get("summary_markdown") or "")
-        if isinstance(_sm, str):
-            if _vin_val not in _sm:
-                vin_line = f"VIN verified: {_vin_val}."
-                if "## Detailed Audit Report" in _sm:
-                    _sm = re.sub(
-                        r"(##\s*Detailed\s+Audit\s+Report\s*\n)",
-                        r"\1" + vin_line + "\n",
-                        _sm,
-                        count=1,
-                        flags=re.IGNORECASE,
-                    )
-                else:
-                    _sm = ("## Detailed Audit Report\n" + vin_line + "\n\n" + _sm).strip()
-                result["summary_markdown"] = _sm
+        if isinstance(_sm, str) and _sm:
+            # Treat these headings as section boundaries even if missing leading "##"
+            _section_names = [
+                "Estimated Repair Costs",
+                "Fraud & Authenticity Check",
+                "Fraud and Authenticity Check",
+                "Conclusion",
+            ]
+            # Build a regex that catches both "## Heading" and plain "Heading" at line start
+            _head_rx = re.compile(r"(?m)^(##\s*)?(" + "|".join(re.escape(s) for s in _section_names) + r")\s*$")
+            lines = _sm.splitlines()
+            out = []
+            seen = set()
+            skip_mode = False
+            current_head = None
 
-            # Keep brief consistent if room
-            _sb = (result.get("summary_brief") or "")
-            if isinstance(_sb, str) and _vin_val not in _sb:
-                cand = (_sb.strip() + f" VIN verified: {_vin_val}.").strip()
-                if len(cand) <= 280:
-                    result["summary_brief"] = cand
-except Exception:
-    pass
-
-# --- DEDUPE REPEATED SECTIONS IN NARRATIVE (MODEL OCCASIONALLY REPEATS) ---
-try:
-    _sm = (result.get("summary_markdown") or "")
-    if isinstance(_sm, str) and _sm:
-        # Treat these headings as section boundaries even if missing leading "##"
-        _section_names = [
-            "Estimated Repair Costs",
-            "Fraud & Authenticity Check",
-            "Fraud and Authenticity Check",
-            "Conclusion",
-        ]
-        # Build a regex that catches both "## Heading" and plain "Heading" at line start
-        _head_rx = re.compile(r"(?m)^(##\s*)?(" + "|".join(re.escape(s) for s in _section_names) + r")\s*$")
-        lines = _sm.splitlines()
-        out = []
-        seen = set()
-        skip_mode = False
-        current_head = None
-
-        i = 0
-        while i < len(lines):
-            line = lines[i]
-            m = _head_rx.match(line.strip())
-            if m:
-                head = m.group(2)
-                # normalize
-                key = head.lower()
-                if key in seen:
-                    # skip this repeated section entirely until next recognized heading
-                    skip_mode = True
-                    current_head = key
-                    i += 1
-                    # consume until next heading (but do not consume that heading; loop will handle)
-                    while i < len(lines):
-                        if _head_rx.match(lines[i].strip()):
-                            break
+            i = 0
+            while i < len(lines):
+                line = lines[i]
+                m = _head_rx.match(line.strip())
+                if m:
+                    head = m.group(2)
+                    # normalize
+                    key = head.lower()
+                    if key in seen:
+                        # skip this repeated section entirely until next recognized heading
+                        skip_mode = True
+                        current_head = key
                         i += 1
-                    continue
-                else:
-                    seen.add(key)
-                    skip_mode = False
-                    current_head = key
-                    # Keep heading as-is
+                        # consume until next heading (but do not consume that heading; loop will handle)
+                        while i < len(lines):
+                            if _head_rx.match(lines[i].strip()):
+                                break
+                            i += 1
+                        continue
+                    else:
+                        seen.add(key)
+                        skip_mode = False
+                        current_head = key
+                        # Keep heading as-is
+                        out.append(line)
+                        i += 1
+                        continue
+                if not skip_mode:
                     out.append(line)
-                    i += 1
-                    continue
-            if not skip_mode:
-                out.append(line)
-            i += 1
+                i += 1
 
-        result["summary_markdown"] = "\n".join(out).strip()
-except Exception:
-    pass
+            result["summary_markdown"] = "\n".join(out).strip()
+    except Exception:
+        pass
 
 
 
