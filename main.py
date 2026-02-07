@@ -856,10 +856,10 @@ async def vision_review(
     if (ai_notes or "").strip():
         _note = (ai_notes or "").strip()[:2000]
         prompt_text += (
-            "\n\nADD'L NOTES ENFORCEMENT (HARD REQUIREMENT):\n"
+            "\n\nADD'L NOTES (MANDATORY):\n"
             "- You MUST include a short subsection titled \"### Add'l Notes Addressed\" inside '## Detailed Audit Report'.\n"
             "- Quote the note verbatim, then respond to it as a CHECK ITEM (do not reinterpret locations like front/rear/left/right from the note).\n"
-            "- If the requested item is not clearly visible in photos, write: 'Not verifiable from provided photos' and specify the exact photo needed.\n"
+            "- If the requested item is not clearly visible in photos, write: 'Not verifiable from provided photos' and specify the exact photo needed. Do not speculate; stick to observable facts.\n"
             f"- Note to address (verbatim): \"{_note}\"\n"
         )
     prompt_text = (
@@ -1246,7 +1246,7 @@ async def vision_review(
                     inject = (
                         "### Add'l Notes Addressed\n"
                         f"- Note: \"{_notes}\"\n"
-                        "- Status: Treated as a checklist item. If not clearly shown in the provided photos, it is not verifiable and a close-up photo is required.\n"
+                        "- Status: Not verifiable from provided photos unless explicitly shown; provide a close-up photo of the requested area.\n"
                     )
                     if re.search(r"(?i)^##\s*Detailed\s+Audit\s+Report\b", _sm, flags=re.M):
                         _sm = re.sub(
@@ -1291,7 +1291,7 @@ async def vision_review(
             _note_corners = _corners_from_notes(_notes_raw)
             _note_mentions_wheel = bool(re.search(r"(?i)\b(wheel|rim|tire|tyre|hub|axle|suspension)\b", _notes_raw))
 
-            if _note_corners and _note_mentions_wheel:
+            if False and _note_corners and _note_mentions_wheel:
                 _sm = (result.get("summary_markdown") or "")
                 if isinstance(_sm, str) and _sm:
                     # Stronger than sentence-level keep/remove:
@@ -2520,6 +2520,7 @@ async def download_pdf(file_number: Optional[str] = None, filename: Optional[str
         return JSONResponse(status_code=404, content={"detail": "Not Found"})
     latest = max(candidates, key=lambda p: os.path.getmtime(p))
     return FileResponse(path=latest, media_type="application/pdf", filename=os.path.basename(latest))
+
 
 
 
