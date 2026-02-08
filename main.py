@@ -592,9 +592,9 @@ async def vision_review(
     files: List[UploadFile] = File(...),
     client_rules: str = Form(""),
     ai_notes: str = Form(""),
-    addl_notes: str = Form("", alias="addl_notes"),
-    additional_notes: str = Form("", alias="additional_notes"),
-    notes: str = Form("", alias="notes"),
+    addl_notes: str = Form(""),
+    additional_notes: str = Form(""),
+    notes: str = Form(""),
     file_number: str = Form(...),
     ia_company: str = Form(""),
     appraiser_id: str = Form(""),
@@ -606,6 +606,9 @@ async def vision_review(
     MAX_IMAGES = 48
     used = 0
     pdf_text_fulls: List[str] = []  # full PDF text for supplement detection
+
+    # Coalesce Add'l Notes field names from different front-end versions
+    ai_notes_used = ((ai_notes or '').strip() or (addl_notes or '').strip() or (additional_notes or '').strip() or (notes or '').strip()).strip()
 
     # Anti-zipbomb guardrails
     MAX_ZIP_FILES = 100
@@ -808,9 +811,6 @@ async def vision_review(
             f"- Detected supplement tags: {', '.join(supplement_versions)}.\n"
             "- Use these exact tags (e.g., 'Supplement S01 and S02') when describing supplements in the narrative.\n"
         )
-    # --- Add'l Notes field-name coalescing (supports multiple frontend field names) ---
-    ai_notes_used = (ai_notes or "").strip() or (addl_notes or "").strip() or (additional_notes or "").strip() or (notes or "").strip()
-    ai_notes_used = (ai_notes_used or "").strip()
 
     prompt_text = (
         f"REQUEST TYPE SELECTED (exact): '{req_label}'. Use this exact string in 'request_type'.\n\n"
@@ -822,13 +822,13 @@ async def vision_review(
         + "\n\nCLIENT RULES (if provided; else blank):\n"
         + (client_rules[:2000] if client_rules else "")
         + "\n\nADD'L NOTES FOR AI REVIEW (priority focus; only applies to guidelines/review items):\n"
-        + (ai_notes_used[:2000] if ai_notes_used else "")
+        + ((ai_notes_used or "").strip()[:2000] if (ai_notes_used or "").strip() else "")
         + supplement_block
         + "\n\nANALYSIS LAYOUT (guidance, not strict):\n"
         + DETAIL_TEMPLATES.get(ai_intent, DETAIL_TEMPLATES["comprehensive"])
     )
     
-    if ai_notes_used:
+    if (ai_notes_used or "").strip():
         prompt_text += (
             "\n\nAI NOTES INSTRUCTIONS (MANDATORY): "
             "You MUST explicitly address the Add'l Notes in the '## Detailed Audit Report' narrative and/or '## Key Issues & Actions'. "
@@ -1217,6 +1217,28 @@ async def vision_review(
                     "**Driver/Left Side**: Not clearly addressed in model output; review left/driver-side photos and add notes if needed.\n- **Passenger/Right Side**",
                     1
                 )
+    except Exception:
+        pass
+
+
+    # --- ADD'L NOTES MUST APPEAR IN NARRATIVE (LIGHT, DETERMINISTIC) ---
+    # Keep GPT free to write its narrative, but if notes were provided and the model omitted them,
+    # inject a small 'Add'l Notes Addressed' subsection under '## Detailed Audit Report'.
+    try:
+        if (ai_notes_used or "").strip():
+            _sm = (result.get("summary_markdown") or "")
+            if isinstance(_sm, str):
+                if re.search(r"(?i)###\s*Add['’]l\s+Notes\s+Addressed", _sm) is None:
+                    _inject = (
+                        "### Add'l Notes Addressed\n"
+                        f"- Note: \"{ai_notes_used.strip()}\"\n"
+                        "- Status: Not verifiable from provided photos unless explicitly shown; provide a close-up photo of the requested area.\n"
+                    )
+                    if re.search(r"(?im)^##\s*Detailed\s+Audit\s+Report\b", _sm):
+                        _sm = re.sub(r"(?im)^(##\s*Detailed\s+Audit\s+Report\b.*\n)", r"\1" + _inject + "\n", _sm, count=1)
+                    else:
+                        _sm = ("## Detailed Audit Report\n" + _inject + "\n" + _sm).strip()
+                    result["summary_markdown"] = _sm
     except Exception:
         pass
 
@@ -2175,6 +2197,7 @@ async def download_pdf(file_number: Optional[str] = None, filename: Optional[str
         return JSONResponse(status_code=404, content={"detail": "Not Found"})
     latest = max(candidates, key=lambda p: os.path.getmtime(p))
     return FileResponse(path=latest, media_type="application/pdf", filename=os.path.basename(latest))
+
 
 
 
