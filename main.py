@@ -2,7 +2,7 @@ from fastapi import FastAPI, File, UploadFile, Form
 from fastapi.responses import JSONResponse, FileResponse
 from fastapi.middleware.cors import CORSMiddleware
 from typing import List, Dict, Any, Optional
-import os, io, re, json, base64, logging, zipfile, glob, uuid
+import os, io, re, json, base64, logging, zipfile, glob
 import smtplib  # email transport
 from email.message import EmailMessage
 
@@ -433,7 +433,7 @@ def _maybe_ocr_image_text(im: Image.Image) -> str:
     except Exception:
         return ""
 
-def _add_bytes(parts: List[Dict[str,Any]], files_seen: List[str], photo_index: Optional[List[str]], thumb_paths: Optional[List[str]], raw: bytes, fname: str, used: int, max_images: int, pdf_text_fulls: Optional[List[str]] = None) -> int:
+def _add_bytes(parts: List[Dict[str,Any]], files_seen: List[str], photo_index: Optional[List[str]], raw: bytes, fname: str, used: int, max_images: int, pdf_text_fulls: Optional[List[str]] = None) -> int:
     low = fname.lower()
     if low.endswith(SUPPORTED_PDF_EXTS) and used < max_images:
         try:
@@ -474,17 +474,6 @@ def _add_bytes(parts: List[Dict[str,Any]], files_seen: List[str], photo_index: O
         if photo_index is not None:
             photo_index.append(fname)
         files_seen.append(f"{fname} (photo)")
-        # Keep a local copy of each uploaded photo for the PDF thumbnail appendix page.
-        if thumb_paths is not None:
-            try:
-                im_save = im_ref if im_ref is not None else Image.open(io.BytesIO(raw)).convert("RGB")
-                im_save.thumbnail((900, 900))
-                thumb_name = f"thumb_{uuid.uuid4().hex}.jpg"
-                thumb_path = os.path.join(PDF_DIR, thumb_name)
-                im_save.save(thumb_path, format="JPEG", quality=75, optimize=True)
-                thumb_paths.append(thumb_path)
-            except Exception:
-                pass
         if im_ref is not None:
             txt = _maybe_ocr_image_text(im_ref)
             if txt:
@@ -603,6 +592,9 @@ async def vision_review(
     files: List[UploadFile] = File(...),
     client_rules: str = Form(""),
     ai_notes: str = Form(""),
+    addl_notes: str = Form("", alias="addl_notes"),
+    additional_notes: str = Form("", alias="additional_notes"),
+    notes: str = Form("", alias="notes"),
     file_number: str = Form(...),
     ia_company: str = Form(""),
     appraiser_id: str = Form(""),
@@ -611,8 +603,6 @@ async def vision_review(
     parts: List[Dict[str, Any]] = []
     files_seen: List[str] = []
     photo_index: List[str] = []
-    thumbnail_paths: List[str] = []
-    vin_candidates: List[str] = []  # collected from filenames and OCR text
     MAX_IMAGES = 48
     used = 0
     pdf_text_fulls: List[str] = []  # full PDF text for supplement detection
@@ -625,10 +615,6 @@ async def vision_review(
         raw = await f.read()
         fname = f.filename or "upload"
         low = fname.lower()
-        try:
-            vin_candidates += re.findall(VIN_PATTERN, fname.upper())
-        except Exception:
-            pass
         if low.endswith(".zip"):
             try:
                 zf = zipfile.ZipFile(io.BytesIO(raw))
@@ -641,10 +627,6 @@ async def vision_review(
                 members = members[:MAX_ZIP_FILES]
             for zi in members:
                 inner_name = zi.filename
-                try:
-                    vin_candidates += re.findall(VIN_PATTERN, inner_name.upper())
-                except Exception:
-                    pass
                 if ".." in inner_name or inner_name.startswith(("/", "\\")):
                     files_seen.append(f"{fname}::{inner_name} (skipped unsafe path)"); continue
                 if zi.file_size > MAX_ENTRY_SIZE:
@@ -653,9 +635,9 @@ async def vision_review(
                     data = zf.read(zi)
                 except Exception as e:
                     files_seen.append(f"{fname}::{inner_name} (read error: {e})"); continue
-                used = _add_bytes(parts, files_seen, photo_index, thumbnail_paths, data, f"{fname}::{inner_name}", used, MAX_IMAGES, pdf_text_fulls=pdf_text_fulls)
+                used = _add_bytes(parts, files_seen, photo_index, data, f"{fname}::{inner_name}", used, MAX_IMAGES, pdf_text_fulls=pdf_text_fulls)
         else:
-            used = _add_bytes(parts, files_seen, photo_index, thumbnail_paths, raw, fname, used, MAX_IMAGES, pdf_text_fulls=pdf_text_fulls)
+            used = _add_bytes(parts, files_seen, photo_index, raw, fname, used, MAX_IMAGES, pdf_text_fulls=pdf_text_fulls)
 
     # Collect uploaded TEXT ONLY for evidence checks
     uploaded_text_blobs = []
@@ -663,16 +645,6 @@ async def vision_review(
         if isinstance(p, dict) and p.get("type") == "text" and isinstance(p.get("text"), str):
             uploaded_text_blobs.append(p["text"])
     uploaded_text_all = "\n".join(uploaded_text_blobs)
-    try:
-        vin_candidates += re.findall(VIN_PATTERN, uploaded_text_all.upper())
-    except Exception:
-        pass
-    # normalize + keep unique order
-    _seen_v = set(); _tmp_v=[]
-    for _v in vin_candidates:
-        if _v and _v not in _seen_v:
-            _seen_v.add(_v); _tmp_v.append(_v)
-    vin_candidates = _tmp_v
 
     # --- ODOMETER OCR LOCK (extract mileage from OCR text if visible) ---
     # This makes it impossible for the narrative to claim the odometer is not visible when OCR captured a mileage value.
@@ -836,6 +808,9 @@ async def vision_review(
             f"- Detected supplement tags: {', '.join(supplement_versions)}.\n"
             "- Use these exact tags (e.g., 'Supplement S01 and S02') when describing supplements in the narrative.\n"
         )
+    # --- Add'l Notes field-name coalescing (supports multiple frontend field names) ---
+    ai_notes_used = (ai_notes or "").strip() or (addl_notes or "").strip() or (additional_notes or "").strip() or (notes or "").strip()
+    ai_notes_used = (ai_notes_used or "").strip()
 
     prompt_text = (
         f"REQUEST TYPE SELECTED (exact): '{req_label}'. Use this exact string in 'request_type'.\n\n"
@@ -847,20 +822,17 @@ async def vision_review(
         + "\n\nCLIENT RULES (if provided; else blank):\n"
         + (client_rules[:2000] if client_rules else "")
         + "\n\nADD'L NOTES FOR AI REVIEW (priority focus; only applies to guidelines/review items):\n"
-        + ((ai_notes or "").strip()[:2000] if (ai_notes or "").strip() else "")
+        + (ai_notes_used[:2000] if ai_notes_used else "")
         + supplement_block
         + "\n\nANALYSIS LAYOUT (guidance, not strict):\n"
         + DETAIL_TEMPLATES.get(ai_intent, DETAIL_TEMPLATES["comprehensive"])
     )
     
-    if (ai_notes or "").strip():
-        _note = (ai_notes or "").strip()[:2000]
+    if ai_notes_used:
         prompt_text += (
-            "\n\nADD'L NOTES (MANDATORY):\n"
-            "- You MUST include a short subsection titled \"### Add'l Notes Addressed\" inside '## Detailed Audit Report'.\n"
-            "- Quote the note verbatim, then respond to it as a CHECK ITEM (do not reinterpret locations like front/rear/left/right from the note).\n"
-            "- If the requested item is not clearly visible in photos, write: 'Not verifiable from provided photos' and specify the exact photo needed. Do not speculate; stick to observable facts.\n"
-            f"- Note to address (verbatim): \"{_note}\"\n"
+            "\n\nAI NOTES INSTRUCTIONS (MANDATORY): "
+            "You MUST explicitly address the Add'l Notes in the '## Detailed Audit Report' narrative and/or '## Key Issues & Actions'. "
+            "If a note cannot be verified from evidence, say so and state what evidence would be needed."
         )
     prompt_text = (
         "OUTPUT FORMAT (MANDATORY): Return ONLY a single strict JSON object with keys "
@@ -1231,261 +1203,6 @@ async def vision_review(
                 result["summary_markdown"] = _sm.rstrip() + f"\n\nOdometer visible: {odometer_value}.\n"
     except Exception:
         pass
-
-
-    # --- ADD'L NOTES MUST APPEAR IN NARRATIVE (SILENT, DETERMINISTIC) ---
-    # If the user provided Add'l Notes, force an '### Add'l Notes Addressed' subsection into the
-    # '## Detailed Audit Report' narrative so the note cannot be ignored.
-    try:
-        _notes = (ai_notes or "").strip()
-        if _notes:
-            _notes = _notes[:500]  # keep PDF/email safe; full note remains in prompt_text
-            _sm = (result.get("summary_markdown") or "")
-            if isinstance(_sm, str) and _sm:
-                if re.search(r"(?i)###\s*Add['’]l\s+Notes\s+Addressed\b", _sm) is None:
-                    inject = (
-                        "### Add'l Notes Addressed\n"
-                        f"- Note: \"{_notes}\"\n"
-                        "- Status: Not verifiable from provided photos unless explicitly shown; provide a close-up photo of the requested area.\n"
-                    )
-                    if re.search(r"(?i)^##\s*Detailed\s+Audit\s+Report\b", _sm, flags=re.M):
-                        _sm = re.sub(
-                            r"(?im)(^##\s*Detailed\s+Audit\s+Report\s*\n)",
-                            r"\1" + inject + "\n",
-                            _sm,
-                            count=1,
-                        )
-                    else:
-                        _sm = ("## Detailed Audit Report\n" + inject + "\n" + _sm).strip()
-                    result["summary_markdown"] = _sm
-    except Exception:
-        pass
-
-
-    
-    # --- ADD'L NOTES CORNER / COMPONENT CONTRADICTION GUARD (SILENT, DETERMINISTIC) ---
-    # Purpose: If Add'l Notes specify a specific corner (e.g., "left rear wheel"), do NOT allow the narrative to
-    # substitute a different corner (e.g., "front left wheel") for the same component (wheel/rim/tire/suspension).
-    # This prevents the model from "fulfilling" the note using the wrong corner.
-    try:
-        _notes_raw = (ai_notes or "").strip()
-        if _notes_raw:
-            def _corners_from_notes(t: str):
-                corners = set()
-                s = (t or "").lower()
-                # explicit abbreviations
-                for ab in ("lf","rf","lr","rr"):
-                    if re.search(r"\b" + ab + r"\b", s):
-                        corners.add(ab.upper())
-                # full words
-                if re.search(r"\bleft\s+rear\b|\bdriver\s+rear\b", s):
-                    corners.add("LR")
-                if re.search(r"\bright\s+rear\b|\bpassenger\s+rear\b", s):
-                    corners.add("RR")
-                if re.search(r"\bleft\s+front\b|\bdriver\s+front\b", s):
-                    corners.add("LF")
-                if re.search(r"\bright\s+front\b|\bpassenger\s+front\b", s):
-                    corners.add("RF")
-                return corners
-
-            _note_corners = _corners_from_notes(_notes_raw)
-            _note_mentions_wheel = bool(re.search(r"(?i)\b(wheel|rim|tire|tyre|hub|axle|suspension)\b", _notes_raw))
-
-            if False and _note_corners and _note_mentions_wheel:
-                _sm = (result.get("summary_markdown") or "")
-                if isinstance(_sm, str) and _sm:
-                    # Stronger than sentence-level keep/remove:
-                    # Remove ANY line/sentence that discusses wheel/rim/tire/suspension and names a different corner
-                    # than requested in Add'l Notes — even if the same sentence also contains the requested corner elsewhere.
-                    # Split on punctuation OR newlines to catch wrapped sentences.
-                    wheel_hint = re.compile(r"(?i)\b(wheel|rim|tire|tyre|hub|axle|suspension|spare)\b")
-                    damage_hint = re.compile(r"(?i)\b(spare|missing|flat|damage|damaged|bent|crack|cracked|worn|suspension|alignment)\b")
-
-                    # Corner phrases normalized
-                    CORNER_RX = {
-                        "LR": re.compile(r"(?i)\b(left\s+rear|driver\s+rear|LR)\b"),
-                        "RR": re.compile(r"(?i)\b(right\s+rear|passenger\s+rear|RR)\b"),
-                        "LF": re.compile(r"(?i)\b(left\s+front|driver\s+front|LF|front\s+left)\b"),
-                        "RF": re.compile(r"(?i)\b(right\s+front|passenger\s+front|RF|front\s+right)\b"),
-                    }
-
-                    # Determine which corners are "allowed" (from the note). Usually one, but support multiple.
-                    allowed = set(_note_corners)
-
-                    def _mentions_disallowed_corner(chunk: str) -> bool:
-                        for c, rx in CORNER_RX.items():
-                            if c in allowed:
-                                continue
-                            if rx.search(chunk):
-                                return True
-                        return False
-
-                    def _mentions_allowed_corner(chunk: str) -> bool:
-                        return any(CORNER_RX[c].search(chunk) for c in allowed if c in CORNER_RX)
-
-                    pieces = re.split(r"(?<=[\.!\?])\s+|\n+", _sm)
-                    kept = []
-                    removed_any = False
-                    for piece in pieces:
-                        if not piece.strip():
-                            continue
-                        if wheel_hint.search(piece) and damage_hint.search(piece) and _mentions_disallowed_corner(piece):
-                            # If it references a disallowed corner for wheel/tire/suspension damage, drop it.
-                            removed_any = True
-                            continue
-                        kept.append(piece.strip())
-                    _sm2 = "\n".join(kept).strip()
-
-                    # Ensure Add'l Notes section explicitly states requested corner focus.
-                    corner_phrase = ", ".join(sorted(allowed))
-                    corner_line = f"- Requested corner focus: {corner_phrase} (from Add'l Notes). Do not substitute other corners for this request.\n"
-                    if re.search(r"(?i)###\s*Add['’]l\s+Notes\s+Addressed\b", _sm2):
-                        if re.search(r"(?i)Requested\s+corner\s+focus", _sm2) is None:
-                            _sm2 = re.sub(
-                                r"(?im)(^###\s*Add['’]l\s+Notes\s+Addressed\s*\n(?:.*\n){0,3})",
-                                lambda m: m.group(1) + corner_line,
-                                _sm2,
-                                count=1,
-                            )
-
-                    # If we removed disallowed-corner wheel statements, add an explicit clarification line so reviewers understand why.
-                    if removed_any and re.search(r"(?i)###\s*Add['’]l\s+Notes\s+Addressed\b", _sm2):
-                        clar = "- Clarification: Wheel/tire observations for other corners were omitted to avoid substituting for the requested corner in Add'l Notes.\n"
-                        if "Clarification:" not in _sm2:
-                            _sm2 = re.sub(
-                                r"(?im)(^###\s*Add['’]l\s+Notes\s+Addressed\s*\n(?:.*\n){0,6})",
-                                lambda m: m.group(1) + clar,
-                                _sm2,
-                                count=1,
-                            )
-
-                    result["summary_markdown"] = _sm2
-    except Exception:
-        pass
-
-# --- VIN: ELIMINATE FALSE "PROVIDED VIN" + FORCE VERIFIED VIN IN NARRATIVE ---
-    # Goal:
-    # 1) Never claim "provided VIN" / "VIN matches" unless we actually have a 17-char VIN value.
-    # 2) If we have a VIN value AND verification indicates a match/verified, force the VIN string into the narrative.
-    # 3) If model omitted VIN but OCR/filename produced one, backfill result['vin'] deterministically.
-    try:
-        _cand_vins = vin_candidates[:] if isinstance(vin_candidates, list) else []
-        _vin_val = (result.get("vin") or "").strip()
-        _vin_ver = (result.get("vin_verification") or "").strip()
-
-        def _is_real_vin(v: str) -> bool:
-            return bool(re.fullmatch(r"[A-HJ-NPR-Z0-9]{17}", (v or "").strip().upper()))
-
-        # Backfill VIN if missing/placeholder and we have candidates from OCR/filename
-        if (not _is_real_vin(_vin_val)) and _cand_vins:
-            for _v in _cand_vins:
-                if _is_real_vin(_v):
-                    _vin_val = _v.strip().upper()
-                    result["vin"] = _vin_val
-                    break
-
-        _has_vin = _is_real_vin(_vin_val)
-        # If we don't have a real VIN, scrub any "provided VIN" / "VIN matches" language from narrative-related fields
-        if not _has_vin:
-            _bad = r"(?is)\b(vin\s+(?:matches|matched|verified|confirm(?:ed|s)|consistent)\s+(?:the\s+)?provided\s+vin|provided\s+vin)\b.*?(?:\.|\n)"
-            for _k in ("summary_markdown", "summary_brief", "vin_verification", "conclusion"):
-                _t = result.get(_k)
-                if isinstance(_t, str) and _t:
-                    result[_k] = re.sub(_bad, "", _t).strip()
-
-        # Determine "verified" status only if we have VIN and verification says so OR narrative implies verified
-        _vin_verified = False
-        if _has_vin:
-            if re.search(r"(?i)\b(match|matched|verified|confirm(?:ed|s)|consistent)\b", _vin_ver):
-                _vin_verified = True
-            else:
-                # If model narrative already says VIN verified/matched, treat as verified
-                _sm0 = (result.get("summary_markdown") or "")
-                if isinstance(_sm0, str) and re.search(r"(?i)\bvin\b.*\b(verified|matched|match|confirmed|consistent)\b", _sm0):
-                    _vin_verified = True
-
-        # Force VIN string into narrative when verified (and avoid duplicates)
-        if _has_vin and _vin_verified:
-            _sm = (result.get("summary_markdown") or "")
-            if isinstance(_sm, str):
-                if _vin_val not in _sm:
-                    vin_line = f"VIN verified: {_vin_val}."
-                    if "## Detailed Audit Report" in _sm:
-                        _sm = re.sub(
-                            r"(##\s*Detailed\s+Audit\s+Report\s*\n)",
-                            r"\1" + vin_line + "\n",
-                            _sm,
-                            count=1,
-                            flags=re.IGNORECASE,
-                        )
-                    else:
-                        _sm = ("## Detailed Audit Report\n" + vin_line + "\n\n" + _sm).strip()
-                    result["summary_markdown"] = _sm
-
-                # Keep brief consistent if room
-                _sb = (result.get("summary_brief") or "")
-                if isinstance(_sb, str) and _vin_val not in _sb:
-                    cand = (_sb.strip() + f" VIN verified: {_vin_val}.").strip()
-                    if len(cand) <= 280:
-                        result["summary_brief"] = cand
-    except Exception:
-        pass
-
-    # --- DEDUPE REPEATED SECTIONS IN NARRATIVE (MODEL OCCASIONALLY REPEATS) ---
-    try:
-        _sm = (result.get("summary_markdown") or "")
-        if isinstance(_sm, str) and _sm:
-            # Treat these headings as section boundaries even if missing leading "##"
-            _section_names = [
-                "Estimated Repair Costs",
-                "Fraud & Authenticity Check",
-                "Fraud and Authenticity Check",
-                "Conclusion",
-            ]
-            # Build a regex that catches both "## Heading" and plain "Heading" at line start
-            _head_rx = re.compile(r"(?m)^(##\s*)?(" + "|".join(re.escape(s) for s in _section_names) + r")\s*$")
-            lines = _sm.splitlines()
-            out = []
-            seen = set()
-            skip_mode = False
-            current_head = None
-
-            i = 0
-            while i < len(lines):
-                line = lines[i]
-                m = _head_rx.match(line.strip())
-                if m:
-                    head = m.group(2)
-                    # normalize
-                    key = head.lower()
-                    if key in seen:
-                        # skip this repeated section entirely until next recognized heading
-                        skip_mode = True
-                        current_head = key
-                        i += 1
-                        # consume until next heading (but do not consume that heading; loop will handle)
-                        while i < len(lines):
-                            if _head_rx.match(lines[i].strip()):
-                                break
-                            i += 1
-                        continue
-                    else:
-                        seen.add(key)
-                        skip_mode = False
-                        current_head = key
-                        # Keep heading as-is
-                        out.append(line)
-                        i += 1
-                        continue
-                if not skip_mode:
-                    out.append(line)
-                i += 1
-
-            result["summary_markdown"] = "\n".join(out).strip()
-    except Exception:
-        pass
-
-
 
 
 
@@ -2234,61 +1951,6 @@ async def vision_review(
             pdf.set_x(pdf.l_margin)
             pdf.multi_cell(effective_w, 6, (_pdf_sanitize(str(s))[:2000] + " …"))
 
-
-    def add_thumbnail_page(pdf_obj: FPDF, image_paths: List[str]) -> None:
-        """Append exactly ONE page containing thumbnails of all uploaded photos (as space allows)."""
-        if not image_paths:
-            return
-
-        pdf_obj.add_page()
-        try:
-            pdf_obj.set_font("Helvetica", "B", 12)
-        except Exception:
-            pdf_obj.set_font("Arial", "B", 12)
-        pdf_obj.cell(0, 8, "Uploaded Photo Thumbnails", ln=True)
-        pdf_obj.ln(2)
-
-        # Layout (single-page, grid)
-        cols = 4
-        gutter = 3.0
-        usable_w = pdf_obj.w - pdf_obj.l_margin - pdf_obj.r_margin
-        thumb_w = (usable_w - gutter * (cols - 1)) / cols
-        x0 = pdf_obj.l_margin
-        y = pdf_obj.get_y()
-        x = x0
-        col = 0
-
-        placed = 0
-        total = len(image_paths)
-
-        for p in image_paths:
-            # Hard-stop to keep this as ONE PAGE ONLY
-            if y + thumb_w > (pdf_obj.h - pdf_obj.b_margin - 10):
-                break
-            try:
-                pdf_obj.image(p, x=x, y=y, w=thumb_w)
-                placed += 1
-            except Exception:
-                pass
-
-            col += 1
-            if col >= cols:
-                col = 0
-                x = x0
-                y += thumb_w + gutter
-            else:
-                x += thumb_w + gutter
-
-        # Footer note if truncated by the 1-page rule
-        if placed < total:
-            try:
-                pdf_obj.set_font_size(9)
-            except Exception:
-                pass
-            pdf_obj.set_y(pdf_obj.h - pdf_obj.b_margin - 8)
-            pdf_obj.set_x(pdf_obj.l_margin)
-            pdf_obj.cell(0, 6, f"Showing {placed} of {total} uploaded photos (1-page appendix limit).", ln=True)
-
     # POI-15 Total Loss trigger from uploaded text ONLY
     poi15_hit = False
     try:
@@ -2378,13 +2040,6 @@ async def vision_review(
 
         safe_file = _safe(file_number)
         pdf_filename = f"{safe_file}.pdf"
-
-
-    # --- One-page photo thumbnail appendix (all uploaded photos) ---
-    try:
-        add_thumbnail_page(pdf, thumbnail_paths)
-    except Exception:
-        pass
 
     pdf_path = os.path.join(PDF_DIR, pdf_filename)
     try:
