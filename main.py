@@ -1,4 +1,4 @@
-from fastapi import FastAPI, File, UploadFile, Form
+from fastapi import FastAPI, File, UploadFile, Form, Request
 from fastapi.responses import JSONResponse, FileResponse
 from fastapi.middleware.cors import CORSMiddleware
 from typing import List, Dict, Any, Optional
@@ -600,6 +600,7 @@ async def list_client_rules():
 # -----------------------
 @app.post("/vision-review")
 async def vision_review(
+    request: Request,
     files: List[UploadFile] = File(...),
     client_rules: str = Form(""),
     ai_notes: str = Form(""),
@@ -621,6 +622,26 @@ async def vision_review(
     # Coalesce Add\'l Notes from multiple possible frontend field names
     ai_notes_used = ((ai_notes or "").strip() or (addl_notes or "").strip() or (additional_notes or "").strip() or (notes or "").strip())
     ai_notes_used = ai_notes_used.strip()
+    # If notes still empty, fall back to reading the raw posted form (covers mismatched frontend field names)
+    if not ai_notes_used:
+        try:
+            _form = await request.form()
+            # First try common variants explicitly
+            for _k in ("ai_notes","addl_notes","additional_notes","notes","ai_review_notes","ai_notes_box","addlNote","addlNoteText"):
+                _v = str(_form.get(_k, "") or "").strip()
+                if _v:
+                    ai_notes_used = _v
+                    break
+            # Then any key containing 'note' (last resort)
+            if not ai_notes_used:
+                for _k in _form.keys():
+                    if "note" in str(_k).lower():
+                        _v = str(_form.get(_k, "") or "").strip()
+                        if _v:
+                            ai_notes_used = _v
+                            break
+        except Exception:
+            pass
     pdf_text_fulls: List[str] = []  # full PDF text for supplement detection
 
     # Anti-zipbomb guardrails
