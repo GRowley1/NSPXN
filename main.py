@@ -886,6 +886,7 @@ async def vision_review(
             "\n\nADD'L NOTES (MANDATORY):\n"
             "- You MUST include a short subsection titled \"### Add'l Notes Addressed\" inside '## Detailed Audit Report'.\n"
             "- Quote the note verbatim, then respond to it as a CHECK ITEM (do not reinterpret locations like front/rear/left/right from the note).\n"
+            "- If Add’l Notes specifies a corner for a component (wheel/tire/rim), treat that corner as the required reference. Do not substitute another corner. If unsure, say ‘corner not independently verified’ but do not contradict the note. \n"
             "- If the requested item is not clearly visible in photos, write: 'Not verifiable from provided photos' and specify the exact photo needed. Do not speculate; stick to observable facts.\n"
             f"- Note to address (verbatim): \"{_note}\"\n"
         )
