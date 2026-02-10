@@ -2273,6 +2273,7 @@ async def vision_review(
         pdf.set_font_size(10); pdf.ln(3)
 
         mc(f"Claim #: {result['claim_number'] or 'N/A'}    File #: {file_number or 'N/A'}")
+        mc(f"IA Company/Auction/Shop/Etc: {ia_company}")
         pdf_status = result["redaction_status"].replace("✅", "OK")
         pdf.ln(2); mc(pdf_status)
         pdf.ln(2); mc("Damage Summary"); mc((result["summary_markdown"] or "N/A").strip())
