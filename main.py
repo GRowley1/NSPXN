@@ -601,13 +601,13 @@ async def list_client_rules():
 @app.post("/vision-review")
 async def vision_review(
     request: Request,
-    files: List[UploadFile] = File(...),
+    files: Optional[List[UploadFile]] = File(None),
     client_rules: str = Form(""),
     ai_notes: str = Form(""),
     addl_notes: str = Form(""),
     additional_notes: str = Form(""),
     notes: str = Form(""),
-    file_number: str = Form(...),
+    file_number: Optional[str] = Form(None),
     ia_company: str = Form(""),
     appraiser_id: str = Form(""),
     ai_intent: str = Form("comprehensive")
@@ -616,6 +616,46 @@ async def vision_review(
     files_seen: List[str] = []
     photo_index: List[str] = []
     thumbnail_paths: List[str] = []
+
+    # --- 422 guard: avoid FastAPI validation failures when frontend keys vary ---
+    # Accept missing/alternate keys without raising 422; return a clear 400 instead.
+    if files is None:
+        files = []
+    if file_number is None or str(file_number).strip() == "":
+        try:
+            _form = await request.form()
+            # Common file number key variants from different frontends
+            for _k in ("file_number", "file-number", "fileNumber", "fileNum", "file_num", "filenumber"):
+                _v = str(_form.get(_k, "") or "").strip()
+                if _v:
+                    file_number = _v
+                    break
+        except Exception:
+            pass
+    # If 'files' was posted under a different key, recover it from the raw form
+    if (not files) or (isinstance(files, list) and len(files) == 0):
+        try:
+            _form = await request.form()
+            _maybe = []
+            try:
+                _maybe = list(_form.getlist("files")) if hasattr(_form, "getlist") else []
+            except Exception:
+                _maybe = []
+            if not _maybe:
+                try:
+                    _maybe = list(_form.getlist("file")) if hasattr(_form, "getlist") else []
+                except Exception:
+                    _maybe = []
+            _maybe_files = [x for x in _maybe if hasattr(x, "filename")]
+            if _maybe_files:
+                files = _maybe_files  # type: ignore[assignment]
+        except Exception:
+            pass
+    # Hard-required fields (explicit 400 instead of 422)
+    if not file_number or str(file_number).strip() == "":
+        return JSONResponse(status_code=400, content={"error": "Missing required field: file_number"})
+    if not files:
+        return JSONResponse(status_code=400, content={"error": "Missing required upload: files"})
     vin_candidates: List[str] = []  # collected from filenames and OCR text
     MAX_IMAGES = 48
     used = 0
@@ -2448,7 +2488,6 @@ async def download_pdf(file_number: Optional[str] = None, filename: Optional[str
         return JSONResponse(status_code=404, content={"detail": "Not Found"})
     latest = max(candidates, key=lambda p: os.path.getmtime(p))
     return FileResponse(path=latest, media_type="application/pdf", filename=os.path.basename(latest))
-
 
 
 
