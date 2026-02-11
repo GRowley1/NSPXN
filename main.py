@@ -2285,6 +2285,32 @@ async def vision_review(
         pdf.ln(2); mc("Fraud & Authenticity Check"); mc((result["fraud_markdown"] or 'N/A').strip())
         pdf.ln(2); mc("Conclusion"); mc((result["conclusion"] or 'N/A').strip())
 
+        # --- AI Disclaimer (after Conclusion) ---
+        try:
+            pdf.ln(4)
+            x_left = pdf.l_margin
+            x_right = pdf.w - pdf.r_margin
+            y_line = pdf.get_y()
+            pdf.set_draw_color(180, 180, 180)
+            pdf.line(x_left, y_line, x_right, y_line)
+            pdf.ln(3)
+
+            pdf.set_text_color(90, 90, 90)
+            pdf.set_font("Helvetica", "B", 9)
+            pdf.cell(0, 5, "Disclaimer:", ln=True)
+            pdf.set_font("Helvetica", "", 8)
+
+            disclaimer_body = (
+                "This report was generated using artificial intelligence. AI systems may make errors or misinterpret "
+                "visual information. All photos, damage descriptions, conclusions, and findings must be independently "
+                "reviewed and verified by a qualified appraiser before preparing or finalizing any repair estimate."
+            )
+            pdf.multi_cell(0, 4, disclaimer_body)
+            pdf.set_text_color(0, 0, 0)
+        except Exception:
+            pass
+
+
         safe_file = _safe(file_number)
         pdf_filename = f"AI_Damage_Report_{safe_file}.pdf"
     else:
@@ -2349,6 +2375,32 @@ async def vision_review(
         pdf.ln(3); mc("NSPXN.com Review Summary"); mc((smark or '').strip())
         pdf.ln(3); mc("Fraud Detection"); mc((result["fraud_markdown"] or 'N/A').strip())
 
+        # --- AI Disclaimer (after report content) ---
+        try:
+            pdf.ln(4)
+            x_left = pdf.l_margin
+            x_right = pdf.w - pdf.r_margin
+            y_line = pdf.get_y()
+            pdf.set_draw_color(180, 180, 180)
+            pdf.line(x_left, y_line, x_right, y_line)
+            pdf.ln(3)
+
+            pdf.set_text_color(90, 90, 90)
+            pdf.set_font("Helvetica", "B", 9)
+            pdf.cell(0, 5, "Disclaimer:", ln=True)
+            pdf.set_font("Helvetica", "", 8)
+
+            disclaimer_body = (
+                "This report was generated using artificial intelligence. AI systems may make errors or misinterpret "
+                "visual information. All photos, damage descriptions, conclusions, and findings must be independently "
+                "reviewed and verified by a qualified appraiser before preparing or finalizing any repair estimate."
+            )
+            pdf.multi_cell(0, 4, disclaimer_body)
+            pdf.set_text_color(0, 0, 0)
+        except Exception:
+            pass
+
+
         safe_file = _safe(file_number)
         pdf_filename = f"{safe_file}.pdf"
 
@@ -2356,40 +2408,6 @@ async def vision_review(
     # --- One-page photo thumbnail appendix (all uploaded photos) ---
     try:
         add_thumbnail_page(pdf, thumbnail_paths)
-    except Exception:
-        pass
-        
-    # --- AI Disclaimer (Immediately After Conclusion Section) ---
-    try:
-        # Thin divider line
-        pdf.ln(4)
-        x_left = pdf.l_margin
-        x_right = pdf.w - pdf.r_margin
-        y_line = pdf.get_y()
-        pdf.set_draw_color(180, 180, 180)
-        pdf.line(x_left, y_line, x_right, y_line)
-
-        pdf.ln(3)
-
-        # Disclaimer text
-        pdf.set_font("Helvetica", "B", 9)
-        pdf.set_text_color(90, 90, 90)
-        pdf.cell(0, 5, "Disclaimer:", ln=True)
-
-        pdf.set_font("Helvetica", "", 8)
-
-        disclaimer_body = (
-            "This report was generated using artificial intelligence. "
-            "AI systems may misinterpret visual information or documentation. "
-            "All photos, damage descriptions, conclusions, and compliance findings "
-            "must be independently reviewed and verified by a qualified appraiser "
-            "before preparing, approving, or finalizing any repair estimate."
-        )
-
-        pdf.multi_cell(0, 4, disclaimer_body)
-
-        pdf.set_text_color(0, 0, 0)
-
     except Exception:
         pass
 
@@ -2527,6 +2545,7 @@ async def download_pdf(file_number: Optional[str] = None, filename: Optional[str
         return JSONResponse(status_code=404, content={"detail": "Not Found"})
     latest = max(candidates, key=lambda p: os.path.getmtime(p))
     return FileResponse(path=latest, media_type="application/pdf", filename=os.path.basename(latest))
+
 
 
 
