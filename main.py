@@ -1069,6 +1069,9 @@ async def vision_review(
     try:
         red_prompt = redact_text_preserve_vin_claim(prompt_text)
         redaction_success = True
+        # Prevent Presidio from mutating fixed markdown headings used for prompting.
+        # (This avoids model outputs like "### [REDACTED] Addressed".)
+        red_prompt = red_prompt.replace("### [REDACTED] Addressed", "### Add'l Notes Addressed")
     except Exception as e:
         log.warning(f"Redaction failed on prompt_text: {e}")
         red_prompt = prompt_text
@@ -1301,35 +1304,6 @@ async def vision_review(
         pass
 
 
-    # --- ADD'L NOTES MUST APPEAR IN NARRATIVE (SILENT, DETERMINISTIC) ---
-    # If the user provided Add'l Notes, force an '### Add'l Notes Addressed' subsection into the
-    # '## Detailed Audit Report' narrative so the note cannot be ignored.
-    try:
-        _notes = (ai_notes_used or "").strip()
-        if _notes:
-            _notes = _notes[:500]  # keep PDF/email safe; full note remains in prompt_text
-            _sm = (result.get("summary_markdown") or "")
-            if isinstance(_sm, str) and _sm:
-                if re.search(r"(?i)###\s*Add['’]l\s+Notes\s+Addressed\b", _sm) is None:
-                    inject = (
-                        "### Add'l Notes Addressed\n"
-                        f"- Note: \"{_notes}\"\n"
-                        "- Status: Not verifiable from provided photos unless explicitly shown; provide a close-up photo of the requested area.\n"
-                    )
-                    if re.search(r"(?i)^##\s*Detailed\s+Audit\s+Report\b", _sm, flags=re.M):
-                        _sm = re.sub(
-                            r"(?im)(^##\s*Detailed\s+Audit\s+Report\s*\n)",
-                            r"\1" + inject + "\n",
-                            _sm,
-                            count=1,
-                        )
-                    else:
-                        _sm = ("## Detailed Audit Report\n" + inject + "\n" + _sm).strip()
-                    result["summary_markdown"] = _sm
-    except Exception:
-        pass
-
-
     
 # --- VIN: ELIMINATE FALSE "PROVIDED VIN" + FORCE VERIFIED VIN IN NARRATIVE ---
     # Goal:
@@ -1452,6 +1426,29 @@ async def vision_review(
             result["summary_markdown"] = "\n".join(out).strip()
     except Exception:
         pass
+
+    # --- Photos-only duplication cleanup (prevents repeated sections in PDF/email) ---
+    # In damage-report mode, the PDF/email already prints Estimated Repair Costs, Fraud, and Conclusion
+    # from their dedicated fields. If the model also includes these sections inside summary_markdown,
+    # it creates redundant repeated blocks.
+    try:
+        if ai_intent == "damage_report_from_photos":
+            _sm = (result.get("summary_markdown") or "")
+            if isinstance(_sm, str) and _sm:
+                def _strip_sections(md: str, heads: List[str]) -> str:
+                    out = md
+                    for h in heads:
+                        rx = re.compile(r"(?is)^#{1,6}\s*" + re.escape(h) + r"\s*$.*?(?=^#{1,6}\s|\Z)", re.M)
+                        out = re.sub(rx, "", out)
+                    out = re.sub(r"\n{3,}", "\n\n", out).strip()
+                    return out
+                result["summary_markdown"] = _strip_sections(
+                    _sm,
+                    ["Estimated Repair Costs", "Fraud & Authenticity Check", "Fraud and Authenticity Check", "Conclusion"]
+                )
+    except Exception:
+        pass
+
 
 
 
