@@ -2176,6 +2176,13 @@ async def vision_review(
         return s
 
     pdf = FPDF(); pdf.add_page()
+    # --- NSPXN Logo (Top Right, First Page Only) ---
+    try:
+        logo_path = "/mnt/data/ChatGPT logo100725.png"
+        if os.path.exists(logo_path):
+        pdf.image(logo_path, x=pdf.w - 45, y=8, w=35)  # small–medium size
+    except Exception:
+        pass
     pdf.set_auto_page_break(auto=True, margin=10)
     pdf.set_left_margin(10); pdf.set_right_margin(10)
 
@@ -2349,6 +2356,22 @@ async def vision_review(
     # --- One-page photo thumbnail appendix (all uploaded photos) ---
     try:
         add_thumbnail_page(pdf, thumbnail_paths)
+        # --- AI Disclaimer (Bottom of Final Page) ---
+    try:
+        pdf.set_font_size(8)
+        pdf.ln(6)
+        pdf.set_text_color(100, 100, 100)
+
+        disclaimer_text = (
+            "Disclaimer: This report was generated using artificial intelligence. "
+            "AI systems may make errors or misinterpret visual information. "
+            "All photos, damage descriptions, and conclusions must be independently "
+            "reviewed and verified by a qualified appraiser before preparing or "
+            "finalizing any repair estimate."
+        )
+
+        pdf.multi_cell(0, 4, disclaimer_text)
+        pdf.set_text_color(0, 0, 0)
     except Exception:
         pass
 
