@@ -2356,14 +2356,11 @@ async def vision_review(
     # --- One-page photo thumbnail appendix (all uploaded photos) ---
     try:
         add_thumbnail_page(pdf, thumbnail_paths)
-    except Exception:
-        pass
 
-    # --- AI Disclaimer (Bottom of Final Page) ---
+# --- AI Disclaimer (True Bottom of Final Page) ---
     try:
-        pdf.set_font_size(8)
-        pdf.ln(6)
-        pdf.set_text_color(100, 100, 100)
+        pdf.set_font("Helvetica", "", 8)
+        pdf.set_text_color(90, 90, 90)
 
         disclaimer_text = (
             "Disclaimer: This report was generated using artificial intelligence. "
@@ -2373,7 +2370,13 @@ async def vision_review(
             "finalizing any repair estimate."
         )
 
-        pdf.multi_cell(0, 4, disclaimer_text)
+        # Move to bottom of page
+        page_height = pdf.h
+        bottom_margin = 12
+        pdf.set_y(page_height - bottom_margin)
+
+        pdf.multi_cell(0, 4, disclaimer_text, align="L")
+
         pdf.set_text_color(0, 0, 0)
     except Exception:
         pass
