@@ -2359,27 +2359,37 @@ async def vision_review(
     except Exception:
         pass
         
-# --- AI Disclaimer (True Bottom of Final Page) ---
+    # --- AI Disclaimer (Immediately After Conclusion Section) ---
     try:
-        pdf.set_font("Helvetica", "", 8)
-        pdf.set_text_color(90, 90, 90)
+        # Thin divider line
+        pdf.ln(4)
+        x_left = pdf.l_margin
+        x_right = pdf.w - pdf.r_margin
+        y_line = pdf.get_y()
+        pdf.set_draw_color(180, 180, 180)
+        pdf.line(x_left, y_line, x_right, y_line)
 
-        disclaimer_text = (
-            "Disclaimer: This report was generated using artificial intelligence. "
-            "AI systems may make errors or misinterpret visual information. "
-            "All photos, damage descriptions, and conclusions must be independently "
-            "reviewed and verified by a qualified appraiser before preparing or "
-            "finalizing any repair estimate."
+        pdf.ln(3)
+
+        # Disclaimer text
+        pdf.set_font("Helvetica", "B", 9)
+        pdf.set_text_color(90, 90, 90)
+        pdf.cell(0, 5, "Disclaimer:", ln=True)
+
+        pdf.set_font("Helvetica", "", 8)
+
+        disclaimer_body = (
+            "This report was generated using artificial intelligence. "
+            "AI systems may misinterpret visual information or documentation. "
+            "All photos, damage descriptions, conclusions, and compliance findings "
+            "must be independently reviewed and verified by a qualified appraiser "
+            "before preparing, approving, or finalizing any repair estimate."
         )
 
-        # Move to bottom of page
-        page_height = pdf.h
-        bottom_margin = 12
-        pdf.set_y(page_height - bottom_margin)
-
-        pdf.multi_cell(0, 4, disclaimer_text, align="L")
+        pdf.multi_cell(0, 4, disclaimer_body)
 
         pdf.set_text_color(0, 0, 0)
+
     except Exception:
         pass
 
