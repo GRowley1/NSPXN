@@ -2180,7 +2180,7 @@ async def vision_review(
     try:
         logo_path = "/mnt/data/ChatGPT logo100725.png"
         if os.path.exists(logo_path):
-        pdf.image(logo_path, x=pdf.w - 45, y=8, w=35)  # small–medium size
+            pdf.image(logo_path, x=pdf.w - 45, y=8, w=35)  # small–medium size
     except Exception:
         pass
     pdf.set_auto_page_break(auto=True, margin=10)
