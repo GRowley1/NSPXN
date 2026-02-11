@@ -2273,7 +2273,7 @@ async def vision_review(
         poi15_hit = False
 
     if ai_intent == "damage_report_from_photos":
-        pdf.cell(0,10,"NSPXN.com Damage Report", ln=True, align="C")
+        pdf.cell(0,10,"NSPXN.com Condition Report", ln=True, align="C")
         pdf.set_font_size(10); pdf.ln(3)
 
         mc(f"Claim #: {result['claim_number'] or 'N/A'}    File #: {file_number or 'N/A'}")
@@ -2314,7 +2314,7 @@ async def vision_review(
         safe_file = _safe(file_number)
         pdf_filename = f"AI_Damage_Report_{safe_file}.pdf"
     else:
-        pdf.cell(0,10,"NSPXN.com Review Report", ln=True, align="C")
+        pdf.cell(0,10,"NSPXN.com Condition Report", ln=True, align="C")
         pdf.set_font_size(10); pdf.ln(3)
         mc(f"File Number: {file_number}")
         mc(f"Inspected For: {ia_company}")
@@ -2431,15 +2431,15 @@ async def vision_review(
     try:
         msg = EmailMessage()
         if ai_intent == "damage_report_from_photos":
-            subj = f"NSPXN.com Damage Report: {file_number or ''} {result['claim_number'] or ''}".strip()
+            subj = f"NSPXN.com Condition Report: {file_number or ''} {result['claim_number'] or ''}".strip()
             body = (
-                "NSPXN.com Damage Report\n\n"
+                "NSPXN.com Condition Report\n\n"
                 f"Inspected For: {ia_company}\n"
                 f"Claim #: {result['claim_number'] or 'N/A'}    File #: {file_number or 'N/A'}\n"
                 f"Odometer: {result['odometer_estimate_only'] or 'N/A'}    Primary Impact: {result['primary_impact'] or 'N/A'}\n"
                 f"Secondary Impact: {result['secondary_impact'] or 'N/A'}\n\n"
                 f"{result['redaction_status']}\n\n"
-                "Damage Summary\n"
+                "Condition Summary\n"
                 f"{(result['summary_markdown'] or 'N/A')}\n\n"
                 "Estimated Repair Costs\n"
                 f"{(result['estimated_costs_markdown'] or 'N/A')}\n\n"
@@ -2478,7 +2478,7 @@ async def vision_review(
             tl_line = "Estimate Type: Total Loss (explicit in documents)\n" if _explicit_tl_email else ""
             subj = f"NSPXN.com Review: {result['claim_number'] or file_number}"
             body = (
-                "NSPXN.com Review Report\n\n"
+                "NSPXN.com Condition Report\n\n"
                 f"File Number: {file_number}\n"
                 f"Inspected For: {ia_company}\n"
                 f"Appraiser ID #: {appraiser_id}\n"
