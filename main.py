@@ -2178,7 +2178,7 @@ async def vision_review(
     pdf = FPDF(); pdf.add_page()
     # --- NSPXN Logo (Top Right, First Page Only) ---
     try:
-        logo_path = os.path.join(os.path.dirname(_file_),"ChatGPT logo100725.png")
+        logo_path = os.path.join(os.path.dirname(__file__), "ChatGPT logo100725.png")
         if os.path.exists(logo_path):
             pdf.image(logo_path, x=pdf.w - 45, y=8, w=35)  # small–medium size
     except Exception:
@@ -2356,7 +2356,10 @@ async def vision_review(
     # --- One-page photo thumbnail appendix (all uploaded photos) ---
     try:
         add_thumbnail_page(pdf, thumbnail_paths)
-        # --- AI Disclaimer (Bottom of Final Page) ---
+    except Exception:
+        pass
+
+    # --- AI Disclaimer (Bottom of Final Page) ---
     try:
         pdf.set_font_size(8)
         pdf.ln(6)
