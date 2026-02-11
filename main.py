@@ -2356,7 +2356,9 @@ async def vision_review(
     # --- One-page photo thumbnail appendix (all uploaded photos) ---
     try:
         add_thumbnail_page(pdf, thumbnail_paths)
-
+    except Exception:
+        pass
+        
 # --- AI Disclaimer (True Bottom of Final Page) ---
     try:
         pdf.set_font("Helvetica", "", 8)
