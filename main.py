@@ -2178,7 +2178,7 @@ async def vision_review(
     pdf = FPDF(); pdf.add_page()
     # --- NSPXN Logo (Top Right, First Page Only) ---
     try:
-        logo_path = "/mnt/data/ChatGPT logo100725.png"
+        logo_path = os.path.join(os.path.dirname(_file_),"ChatGPT logo100725.png")
         if os.path.exists(logo_path):
             pdf.image(logo_path, x=pdf.w - 45, y=8, w=35)  # small–medium size
     except Exception:
