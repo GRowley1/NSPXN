@@ -1303,51 +1303,44 @@ async def vision_review(
     except Exception:
         pass
 
+# --- VIN: KEEP OUTPUT HONEST + ENSURE VIN APPEARS IN NARRATIVE WHEN VERIFIED/PRESENT ---
+# Goals:
+# 1) Never claim "provided VIN" / "VIN matches" unless we actually have a 17-char VIN value.
+# 2) If we have a real VIN and there is evidence a VIN photo exists (door label/windshield) OR verification implies match,
+#    ensure the VIN string appears at least once inside '## Detailed Audit Report'.
+# 3) If the model omitted VIN but OCR/filename produced one, backfill result['vin'] deterministically.
+try:
+    _cand_vins = vin_candidates[:] if isinstance(vin_candidates, list) else []
+    _vin_val = (result.get("vin") or "").strip().upper()
+    _vin_ver = (result.get("vin_verification") or "").strip()
 
-    
-# --- VIN: ELIMINATE FALSE "PROVIDED VIN" + FORCE VERIFIED VIN IN NARRATIVE ---
-    # Goal:
-    # 1) Never claim "provided VIN" / "VIN matches" unless we actually have a 17-char VIN value.
-    # 2) If we have a VIN value AND verification indicates a match/verified, force the VIN string into the narrative.
-    # 3) If model omitted VIN but OCR/filename produced one, backfill result['vin'] deterministically.
-    try:
-        _cand_vins = vin_candidates[:] if isinstance(vin_candidates, list) else []
-        _vin_val = (result.get("vin") or "").strip()
-        _vin_ver = (result.get("vin_verification") or "").strip()
+    def _is_real_vin(v: str) -> bool:
+        return bool(re.fullmatch(r"[A-HJ-NPR-Z0-9]{17}", (v or "").strip().upper()))
 
-        def _is_real_vin(v: str) -> bool:
-            return bool(re.fullmatch(r"[A-HJ-NPR-Z0-9]{17}", (v or "").strip().upper()))
+    # Backfill VIN if missing/placeholder and we have candidates from OCR/filename
+    if (not _is_real_vin(_vin_val)) and _cand_vins:
+        for _v in _cand_vins:
+            _v2 = (_v or "").strip().upper()
+            if _is_real_vin(_v2):
+                _vin_val = _v2
+                result["vin"] = _vin_val
+                break
 
-        # Backfill VIN if missing/placeholder and we have candidates from OCR/filename
-        if (not _is_real_vin(_vin_val)) and _cand_vins:
-            for _v in _cand_vins:
-                if _is_real_vin(_v):
-                    _vin_val = _v.strip().upper()
-                    result["vin"] = _vin_val
-                    break
+    _has_vin = _is_real_vin(_vin_val)
 
-        _has_vin = _is_real_vin(_vin_val)
-        # If we don't have a real VIN, scrub any "provided VIN" / "VIN matches" language from narrative-related fields
-        if not _has_vin:
-            _bad = r"(?is)\b(vin\s+(?:matches|matched|verified|confirm(?:ed|s)|consistent)\s+(?:the\s+)?provided\s+vin|provided\s+vin)\b.*?(?:\.|\n)"
-            for _k in ("summary_markdown", "summary_brief", "vin_verification", "conclusion"):
-                _t = result.get(_k)
-                if isinstance(_t, str) and _t:
-                    result[_k] = re.sub(_bad, "", _t).strip()
+    # If we don't have a real VIN, scrub any "provided VIN" / "VIN matches" language
+    if not _has_vin:
+        _bad = r"(?is)\b(vin\s+(?:matches|matched|verified|confirm(?:ed|s)|consistent)\s+(?:the\s+)?provided\s+vin|provided\s+vin)\b.*?(?:\.|\n)"
+        for _k in ("summary_markdown", "summary_brief", "vin_verification", "conclusion"):
+            _t = result.get(_k)
+            if isinstance(_t, str) and _t:
+                result[_k] = re.sub(_bad, "", _t).strip()
+    else:
+        # Determine whether we should force-inject VIN into narrative.
+        # If there's a VIN photo (door label/windshield) OR verification text implies match/verified, we inject.
+        _inject = bool(_vin_photo_present) or bool(re.search(r"(?i)\b(match|matched|verified|confirm(?:ed|s)|consistent)\b", _vin_ver or ""))
 
-        # Determine "verified" status only if we have VIN and verification says so OR narrative implies verified
-        _vin_verified = False
-        if _has_vin:
-            if re.search(r"(?i)\b(match|matched|verified|confirm(?:ed|s)|consistent)\b", _vin_ver):
-                _vin_verified = True
-            else:
-                # If model narrative already says VIN verified/matched, treat as verified
-                _sm0 = (result.get("summary_markdown") or "")
-                if isinstance(_sm0, str) and re.search(r"(?i)\bvin\b.*\b(verified|matched|match|confirmed|consistent)\b", _sm0):
-                    _vin_verified = True
-
-        # Force VIN string into narrative when verified (and avoid duplicates)
-        if _has_vin and _vin_verified:
+        if _inject:
             _sm = (result.get("summary_markdown") or "")
             if isinstance(_sm, str):
                 if _vin_val not in _sm:
@@ -1364,14 +1357,14 @@ async def vision_review(
                         _sm = ("## Detailed Audit Report\n" + vin_line + "\n\n" + _sm).strip()
                     result["summary_markdown"] = _sm
 
-                # Keep brief consistent if room
+                # Keep summary brief consistent if there's room
                 _sb = (result.get("summary_brief") or "")
                 if isinstance(_sb, str) and _vin_val not in _sb:
-                    cand = (_sb.strip() + f" VIN verified: {_vin_val}.").strip()
+                    cand = (_sb.strip() + f" VIN: {_vin_val}.").strip()
                     if len(cand) <= 280:
                         result["summary_brief"] = cand
-    except Exception:
-        pass
+except Exception:
+    pass
 
     # --- DEDUPE REPEATED SECTIONS IN NARRATIVE (MODEL OCCASIONALLY REPEATS) ---
     try:
@@ -2273,7 +2266,7 @@ async def vision_review(
         poi15_hit = False
 
     if ai_intent == "damage_report_from_photos":
-        pdf.cell(0,10,"NSPXN.com Condition Report", ln=True, align="C")
+        pdf.cell(0,10,"NSPXN.com Damage Report", ln=True, align="C")
         pdf.set_font_size(10); pdf.ln(3)
 
         mc(f"Claim #: {result['claim_number'] or 'N/A'}    File #: {file_number or 'N/A'}")
@@ -2285,36 +2278,10 @@ async def vision_review(
         pdf.ln(2); mc("Fraud & Authenticity Check"); mc((result["fraud_markdown"] or 'N/A').strip())
         pdf.ln(2); mc("Conclusion"); mc((result["conclusion"] or 'N/A').strip())
 
-        # --- AI Disclaimer (after Conclusion) ---
-        try:
-            pdf.ln(4)
-            x_left = pdf.l_margin
-            x_right = pdf.w - pdf.r_margin
-            y_line = pdf.get_y()
-            pdf.set_draw_color(180, 180, 180)
-            pdf.line(x_left, y_line, x_right, y_line)
-            pdf.ln(3)
-
-            pdf.set_text_color(90, 90, 90)
-            pdf.set_font("Helvetica", "B", 9)
-            pdf.cell(0, 5, "Disclaimer:", ln=True)
-            pdf.set_font("Helvetica", "", 8)
-
-            disclaimer_body = (
-                "This report was generated using artificial intelligence. AI systems may make errors or misinterpret "
-                "visual information. All photos, damage descriptions, conclusions, and findings must be independently "
-                "reviewed and verified by a qualified appraiser before preparing or finalizing any repair estimate."
-            )
-            pdf.multi_cell(0, 4, disclaimer_body)
-            pdf.set_text_color(0, 0, 0)
-        except Exception:
-            pass
-
-
         safe_file = _safe(file_number)
         pdf_filename = f"AI_Damage_Report_{safe_file}.pdf"
     else:
-        pdf.cell(0,10,"NSPXN.com Condition Report", ln=True, align="C")
+        pdf.cell(0,10,"NSPXN.com Review Report", ln=True, align="C")
         pdf.set_font_size(10); pdf.ln(3)
         mc(f"File Number: {file_number}")
         mc(f"Inspected For: {ia_company}")
@@ -2375,32 +2342,6 @@ async def vision_review(
         pdf.ln(3); mc("NSPXN.com Review Summary"); mc((smark or '').strip())
         pdf.ln(3); mc("Fraud Detection"); mc((result["fraud_markdown"] or 'N/A').strip())
 
-        # --- AI Disclaimer (after report content) ---
-        try:
-            pdf.ln(4)
-            x_left = pdf.l_margin
-            x_right = pdf.w - pdf.r_margin
-            y_line = pdf.get_y()
-            pdf.set_draw_color(180, 180, 180)
-            pdf.line(x_left, y_line, x_right, y_line)
-            pdf.ln(3)
-
-            pdf.set_text_color(90, 90, 90)
-            pdf.set_font("Helvetica", "B", 9)
-            pdf.cell(0, 5, "Disclaimer:", ln=True)
-            pdf.set_font("Helvetica", "", 8)
-
-            disclaimer_body = (
-                "This report was generated using artificial intelligence. AI systems may make errors or misinterpret "
-                "visual information. All photos, damage descriptions, conclusions, and findings must be independently "
-                "reviewed and verified by a qualified appraiser before preparing or finalizing any repair estimate."
-            )
-            pdf.multi_cell(0, 4, disclaimer_body)
-            pdf.set_text_color(0, 0, 0)
-        except Exception:
-            pass
-
-
         safe_file = _safe(file_number)
         pdf_filename = f"{safe_file}.pdf"
 
@@ -2408,6 +2349,30 @@ async def vision_review(
     # --- One-page photo thumbnail appendix (all uploaded photos) ---
     try:
         add_thumbnail_page(pdf, thumbnail_paths)
+    except Exception:
+        pass
+        
+# --- AI Disclaimer (True Bottom of Final Page) ---
+    try:
+        pdf.set_font("Helvetica", "", 8)
+        pdf.set_text_color(90, 90, 90)
+
+        disclaimer_text = (
+            "Disclaimer: This report was generated using artificial intelligence. "
+            "AI systems may make errors or misinterpret visual information. "
+            "All photos, damage descriptions, and conclusions must be independently "
+            "reviewed and verified by a qualified appraiser before preparing or "
+            "finalizing any repair estimate."
+        )
+
+        # Move to bottom of page
+        page_height = pdf.h
+        bottom_margin = 12
+        pdf.set_y(page_height - bottom_margin)
+
+        pdf.multi_cell(0, 4, disclaimer_text, align="L")
+
+        pdf.set_text_color(0, 0, 0)
     except Exception:
         pass
 
@@ -2431,15 +2396,15 @@ async def vision_review(
     try:
         msg = EmailMessage()
         if ai_intent == "damage_report_from_photos":
-            subj = f"NSPXN.com Condition Report: {file_number or ''} {result['claim_number'] or ''}".strip()
+            subj = f"NSPXN.com Damage Report: {file_number or ''} {result['claim_number'] or ''}".strip()
             body = (
-                "NSPXN.com Condition Report\n\n"
+                "NSPXN.com Damage Report\n\n"
                 f"Inspected For: {ia_company}\n"
                 f"Claim #: {result['claim_number'] or 'N/A'}    File #: {file_number or 'N/A'}\n"
                 f"Odometer: {result['odometer_estimate_only'] or 'N/A'}    Primary Impact: {result['primary_impact'] or 'N/A'}\n"
                 f"Secondary Impact: {result['secondary_impact'] or 'N/A'}\n\n"
                 f"{result['redaction_status']}\n\n"
-                "Condition Summary\n"
+                "Damage Summary\n"
                 f"{(result['summary_markdown'] or 'N/A')}\n\n"
                 "Estimated Repair Costs\n"
                 f"{(result['estimated_costs_markdown'] or 'N/A')}\n\n"
@@ -2478,7 +2443,7 @@ async def vision_review(
             tl_line = "Estimate Type: Total Loss (explicit in documents)\n" if _explicit_tl_email else ""
             subj = f"NSPXN.com Review: {result['claim_number'] or file_number}"
             body = (
-                "NSPXN.com Condition Report\n\n"
+                "NSPXN.com Review Report\n\n"
                 f"File Number: {file_number}\n"
                 f"Inspected For: {ia_company}\n"
                 f"Appraiser ID #: {appraiser_id}\n"
