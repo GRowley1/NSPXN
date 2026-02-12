@@ -2236,7 +2236,7 @@ async def vision_review(
             pdf_obj.set_font("Helvetica", "B", 12)
         except Exception:
             pdf_obj.set_font("Arial", "B", 12)
-        pdf_obj.cell(0, 8, "Uploaded Photo Thumbnails", ln=True)
+        pdf_obj.cell(0, 8, "Uploaded Photos", ln=True)
         pdf_obj.ln(2)
 
         # Layout (single-page, grid)
@@ -2299,7 +2299,7 @@ async def vision_review(
         mc(f"Inspected For: {ia_company}")
         pdf_status = result["redaction_status"].replace("✅", "OK")
         pdf.ln(2); mc(pdf_status)
-        pdf.ln(2); mc("Damage Summary"); mc((result["summary_markdown"] or "N/A").strip())
+        pdf.ln(2); mc("Condition Summary"); mc((result["summary_markdown"] or "N/A").strip())
         mc("Estimated Repair Costs"); mc((result["estimated_costs_markdown"] or "N/A").strip())
         pdf.ln(2); mc("Fraud & Authenticity Check"); mc((result["fraud_markdown"] or 'N/A').strip())
         pdf.ln(2); mc("Conclusion"); mc((result["conclusion"] or 'N/A').strip())
@@ -2391,7 +2391,7 @@ async def vision_review(
         mc(f"Compliance Score: {result['compliance_score']}")
         pdf_status = result["redaction_status"].replace("✅", "OK")
         mc(pdf_status)
-        pdf.ln(3); mc("NSPXN.com Review Summary"); mc((smark or '').strip())
+        pdf.ln(3); mc("NSPXN.com Condition Summary"); mc((smark or '').strip())
         pdf.ln(3); mc("Fraud Detection"); mc((result["fraud_markdown"] or 'N/A').strip())
 
         # --- AI Disclaimer (after report content) ---
@@ -2511,7 +2511,7 @@ async def vision_review(
                 f"Odometer (from estimate): {result['odometer_estimate_only']}\n"
                 f"Compliance Score: {result['compliance_score']}\n\n"
                 f"{result['redaction_status']}\n\n"
-                "NSPXN.com Review Summary\n"
+                "NSPXN.com Condition Summary\n"
                 f"{result['summary_markdown']}\n\n"
                 "Fraud Detection\n"
                 f"{result['fraud_markdown']}\n"
