@@ -42,11 +42,15 @@ logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(levelname)s - %(
 log = logging.getLogger("nspxn")
 log.info(f"Using CLIENT_RULES_DIR={CLIENT_RULES_DIR}")
 
-# Use GPT-4o everywhere
-MODEL = os.getenv("OAI_MODEL", "gpt-4o")
+# Use selected model everywhere
+MODEL = os.getenv("OAI_MODEL") or os.getenv("OPENAI_MODEL") or "gpt-5.2-2025-12-11"
 if not os.getenv("OPENAI_API_KEY"):
     raise RuntimeError("OPENAI_API_KEY missing")
-client = OpenAI(api_key=os.environ["OPENAI_API_KEY"])
+try:
+    client = OpenAI(api_key=os.environ["OPENAI_API_KEY"], timeout=60.0, max_retries=2)
+except TypeError:
+    # Backwards-compatible init for older openai-python versions
+    client = OpenAI(api_key=os.environ["OPENAI_API_KEY"])
 
 # --------------------------------
 # Presidio: Analyzer/Anonymizer (preserve VIN & Claim #)
@@ -1113,23 +1117,30 @@ async def vision_review(
     max_tokens = MAX_TOKENS_BY_INTENT.get(ai_intent, 1500)
 
     # Call GPT and parse JSON (JSON hardened)
+    # Prefer the canonical SDK path (client.chat.completions). Keep fallback for older SDKs.
     try:
-        rsp = client.chat_completions.create(  # type: ignore[attr-defined]
-            model=MODEL,
-            messages=[{"role":"system","content": SYSTEM},
-                      {"role":"user","content": parts_payload}],
-            max_tokens=max_tokens,
-            temperature=0,
-            response_format={"type":"json_object"}
-        )
-    except AttributeError:
         rsp = client.chat.completions.create(
             model=MODEL,
             messages=[{"role":"system","content": SYSTEM},
                       {"role":"user","content": parts_payload}],
             max_tokens=max_tokens,
             temperature=0,
-            response_format={"type":"json_object"}
+            top_p=1,
+            presence_penalty=0,
+            frequency_penalty=0,
+            response_format={"type":"json_object"},
+        )
+    except AttributeError:
+        rsp = client.chat_completions.create(  # type: ignore[attr-defined]
+            model=MODEL,
+            messages=[{"role":"system","content": SYSTEM},
+                      {"role":"user","content": parts_payload}],
+            max_tokens=max_tokens,
+            temperature=0,
+            top_p=1,
+            presence_penalty=0,
+            frequency_penalty=0,
+            response_format={"type":"json_object"},
         )
 
     # --- Hardened JSON parse helper
@@ -2564,6 +2575,7 @@ async def download_pdf(file_number: Optional[str] = None, filename: Optional[str
         return JSONResponse(status_code=404, content={"detail": "Not Found"})
     latest = max(candidates, key=lambda p: os.path.getmtime(p))
     return FileResponse(path=latest, media_type="application/pdf", filename=os.path.basename(latest))
+
 
 
 
