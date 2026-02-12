@@ -482,10 +482,16 @@ def _add_bytes(parts: List[Dict[str,Any]], files_seen: List[str], photo_index: O
         if thumb_paths is not None:
             try:
                 im_save = im_ref if im_ref is not None else Image.open(io.BytesIO(raw)).convert("RGB")
-                im_save.thumbnail((900, 900))
+                im_save.thumbnail((650, 650))
                 thumb_name = f"thumb_{uuid.uuid4().hex}.jpg"
                 thumb_path = os.path.join(PDF_DIR, thumb_name)
-                im_save.save(thumb_path, format="JPEG", quality=75, optimize=True)
+                im_save.save(
+                    thumb_path,
+                    format="JPEG",
+                    quality=45,
+                    optimize=True,
+                    progressive=True,
+                )
                 thumb_paths.append(thumb_path)
             except Exception:
                 pass
