@@ -974,6 +974,16 @@ async def vision_review(
             "\nODOMETER TRANSCRIPTION: Use only the odometer photo for mileage. "
             "If the digits are not fully readable, return 'Present — not clearly legible' and explain (glare/blur/angle). "
             "Do not infer or estimate mileage from other sources."
+            "\n\nORIENTATION REFERENCE (MANDATORY FIRST LINE): Before describing damage, determine vehicle orientation using the strongest visual evidence available "
+            "(steering wheel position, door-label/VIN plate photo, interior layout, multi-angle consistency). "
+            "Start the narrative with exactly one short line: 'Reference: Driver side confirmed from [evidence].' OR 'Reference: Side orientation not fully confirmable from photos.'"
+            "\nSIDE-CONFIDENCE RULE: Only state 'driver-side (left)' / 'passenger-side (right)' when confidence is high and supported by more than one indicator. "
+            "If uncertain, use neutral terms like 'front corner', 'rear corner', or 'side not fully confirmed' rather than guessing."
+            "\nINTERNAL COVERAGE CHECK (DO NOT PRINT): Silently verify you have evaluated each zone at least once: "
+            "Front assembly (bumper/grille/lamps/hood/fenders); Left side; Right side; Rear assembly; Roof/pillars; Wheels/tires (LF/RF/LR/RR individually); "
+            "Undercarriage/leaks; Interior/airbags. If a zone is not shown, explicitly say 'not shown/cannot confirm' in the narrative."
+            "\nPHOTO TAGGING PASS (INTERNAL ONLY): Before writing, quickly tag each photo as one of: Front / Rear / Driver-side / Passenger-side / Interior / VIN / Odometer / Undercarriage / Unknown, "
+            "and base the narrative on that tagging to avoid missing damage and to prevent left/right mix-ups."
         )
         prompt_text += (
             "\nABSOLUTE BAN (PHOTOS-ONLY): Do not reference or imply any estimate document. "
