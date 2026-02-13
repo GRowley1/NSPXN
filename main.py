@@ -222,12 +222,6 @@ You MUST fill every line below. If unclear, say "Not clearly shown; cannot asses
 - Cite VIN / odometer with Photo #s; if unreadable explain why.
 - Balance coverage: do NOT focus only on primary damage.
 
-## Estimated Repair Costs (photo-based rough only)
-- Body Labor: ...
-- Paint Labor / Materials: ...
-- Parts: ...
-- Sublet / Tax: ...
-- Rationale tied to observed panels / sides.
 
 ## Fraud & Authenticity Check
 - VIN match, odometer legibility, no tampering/duplicates/metadata issues.
@@ -2317,7 +2311,6 @@ async def vision_review(
         pdf_status = result["redaction_status"].replace("✅", "OK")
         pdf.ln(2); mc(pdf_status)
         pdf.ln(2); mc("Condition Summary"); mc((result["summary_markdown"] or "N/A").strip())
-        mc("Estimated Repair Costs"); mc((result["estimated_costs_markdown"] or "N/A").strip())
         pdf.ln(2); mc("Fraud & Authenticity Check"); mc((result["fraud_markdown"] or 'N/A').strip())
         pdf.ln(2); mc("Conclusion"); mc((result["conclusion"] or 'N/A').strip())
 
@@ -2477,8 +2470,6 @@ async def vision_review(
                 f"{result['redaction_status']}\n\n"
                 "Condition Summary\n"
                 f"{(result['summary_markdown'] or 'N/A')}\n\n"
-                "Estimated Repair Costs\n"
-                f"{(result['estimated_costs_markdown'] or 'N/A')}\n\n"
                 "Fraud & Authenticity Check\n"
                 f"{(result['fraud_markdown'] or 'N/A')}\n\n"
                 "Conclusion\n"
@@ -2581,6 +2572,14 @@ async def download_pdf(file_number: Optional[str] = None, filename: Optional[str
         return JSONResponse(status_code=404, content={"detail": "Not Found"})
     latest = max(candidates, key=lambda p: os.path.getmtime(p))
     return FileResponse(path=latest, media_type="application/pdf", filename=os.path.basename(latest))
+
+
+
+
+
+
+
+
 
 
 
