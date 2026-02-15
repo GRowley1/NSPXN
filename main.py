@@ -982,6 +982,8 @@ async def vision_review(
 
             "2) Perform an internal 4-corner sweep and classify each as: Damaged / Intact (only if clearly visible) / Not Shown: "
             "Front-left corner; Front-right corner; Rear-left corner; Rear-right corner. "
+            "2b) Bumper fitment check (front & rear): if the bumper cover shows gaps, sagging, misalignment, or pulled edges at the fender/quarter joints, "
+            "treat it as damage/fitment issue and describe it (do not label as 'intact'). "
 
             "3) Narrative binding rules: "
             "- Any corner classified as Damaged MUST be described in the narrative. "
@@ -996,7 +998,12 @@ async def vision_review(
 
             "\nPHOTO TAGGING PASS (INTERNAL ONLY): Before writing, quickly tag each photo as one of: "
             "Front / Rear / Driver-side / Passenger-side / Interior / VIN / Odometer / Undercarriage / Unknown, "
-            "and base the narrative on that tagging to prevent left/right mix-ups and missed damage."
+            "and base the narrative on that tagging to prevent left/right mix-ups and missed damage. "
+            "Then append ONE hidden machine-readable line at the very end of summary_markdown as an HTML comment exactly like: "
+            "<!--PHOTO_TAGS:{\"corner_visibility\":{\"front_left\":\"clearly_shown\"|\"not_shown\"|\"uncertain\","
+            "\"front_right\":...,\"rear_left\":...,\"rear_right\":...},"
+            "\"zone_visibility\":{\"front_bumper\":...,\"rear_bumper\":...}}--> "
+            "Do not mention this comment in the narrative."
         )
 
         prompt_text += (
@@ -1503,10 +1510,87 @@ async def vision_review(
     except Exception:
         pass
 
+    # --- Photos-only safety scrub: remove "intact/no obvious damage" claims for corners/zones not clearly shown ---
+    # We ask the model to append a hidden HTML comment with corner/zone visibility.
+    try:
+        if ai_intent == "damage_report_from_photos":
+            _sm0 = (result.get("summary_markdown") or "")
+            if isinstance(_sm0, str) and _sm0:
+                _m = re.search(r"<!--\s*PHOTO_TAGS\s*:(.*?)-->", _sm0, flags=re.S)
+                _corner_vis = {}
+                _zone_vis = {}
 
+                if _m:
+                    _payload = _m.group(1).strip()
+                    try:
+                        _tags_obj = json.loads(_payload)
+                        _corner_vis = _tags_obj.get("corner_visibility") or {}
+                        _zone_vis = _tags_obj.get("zone_visibility") or {}
+                    except Exception:
+                        _corner_vis = {}
+                        _zone_vis = {}
 
+                    # Strip the hidden comment from all user-facing fields (so report is not cluttery)
+                    for _k in ("summary_markdown", "summary_brief", "vin_verification", "conclusion"):
+                        _t = result.get(_k)
+                        if isinstance(_t, str) and _t:
+                            result[_k] = re.sub(r"<!--\s*PHOTO_TAGS\s*:.*?-->", "", _t, flags=re.S).strip()
 
+                def _not_clearly_shown(val: str) -> bool:
+                    v = (val or "").strip().lower()
+                    return v not in ("clearly_shown", "shown", "clear", "yes", "true")
 
+                _front_left_hide   = _not_clearly_shown(_corner_vis.get("front_left"))
+                _front_right_hide  = _not_clearly_shown(_corner_vis.get("front_right"))
+                _rear_left_hide    = _not_clearly_shown(_corner_vis.get("rear_left"))
+                _rear_right_hide   = _not_clearly_shown(_corner_vis.get("rear_right"))
+                _front_bumper_hide = _not_clearly_shown(_zone_vis.get("front_bumper"))
+                _rear_bumper_hide  = _not_clearly_shown(_zone_vis.get("rear_bumper"))
+
+                _sm = (result.get("summary_markdown") or "")
+                if isinstance(_sm, str) and _sm:
+                    bad_phrase = re.compile(
+                        r"(?i)\b(intact|no\s+obvious\s+damage|no\s+visible\s+damage|appears\s+intact|appear\s+intact)\b"
+                    )
+
+                    # Corner/zone keyword anchors (broad on purpose)
+                    rx_fl = re.compile(r"(?i)\b(front\s*[- ]\s*left|left\s+front|\bLF\b|driver\s*[- ]?side\s+front)\b")
+                    rx_fr = re.compile(r"(?i)\b(front\s*[- ]\s*right|right\s+front|\bRF\b|passenger\s*[- ]?side\s+front)\b")
+                    rx_rl = re.compile(r"(?i)\b(rear\s*[- ]\s*left|left\s+rear|\bLR\b|driver\s*[- ]?side\s+rear)\b")
+                    rx_rr = re.compile(r"(?i)\b(rear\s*[- ]\s*right|right\s+rear|\bRR\b|passenger\s*[- ]?side\s+rear)\b")
+                    rx_fb = re.compile(r"(?i)\b(front\s+bumper|bumper\s+cover|lower\s+bumper|grille\s+area)\b")
+                    rx_rb = re.compile(r"(?i)\b(rear\s+bumper|bumper\s+cover|rear\s+fascia)\b")
+
+                    def _filter_lines(md: str) -> str:
+                        out_lines = []
+                        for line in md.splitlines():
+                            if not bad_phrase.search(line):
+                                out_lines.append(line)
+                                continue
+
+                            # If it's an "intact/no damage" claim and the relevant area isn't clearly shown, drop it.
+                            if _front_left_hide and rx_fl.search(line):
+                                continue
+                            if _front_right_hide and rx_fr.search(line):
+                                continue
+                            if _rear_left_hide and rx_rl.search(line):
+                                continue
+                            if _rear_right_hide and rx_rr.search(line):
+                                continue
+                            if _front_bumper_hide and rx_fb.search(line):
+                                continue
+                            if _rear_bumper_hide and rx_rb.search(line):
+                                continue
+
+                            out_lines.append(line)
+
+                        cleaned = "\n".join(out_lines)
+                        cleaned = re.sub(r"\n{3,}", "\n\n", cleaned).strip()
+                        return cleaned
+
+                    result["summary_markdown"] = _filter_lines(_sm)
+    except Exception:
+        pass
 
 
     # --- Side Checks enforcement (photos-only): ensure Driver/Left Side bullet exists if Passenger/Right Side exists ---
