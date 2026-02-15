@@ -1,4 +1,4 @@
-from fastapi import FastAPI, File, UploadFile, Form, Request
+from fastapi import FastAPI, File, UploadFile, Form
 from fastapi.responses import JSONResponse, FileResponse
 from fastapi.middleware.cors import CORSMiddleware
 from typing import List, Dict, Any, Optional
@@ -42,15 +42,11 @@ logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(levelname)s - %(
 log = logging.getLogger("nspxn")
 log.info(f"Using CLIENT_RULES_DIR={CLIENT_RULES_DIR}")
 
-# Use selected model everywhere
-MODEL = os.getenv("OAI_MODEL") or os.getenv("OPENAI_MODEL") or "gpt-5.2-2025-12-11"
+# Use GPT-4o everywhere
+MODEL = os.getenv("OAI_MODEL", "gpt-4o")
 if not os.getenv("OPENAI_API_KEY"):
     raise RuntimeError("OPENAI_API_KEY missing")
-try:
-    client = OpenAI(api_key=os.environ["OPENAI_API_KEY"], timeout=60.0, max_retries=2)
-except TypeError:
-    # Backwards-compatible init for older openai-python versions
-    client = OpenAI(api_key=os.environ["OPENAI_API_KEY"])
+client = OpenAI(api_key=os.environ["OPENAI_API_KEY"])
 
 # --------------------------------
 # Presidio: Analyzer/Anonymizer (preserve VIN & Claim #)
@@ -59,6 +55,91 @@ analyzer = AnalyzerEngine()
 anonymizer = AnonymizerEngine()
 
 VIN_PATTERN = r"\b([A-HJ-NPR-Z0-9]{17})\b"
+
+# --- VIN VALIDATION (ISO 3779 check digit) + RECONCILIATION ---
+# We use this to pick the correct VIN when multiple candidates are present (filename/OCR/estimate),
+# and to avoid reporting an incorrect VIN in the narrative.
+_VIN_WEIGHTS = [8, 7, 6, 5, 4, 3, 2, 10, 0, 9, 8, 7, 6, 5, 4, 3, 2]
+_VIN_VALUES = {
+    'A': 1, 'B': 2, 'C': 3, 'D': 4, 'E': 5, 'F': 6, 'G': 7, 'H': 8,
+    'J': 1, 'K': 2, 'L': 3, 'M': 4, 'N': 5, 'P': 7, 'R': 9,
+    'S': 2, 'T': 3, 'U': 4, 'V': 5, 'W': 6, 'X': 7, 'Y': 8, 'Z': 9,
+    '0': 0, '1': 1, '2': 2, '3': 3, '4': 4, '5': 5,
+    '6': 6, '7': 7, '8': 8, '9': 9
+}
+
+def _validate_vin_check_digit(vin: str) -> bool:
+    vin = (vin or '').strip().upper()
+    if len(vin) != 17:
+        return False
+    if not re.fullmatch(r'[A-HJ-NPR-Z0-9]{17}', vin):
+        return False
+    try:
+        total = sum(_VIN_VALUES[vin[i]] * _VIN_WEIGHTS[i] for i in range(17))
+        cd = total % 11
+        expected = 'X' if cd == 10 else str(cd)
+        return vin[8] == expected
+    except Exception:
+        return False
+
+
+def _reconcile_vin_best(filename_blob: str, ocr_blob: str, estimate_blob: str) -> dict:
+    'Return best VIN selection with confidence + explanation.'
+    vin_pat = r'\b([A-HJ-NPR-Z0-9]{17})\b'
+
+    def _find_all(txt: str) -> list:
+        if not txt:
+            return []
+        return [m.group(1).upper() for m in re.finditer(vin_pat, txt.upper())]
+
+    scored = []  # (vin, score, source)
+    for v in _find_all(filename_blob):
+        scored.append((v, 0.30, 'filename'))
+    for v in _find_all(ocr_blob):
+        ctx_boost = 0.0
+        if re.search(rf'(?i)(?:VIN|Vehicle\s+Identification).{{0,30}}{re.escape(v)}', ocr_blob or ''):
+            ctx_boost = 0.20
+        scored.append((v, 0.60 + ctx_boost, 'ocr'))
+    for v in _find_all(estimate_blob):
+        scored.append((v, 0.95, 'estimate'))
+
+    if not scored:
+        return {'best_vin': '', 'confidence': 0.0, 'validation_passed': False, 'details': 'No VINs found', 'all_vins': []}
+
+    agg = {}
+    for vin, sc, src in scored:
+        d = agg.setdefault(vin, {'max': 0.0, 'sources': set()})
+        d['max'] = max(d['max'], float(sc))
+        d['sources'].add(src)
+
+    best_vin = ''
+    best_score = -1.0
+    best_valid = False
+    for vin, d in agg.items():
+        score = float(d['max']) + min(0.30, 0.10 * len(d['sources']))
+        valid = _validate_vin_check_digit(vin)
+        if valid:
+            score = min(1.0, score + 0.20)
+        key = (1 if valid else 0, score)
+        if key > ((1 if best_valid else 0), best_score):
+            best_vin, best_score, best_valid = vin, score, valid
+
+    all_vins = list(agg.keys())
+    srcs = sorted(list(agg.get(best_vin, {}).get('sources', [])))
+    details = f"Selected {best_vin} from {', '.join(srcs) or 'unknown'} (conf {best_score:.2f}; {'valid' if best_valid else 'INVALID check digit'})"
+    conflicts = [v for v in all_vins if v != best_vin]
+    if conflicts:
+        details = 'Multiple VINs found: ' + ', '.join(all_vins) + '. ' + details
+
+    return {
+        'best_vin': best_vin,
+        'confidence': max(0.0, min(1.0, best_score)),
+        'validation_passed': bool(best_valid),
+        'details': details,
+        'all_vins': all_vins,
+        'conflicts': conflicts,
+    }
+
 vin_recognizer = PatternRecognizer(
     supported_entity="VIN",
     patterns=[Pattern(name="vin-17", regex=VIN_PATTERN, score=0.8)],
@@ -137,7 +218,7 @@ DETAIL_TEMPLATES = {
         "tax/markup accuracy, and overall estimate integrity. Cite photos and estimate lines (e.g., 'Photo 3', 'p2/L14'). "
         "Close with compliance to any provided client rules and a clear final recommendation (Repairable vs. Total Loss). "
         "Do not declare Repairable/Total Loss unless the estimate itself explicitly marks 'Total Loss' or an ACV comparison is provided. "
-        "If the shop info is listed under Repair Facility on ANY estimate, add only the shop name to the Detailed Audit Report narrative. "
+        "If the shop info is listed under Repair Facility, add only the shop name to the Detailed Audit Report narrative. "
         "If a Printout showing the Clean Retail Value or Estimated Trade-In Value of the unit is present which may include ANY of the following: NADA, J.D. Power, Kelly Blue Book, Edmunds, Carfax, or Cars.com, DO NOT declare as missing if any of these are present. "
         "Minimum 10–14 sentences (one continuous narrative, not bullets).\n\n"
         "## Photo-by-Photo Damage Ledger\n"
@@ -222,6 +303,12 @@ You MUST fill every line below. If unclear, say "Not clearly shown; cannot asses
 - Cite VIN / odometer with Photo #s; if unreadable explain why.
 - Balance coverage: do NOT focus only on primary damage.
 
+## Estimated Repair Costs (photo-based rough only)
+- Body Labor: ...
+- Paint Labor / Materials: ...
+- Parts: ...
+- Sublet / Tax: ...
+- Rationale tied to observed panels / sides.
 
 ## Fraud & Authenticity Check
 - VIN match, odometer legibility, no tampering/duplicates/metadata issues.
@@ -325,9 +412,9 @@ PARTS_SOURCE_GUARD = (
 SUPPLEMENT_HANDLING = (
     "\n\nSUPPLEMENT HANDLING:"
     "\n- Examine the estimate documents for explicit supplement indicators: 'Supplement', 'Supplement of record', 'S01', 'S02', 'Supplement Summary', or similar."
-    "\n- If a supplement or multiple supplements are detected, clearly state in the narrative that the estimate is a supplement and summarize what changed: added operations/parts, rate updates, refinish overlap changes, or corrections to prior omissions."
-    "\n- If the supplement(s) corrects earlier deficiencies (e.g., missing materials line, added calibrations), note that improvement explicitly."
-    "\n- If a supplement(s) exists but required supporting evidence (invoices, photos) is still missing, call this out in Risks/Missing Evidence."
+    "\n- If a supplement is detected, clearly state in the narrative that the estimate is a supplement and summarize what changed: added operations/parts, rate updates, refinish overlap changes, or corrections to prior omissions."
+    "\n- If the supplement corrects earlier deficiencies (e.g., missing materials line, added calibrations), note that improvement explicitly."
+    "\n- If a supplement exists but required supporting evidence (invoices, photos) is still missing, call this out in Risks/Missing Evidence."
 )
 
 ALLOWED_INTENTS = {"guidelines_only","comprehensive","damage_report_from_photos"}
@@ -476,16 +563,10 @@ def _add_bytes(parts: List[Dict[str,Any]], files_seen: List[str], photo_index: O
         if thumb_paths is not None:
             try:
                 im_save = im_ref if im_ref is not None else Image.open(io.BytesIO(raw)).convert("RGB")
-                im_save.thumbnail((650, 650))
+                im_save.thumbnail((900, 900))
                 thumb_name = f"thumb_{uuid.uuid4().hex}.jpg"
                 thumb_path = os.path.join(PDF_DIR, thumb_name)
-                im_save.save(
-                    thumb_path,
-                    format="JPEG",
-                    quality=45,
-                    optimize=True,
-                    progressive=True,
-                )
+                im_save.save(thumb_path, format="JPEG", quality=75, optimize=True)
                 thumb_paths.append(thumb_path)
             except Exception:
                 pass
@@ -604,14 +685,13 @@ async def list_client_rules():
 # -----------------------
 @app.post("/vision-review")
 async def vision_review(
-    request: Request,
-    files: Optional[List[UploadFile]] = File(None),
+    files: List[UploadFile] = File(...),
     client_rules: str = Form(""),
     ai_notes: str = Form(""),
     addl_notes: str = Form(""),
     additional_notes: str = Form(""),
     notes: str = Form(""),
-    file_number: Optional[str] = Form(None),
+    file_number: str = Form(...),
     ia_company: str = Form(""),
     appraiser_id: str = Form(""),
     ai_intent: str = Form("comprehensive")
@@ -620,72 +700,12 @@ async def vision_review(
     files_seen: List[str] = []
     photo_index: List[str] = []
     thumbnail_paths: List[str] = []
-
-    # --- 422 guard: avoid FastAPI validation failures when frontend keys vary ---
-    # Accept missing/alternate keys without raising 422; return a clear 400 instead.
-    if files is None:
-        files = []
-    if file_number is None or str(file_number).strip() == "":
-        try:
-            _form = await request.form()
-            # Common file number key variants from different frontends
-            for _k in ("file_number", "file-number", "fileNumber", "fileNum", "file_num", "filenumber"):
-                _v = str(_form.get(_k, "") or "").strip()
-                if _v:
-                    file_number = _v
-                    break
-        except Exception:
-            pass
-    # If 'files' was posted under a different key, recover it from the raw form
-    if (not files) or (isinstance(files, list) and len(files) == 0):
-        try:
-            _form = await request.form()
-            _maybe = []
-            try:
-                _maybe = list(_form.getlist("files")) if hasattr(_form, "getlist") else []
-            except Exception:
-                _maybe = []
-            if not _maybe:
-                try:
-                    _maybe = list(_form.getlist("file")) if hasattr(_form, "getlist") else []
-                except Exception:
-                    _maybe = []
-            _maybe_files = [x for x in _maybe if hasattr(x, "filename")]
-            if _maybe_files:
-                files = _maybe_files  # type: ignore[assignment]
-        except Exception:
-            pass
-    # Hard-required fields (explicit 400 instead of 422)
-    if not file_number or str(file_number).strip() == "":
-        return JSONResponse(status_code=400, content={"error": "Missing required field: file_number"})
-    if not files:
-        return JSONResponse(status_code=400, content={"error": "Missing required upload: files"})
     vin_candidates: List[str] = []  # collected from filenames and OCR text
     MAX_IMAGES = 48
     used = 0
     # Coalesce Add\'l Notes from multiple possible frontend field names
     ai_notes_used = ((ai_notes or "").strip() or (addl_notes or "").strip() or (additional_notes or "").strip() or (notes or "").strip())
     ai_notes_used = ai_notes_used.strip()
-    # If notes still empty, fall back to reading the raw posted form (covers mismatched frontend field names)
-    if not ai_notes_used:
-        try:
-            _form = await request.form()
-            # First try common variants explicitly
-            for _k in ("ai_notes","addl_notes","additional_notes","notes","ai_review_notes","ai_notes_box","addlNote","addlNoteText"):
-                _v = str(_form.get(_k, "") or "").strip()
-                if _v:
-                    ai_notes_used = _v
-                    break
-            # Then any key containing 'note' (last resort)
-            if not ai_notes_used:
-                for _k in _form.keys():
-                    if "note" in str(_k).lower():
-                        _v = str(_form.get(_k, "") or "").strip()
-                        if _v:
-                            ai_notes_used = _v
-                            break
-        except Exception:
-            pass
     pdf_text_fulls: List[str] = []  # full PDF text for supplement detection
 
     # Anti-zipbomb guardrails
@@ -744,6 +764,19 @@ async def vision_review(
         if _v and _v not in _seen_v:
             _seen_v.add(_v); _tmp_v.append(_v)
     vin_candidates = _tmp_v
+
+
+    # --- VIN RECONCILIATION (deterministic; used to prevent wrong VINs) ---
+    vin_reconciliation = {"best_vin": "", "confidence": 0.0, "validation_passed": False, "details": "", "all_vins": []}
+    best_vin_reconciled = ""
+    try:
+        _fname_blob = "\n".join(files_seen or [])[:8000]
+        _ocr_blob = (uploaded_text_all or "")[:12000]
+        _est_blob = ("\n".join(pdf_text_fulls or []) + "\n" + (uploaded_text_all or ""))[:20000]
+        vin_reconciliation = _reconcile_vin_best(_fname_blob, _ocr_blob, _est_blob)
+        best_vin_reconciled = (vin_reconciliation.get("best_vin") or "").strip().upper()
+    except Exception:
+        best_vin_reconciled = ""
 
     # --- ODOMETER OCR LOCK (extract mileage from OCR text if visible) ---
     # This makes it impossible for the narrative to claim the odometer is not visible when OCR captured a mileage value.
@@ -930,7 +963,6 @@ async def vision_review(
             "\n\nADD'L NOTES (MANDATORY):\n"
             "- You MUST include a short subsection titled \"### Add'l Notes Addressed\" inside '## Detailed Audit Report'.\n"
             "- Quote the note verbatim, then respond to it as a CHECK ITEM (do not reinterpret locations like front/rear/left/right from the note).\n"
-            "- If Add’l Notes specifies a corner for a component (wheel/tire/rim), treat that corner as the required reference. Do not substitute another corner. If unsure, say ‘corner not independently verified’ but do not contradict the note. \n"
             "- If the requested item is not clearly visible in photos, write: 'Not verifiable from provided photos' and specify the exact photo needed. Do not speculate; stick to observable facts.\n"
             f"- Note to address (verbatim): \"{_note}\"\n"
         )
@@ -971,41 +1003,25 @@ async def vision_review(
         prompt_text += (
             "\n\nPHOTOS-ONLY MODE: Set 'compliance_score' to 'N/A'. "
             "Do NOT include a '## Compliance Score Rationale' section."
-        
             "\nODOMETER TRANSCRIPTION: Use only the odometer photo for mileage. "
             "If the digits are not fully readable, return 'Present — not clearly legible' and explain (glare/blur/angle). "
             "Do not infer or estimate mileage from other sources."
-
-            "\n\nINTERNAL ORIENTATION + 4-CORNER CHECK (DO NOT PRINT THESE STEPS): "
-            "1) Determine vehicle orientation using the strongest available anchors (steering wheel, door-label/VIN plate photo, interior layout, non-mirrored readable text, multi-angle consistency). "
-            "If orientation cannot be confidently confirmed, treat left/right as UNCONFIRMED and do NOT guess. "
-
-            "2) Perform an internal 4-corner sweep and classify each as: Damaged / Intact (only if clearly visible) / Not Shown: "
-            "Front-left corner; Front-right corner; Rear-left corner; Rear-right corner. "
-            "2b) Bumper fitment check (front & rear): if the bumper cover shows gaps, sagging, misalignment, or pulled edges at the fender/quarter joints, "
-            "treat it as damage/fitment issue and describe it (do not label as 'intact'). "
-
-            "3) Narrative binding rules: "
-            "- Any corner classified as Damaged MUST be described in the narrative. "
-            "- Never state a corner/panel is 'intact' or 'no damage' unless it is clearly visible and not contradicted elsewhere. "
-            "- If orientation is UNCONFIRMED, use neutral wording such as 'front corner' or 'rear corner' instead of driver/passenger or left/right. "
-            "- If orientation IS confirmed, you may use driver/passenger and left/right normally. "
-
-            "\nINTERNAL COVERAGE CHECK (DO NOT PRINT): Silently verify you have evaluated each zone at least once: "
-            "Front assembly (bumper/grille/lamps/hood/fenders); Left side; Right side; Rear assembly; Roof/pillars; "
-            "Wheels/tires (LF/RF/LR/RR individually); Undercarriage/leaks; Interior/airbags. "
-            "If a zone is not shown, explicitly state 'not shown/cannot confirm' in the narrative instead of assuming intact."
-
-            "\nPHOTO TAGGING PASS (INTERNAL ONLY): Before writing, quickly tag each photo as one of: "
-            "Front / Rear / Driver-side / Passenger-side / Interior / VIN / Odometer / Undercarriage / Unknown, "
-            "and base the narrative on that tagging to prevent left/right mix-ups and missed damage. "
-            "Then append ONE hidden machine-readable line at the very end of summary_markdown as an HTML comment exactly like: "
-            "<!--PHOTO_TAGS:{\"corner_visibility\":{\"front_left\":\"clearly_shown\"|\"not_shown\"|\"uncertain\","
-            "\"front_right\":...,\"rear_left\":...,\"rear_right\":...},"
-            "\"zone_visibility\":{\"front_bumper\":...,\"rear_bumper\":...}}--> "
-            "Do not mention this comment in the narrative."
         )
-
+        prompt_text += (
+            "\n\nORIENTATION REFERENCE (MANDATORY FIRST LINE): Before describing damage, determine vehicle orientation using the strongest visual evidence available "
+            "(steering wheel position, door-label/VIN plate photo, interior layout, multi-angle consistency). "
+            "Start the narrative with exactly one short line: 'Reference: Driver side confirmed from [evidence].' OR 'Reference: Side orientation not fully confirmable from photos.'"
+            "\nSIDE-CONFIDENCE RULE: Only state 'driver-side (left)' / 'passenger-side (right)' when confidence is high and supported by more than one indicator. "
+            "If uncertain, use neutral terms like 'front corner', 'rear corner', or 'side not fully confirmed' rather than guessing."
+            "\nINTERNAL COVERAGE CHECK (DO NOT PRINT): Silently verify you have evaluated each zone at least once: "
+            "Front assembly (bumper/grille/lamps/hood/fenders); Left side; Right side; Rear assembly; Roof/pillars; Wheels/tires (LF/RF/LR/RR individually); "
+            "Undercarriage/leaks; Interior/airbags. If a zone is not shown, explicitly say 'not shown/cannot confirm' in the narrative."
+            "\nFOUR-CORNER CHECK (INTERNAL ONLY): Silently classify each corner as damaged / intact / not shown: Front-left, Front-right, Rear-left, Rear-right. "
+            "Do not claim a corner is intact unless it is clearly shown."
+            "\nBUMPER FITMENT CHECK (INTERNAL ONLY): If rear or front bumper is visible, check for gaps, misalignment, sag, or broken retainers/clips and mention fitment issues when observed."
+            "\nPHOTO TAGGING PASS (INTERNAL ONLY): Before writing, quickly tag each photo as one of: Front / Rear / Driver-side / Passenger-side / Interior / VIN / Odometer / Undercarriage / Unknown, "
+            "and base the narrative on that tagging to avoid missing damage and to prevent left/right mix-ups."
+        )
         prompt_text += (
             "\nABSOLUTE BAN (PHOTOS-ONLY): Do not reference or imply any estimate document. "
             "Do not use phrases like 'the estimate', 'estimate suggests', 'p#/L#', 'CCC', 'labor rate', or any estimate page/line notation. "
@@ -1104,9 +1120,6 @@ async def vision_review(
     try:
         red_prompt = redact_text_preserve_vin_claim(prompt_text)
         redaction_success = True
-        # Prevent Presidio from mutating fixed markdown headings used for prompting.
-        # (This avoids model outputs like "### [REDACTED] Addressed".)
-        red_prompt = red_prompt.replace("### [REDACTED] Addressed", "### Add'l Notes Addressed")
     except Exception as e:
         log.warning(f"Redaction failed on prompt_text: {e}")
         red_prompt = prompt_text
@@ -1148,30 +1161,23 @@ async def vision_review(
     max_tokens = MAX_TOKENS_BY_INTENT.get(ai_intent, 1500)
 
     # Call GPT and parse JSON (JSON hardened)
-    # Prefer the canonical SDK path (client.chat.completions). Keep fallback for older SDKs.
     try:
-        rsp = client.chat.completions.create(
-            model=MODEL,
-            messages=[{"role":"system","content": SYSTEM},
-                      {"role":"user","content": parts_payload}],
-            max_tokens=max_tokens,
-            temperature=0,
-            top_p=1,
-            presence_penalty=0,
-            frequency_penalty=0,
-            response_format={"type":"json_object"},
-        )
-    except AttributeError:
         rsp = client.chat_completions.create(  # type: ignore[attr-defined]
             model=MODEL,
             messages=[{"role":"system","content": SYSTEM},
                       {"role":"user","content": parts_payload}],
             max_tokens=max_tokens,
             temperature=0,
-            top_p=1,
-            presence_penalty=0,
-            frequency_penalty=0,
-            response_format={"type":"json_object"},
+            response_format={"type":"json_object"}
+        )
+    except AttributeError:
+        rsp = client.chat.completions.create(
+            model=MODEL,
+            messages=[{"role":"system","content": SYSTEM},
+                      {"role":"user","content": parts_payload}],
+            max_tokens=max_tokens,
+            temperature=0,
+            response_format={"type":"json_object"}
         )
 
     # --- Hardened JSON parse helper
@@ -1326,25 +1332,6 @@ async def vision_review(
     except Exception:
         pass
 
-    # --- VIN IN NARRATIVE ENFORCER (MINIMAL) ---
-    # Ensure a verified/observed VIN appears in the narrative (summary_markdown) when VIN is present.
-    try:
-        _vin = (result.get("vin") or "").strip()
-        if re.fullmatch(r"[A-HJ-NPR-Z0-9]{17}", _vin or ""):
-            _sm = (result.get("summary_markdown") or "")
-            if _vin not in _sm:
-                _vv = (result.get("vin_verification") or "").lower()
-                _status = "verified" if any(k in _vv for k in ("verified", "match", "matches", "confirmed")) else "observed"
-                _vin_line = f"VIN {_status}: {_vin}"
-                if "## Detailed Audit Report" in _sm:
-                    _pre, _post = _sm.split("## Detailed Audit Report", 1)
-                    # Insert immediately after the section header
-                    result["summary_markdown"] = _pre + "## Detailed Audit Report\n" + _vin_line + "\n" + _post.lstrip("\n")
-                else:
-                    result["summary_markdown"] = "## Detailed Audit Report\n" + _vin_line + "\n\n" + _sm.lstrip("\n")
-    except Exception:
-        pass
-
     # --- ODOMETER CONSISTENCY ENFORCER (SILENT) ---
     # If OCR captured a mileage value, remove any statements implying the odometer/mileage is not visible/unknown,
     # and ensure the output mentions the mileage at least once.
@@ -1365,74 +1352,85 @@ async def vision_review(
         pass
 
 
-    
-# --- VIN: ELIMINATE FALSE "PROVIDED VIN" + FORCE VERIFIED VIN IN NARRATIVE ---
-    # Goal:
-    # 1) Never claim "provided VIN" / "VIN matches" unless we actually have a 17-char VIN value.
-    # 2) If we have a VIN value AND verification indicates a match/verified, force the VIN string into the narrative.
-    # 3) If model omitted VIN but OCR/filename produced one, backfill result['vin'] deterministically.
+    # --- ADD'L NOTES MUST APPEAR IN NARRATIVE (SILENT, DETERMINISTIC) ---
+    # If the user provided Add'l Notes, force an '### Add'l Notes Addressed' subsection into the
+    # '## Detailed Audit Report' narrative so the note cannot be ignored.
     try:
-        _cand_vins = vin_candidates[:] if isinstance(vin_candidates, list) else []
-        _vin_val = (result.get("vin") or "").strip()
+        _notes = (ai_notes_used or "").strip()
+        if _notes:
+            _notes = _notes[:500]  # keep PDF/email safe; full note remains in prompt_text
+            _sm = (result.get("summary_markdown") or "")
+            if isinstance(_sm, str) and _sm:
+                if re.search(r"(?i)###\s*Add['’]l\s+Notes\s+Addressed\b", _sm) is None:
+                    inject = (
+                        "### Add'l Notes Addressed\n"
+                        f"- Note: \"{_notes}\"\n"
+                        "- Status: Not verifiable from provided photos unless explicitly shown; provide a close-up photo of the requested area.\n"
+                    )
+                    if re.search(r"(?i)^##\s*Detailed\s+Audit\s+Report\b", _sm, flags=re.M):
+                        _sm = re.sub(
+                            r"(?im)(^##\s*Detailed\s+Audit\s+Report\s*\n)",
+                            r"\1" + inject + "\n",
+                            _sm,
+                            count=1,
+                        )
+                    else:
+                        _sm = ("## Detailed Audit Report\n" + inject + "\n" + _sm).strip()
+                    result["summary_markdown"] = _sm
+    except Exception:
+        pass
+    # --- VIN: ELIMINATE FALSE "PROVIDED VIN" + FORCE VERIFIED VIN IN NARRATIVE ---
+    # Goal:
+    # 1) Choose best VIN deterministically (estimate/OCR/filename) and prefer valid check-digit VINs.
+    # 2) Never claim "provided VIN" / "VIN matches" unless we actually have a 17-char VIN value.
+    # 3) If VIN is valid and evidenced (VIN photo OR estimate), force the VIN string into the narrative.
+    try:
+        _vin_val = (result.get("vin") or "").strip().upper()
         _vin_ver = (result.get("vin_verification") or "").strip()
 
         def _is_real_vin(v: str) -> bool:
             return bool(re.fullmatch(r"[A-HJ-NPR-Z0-9]{17}", (v or "").strip().upper()))
 
-        # Backfill VIN if missing/placeholder and we have candidates from OCR/filename
-        if (not _is_real_vin(_vin_val)) and _cand_vins:
-            for _v in _cand_vins:
-                if _is_real_vin(_v):
-                    _vin_val = _v.strip().upper()
-                    result["vin"] = _vin_val
-                    break
+        _best = (best_vin_reconciled or "").strip().upper()
+        if _best and _is_real_vin(_best):
+            _vin_val = _best
+            result["vin"] = _best
 
         _has_vin = _is_real_vin(_vin_val)
-        # If we don't have a real VIN, scrub any "provided VIN" / "VIN matches" language from narrative-related fields
+        _vin_is_valid = _validate_vin_check_digit(_vin_val) if _has_vin else False
+
         if not _has_vin:
             _bad = r"(?is)\b(vin\s+(?:matches|matched|verified|confirm(?:ed|s)|consistent)\s+(?:the\s+)?provided\s+vin|provided\s+vin)\b.*?(?:\.|\n)"
             for _k in ("summary_markdown", "summary_brief", "vin_verification", "conclusion"):
                 _t = result.get(_k)
                 if isinstance(_t, str) and _t:
                     result[_k] = re.sub(_bad, "", _t).strip()
-
-        # Determine "verified" status only if we have VIN and verification says so OR narrative implies verified
-        _vin_verified = False
-        if _has_vin:
-            if re.search(r"(?i)\b(match|matched|verified|confirm(?:ed|s)|consistent)\b", _vin_ver):
-                _vin_verified = True
+        else:
+            if not _vin_is_valid:
+                result["vin_verification"] = f"VIN found but failed check-digit validation: {_vin_val}."
+                _inject = False
             else:
-                # If model narrative already says VIN verified/matched, treat as verified
-                _sm0 = (result.get("summary_markdown") or "")
-                if isinstance(_sm0, str) and re.search(r"(?i)\bvin\b.*\b(verified|matched|match|confirmed|consistent)\b", _sm0):
-                    _vin_verified = True
+                _inject = bool(_vin_photo_present) or ("estimate" in (vin_reconciliation.get("details") or "").lower())
+                result["vin_verification"] = f"VIN verified: {_vin_val}."
 
-        # Force VIN string into narrative when verified (and avoid duplicates)
-        if _has_vin and _vin_verified:
-            _sm = (result.get("summary_markdown") or "")
-            if isinstance(_sm, str):
-                if _vin_val not in _sm:
+            if _inject:
+                _sm = (result.get("summary_markdown") or "")
+                if isinstance(_sm, str) and _vin_val not in _sm:
                     vin_line = f"VIN verified: {_vin_val}."
                     if "## Detailed Audit Report" in _sm:
-                        _sm = re.sub(
-                            r"(##\s*Detailed\s+Audit\s+Report\s*\n)",
-                            r"\1" + vin_line + "\n",
-                            _sm,
-                            count=1,
-                            flags=re.IGNORECASE,
-                        )
+                        _sm = re.sub(r"(##\s*Detailed\s+Audit\s+Report\s*\n)", r"\1" + vin_line + "\n", _sm, count=1, flags=re.IGNORECASE)
                     else:
                         _sm = ("## Detailed Audit Report\n" + vin_line + "\n\n" + _sm).strip()
                     result["summary_markdown"] = _sm
 
-                # Keep brief consistent if room
                 _sb = (result.get("summary_brief") or "")
                 if isinstance(_sb, str) and _vin_val not in _sb:
-                    cand = (_sb.strip() + f" VIN verified: {_vin_val}.").strip()
+                    cand = (_sb.strip() + f" VIN: {_vin_val}.").strip()
                     if len(cand) <= 280:
                         result["summary_brief"] = cand
     except Exception:
         pass
+
 
     # --- DEDUPE REPEATED SECTIONS IN NARRATIVE (MODEL OCCASIONALLY REPEATS) ---
     try:
@@ -1488,109 +1486,9 @@ async def vision_review(
     except Exception:
         pass
 
-    # --- Photos-only duplication cleanup (prevents repeated sections in PDF/email) ---
-    # In damage-report mode, the PDF/email already prints Estimated Repair Costs, Fraud, and Conclusion
-    # from their dedicated fields. If the model also includes these sections inside summary_markdown,
-    # it creates redundant repeated blocks.
-    try:
-        if ai_intent == "damage_report_from_photos":
-            _sm = (result.get("summary_markdown") or "")
-            if isinstance(_sm, str) and _sm:
-                def _strip_sections(md: str, heads: List[str]) -> str:
-                    out = md
-                    for h in heads:
-                        rx = re.compile(r"(?is)^#{1,6}\s*" + re.escape(h) + r"\s*$.*?(?=^#{1,6}\s|\Z)", re.M)
-                        out = re.sub(rx, "", out)
-                    out = re.sub(r"\n{3,}", "\n\n", out).strip()
-                    return out
-                result["summary_markdown"] = _strip_sections(
-                    _sm,
-                    ["Estimated Repair Costs", "Fraud & Authenticity Check", "Fraud and Authenticity Check", "Conclusion"]
-                )
-    except Exception:
-        pass
 
-    # --- Photos-only safety scrub: remove "intact/no obvious damage" claims for corners/zones not clearly shown ---
-    # We ask the model to append a hidden HTML comment with corner/zone visibility.
-    try:
-        if ai_intent == "damage_report_from_photos":
-            _sm0 = (result.get("summary_markdown") or "")
-            if isinstance(_sm0, str) and _sm0:
-                _m = re.search(r"<!--\s*PHOTO_TAGS\s*:(.*?)-->", _sm0, flags=re.S)
-                _corner_vis = {}
-                _zone_vis = {}
 
-                if _m:
-                    _payload = _m.group(1).strip()
-                    try:
-                        _tags_obj = json.loads(_payload)
-                        _corner_vis = _tags_obj.get("corner_visibility") or {}
-                        _zone_vis = _tags_obj.get("zone_visibility") or {}
-                    except Exception:
-                        _corner_vis = {}
-                        _zone_vis = {}
 
-                    # Strip the hidden comment from all user-facing fields (so report is not cluttery)
-                    for _k in ("summary_markdown", "summary_brief", "vin_verification", "conclusion"):
-                        _t = result.get(_k)
-                        if isinstance(_t, str) and _t:
-                            result[_k] = re.sub(r"<!--\s*PHOTO_TAGS\s*:.*?-->", "", _t, flags=re.S).strip()
-
-                def _not_clearly_shown(val: str) -> bool:
-                    v = (val or "").strip().lower()
-                    return v not in ("clearly_shown", "shown", "clear", "yes", "true")
-
-                _front_left_hide   = _not_clearly_shown(_corner_vis.get("front_left"))
-                _front_right_hide  = _not_clearly_shown(_corner_vis.get("front_right"))
-                _rear_left_hide    = _not_clearly_shown(_corner_vis.get("rear_left"))
-                _rear_right_hide   = _not_clearly_shown(_corner_vis.get("rear_right"))
-                _front_bumper_hide = _not_clearly_shown(_zone_vis.get("front_bumper"))
-                _rear_bumper_hide  = _not_clearly_shown(_zone_vis.get("rear_bumper"))
-
-                _sm = (result.get("summary_markdown") or "")
-                if isinstance(_sm, str) and _sm:
-                    bad_phrase = re.compile(
-                        r"(?i)\b(intact|no\s+obvious\s+damage|no\s+visible\s+damage|appears\s+intact|appear\s+intact)\b"
-                    )
-
-                    # Corner/zone keyword anchors (broad on purpose)
-                    rx_fl = re.compile(r"(?i)\b(front\s*[- ]\s*left|left\s+front|\bLF\b|driver\s*[- ]?side\s+front)\b")
-                    rx_fr = re.compile(r"(?i)\b(front\s*[- ]\s*right|right\s+front|\bRF\b|passenger\s*[- ]?side\s+front)\b")
-                    rx_rl = re.compile(r"(?i)\b(rear\s*[- ]\s*left|left\s+rear|\bLR\b|driver\s*[- ]?side\s+rear)\b")
-                    rx_rr = re.compile(r"(?i)\b(rear\s*[- ]\s*right|right\s+rear|\bRR\b|passenger\s*[- ]?side\s+rear)\b")
-                    rx_fb = re.compile(r"(?i)\b(front\s+bumper|bumper\s+cover|lower\s+bumper|grille\s+area)\b")
-                    rx_rb = re.compile(r"(?i)\b(rear\s+bumper|bumper\s+cover|rear\s+fascia)\b")
-
-                    def _filter_lines(md: str) -> str:
-                        out_lines = []
-                        for line in md.splitlines():
-                            if not bad_phrase.search(line):
-                                out_lines.append(line)
-                                continue
-
-                            # If it's an "intact/no damage" claim and the relevant area isn't clearly shown, drop it.
-                            if _front_left_hide and rx_fl.search(line):
-                                continue
-                            if _front_right_hide and rx_fr.search(line):
-                                continue
-                            if _rear_left_hide and rx_rl.search(line):
-                                continue
-                            if _rear_right_hide and rx_rr.search(line):
-                                continue
-                            if _front_bumper_hide and rx_fb.search(line):
-                                continue
-                            if _rear_bumper_hide and rx_rb.search(line):
-                                continue
-
-                            out_lines.append(line)
-
-                        cleaned = "\n".join(out_lines)
-                        cleaned = re.sub(r"\n{3,}", "\n\n", cleaned).strip()
-                        return cleaned
-
-                    result["summary_markdown"] = _filter_lines(_sm)
-    except Exception:
-        pass
 
 
     # --- Side Checks enforcement (photos-only): ensure Driver/Left Side bullet exists if Passenger/Right Side exists ---
@@ -2299,6 +2197,22 @@ async def vision_review(
         pass
 
 # -----------------------
+
+    # --- PHOTOS-ONLY SCRUBBER: REMOVE UNSUPPORTED "NO DAMAGE/INTACT" CLAIMS ---
+    # This prevents false "clean/intact" statements when a side/corner wasn't clearly shown.
+    # We conservatively remove these claims entirely in photos-only mode.
+    try:
+        if ai_intent == "damage_report_from_photos":
+            _rx = r"(?im)^.*\b(?:intact|clean\s+with\s+no\s+visible\s+damage|no\s+visible\s+damage|no\s+obvious\s+damage|appears\s+intact|appears\s+clean)\b.*$"
+            for _k in ("summary_markdown", "summary_brief", "conclusion"):
+                _t = result.get(_k)
+                if isinstance(_t, str) and _t:
+                    _t2 = re.sub(_rx, "", _t)
+                    _t2 = re.sub(r"\n{3,}", "\n\n", _t2).strip()
+                    result[_k] = _t2
+    except Exception:
+        pass
+
     # PDF helpers
     # -----------------------
     def _pdf_sanitize(text: str, max_token_len: int = 60) -> str:
@@ -2314,13 +2228,6 @@ async def vision_review(
         return s
 
     pdf = FPDF(); pdf.add_page()
-    # --- NSPXN Logo (Top Right, First Page Only) ---
-    try:
-        logo_path = os.path.join(os.path.dirname(__file__), "ChatGPT logo100725.png")
-        if os.path.exists(logo_path):
-            pdf.image(logo_path, x=pdf.w - 45, y=8, w=35)  # small–medium size
-    except Exception:
-        pass
     pdf.set_auto_page_break(auto=True, margin=10)
     pdf.set_left_margin(10); pdf.set_right_margin(10)
 
@@ -2355,7 +2262,7 @@ async def vision_review(
             pdf_obj.set_font("Helvetica", "B", 12)
         except Exception:
             pdf_obj.set_font("Arial", "B", 12)
-        pdf_obj.cell(0, 8, "Uploaded Photos", ln=True)
+        pdf_obj.cell(0, 8, "Uploaded Photo Thumbnails", ln=True)
         pdf_obj.ln(2)
 
         # Layout (single-page, grid)
@@ -2411,50 +2318,24 @@ async def vision_review(
         poi15_hit = False
 
     if ai_intent == "damage_report_from_photos":
-        pdf.cell(0,10,"NSPXN.com Condition Report", ln=True, align="C")
+        pdf.cell(0,10,"NSPXN.com Damage Report", ln=True, align="C")
         pdf.set_font_size(10); pdf.ln(3)
 
         mc(f"Claim #: {result['claim_number'] or 'N/A'}    File #: {file_number or 'N/A'}")
-        mc(f"Inspected For: {ia_company}")
         pdf_status = result["redaction_status"].replace("✅", "OK")
         pdf.ln(2); mc(pdf_status)
-        pdf.ln(2); mc("Condition Summary"); mc((result["summary_markdown"] or "N/A").strip())
+        pdf.ln(2); mc("Damage Summary"); mc((result["summary_markdown"] or "N/A").strip())
+        mc("Estimated Repair Costs"); mc((result["estimated_costs_markdown"] or "N/A").strip())
         pdf.ln(2); mc("Fraud & Authenticity Check"); mc((result["fraud_markdown"] or 'N/A').strip())
         pdf.ln(2); mc("Conclusion"); mc((result["conclusion"] or 'N/A').strip())
-
-        # --- AI Disclaimer (after Conclusion) ---
-        try:
-            pdf.ln(4)
-            x_left = pdf.l_margin
-            x_right = pdf.w - pdf.r_margin
-            y_line = pdf.get_y()
-            pdf.set_draw_color(180, 180, 180)
-            pdf.line(x_left, y_line, x_right, y_line)
-            pdf.ln(3)
-
-            pdf.set_text_color(90, 90, 90)
-            pdf.set_font("Helvetica", "B", 9)
-            pdf.cell(0, 5, "Disclaimer:", ln=True)
-            pdf.set_font("Helvetica", "", 8)
-
-            disclaimer_body = (
-                "This report was generated using artificial intelligence. AI systems may make errors or misinterpret "
-                "visual information. All photos, damage descriptions, conclusions, and findings must be independently "
-                "reviewed and verified by a qualified appraiser before preparing or finalizing any repair estimate."
-            )
-            pdf.multi_cell(0, 4, disclaimer_body)
-            pdf.set_text_color(0, 0, 0)
-        except Exception:
-            pass
-
 
         safe_file = _safe(file_number)
         pdf_filename = f"AI_Damage_Report_{safe_file}.pdf"
     else:
-        pdf.cell(0,10,"NSPXN.com Condition Report", ln=True, align="C")
+        pdf.cell(0,10,"NSPXN.com Review Report", ln=True, align="C")
         pdf.set_font_size(10); pdf.ln(3)
         mc(f"File Number: {file_number}")
-        mc(f"Inspected For: {ia_company}")
+        mc(f"IA Company: {ia_company}")
         mc(f"Appraiser ID #: {appraiser_id}")
         mc(f"Request Type: {result['request_type']}")
 
@@ -2509,34 +2390,8 @@ async def vision_review(
         mc(f"Compliance Score: {result['compliance_score']}")
         pdf_status = result["redaction_status"].replace("✅", "OK")
         mc(pdf_status)
-        pdf.ln(3); mc("NSPXN.com Condition Summary"); mc((smark or '').strip())
+        pdf.ln(3); mc("NSPXN.com Review Summary"); mc((smark or '').strip())
         pdf.ln(3); mc("Fraud Detection"); mc((result["fraud_markdown"] or 'N/A').strip())
-
-        # --- AI Disclaimer (after report content) ---
-        try:
-            pdf.ln(4)
-            x_left = pdf.l_margin
-            x_right = pdf.w - pdf.r_margin
-            y_line = pdf.get_y()
-            pdf.set_draw_color(180, 180, 180)
-            pdf.line(x_left, y_line, x_right, y_line)
-            pdf.ln(3)
-
-            pdf.set_text_color(90, 90, 90)
-            pdf.set_font("Helvetica", "B", 9)
-            pdf.cell(0, 5, "Disclaimer:", ln=True)
-            pdf.set_font("Helvetica", "", 8)
-
-            disclaimer_body = (
-                "This report was generated using artificial intelligence. AI systems may make errors or misinterpret "
-                "visual information. All photos, damage descriptions, conclusions, and findings must be independently "
-                "reviewed and verified by a qualified appraiser before preparing or finalizing any repair estimate."
-            )
-            pdf.multi_cell(0, 4, disclaimer_body)
-            pdf.set_text_color(0, 0, 0)
-        except Exception:
-            pass
-
 
         safe_file = _safe(file_number)
         pdf_filename = f"{safe_file}.pdf"
@@ -2568,16 +2423,18 @@ async def vision_review(
     try:
         msg = EmailMessage()
         if ai_intent == "damage_report_from_photos":
-            subj = f"NSPXN.com Condition Report: {file_number or ''} {result['claim_number'] or ''}".strip()
+            subj = f"NSPXN.com Damage Report: {file_number or ''} {result['claim_number'] or ''}".strip()
             body = (
-                "NSPXN.com Condition Report\n\n"
-                f"Inspected For: {ia_company}\n"
+                "NSPXN.com Damage Report\n\n"
+                f"IA Company: {ia_company}\n"
                 f"Claim #: {result['claim_number'] or 'N/A'}    File #: {file_number or 'N/A'}\n"
                 f"Odometer: {result['odometer_estimate_only'] or 'N/A'}    Primary Impact: {result['primary_impact'] or 'N/A'}\n"
                 f"Secondary Impact: {result['secondary_impact'] or 'N/A'}\n\n"
                 f"{result['redaction_status']}\n\n"
-                "Condition Summary\n"
+                "Damage Summary\n"
                 f"{(result['summary_markdown'] or 'N/A')}\n\n"
+                "Estimated Repair Costs\n"
+                f"{(result['estimated_costs_markdown'] or 'N/A')}\n\n"
                 "Fraud & Authenticity Check\n"
                 f"{(result['fraud_markdown'] or 'N/A')}\n\n"
                 "Conclusion\n"
@@ -2613,9 +2470,9 @@ async def vision_review(
             tl_line = "Estimate Type: Total Loss (explicit in documents)\n" if _explicit_tl_email else ""
             subj = f"NSPXN.com Review: {result['claim_number'] or file_number}"
             body = (
-                "NSPXN.com Condition Report\n\n"
+                "NSPXN.com Review Report\n\n"
                 f"File Number: {file_number}\n"
-                f"Inspected For: {ia_company}\n"
+                f"IA Company: {ia_company}\n"
                 f"Appraiser ID #: {appraiser_id}\n"
                 f"Request Type: {result['request_type']}\n"
                 f"{supp_line}"
@@ -2627,7 +2484,7 @@ async def vision_review(
                 f"Odometer (from estimate): {result['odometer_estimate_only']}\n"
                 f"Compliance Score: {result['compliance_score']}\n\n"
                 f"{result['redaction_status']}\n\n"
-                "NSPXN.com Condition Summary\n"
+                "NSPXN.com Review Summary\n"
                 f"{result['summary_markdown']}\n\n"
                 "Fraud Detection\n"
                 f"{result['fraud_markdown']}\n"
