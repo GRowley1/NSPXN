@@ -44,7 +44,7 @@ log = logging.getLogger("nspxn")
 log.info(f"Using CLIENT_RULES_DIR={CLIENT_RULES_DIR}")
 
 # Use selected model everywhere
-MODEL = os.getenv("OAI_MODEL") or os.getenv("OPENAI_MODEL") or "gpt-5.2-2025-12-11"
+MODEL = os.getenv("OAI_MODEL") or os.getenv("OPENAI_MODEL") or "gpt-4.1"
 if not os.getenv("OPENAI_API_KEY"):
     raise RuntimeError("OPENAI_API_KEY missing")
 try:
@@ -1283,16 +1283,16 @@ async def vision_review(
         sm_tmp = (result.get("summary_markdown") or "").strip()
         if not sm_tmp:
             result["summary_markdown"] = (
-                "## Detailed Audit Report\n"
+                "## Detailed Condition Report\n"
                 "Narrative fallback: The model returned an empty narrative field. "
                 "Please re-run with the same inputs; core identifiers and score fields were still returned.\n\n"
                 "## Overall Assessment\n"
                 f"Request Type: {result.get('request_type','N/A')}\n"
                 f"Compliance Score: {result.get('compliance_score','N/A')}\n"
             )
-        elif "## Detailed Audit Report" not in sm_tmp:
+        elif "## Detailed Condition Report" not in sm_tmp:
             # Keep minimal: do not re-write content; just prepend the required header to avoid downstream display rules.
-            result["summary_markdown"] = "## Detailed Audit Report\n" + sm_tmp
+            result["summary_markdown"] = "## Detailed Condition Report\n" + sm_tmp
     except Exception:
         pass
 
@@ -1306,12 +1306,12 @@ async def vision_review(
                 _vv = (result.get("vin_verification") or "").lower()
                 _status = "verified" if any(k in _vv for k in ("verified", "match", "matches", "confirmed")) else "observed"
                 _vin_line = f"VIN {_status}: {_vin}"
-                if "## Detailed Audit Report" in _sm:
-                    _pre, _post = _sm.split("## Detailed Audit Report", 1)
+                if "## Detailed Condition Report" in _sm:
+                    _pre, _post = _sm.split("## Detailed Condition Report", 1)
                     # Insert immediately after the section header
-                    result["summary_markdown"] = _pre + "## Detailed Audit Report\n" + _vin_line + "\n" + _post.lstrip("\n")
+                    result["summary_markdown"] = _pre + "## Detailed Condition Report\n" + _vin_line + "\n" + _post.lstrip("\n")
                 else:
-                    result["summary_markdown"] = "## Detailed Audit Report\n" + _vin_line + "\n\n" + _sm.lstrip("\n")
+                    result["summary_markdown"] = "## Detailed Condition Report\n" + _vin_line + "\n\n" + _sm.lstrip("\n")
     except Exception:
         pass
 
@@ -1410,9 +1410,6 @@ async def vision_review(
         if isinstance(_sm, str) and _sm:
             # Treat these headings as section boundaries even if missing leading "##"
             _section_names = [
-                "Estimated Repair Costs",
-        \"Estimated Repair Costs Markdown\",
-        \"Estimated Repair Costs (Markdown)\",
                 "Fraud & Authenticity Check",
                 "Fraud and Authenticity Check",
                 "Conclusion",
@@ -1481,11 +1478,6 @@ async def vision_review(
                 )
     except Exception:
         pass
-
-
-
-
-
 
 
         # --- Remove any leaked Estimated Repair Costs blocks (photos-only)
