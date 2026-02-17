@@ -1,4 +1,3 @@
-import json
 from fastapi import FastAPI, File, UploadFile, Form, Request
 from fastapi.responses import JSONResponse, FileResponse
 from fastapi.middleware.cors import CORSMiddleware
@@ -44,7 +43,7 @@ log = logging.getLogger("nspxn")
 log.info(f"Using CLIENT_RULES_DIR={CLIENT_RULES_DIR}")
 
 # Use selected model everywhere
-MODEL = os.getenv("OAI_MODEL") or os.getenv("OPENAI_MODEL") or "gpt-4.1"
+MODEL = os.getenv("OAI_MODEL") or os.getenv("OPENAI_MODEL") or "gpt-5.2-2025-12-11"
 if not os.getenv("OPENAI_API_KEY"):
     raise RuntimeError("OPENAI_API_KEY missing")
 try:
@@ -198,13 +197,13 @@ Create a concise, professional damage report based ONLY on the provided photos. 
 - **Passenger/Right Side**: <what is visible on right/passenger side; cite at least one Photo #>
 
 Rules:
-- If a side is shown but looks clean, say "No obvious damage visible from this angle" (do NOT say "no visible damage" or "intact").
+- If a side is shown but no damage is apparent, do NOT write any 'intact/clean/no damage' statement. Simply omit that area from the narrative unless needed for context.
 - If a side is NOT shown clearly, say "Not clearly shown in provided photos; cannot assess" (and do NOT guess).
 - Do NOT make blanket statements like "both sides show no visible damage". Address Driver/Left and Passenger/Right separately with citations.
 
 ## Front-End Checklist (MANDATORY - DO NOT OMIT HOOD)
 You MUST fill every line below. If unclear, say "Not clearly shown; cannot assess" (do not guess). If gaps/misalignment/buckling are visible, treat that as damage.
-- Hood: <dent/crease/buckle/misalignment/gap issue or 'No obvious damage visible from this angle'> (Photo #)
+- Hood: <dent/crease/buckle/misalignment/gap issue or 'Not clearly shown; cannot assess'> (Photo #)
 - Front bumper cover: <condition> (Photo #)
 - Grille: <condition> (Photo #)
 - Driver-side headlamp: <condition> (Photo #)
@@ -214,15 +213,14 @@ You MUST fill every line below. If unclear, say "Not clearly shown; cannot asses
 
 ## Other Views (use bullets; cite Photo #s)
 - **Rear**: bumper, tail lamps, hatch/trunk - describe each.
-- **Roof / upper body**: any damage or 'No obvious damage visible from this angle'.
-- **Interior** (if shown): seats, dash, airbags - describe deployment or "No obvious damage visible from this angle".
+- **Roof / upper body**: any damage or 'Not clearly shown; cannot assess'.
+- **Interior** (if shown): seats, dash, airbags - describe deployment or 'Not clearly shown; cannot assess'.
 
 ## Detailed Audit Report (narrative)
 - Write a continuous 10-15 sentence professional narrative that synthesizes the Side Checks and Front-End Checklist (do NOT contradict them).
 - Describe impact zones, visible misalignment/gap issues, repair vs replace logic (photo-based).
 - Cite VIN / odometer with Photo #s; if unreadable explain why.
 - Balance coverage: do NOT focus only on primary damage.
-
 
 ## Fraud & Authenticity Check
 - VIN match, odometer legibility, no tampering/duplicates/metadata issues.
@@ -338,7 +336,7 @@ SYSTEM_BASE = (
     "Populate exactly these keys (always include all, use 'N/A' when not applicable): "
     "['file_number','request_type','claim_number','vin','vin_verification','vehicle',"
     "'odometer_estimate_only','compliance_score','summary_brief','summary_markdown',"
-    "'fraud_markdown','primary_impact','secondary_impact','estimated_costs_markdown',"
+    "'fraud_markdown','primary_impact','secondary_impact',"
     "'conclusion']. "
     "Use evidence only from the provided inputs. Cite estimate page/line as 'p#/L#' and photos as 'Photo #'. "
     "Avoid guessing; if uncertain, say 'N/A' and why. summary_brief must be <= 280 chars (plain text)."
@@ -477,16 +475,10 @@ def _add_bytes(parts: List[Dict[str,Any]], files_seen: List[str], photo_index: O
         if thumb_paths is not None:
             try:
                 im_save = im_ref if im_ref is not None else Image.open(io.BytesIO(raw)).convert("RGB")
-                im_save.thumbnail((650, 650))
+                im_save.thumbnail((900, 900))
                 thumb_name = f"thumb_{uuid.uuid4().hex}.jpg"
                 thumb_path = os.path.join(PDF_DIR, thumb_name)
-                im_save.save(
-                    thumb_path,
-                    format="JPEG",
-                    quality=45,
-                    optimize=True,
-                    progressive=True,
-                )
+                im_save.save(thumb_path, format="JPEG", quality=75, optimize=True)
                 thumb_paths.append(thumb_path)
             except Exception:
                 pass
@@ -876,7 +868,7 @@ async def vision_review(
     KEYS = [
         "file_number","request_type","claim_number","vin","vin_verification","vehicle",
         "odometer_estimate_only","compliance_score","summary_brief","summary_markdown",
-        "fraud_markdown","primary_impact","secondary_impact","estimated_costs_markdown","conclusion"
+        "fraud_markdown","primary_impact","secondary_impact","conclusion"
     ]
 
     SYSTEM = SYSTEM_BASE
@@ -939,7 +931,7 @@ async def vision_review(
         "OUTPUT FORMAT (MANDATORY): Return ONLY a single strict JSON object with keys "
         "['file_number','request_type','claim_number','vin','vin_verification','vehicle',"
         "'odometer_estimate_only','compliance_score','summary_brief','summary_markdown',"
-        "'fraud_markdown','primary_impact','secondary_impact','estimated_costs_markdown','conclusion'] "
+        "'fraud_markdown','primary_impact','secondary_impact','conclusion'] "
         "and no extra text before or after.\n\n"
     ) + prompt_text
 
@@ -971,7 +963,7 @@ async def vision_review(
     if ai_intent == "damage_report_from_photos":
         prompt_text += (
             "\n\nPHOTOS-ONLY MODE: Set 'compliance_score' to 'N/A'. "
-            "Do NOT include a '## Compliance Score Rationale' section."
+            "Do NOT include a '## Compliance Score Rationale' section. Do NOT include any 'Estimated Repair Costs' / cost breakdown section. Do NOT write any statements claiming a side/corner/panel is intact, clean, or has no damage; only describe observed damage or state 'not clearly shown; cannot assess'."
             "\nODOMETER TRANSCRIPTION: Use only the odometer photo for mileage. "
             "If the digits are not fully readable, return 'Present — not clearly legible' and explain (glare/blur/angle). "
             "Do not infer or estimate mileage from other sources."
@@ -1005,7 +997,6 @@ async def vision_review(
 
     prompt_text += (
         "\n\nPHOTO NUMBER SANITY CHECK: Before finalizing, verify that every referenced Photo # actually exists and matches the content described."
-        "\nCOST RATIONALE REQUIREMENT: For each cost bucket (Body/Paint/Materials/Parts/Sublet/Tax), include a one-line rationale tied to observed operations or panel counts when you provide costs."
     )
 
     prompt_text += IDENTIFIERS_VERIFICATION_PROTOCOL
@@ -1216,7 +1207,7 @@ async def vision_review(
                     "Use exactly these keys (all required): "
                     "['file_number','request_type','claim_number','vin','vin_verification','vehicle',"
                     "'odometer_estimate_only','compliance_score','summary_brief','summary_markdown',"
-                    "'fraud_markdown','primary_impact','secondary_impact','estimated_costs_markdown','conclusion'] "
+                    "'fraud_markdown','primary_impact','secondary_impact','conclusion'] "
                     "Do not invent new keys. If a field is unavailable, use 'N/A'. "
                     "Here is the text:\n\n" + raw
                 }
@@ -1283,16 +1274,16 @@ async def vision_review(
         sm_tmp = (result.get("summary_markdown") or "").strip()
         if not sm_tmp:
             result["summary_markdown"] = (
-                "## Detailed Condition Report\n"
+                "## Detailed Audit Report\n"
                 "Narrative fallback: The model returned an empty narrative field. "
                 "Please re-run with the same inputs; core identifiers and score fields were still returned.\n\n"
                 "## Overall Assessment\n"
                 f"Request Type: {result.get('request_type','N/A')}\n"
                 f"Compliance Score: {result.get('compliance_score','N/A')}\n"
             )
-        elif "## Detailed Condition Report" not in sm_tmp:
+        elif "## Detailed Audit Report" not in sm_tmp:
             # Keep minimal: do not re-write content; just prepend the required header to avoid downstream display rules.
-            result["summary_markdown"] = "## Detailed Condition Report\n" + sm_tmp
+            result["summary_markdown"] = "## Detailed Audit Report\n" + sm_tmp
     except Exception:
         pass
 
@@ -1306,12 +1297,12 @@ async def vision_review(
                 _vv = (result.get("vin_verification") or "").lower()
                 _status = "verified" if any(k in _vv for k in ("verified", "match", "matches", "confirmed")) else "observed"
                 _vin_line = f"VIN {_status}: {_vin}"
-                if "## Detailed Condition Report" in _sm:
-                    _pre, _post = _sm.split("## Detailed Condition Report", 1)
+                if "## Detailed Audit Report" in _sm:
+                    _pre, _post = _sm.split("## Detailed Audit Report", 1)
                     # Insert immediately after the section header
-                    result["summary_markdown"] = _pre + "## Detailed Condition Report\n" + _vin_line + "\n" + _post.lstrip("\n")
+                    result["summary_markdown"] = _pre + "## Detailed Audit Report\n" + _vin_line + "\n" + _post.lstrip("\n")
                 else:
-                    result["summary_markdown"] = "## Detailed Condition Report\n" + _vin_line + "\n\n" + _sm.lstrip("\n")
+                    result["summary_markdown"] = "## Detailed Audit Report\n" + _vin_line + "\n\n" + _sm.lstrip("\n")
     except Exception:
         pass
 
@@ -1410,6 +1401,7 @@ async def vision_review(
         if isinstance(_sm, str) and _sm:
             # Treat these headings as section boundaries even if missing leading "##"
             _section_names = [
+                "Estimated Repair Costs",
                 "Fraud & Authenticity Check",
                 "Fraud and Authenticity Check",
                 "Conclusion",
@@ -1474,26 +1466,18 @@ async def vision_review(
                     return out
                 result["summary_markdown"] = _strip_sections(
                     _sm,
-                    ["Estimated Repair Costs", "Estimated Repair Costs Markdown", "Estimated Repair Costs (Markdown)", "Fraud & Authenticity Check", "Fraud and Authenticity Check", "Conclusion"]
+                    ["Estimated Repair Costs", "Fraud & Authenticity Check", "Fraud and Authenticity Check", "Conclusion"]
                 )
     except Exception:
         pass
 
 
-        # --- Remove any leaked Estimated Repair Costs blocks (photos-only)
-    try:
-        if ai_intent == "damage_report_from_photos":
-            _sm = (result.get("summary_markdown") or "")
-            if isinstance(_sm, str) and _sm:
-                result["summary_markdown"] = _strip_sections(_sm, [
-                    "Estimated Repair Costs",
-                    "Estimated Repair Costs Markdown",
-                    "Estimated Repair Costs (Markdown)",
-                ])
-    except Exception:
-        pass
 
-# --- Side Checks enforcement (photos-only): ensure Driver/Left Side bullet exists if Passenger/Right Side exists ---
+
+
+
+
+    # --- Side Checks enforcement (photos-only): ensure Driver/Left Side bullet exists if Passenger/Right Side exists ---
     try:
         if ai_intent == "damage_report_from_photos":
             _sm_sc = (result.get("summary_markdown") or "")
@@ -2320,10 +2304,7 @@ async def vision_review(
         pdf.ln(2); mc(pdf_status)
         pdf.ln(2); mc("Condition Summary"); mc((result["summary_markdown"] or "N/A").strip())
         pdf.ln(2); mc("Fraud & Authenticity Check"); mc((result["fraud_markdown"] or 'N/A').strip())
-        _concl_pdf = (result.get("conclusion") or "").strip()
-# Prevent embedded heading duplication like '## Conclusion'
-_concl_pdf = re.sub(r"(?im)^\s*#+\s*conclusion\s*\n+", "", _concl_pdf).strip()
-pdf.ln(2); mc("Conclusion"); mc(_concl_pdf or "N/A")
+        pdf.ln(2); mc("Conclusion"); mc((result["conclusion"] or 'N/A').strip())
 
         # --- AI Disclaimer (after Conclusion) ---
         try:
@@ -2583,6 +2564,7 @@ async def download_pdf(file_number: Optional[str] = None, filename: Optional[str
         return JSONResponse(status_code=404, content={"detail": "Not Found"})
     latest = max(candidates, key=lambda p: os.path.getmtime(p))
     return FileResponse(path=latest, media_type="application/pdf", filename=os.path.basename(latest))
+
 
 
 
