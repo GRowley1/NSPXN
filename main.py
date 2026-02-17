@@ -43,11 +43,11 @@ log = logging.getLogger("nspxn")
 log.info(f"Using CLIENT_RULES_DIR={CLIENT_RULES_DIR}")
 
 # Use selected model everywhere
-MODEL = os.getenv("OAI_MODEL") or os.getenv("OPENAI_MODEL") or "gpt-4.1"
+MODEL = os.getenv("OAI_MODEL") or os.getenv("OPENAI_MODEL") or "gpt-5.2"
 if not os.getenv("OPENAI_API_KEY"):
     raise RuntimeError("OPENAI_API_KEY missing")
 try:
-    client = OpenAI(api_key=os.environ["OPENAI_API_KEY"], timeout=60.0, max_retries=2)
+    client = OpenAI(api_key=os.environ["OPENAI_API_KEY"], timeout=180.0, max_retries=1)
 except TypeError:
     # Backwards-compatible init for older openai-python versions
     client = OpenAI(api_key=os.environ["OPENAI_API_KEY"])
@@ -250,84 +250,26 @@ STATIC_AUDIT_QUESTIONS = [
 ]
 
 # --- Identifiers Verification Protocol (prompt-only; no new logic) ---
-IDENTIFIERS_VERIFICATION_PROTOCOL = (
-    "\n\nIDENTIFIERS VERIFICATION PROTOCOL (must follow):"
-    "\n1) Search the photos for: windshield VIN plate, driver-door VIN label, driver-door VIN label Production date, driver-door VIN label Date of Mfr, odometer cluster."
-    "\n2) Transcribe the VIN exactly as visible and cite Photo # for EACH location you find."
-    "\n3) If multiple VINs, compare them to each other and to the estimate VIN; explicitly state: MATCH / MISMATCH."
-    "\n4) Transcribe the odometer reading exactly as shown and cite Photo #."
-    "\n5) Grade legibility for each identifier as one of: 'Clearly legible' / 'Present — not clearly legible' / 'Not present'."
-    "\n6) If any identifier is present but not clearly legible, say why (glare, blur, angle) and what photo would resolve it."
-    "\n7) Write a one-line bottom line: 'VIN verification: <MATCH/MISMATCH/INCONCLUSIVE>; Odometer: <value or reason>'."
-    "\n8) Weave these facts naturally into the '## Detailed Audit Report' narrative and keep the top-line fields "
-    "(vin, vin_verification, odometer_estimate_only) consistent."
-    "\n9) When citing more than one VIN location (e.g., windshield vs. door label), you must cite DISTINCT Photo #s; "
-    "never reuse the same photo number for two different locations."
-    "\n10) Compare VINs as literal 17-character strings. If any single character differs between sources, report "
-    "MISMATCH, and quote both strings with their Photo #/page references."
-    "\n11) ODOMETER RULES (photos-only especially): transcribe only the digits visible in the odometer photo; "
-    "do not infer from estimate text or metadata. Include the exact Photo #. If any digit is unclear, state 'Present — not clearly legible' and explain why; do not guess."
-)
+IDENTIFIERS_VERIFICATION_PROTOCOL = ""
 
 # --- Consistency Guard (prompt-only; avoid contradictions) ---
-CONSISTENCY_GUARD = (
-    "\n\nCONSISTENCY GUARD:"
-    "\n- Do not claim any required photo is 'missing' if you graded it 'Clearly legible' or 'Present — not clearly legible'."
-    "\n- For VIN, Odometer, and Production Date specifically: if present in any photo, do not write any sentence implying they are absent."
-    "\n- If a legible driver-door VIN label photo is present, treat the Production Date requirement as evidenced (the production month/year appears on the same label). Do NOT deduct or say 'not separately documented'."
-    "\n- Only deduct for missing Repair Facility info when the Closing Report or other documents clearly show the vehicle is at a named repair facility AND the estimate's 'Repair Facility' section does not list that same facility; "
-    "if no repair facility information appears anywhere in the estimate or Closing Report, report 'N/A — not provided' and do NOT deduct."
-    "\n- If legibility is the issue, explicitly say 'Present — not clearly legible' and explain why (glare/blur/angle), and request a precise retake rather than marking it missing."
-    "\n- Before finalizing, re-scan your output: confirm every referenced Photo # matches the content described (e.g., do not cite an Odometer photo as the point-of-impact photo). Correct any mismatches."
-)
+CONSISTENCY_GUARD = ""
 
 # --- No-intact-if-damaged rule (prompt-only; prevents false 'intact' claims) ---
-NO_INTACT_IF_DAMAGED_RULE = (
-    "\n\nNO 'INTACT/NO-DAMAGE' OVERRIDE RULE (DO NOT PRINT CONFLICT WARNINGS):"
-    "\n- If any photo indicates damage to a panel/component, you may NOT state that same panel/component is intact/undamaged/no visible damage anywhere."
-    "\n- If photos appear inconsistent, DO NOT write a conflict warning; instead, remove/avoid the intact/no-damage claim and describe only what appears damaged with citations."
-)
+NO_INTACT_IF_DAMAGED_RULE = ""
 
 # --- Damage Side / Orientation Guard (prompt-only; prevents left/right drift) ---
-DAMAGE_SIDE_GUARD = (
-    "\n\nDAMAGE SIDE GUIDANCE (MINIMAL):"
-    "\n- Describe any visible damage on any side (Driver/Passenger or Left/Right) when it is visible in photos."
-    "\n- Do NOT suppress side-level damage descriptions when damage is clearly visible."
-    "\n- If orientation is genuinely unclear, say so and avoid guessing."
-)
+DAMAGE_SIDE_GUARD = ""
 
-BILATERAL_DAMAGE_MANDATE = (
-    "\n\nBILATERAL / SECONDARY DAMAGE MANDATE (STRICT):\n"
-    "- In frontal impacts, explicitly address BOTH front corners (driver-side and passenger-side if clear; otherwise ‘front corner A/B’ or ‘front corner (viewed)’)\n"
-    "- If a photo shows partial view of the opposite side with visible distortion/misalignment/crush, describe it — do NOT default to 'intact' or 'no damage' without citing clear evidence.\n"
-    "- Contradicting visible photo evidence (e.g. calling a crushed fender 'intact') is forbidden."
-)
+BILATERAL_DAMAGE_MANDATE = ""
 
-FRONT_CORNER_ORIENTATION_GUARD = (
-    "\n\nFRONT CORNER ORIENTATION (MANDATORY, MINIMAL):"
-    "\n- Do NOT label front damage as LF/RF (or 'left/right headlight/fender') unless the photo angle clearly establishes the vehicle orientation."
-    "\n- If you have a straight-on FRONT photo: viewer-right corresponds to vehicle-LEFT; viewer-left corresponds to vehicle-RIGHT."
-    "\n- If orientation is not clear, use neutral wording: 'front corner' / 'front headlamp area' instead of left/right."
-    "\n- You may NOT state 'left front fender/headlight intact' or 'right front fender/headlight intact' unless orientation is established; otherwise say 'not clearly shown from this angle.'"
-)
+FRONT_CORNER_ORIENTATION_GUARD = ""
 
 # --- Parts Source Guard (prompt-only; prevents OEM vs Aftermarket drift) ---
-PARTS_SOURCE_GUARD = (
-    "\n\nPARTS SOURCE GUARD (MANDATORY):"
-    "\n- Do NOT claim 'aftermarket', 'A/M', 'quality replacement', 'non-OEM', or 'LKQ/used/recycled' parts were used unless the estimate LINE ITEMS explicitly label them as such."
-    "\n- Generic disclosure/boilerplate text about aftermarket crash parts does NOT prove aftermarket parts were used."
-    "\n- If the Closing Report states no aftermarket/LKQ parts were included, your narrative must not claim they were used."
-    "\n- When parts source is not explicit, state that it is not explicitly labeled and avoid guessing; default to OEM only when supported by part numbers/labels."
-)
+PARTS_SOURCE_GUARD = ""
 
 # --- Supplement Handling (prompt-only; ensures detection + narrative mention) ---
-SUPPLEMENT_HANDLING = (
-    "\n\nSUPPLEMENT HANDLING:"
-    "\n- Examine the estimate documents for explicit supplement indicators: 'Supplement', 'Supplement of record', 'S01', 'S02', 'Supplement Summary', or similar."
-    "\n- If a supplement or multiple supplements are detected, clearly state in the narrative that the estimate is a supplement and summarize what changed: added operations/parts, rate updates, refinish overlap changes, or corrections to prior omissions."
-    "\n- If the supplement(s) corrects earlier deficiencies (e.g., missing materials line, added calibrations), note that improvement explicitly."
-    "\n- If a supplement(s) exists but required supporting evidence (invoices, photos) is still missing, call this out in Risks/Missing Evidence."
-)
+SUPPLEMENT_HANDLING = ""
 
 ALLOWED_INTENTS = {"guidelines_only","comprehensive","damage_report_from_photos"}
 
@@ -989,11 +931,7 @@ async def vision_review(
             "with 3–8 concise bullets. For each, quote the relevant rule fragment and mark Aligned / Not Aligned / Not Evidenced, "
             "citing evidence (p#/L# or Photo #). Also weave any material rule alignment/misalignment into the '## Detailed Audit Report' narrative."
         )
-        prompt_text += (
-            "\n\nWeave the following static audit questions naturally into the '## Detailed Audit Report' narrative "
-            "(do NOT present as a separate Q&A list; integrate answers inline and cite evidence with p#/L# and Photo # as applicable):\n"
-            + "\n".join(f"- {q}" for q in STATIC_AUDIT_QUESTIONS)
-        )
+                )
 
     prompt_text += (
         "\n\nPHOTO NUMBER SANITY CHECK: Before finalizing, verify that every referenced Photo # actually exists and matches the content described."
@@ -1491,10 +1429,7 @@ async def vision_review(
         pass
 
     # --- Score ↔ narrative synchronization ---
-    def _extract_score_from_text(text: str):
-        if not text:
-            return None
-        m = re.search(r"(?is)\bFinal\s*score\b[^0-9]{0,10}(\d{1,3})\s*%?\b", text)
+            m = re.search(r"(?is)\bFinal\s*score\b[^0-9]{0,10}(\d{1,3})\s*%?\b", text)
         if m:
             try:
                 v = int(m.group(1))
@@ -1520,16 +1455,7 @@ async def vision_review(
                 pass
         return None
 
-    def _canonicalize_score_in_narrative(narr: str, score_int: int) -> str:
-        if not narr:
-            narr = ""
-        scrub_lines = r"(?im)^\s*(Final\s*score|Compliance\s*Score)\s*[:\-–]\s*\d{1,3}\s*%?\s*$"
-        narr = re.sub(scrub_lines, "", narr)
-        narr = re.sub(r"(?is)\bthe\s+compliance\s+score\s+is\s+set\s+at\s+\d{1,3}\s*%?\b",
-                      "the compliance score is set as below", narr)
-        narr = re.sub(r"\n{3,}", "\n\n", narr).strip()
-        return (narr + f"\n\nCompliance Score: {score_int}").strip()
-
+    
     try:
         sm = (result.get("summary_markdown") or "")
         if ai_intent == "damage_report_from_photos":
@@ -2564,6 +2490,7 @@ async def download_pdf(file_number: Optional[str] = None, filename: Optional[str
         return JSONResponse(status_code=404, content={"detail": "Not Found"})
     latest = max(candidates, key=lambda p: os.path.getmtime(p))
     return FileResponse(path=latest, media_type="application/pdf", filename=os.path.basename(latest))
+
 
 
 
