@@ -967,15 +967,21 @@ async def vision_review(
             "Do NOT state that any side, panel, system, or component is intact, undamaged, clean, unaffected, or structurally sound. "
             "Do NOT clear any side of the vehicle. "
             "If damage is visible on both sides, describe both. "
-            "If a side is partially visible and damage cannot be confirmed, state 'side not fully visible; cannot confirm full extent of damage.' "
-            "Do NOT conclude that damage is confined to one side unless all other sides are clearly and fully shown."
+            "Do NOT conclude that damage is confined to one side unless all other sides are clearly and fully shown. "
+            "If side orientation (driver vs passenger) cannot be confirmed using clear visual anchors "
+            "(fuel door location, steering wheel visibility, VIN/door-label photo, or consistent multi-angle reference), "
+            "DO NOT guess. Instead use neutral phrasing such as 'the side shown' or 'the opposite side.' "
+            "If a door is removed or open, do not assume driver/passenger unless orientation is clearly anchored."
         )
+
         prompt_text += (
-            "\nINTERNAL DAMAGE CONSISTENCY CHECK: "
+            "\nINTERNAL CONSISTENCY CHECK (DO NOT PRINT): "
             "Before finalizing the narrative, verify that damage seen in any photo angle is included. "
-            "Do not omit damage visible in side-profile or multi-angle photos. "
-            "If a vehicle is shown from multiple exterior angles, assume damage may extend beyond a single panel unless clearly isolated."
+            "Verify that side labels (driver/passenger) match the strongest visible anchor in the images. "
+            "If both sides show damage in different photos, explicitly state both sides show damage. "
+            "Do not label damage as limited to one side unless every other side is clearly shown and undamaged."
         )
+
         prompt_text += (
             "\nABSOLUTE BAN (PHOTOS-ONLY): Do not reference or imply any estimate document. "
             "Do not use phrases like 'the estimate', 'estimate suggests', 'p#/L#', 'CCC', 'labor rate', or any estimate page/line notation. "
