@@ -962,12 +962,14 @@ async def vision_review(
 
     if ai_intent == "damage_report_from_photos":
         prompt_text += (
-            "\n\nPHOTOS-ONLY MODE: Set 'compliance_score' to 'N/A'. "
-            "Do NOT include a '## Compliance Score Rationale' section. Do NOT include any 'Estimated Repair Costs' / cost breakdown section. Do NOT write any statements claiming a side/corner/panel is intact, clean, or has no damage; only describe observed damage or state 'not clearly shown; cannot assess'."
-            "\nODOMETER TRANSCRIPTION: Use only the odometer photo for mileage. "
-            "If the digits are not fully readable, return 'Present — not clearly legible' and explain (glare/blur/angle). "
-            "Do not infer or estimate mileage from other sources."
+            "\n\nPHOTOS-ONLY MODE (STRICT DAMAGE-ONLY REPORTING): "
+            "Describe ONLY visible damage. "
+            "Do NOT describe any area as intact, clean, undamaged, unaffected, or free of damage. "
+            "Do NOT make affirmative statements about areas without damage. "
+            "If a zone is shown and no damage is visible, simply omit it. "
+            "Only discuss areas where visible damage, misalignment, gaps, deformation, cracks, deployment, or missing components are observed."
         )
+
         prompt_text += (
             "\nABSOLUTE BAN (PHOTOS-ONLY): Do not reference or imply any estimate document. "
             "Do not use phrases like 'the estimate', 'estimate suggests', 'p#/L#', 'CCC', 'labor rate', or any estimate page/line notation. "
