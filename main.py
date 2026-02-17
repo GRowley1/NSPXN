@@ -966,27 +966,36 @@ async def vision_review(
             "Describe ONLY visible damage. "
             "Do NOT state that any side, panel, system, or component is intact, undamaged, clean, unaffected, or structurally sound. "
             "Do NOT clear any side of the vehicle. "
-            "If damage is visible on both sides, describe both. "
+            "Do NOT include any 'Estimated Repair Costs' section (or any costs/rationale/parts-labor-tax discussion). "
+            "If a side/corner is not clearly shown, state: 'not fully visible; cannot confirm.' "
             "Do NOT conclude that damage is confined to one side unless all other sides are clearly and fully shown. "
             "If side orientation (driver vs passenger) cannot be confirmed using clear visual anchors "
-            "(fuel door location, steering wheel visibility, VIN/door-label photo, or consistent multi-angle reference), "
-            "DO NOT guess. Instead use neutral phrasing such as 'the side shown' or 'the opposite side.' "
-            "If a door is removed or open, do not assume driver/passenger unless orientation is clearly anchored."
+            "(fuel door location, steering wheel visibility, VIN/door-label photo, consistent multi-angle reference), "
+            "DO NOT guess; use neutral phrasing (e.g., 'front-right corner', 'rear-left corner', 'side shown')."
+        )
+
+        prompt_text += (
+            "\nINTERNAL 4-CORNER COVERAGE CHECK (DO NOT PRINT): "
+            "For each corner, classify as: damaged / intact cannot be stated / not shown. "
+            "Corners: Front-left, Front-right, Rear-left, Rear-right. "
+            "If a corner is not clearly shown, mark 'not shown' and do NOT write any intact/clean/no-damage statement about it."
+        )
+
+        prompt_text += (
+            "\nINTERNAL BUMPER FITMENT CHECK (DO NOT PRINT): "
+            "If any bumper cover shows gap/misalignment/loose fitment at corners, joints, lamps, or quarter interface, "
+            "mention bumper fitment/misalignment as visible damage/condition."
         )
 
         prompt_text += (
             "\nINTERNAL CONSISTENCY CHECK (DO NOT PRINT): "
-            "Before finalizing the narrative, verify that damage seen in any photo angle is included. "
-            "Verify that side labels (driver/passenger) match the strongest visible anchor in the images. "
-            "If both sides show damage in different photos, explicitly state both sides show damage. "
-            "Do not label damage as limited to one side unless every other side is clearly shown and undamaged."
+            "Before finalizing, verify that damage visible from any angle is included and not contradicted elsewhere. "
+            "Do not omit damage visible in side-profile or multi-angle photos."
         )
 
         prompt_text += (
             "\nABSOLUTE BAN (PHOTOS-ONLY): Do not reference or imply any estimate document. "
-            "Do not use phrases like 'the estimate', 'estimate suggests', 'p#/L#', 'CCC', 'labor rate', or any estimate page/line notation. "
-            "If you need to discuss costs, label them as 'photo-based rough costs' with explicit assumptions, and keep them independent of any estimate. "
-            "If no odometer photo is present in the upload set, output 'Missing' for odometer_estimate_only."
+            "Do not use phrases like 'the estimate', 'p#/L#', 'CCC', 'labor rate', or page/line notation."
         )
     else:
         prompt_text += SUPPLEMENT_HANDLING
@@ -1463,32 +1472,60 @@ async def vision_review(
     except Exception:
         pass
 
-    # --- Photos-only duplication cleanup (prevents repeated sections in PDF/email) ---
-    # In damage-report mode, the PDF/email already prints Estimated Repair Costs, Fraud, and Conclusion
-    # from their dedicated fields. If the model also includes these sections inside summary_markdown,
-    # it creates redundant repeated blocks.
+    # --- Photos-only cleanup (prevents repeated sections + bans "undamaged/clean/intact" claims in photos-only) ---
     try:
         if ai_intent == "damage_report_from_photos":
             _sm = (result.get("summary_markdown") or "")
             if isinstance(_sm, str) and _sm:
+
                 def _strip_sections(md: str, heads: List[str]) -> str:
                     out = md
                     for h in heads:
-                        rx = re.compile(r"(?is)^#{1,6}\s*" + re.escape(h) + r"\s*$.*?(?=^#{1,6}\s|\Z)", re.M)
+                        rx = re.compile(
+                            r"(?is)^#{1,6}\s*" + re.escape(h) + r"\s*$.*?(?=^#{1,6}\s|\Z)",
+                            re.M
+                        )
                         out = re.sub(rx, "", out)
                     out = re.sub(r"\n{3,}", "\n\n", out).strip()
                     return out
-                result["summary_markdown"] = _strip_sections(
+
+                # 1) Strip ALL variants of cost/fraud/conclusion sections if the model included them in summary_markdown
+                _sm2 = _strip_sections(
                     _sm,
-                    ["Estimated Repair Costs", "Fraud & Authenticity Check", "Fraud and Authenticity Check", "Conclusion"]
+                    [
+                        "Estimated Repair Costs",
+                        "Estimated Repair Cost",
+                        "Estimated Repair Costs Markdown",
+                        "Estimated Repair Cost Markdown",
+                        "Estimated Repair Costs (Markdown)",
+                        "Fraud & Authenticity Check",
+                        "Fraud and Authenticity Check",
+                        "Conclusion",
+                    ],
                 )
+
+                # 2) Strip non-heading "Estimated Repair Costs" blocks that slip through (e.g., "Estimated Repair Costs: N/A")
+                _sm2 = re.sub(
+                    r"(?is)(^|\n)\s*Estimated\s+Repair\s+Costs(?:\s+(?:Markdown|\(Markdown\)))?\s*:?\s*.*?(?=\n\s*(?:#{1,6}\s+|\Z))",
+                    "\n",
+                    _sm2
+                )
+
+                # 3) HARD BAN in PHOTOS-ONLY: remove any "intact/undamaged/clean/no visible damage" statements
+                # This prevents false clearing of sides/corners from appearing in the PDF/email.
+                _sm2 = re.sub(
+                    r"(?is)(^|[.\n])[^.\n]*\b("
+                    r"undamaged|intact|clean|unaffected|no\s+visible\s+damage|no\s+obvious\s+damage|no\s+signs\s+of\s+damage|"
+                    r"appears\s+intact|appears\s+undamaged|free\s+of\s+damage"
+                    r")\b[^.\n]*([.\n]|$)",
+                    r"\1",
+                    _sm2
+                )
+
+                _sm2 = re.sub(r"\n{3,}", "\n\n", _sm2).strip()
+                result["summary_markdown"] = _sm2
     except Exception:
         pass
-
-
-
-
-
 
 
     # --- Side Checks enforcement (photos-only): ensure Driver/Left Side bullet exists if Passenger/Right Side exists ---
