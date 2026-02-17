@@ -962,12 +962,14 @@ async def vision_review(
 
     if ai_intent == "damage_report_from_photos":
         prompt_text += (
-            "\n\nPHOTOS-ONLY MODE (STRICT DAMAGE-ONLY REPORTING): "
+            "\n\nPHOTOS-ONLY MODE (STRICT DAMAGE REPORT): "
             "Describe ONLY visible damage. "
-            "Do NOT describe any area as intact, clean, undamaged, unaffected, or free of damage. "
-            "Do NOT make affirmative statements about areas without damage. "
-            "If a zone is shown and no damage is visible, simply omit it. "
-            "Only discuss areas where visible damage, misalignment, gaps, deformation, cracks, deployment, or missing components are observed."
+            "Do NOT describe areas as intact, undamaged, clean, structurally sound, unaffected, or free of damage. "
+            "Do NOT clear any panels, sides, corners, or systems. "
+            "If damage is not visible for a component, omit it entirely. "
+            "Do NOT conclude that the vehicle is structurally sound. "
+            "Do NOT infer absence of damage from limited angles."
+            "Do NOT make structural clearance statements about frame, pillars, rails, or alignment unless clearly broken or deformed in the images. "
         )
 
         prompt_text += (
