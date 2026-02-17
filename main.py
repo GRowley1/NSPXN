@@ -180,13 +180,6 @@ Create a concise, professional damage report based ONLY on the provided photos. 
 ## Inputs Used
 - List exact Photo #s used and total photos provided.
 
-## Quick Stats
-- Claim # (if visible): <value or N/A>
-- File #: <value or N/A>
-- Odometer (if visible): <value or 'Present - not clearly legible'>
-- Primary Impact: <main area(s)>
-- Secondary / Bilateral Impact: <any additional areas or 'None clearly visible'>
-
 ## Photo-by-Photo Damage Ledger (REQUIRED - one row per photo)
 | Photo # | View/Side | Key Panels/Parts Visible | Condition Description (damage or 'No obvious damage visible from this angle') |
 |-------:|-----------|---------------------------|--------------------------------------------------------------------------------|
@@ -197,13 +190,13 @@ Create a concise, professional damage report based ONLY on the provided photos. 
 - **Passenger/Right Side**: <what is visible on right/passenger side; cite at least one Photo #>
 
 Rules:
-- If a side is shown but no damage is apparent, do NOT write any 'intact/clean/no damage' statement. Simply omit that area from the narrative unless needed for context.
+- If a side is shown but looks clean, say "No obvious damage visible from this angle" (do NOT say "no visible damage" or "intact").
 - If a side is NOT shown clearly, say "Not clearly shown in provided photos; cannot assess" (and do NOT guess).
 - Do NOT make blanket statements like "both sides show no visible damage". Address Driver/Left and Passenger/Right separately with citations.
 
 ## Front-End Checklist (MANDATORY - DO NOT OMIT HOOD)
 You MUST fill every line below. If unclear, say "Not clearly shown; cannot assess" (do not guess). If gaps/misalignment/buckling are visible, treat that as damage.
-- Hood: <dent/crease/buckle/misalignment/gap issue or 'Not clearly shown; cannot assess'> (Photo #)
+- Hood: <dent/crease/buckle/misalignment/gap issue or 'No obvious damage visible from this angle'> (Photo #)
 - Front bumper cover: <condition> (Photo #)
 - Grille: <condition> (Photo #)
 - Driver-side headlamp: <condition> (Photo #)
@@ -213,14 +206,15 @@ You MUST fill every line below. If unclear, say "Not clearly shown; cannot asses
 
 ## Other Views (use bullets; cite Photo #s)
 - **Rear**: bumper, tail lamps, hatch/trunk - describe each.
-- **Roof / upper body**: any damage or 'Not clearly shown; cannot assess'.
-- **Interior** (if shown): seats, dash, airbags - describe deployment or 'Not clearly shown; cannot assess'.
+- **Roof / upper body**: any damage or 'No obvious damage visible from this angle'.
+- **Interior** (if shown): seats, dash, airbags - describe deployment or "No obvious damage visible from this angle".
 
 ## Detailed Audit Report (narrative)
 - Write a continuous 10-15 sentence professional narrative that synthesizes the Side Checks and Front-End Checklist (do NOT contradict them).
 - Describe impact zones, visible misalignment/gap issues, repair vs replace logic (photo-based).
 - Cite VIN / odometer with Photo #s; if unreadable explain why.
 - Balance coverage: do NOT focus only on primary damage.
+
 
 ## Fraud & Authenticity Check
 - VIN match, odometer legibility, no tampering/duplicates/metadata issues.
@@ -336,7 +330,7 @@ SYSTEM_BASE = (
     "Populate exactly these keys (always include all, use 'N/A' when not applicable): "
     "['file_number','request_type','claim_number','vin','vin_verification','vehicle',"
     "'odometer_estimate_only','compliance_score','summary_brief','summary_markdown',"
-    "'fraud_markdown','primary_impact','secondary_impact',"
+    "'fraud_markdown','primary_impact','secondary_impact','estimated_costs_markdown',"
     "'conclusion']. "
     "Use evidence only from the provided inputs. Cite estimate page/line as 'p#/L#' and photos as 'Photo #'. "
     "Avoid guessing; if uncertain, say 'N/A' and why. summary_brief must be <= 280 chars (plain text)."
@@ -475,10 +469,16 @@ def _add_bytes(parts: List[Dict[str,Any]], files_seen: List[str], photo_index: O
         if thumb_paths is not None:
             try:
                 im_save = im_ref if im_ref is not None else Image.open(io.BytesIO(raw)).convert("RGB")
-                im_save.thumbnail((900, 900))
+                im_save.thumbnail((650, 650))
                 thumb_name = f"thumb_{uuid.uuid4().hex}.jpg"
                 thumb_path = os.path.join(PDF_DIR, thumb_name)
-                im_save.save(thumb_path, format="JPEG", quality=75, optimize=True)
+                im_save.save(
+                    thumb_path,
+                    format="JPEG",
+                    quality=45,
+                    optimize=True,
+                    progressive=True,
+                )
                 thumb_paths.append(thumb_path)
             except Exception:
                 pass
@@ -868,7 +868,7 @@ async def vision_review(
     KEYS = [
         "file_number","request_type","claim_number","vin","vin_verification","vehicle",
         "odometer_estimate_only","compliance_score","summary_brief","summary_markdown",
-        "fraud_markdown","primary_impact","secondary_impact","conclusion"
+        "fraud_markdown","primary_impact","secondary_impact","estimated_costs_markdown","conclusion"
     ]
 
     SYSTEM = SYSTEM_BASE
@@ -931,7 +931,7 @@ async def vision_review(
         "OUTPUT FORMAT (MANDATORY): Return ONLY a single strict JSON object with keys "
         "['file_number','request_type','claim_number','vin','vin_verification','vehicle',"
         "'odometer_estimate_only','compliance_score','summary_brief','summary_markdown',"
-        "'fraud_markdown','primary_impact','secondary_impact','conclusion'] "
+        "'fraud_markdown','primary_impact','secondary_impact','estimated_costs_markdown','conclusion'] "
         "and no extra text before or after.\n\n"
     ) + prompt_text
 
@@ -962,42 +962,21 @@ async def vision_review(
 
     if ai_intent == "damage_report_from_photos":
         prompt_text += (
-            "\n\nPHOTOS-ONLY MODE (STRICT DAMAGE CAPTURE): "
-            "Describe ONLY visible damage. "
-            "Do NOT state that any side, panel, system, or component is intact, undamaged, clean, unaffected, or structurally sound. "
-            "Do NOT clear any side of the vehicle. "
-            "Do NOT include any 'Estimated Repair Costs' section (or any costs/rationale/parts-labor-tax discussion). "
-            "If a side/corner is not clearly shown, state: 'not fully visible; cannot confirm.' "
-            "Do NOT conclude that damage is confined to one side unless all other sides are clearly and fully shown. "
-            "If side orientation (driver vs passenger) cannot be confirmed using clear visual anchors "
-            "(fuel door location, steering wheel visibility, VIN/door-label photo, consistent multi-angle reference), "
-            "DO NOT guess; use neutral phrasing (e.g., 'front-right corner', 'rear-left corner', 'side shown')."
+            "\n\nPHOTOS-ONLY MODE: Set 'compliance_score' to 'N/A'. "
+            "Do NOT include a '## Compliance Score Rationale' section."
+            "\nODOMETER TRANSCRIPTION: Use only the odometer photo for mileage. "
+            "If the digits are not fully readable, return 'Present — not clearly legible' and explain (glare/blur/angle). "
+            "Do not infer or estimate mileage from other sources."
         )
-
-        prompt_text += (
-            "\nINTERNAL 4-CORNER COVERAGE CHECK (DO NOT PRINT): "
-            "For each corner, classify as: damaged / intact cannot be stated / not shown. "
-            "Corners: Front-left, Front-right, Rear-left, Rear-right. "
-            "If a corner is not clearly shown, mark 'not shown' and do NOT write any intact/clean/no-damage statement about it."
-        )
-
-        prompt_text += (
-            "\nINTERNAL BUMPER FITMENT CHECK (DO NOT PRINT): "
-            "If any bumper cover shows gap/misalignment/loose fitment at corners, joints, lamps, or quarter interface, "
-            "mention bumper fitment/misalignment as visible damage/condition."
-        )
-
-        prompt_text += (
-            "\nINTERNAL CONSISTENCY CHECK (DO NOT PRINT): "
-            "Before finalizing, verify that damage visible from any angle is included and not contradicted elsewhere. "
-            "Do not omit damage visible in side-profile or multi-angle photos."
-        )
-
         prompt_text += (
             "\nABSOLUTE BAN (PHOTOS-ONLY): Do not reference or imply any estimate document. "
-            "Do not use phrases like 'the estimate', 'p#/L#', 'CCC', 'labor rate', or page/line notation."
+            "Do not use phrases like 'the estimate', 'estimate suggests', 'p#/L#', 'CCC', 'labor rate', or any estimate page/line notation. "
+            "If you need to discuss costs, label them as 'photo-based rough costs' with explicit assumptions, and keep them independent of any estimate. "
+            "If no odometer photo is present in the upload set, output 'Missing' for odometer_estimate_only."
         )
     else:
+        prompt_text += SUPPLEMENT_HANDLING
+
     if ai_intent == "comprehensive":
         prompt_text += (
             "\n\nUploader note: If odometer and registration photos are present, report their legibility accurately. "
@@ -1018,7 +997,17 @@ async def vision_review(
 
     prompt_text += (
         "\n\nPHOTO NUMBER SANITY CHECK: Before finalizing, verify that every referenced Photo # actually exists and matches the content described."
+        "\nCOST RATIONALE REQUIREMENT: For each cost bucket (Body/Paint/Materials/Parts/Sublet/Tax), include a one-line rationale tied to observed operations or panel counts when you provide costs."
     )
+
+    prompt_text += IDENTIFIERS_VERIFICATION_PROTOCOL
+    prompt_text += CONSISTENCY_GUARD
+    prompt_text += NO_INTACT_IF_DAMAGED_RULE
+    prompt_text += DAMAGE_SIDE_GUARD
+    prompt_text += FRONT_CORNER_ORIENTATION_GUARD
+    prompt_text += BILATERAL_DAMAGE_MANDATE
+    prompt_text += PARTS_SOURCE_GUARD
+
     # --------- EVIDENCE FLAGS ----------
     flags = []
     if _not_at_shop:
@@ -1219,7 +1208,7 @@ async def vision_review(
                     "Use exactly these keys (all required): "
                     "['file_number','request_type','claim_number','vin','vin_verification','vehicle',"
                     "'odometer_estimate_only','compliance_score','summary_brief','summary_markdown',"
-                    "'fraud_markdown','primary_impact','secondary_impact','conclusion'] "
+                    "'fraud_markdown','primary_impact','secondary_impact','estimated_costs_markdown','conclusion'] "
                     "Do not invent new keys. If a field is unavailable, use 'N/A'. "
                     "Here is the text:\n\n" + raw
                 }
@@ -1280,6 +1269,28 @@ async def vision_review(
         "conclusion": _get("conclusion"),
         "redaction_status": redaction_status,
     }
+
+    # --- LEAN SCORE NORMALIZER (deterministic; no narrative rewrite wars) ---
+    # Photos-only: compliance_score must be "N/A" and score lines removed from narrative.
+    # All other intents: keep a valid numeric score if provided; else default to "100".
+    try:
+        sm0 = (result.get("summary_markdown") or "")
+        if ai_intent == "damage_report_from_photos":
+            result["compliance_score"] = "N/A"
+            if isinstance(sm0, str) and sm0:
+                sm0 = re.sub(r"(?im)^\s*(Final\s*score|Compliance\s*Score)\s*[:\-–]\s*\d{1,3}\s*%?\s*$", "", sm0).strip()
+                sm0 = re.sub(r"(?im)^\s*Compliance\s*Score\s*:\s*\d{1,3}\s*%?\s*$", "", sm0).strip()
+                result["summary_markdown"] = sm0
+        else:
+            v = (result.get("compliance_score") or "").strip()
+            if re.fullmatch(r"\d{1,3}", v):
+                s = max(0, min(100, int(v)))
+                result["compliance_score"] = str(s)
+            else:
+                result["compliance_score"] = "100"
+    except Exception:
+        pass
+
 
     # ✅ FIX #2: Hard fallback so UI never gets an empty narrative ("No narrative generated")
     try:
@@ -1461,60 +1472,32 @@ async def vision_review(
     except Exception:
         pass
 
-    # --- Photos-only cleanup (prevents repeated sections + bans "undamaged/clean/intact" claims in photos-only) ---
+    # --- Photos-only duplication cleanup (prevents repeated sections in PDF/email) ---
+    # In damage-report mode, the PDF/email already prints Estimated Repair Costs, Fraud, and Conclusion
+    # from their dedicated fields. If the model also includes these sections inside summary_markdown,
+    # it creates redundant repeated blocks.
     try:
         if ai_intent == "damage_report_from_photos":
             _sm = (result.get("summary_markdown") or "")
             if isinstance(_sm, str) and _sm:
-
                 def _strip_sections(md: str, heads: List[str]) -> str:
                     out = md
                     for h in heads:
-                        rx = re.compile(
-                            r"(?is)^#{1,6}\s*" + re.escape(h) + r"\s*$.*?(?=^#{1,6}\s|\Z)",
-                            re.M
-                        )
+                        rx = re.compile(r"(?is)^#{1,6}\s*" + re.escape(h) + r"\s*$.*?(?=^#{1,6}\s|\Z)", re.M)
                         out = re.sub(rx, "", out)
                     out = re.sub(r"\n{3,}", "\n\n", out).strip()
                     return out
-
-                # 1) Strip ALL variants of cost/fraud/conclusion sections if the model included them in summary_markdown
-                _sm2 = _strip_sections(
+                result["summary_markdown"] = _strip_sections(
                     _sm,
-                    [
-                        "Estimated Repair Costs",
-                        "Estimated Repair Cost",
-                        "Estimated Repair Costs Markdown",
-                        "Estimated Repair Cost Markdown",
-                        "Estimated Repair Costs (Markdown)",
-                        "Fraud & Authenticity Check",
-                        "Fraud and Authenticity Check",
-                        "Conclusion",
-                    ],
+                    ["Estimated Repair Costs", "Fraud & Authenticity Check", "Fraud and Authenticity Check", "Conclusion"]
                 )
-
-                # 2) Strip non-heading "Estimated Repair Costs" blocks that slip through (e.g., "Estimated Repair Costs: N/A")
-                _sm2 = re.sub(
-                    r"(?is)(^|\n)\s*Estimated\s+Repair\s+Costs(?:\s+(?:Markdown|\(Markdown\)))?\s*:?\s*.*?(?=\n\s*(?:#{1,6}\s+|\Z))",
-                    "\n",
-                    _sm2
-                )
-
-                # 3) HARD BAN in PHOTOS-ONLY: remove any "intact/undamaged/clean/no visible damage" statements
-                # This prevents false clearing of sides/corners from appearing in the PDF/email.
-                _sm2 = re.sub(
-                    r"(?is)(^|[.\n])[^.\n]*\b("
-                    r"undamaged|intact|clean|unaffected|no\s+visible\s+damage|no\s+obvious\s+damage|no\s+signs\s+of\s+damage|"
-                    r"appears\s+intact|appears\s+undamaged|free\s+of\s+damage"
-                    r")\b[^.\n]*([.\n]|$)",
-                    r"\1",
-                    _sm2
-                )
-
-                _sm2 = re.sub(r"\n{3,}", "\n\n", _sm2).strip()
-                result["summary_markdown"] = _sm2
     except Exception:
         pass
+
+
+
+
+
 
 
     # --- Side Checks enforcement (photos-only): ensure Driver/Left Side bullet exists if Passenger/Right Side exists ---
@@ -1530,30 +1513,10 @@ async def vision_review(
     except Exception:
         pass
 
-# --- Score handling (LEAN / deterministic) ---
-# B) Simplify scoring to one pass:
-# - Photos-only: score is "N/A" and any "Compliance Score:" lines are stripped from narrative.
-# - All other intents: keep model-provided numeric score if valid; otherwise default to "100".
-try:
-    sm = (result.get("summary_markdown") or "")
-    if ai_intent == "damage_report_from_photos":
-        result["compliance_score"] = "N/A"
-        if isinstance(sm, str) and sm:
-            sm = re.sub(r"(?im)^\s*(Final\s*score|Compliance\s*Score)\s*[:\-–]\s*\d{1,3}\s*%?\s*$", "", sm).strip()
-            sm = re.sub(r"(?im)^\s*Compliance\s*Score\s*:\s*\d{1,3}\s*%?\s*$", "", sm).strip()
-            result["summary_markdown"] = sm
-    else:
-        v = (result.get("compliance_score") or "").strip()
-        if re.fullmatch(r"\d{1,3}", v):
-            s = max(0, min(100, int(v)))
-            result["compliance_score"] = str(s)
-        else:
-            # Deterministic fallback (avoid score/narrative rewrite wars)
-            result["compliance_score"] = "100"
-except Exception:
-    pass
 
-# Clean Retail deterministic override
+    # --- Score synchronization removed (lean mode) ---
+
+
     # Clean Retail deterministic override
     if _clean_retail_present:
         try:
@@ -1820,6 +1783,9 @@ except Exception:
         result["summary_markdown"] = sm if sm else orig_sm.strip()
     except Exception:
         pass
+
+
+    # --- Final compliance rationale override removed (lean mode) ---
 
 
     # Normalize odometer field when photo is present, so header is clean
@@ -2513,6 +2479,7 @@ async def download_pdf(file_number: Optional[str] = None, filename: Optional[str
         return JSONResponse(status_code=404, content={"detail": "Not Found"})
     latest = max(candidates, key=lambda p: os.path.getmtime(p))
     return FileResponse(path=latest, media_type="application/pdf", filename=os.path.basename(latest))
+
 
 
 
