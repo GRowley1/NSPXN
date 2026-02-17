@@ -962,16 +962,20 @@ async def vision_review(
 
     if ai_intent == "damage_report_from_photos":
         prompt_text += (
-            "\n\nPHOTOS-ONLY MODE (STRICT DAMAGE REPORT): "
+            "\n\nPHOTOS-ONLY MODE (STRICT DAMAGE CAPTURE): "
             "Describe ONLY visible damage. "
-            "Do NOT describe areas as intact, undamaged, clean, structurally sound, unaffected, or free of damage. "
-            "Do NOT clear any panels, sides, corners, or systems. "
-            "If damage is not visible for a component, omit it entirely. "
-            "Do NOT conclude that the vehicle is structurally sound. "
-            "Do NOT infer absence of damage from limited angles."
-            "Do NOT make structural clearance statements about frame, pillars, rails, or alignment unless clearly broken or deformed in the images. "
+            "Do NOT state that any side, panel, system, or component is intact, undamaged, clean, unaffected, or structurally sound. "
+            "Do NOT clear any side of the vehicle. "
+            "If damage is visible on both sides, describe both. "
+            "If a side is partially visible and damage cannot be confirmed, state 'side not fully visible; cannot confirm full extent of damage.' "
+            "Do NOT conclude that damage is confined to one side unless all other sides are clearly and fully shown."
         )
-
+        prompt_text += (
+            "\nINTERNAL DAMAGE CONSISTENCY CHECK: "
+            "Before finalizing the narrative, verify that damage seen in any photo angle is included. "
+            "Do not omit damage visible in side-profile or multi-angle photos. "
+            "If a vehicle is shown from multiple exterior angles, assume damage may extend beyond a single panel unless clearly isolated."
+        )
         prompt_text += (
             "\nABSOLUTE BAN (PHOTOS-ONLY): Do not reference or imply any estimate document. "
             "Do not use phrases like 'the estimate', 'estimate suggests', 'p#/L#', 'CCC', 'labor rate', or any estimate page/line notation. "
