@@ -250,26 +250,84 @@ STATIC_AUDIT_QUESTIONS = [
 ]
 
 # --- Identifiers Verification Protocol (prompt-only; no new logic) ---
-IDENTIFIERS_VERIFICATION_PROTOCOL = ""
+IDENTIFIERS_VERIFICATION_PROTOCOL = (
+    "\n\nIDENTIFIERS VERIFICATION PROTOCOL (must follow):"
+    "\n1) Search the photos for: windshield VIN plate, driver-door VIN label, driver-door VIN label Production date, driver-door VIN label Date of Mfr, odometer cluster."
+    "\n2) Transcribe the VIN exactly as visible and cite Photo # for EACH location you find."
+    "\n3) If multiple VINs, compare them to each other and to the estimate VIN; explicitly state: MATCH / MISMATCH."
+    "\n4) Transcribe the odometer reading exactly as shown and cite Photo #."
+    "\n5) Grade legibility for each identifier as one of: 'Clearly legible' / 'Present — not clearly legible' / 'Not present'."
+    "\n6) If any identifier is present but not clearly legible, say why (glare, blur, angle) and what photo would resolve it."
+    "\n7) Write a one-line bottom line: 'VIN verification: <MATCH/MISMATCH/INCONCLUSIVE>; Odometer: <value or reason>'."
+    "\n8) Weave these facts naturally into the '## Detailed Audit Report' narrative and keep the top-line fields "
+    "(vin, vin_verification, odometer_estimate_only) consistent."
+    "\n9) When citing more than one VIN location (e.g., windshield vs. door label), you must cite DISTINCT Photo #s; "
+    "never reuse the same photo number for two different locations."
+    "\n10) Compare VINs as literal 17-character strings. If any single character differs between sources, report "
+    "MISMATCH, and quote both strings with their Photo #/page references."
+    "\n11) ODOMETER RULES (photos-only especially): transcribe only the digits visible in the odometer photo; "
+    "do not infer from estimate text or metadata. Include the exact Photo #. If any digit is unclear, state 'Present — not clearly legible' and explain why; do not guess."
+)
 
 # --- Consistency Guard (prompt-only; avoid contradictions) ---
-CONSISTENCY_GUARD = ""
+CONSISTENCY_GUARD = (
+    "\n\nCONSISTENCY GUARD:"
+    "\n- Do not claim any required photo is 'missing' if you graded it 'Clearly legible' or 'Present — not clearly legible'."
+    "\n- For VIN, Odometer, and Production Date specifically: if present in any photo, do not write any sentence implying they are absent."
+    "\n- If a legible driver-door VIN label photo is present, treat the Production Date requirement as evidenced (the production month/year appears on the same label). Do NOT deduct or say 'not separately documented'."
+    "\n- Only deduct for missing Repair Facility info when the Closing Report or other documents clearly show the vehicle is at a named repair facility AND the estimate's 'Repair Facility' section does not list that same facility; "
+    "if no repair facility information appears anywhere in the estimate or Closing Report, report 'N/A — not provided' and do NOT deduct."
+    "\n- If legibility is the issue, explicitly say 'Present — not clearly legible' and explain why (glare/blur/angle), and request a precise retake rather than marking it missing."
+    "\n- Before finalizing, re-scan your output: confirm every referenced Photo # matches the content described (e.g., do not cite an Odometer photo as the point-of-impact photo). Correct any mismatches."
+)
 
 # --- No-intact-if-damaged rule (prompt-only; prevents false 'intact' claims) ---
-NO_INTACT_IF_DAMAGED_RULE = ""
+NO_INTACT_IF_DAMAGED_RULE = (
+    "\n\nNO 'INTACT/NO-DAMAGE' OVERRIDE RULE (DO NOT PRINT CONFLICT WARNINGS):"
+    "\n- If any photo indicates damage to a panel/component, you may NOT state that same panel/component is intact/undamaged/no visible damage anywhere."
+    "\n- If photos appear inconsistent, DO NOT write a conflict warning; instead, remove/avoid the intact/no-damage claim and describe only what appears damaged with citations."
+)
 
 # --- Damage Side / Orientation Guard (prompt-only; prevents left/right drift) ---
-DAMAGE_SIDE_GUARD = ""
+DAMAGE_SIDE_GUARD = (
+    "\n\nDAMAGE SIDE GUIDANCE (MINIMAL):"
+    "\n- Describe any visible damage on any side (Driver/Passenger or Left/Right) when it is visible in photos."
+    "\n- Do NOT suppress side-level damage descriptions when damage is clearly visible."
+    "\n- If orientation is genuinely unclear, say so and avoid guessing."
+)
 
-BILATERAL_DAMAGE_MANDATE = ""
+BILATERAL_DAMAGE_MANDATE = (
+    "\n\nBILATERAL / SECONDARY DAMAGE MANDATE (STRICT):\n"
+    "- In frontal impacts, explicitly address BOTH front corners (driver-side and passenger-side if clear; otherwise ‘front corner A/B’ or ‘front corner (viewed)’)\n"
+    "- If a photo shows partial view of the opposite side with visible distortion/misalignment/crush, describe it — do NOT default to 'intact' or 'no damage' without citing clear evidence.\n"
+    "- Contradicting visible photo evidence (e.g. calling a crushed fender 'intact') is forbidden."
+)
 
-FRONT_CORNER_ORIENTATION_GUARD = ""
+FRONT_CORNER_ORIENTATION_GUARD = (
+    "\n\nFRONT CORNER ORIENTATION (MANDATORY, MINIMAL):"
+    "\n- Do NOT label front damage as LF/RF (or 'left/right headlight/fender') unless the photo angle clearly establishes the vehicle orientation."
+    "\n- If you have a straight-on FRONT photo: viewer-right corresponds to vehicle-LEFT; viewer-left corresponds to vehicle-RIGHT."
+    "\n- If orientation is not clear, use neutral wording: 'front corner' / 'front headlamp area' instead of left/right."
+    "\n- You may NOT state 'left front fender/headlight intact' or 'right front fender/headlight intact' unless orientation is established; otherwise say 'not clearly shown from this angle.'"
+)
 
 # --- Parts Source Guard (prompt-only; prevents OEM vs Aftermarket drift) ---
-PARTS_SOURCE_GUARD = ""
+PARTS_SOURCE_GUARD = (
+    "\n\nPARTS SOURCE GUARD (MANDATORY):"
+    "\n- Do NOT claim 'aftermarket', 'A/M', 'quality replacement', 'non-OEM', or 'LKQ/used/recycled' parts were used unless the estimate LINE ITEMS explicitly label them as such."
+    "\n- Generic disclosure/boilerplate text about aftermarket crash parts does NOT prove aftermarket parts were used."
+    "\n- If the Closing Report states no aftermarket/LKQ parts were included, your narrative must not claim they were used."
+    "\n- When parts source is not explicit, state that it is not explicitly labeled and avoid guessing; default to OEM only when supported by part numbers/labels."
+)
 
 # --- Supplement Handling (prompt-only; ensures detection + narrative mention) ---
-SUPPLEMENT_HANDLING = ""
+SUPPLEMENT_HANDLING = (
+    "\n\nSUPPLEMENT HANDLING:"
+    "\n- Examine the estimate documents for explicit supplement indicators: 'Supplement', 'Supplement of record', 'S01', 'S02', 'Supplement Summary', or similar."
+    "\n- If a supplement or multiple supplements are detected, clearly state in the narrative that the estimate is a supplement and summarize what changed: added operations/parts, rate updates, refinish overlap changes, or corrections to prior omissions."
+    "\n- If the supplement(s) corrects earlier deficiencies (e.g., missing materials line, added calibrations), note that improvement explicitly."
+    "\n- If a supplement(s) exists but required supporting evidence (invoices, photos) is still missing, call this out in Risks/Missing Evidence."
+)
 
 ALLOWED_INTENTS = {"guidelines_only","comprehensive","damage_report_from_photos"}
 
@@ -904,21 +962,42 @@ async def vision_review(
 
     if ai_intent == "damage_report_from_photos":
         prompt_text += (
-            "\n\nPHOTOS-ONLY MODE: Set 'compliance_score' to 'N/A'. "
-            "Do NOT include a '## Compliance Score Rationale' section. Do NOT include any 'Estimated Repair Costs' / cost breakdown section. Do NOT write any statements claiming a side/corner/panel is intact, clean, or has no damage; only describe observed damage or state 'not clearly shown; cannot assess'."
-            "\nODOMETER TRANSCRIPTION: Use only the odometer photo for mileage. "
-            "If the digits are not fully readable, return 'Present — not clearly legible' and explain (glare/blur/angle). "
-            "Do not infer or estimate mileage from other sources."
+            "\n\nPHOTOS-ONLY MODE (STRICT DAMAGE CAPTURE): "
+            "Describe ONLY visible damage. "
+            "Do NOT state that any side, panel, system, or component is intact, undamaged, clean, unaffected, or structurally sound. "
+            "Do NOT clear any side of the vehicle. "
+            "Do NOT include any 'Estimated Repair Costs' section (or any costs/rationale/parts-labor-tax discussion). "
+            "If a side/corner is not clearly shown, state: 'not fully visible; cannot confirm.' "
+            "Do NOT conclude that damage is confined to one side unless all other sides are clearly and fully shown. "
+            "If side orientation (driver vs passenger) cannot be confirmed using clear visual anchors "
+            "(fuel door location, steering wheel visibility, VIN/door-label photo, consistent multi-angle reference), "
+            "DO NOT guess; use neutral phrasing (e.g., 'front-right corner', 'rear-left corner', 'side shown')."
         )
+
+        prompt_text += (
+            "\nINTERNAL 4-CORNER COVERAGE CHECK (DO NOT PRINT): "
+            "For each corner, classify as: damaged / intact cannot be stated / not shown. "
+            "Corners: Front-left, Front-right, Rear-left, Rear-right. "
+            "If a corner is not clearly shown, mark 'not shown' and do NOT write any intact/clean/no-damage statement about it."
+        )
+
+        prompt_text += (
+            "\nINTERNAL BUMPER FITMENT CHECK (DO NOT PRINT): "
+            "If any bumper cover shows gap/misalignment/loose fitment at corners, joints, lamps, or quarter interface, "
+            "mention bumper fitment/misalignment as visible damage/condition."
+        )
+
+        prompt_text += (
+            "\nINTERNAL CONSISTENCY CHECK (DO NOT PRINT): "
+            "Before finalizing, verify that damage visible from any angle is included and not contradicted elsewhere. "
+            "Do not omit damage visible in side-profile or multi-angle photos."
+        )
+
         prompt_text += (
             "\nABSOLUTE BAN (PHOTOS-ONLY): Do not reference or imply any estimate document. "
-            "Do not use phrases like 'the estimate', 'estimate suggests', 'p#/L#', 'CCC', 'labor rate', or any estimate page/line notation. "
-            "If you need to discuss costs, label them as 'photo-based rough costs' with explicit assumptions, and keep them independent of any estimate. "
-            "If no odometer photo is present in the upload set, output 'Missing' for odometer_estimate_only."
+            "Do not use phrases like 'the estimate', 'p#/L#', 'CCC', 'labor rate', or page/line notation."
         )
     else:
-        prompt_text += SUPPLEMENT_HANDLING
-
     if ai_intent == "comprehensive":
         prompt_text += (
             "\n\nUploader note: If odometer and registration photos are present, report their legibility accurately. "
@@ -931,20 +1010,15 @@ async def vision_review(
             "with 3–8 concise bullets. For each, quote the relevant rule fragment and mark Aligned / Not Aligned / Not Evidenced, "
             "citing evidence (p#/L# or Photo #). Also weave any material rule alignment/misalignment into the '## Detailed Audit Report' narrative."
         )
-                )
+        prompt_text += (
+            "\n\nWeave the following static audit questions naturally into the '## Detailed Audit Report' narrative "
+            "(do NOT present as a separate Q&A list; integrate answers inline and cite evidence with p#/L# and Photo # as applicable):\n"
+            + "\n".join(f"- {q}" for q in STATIC_AUDIT_QUESTIONS)
+        )
 
     prompt_text += (
         "\n\nPHOTO NUMBER SANITY CHECK: Before finalizing, verify that every referenced Photo # actually exists and matches the content described."
     )
-
-    prompt_text += IDENTIFIERS_VERIFICATION_PROTOCOL
-    prompt_text += CONSISTENCY_GUARD
-    prompt_text += NO_INTACT_IF_DAMAGED_RULE
-    prompt_text += DAMAGE_SIDE_GUARD
-    prompt_text += FRONT_CORNER_ORIENTATION_GUARD
-    prompt_text += BILATERAL_DAMAGE_MANDATE
-    prompt_text += PARTS_SOURCE_GUARD
-
     # --------- EVIDENCE FLAGS ----------
     flags = []
     if _not_at_shop:
@@ -1387,32 +1461,60 @@ async def vision_review(
     except Exception:
         pass
 
-    # --- Photos-only duplication cleanup (prevents repeated sections in PDF/email) ---
-    # In damage-report mode, the PDF/email already prints Estimated Repair Costs, Fraud, and Conclusion
-    # from their dedicated fields. If the model also includes these sections inside summary_markdown,
-    # it creates redundant repeated blocks.
+    # --- Photos-only cleanup (prevents repeated sections + bans "undamaged/clean/intact" claims in photos-only) ---
     try:
         if ai_intent == "damage_report_from_photos":
             _sm = (result.get("summary_markdown") or "")
             if isinstance(_sm, str) and _sm:
+
                 def _strip_sections(md: str, heads: List[str]) -> str:
                     out = md
                     for h in heads:
-                        rx = re.compile(r"(?is)^#{1,6}\s*" + re.escape(h) + r"\s*$.*?(?=^#{1,6}\s|\Z)", re.M)
+                        rx = re.compile(
+                            r"(?is)^#{1,6}\s*" + re.escape(h) + r"\s*$.*?(?=^#{1,6}\s|\Z)",
+                            re.M
+                        )
                         out = re.sub(rx, "", out)
                     out = re.sub(r"\n{3,}", "\n\n", out).strip()
                     return out
-                result["summary_markdown"] = _strip_sections(
+
+                # 1) Strip ALL variants of cost/fraud/conclusion sections if the model included them in summary_markdown
+                _sm2 = _strip_sections(
                     _sm,
-                    ["Estimated Repair Costs", "Fraud & Authenticity Check", "Fraud and Authenticity Check", "Conclusion"]
+                    [
+                        "Estimated Repair Costs",
+                        "Estimated Repair Cost",
+                        "Estimated Repair Costs Markdown",
+                        "Estimated Repair Cost Markdown",
+                        "Estimated Repair Costs (Markdown)",
+                        "Fraud & Authenticity Check",
+                        "Fraud and Authenticity Check",
+                        "Conclusion",
+                    ],
                 )
+
+                # 2) Strip non-heading "Estimated Repair Costs" blocks that slip through (e.g., "Estimated Repair Costs: N/A")
+                _sm2 = re.sub(
+                    r"(?is)(^|\n)\s*Estimated\s+Repair\s+Costs(?:\s+(?:Markdown|\(Markdown\)))?\s*:?\s*.*?(?=\n\s*(?:#{1,6}\s+|\Z))",
+                    "\n",
+                    _sm2
+                )
+
+                # 3) HARD BAN in PHOTOS-ONLY: remove any "intact/undamaged/clean/no visible damage" statements
+                # This prevents false clearing of sides/corners from appearing in the PDF/email.
+                _sm2 = re.sub(
+                    r"(?is)(^|[.\n])[^.\n]*\b("
+                    r"undamaged|intact|clean|unaffected|no\s+visible\s+damage|no\s+obvious\s+damage|no\s+signs\s+of\s+damage|"
+                    r"appears\s+intact|appears\s+undamaged|free\s+of\s+damage"
+                    r")\b[^.\n]*([.\n]|$)",
+                    r"\1",
+                    _sm2
+                )
+
+                _sm2 = re.sub(r"\n{3,}", "\n\n", _sm2).strip()
+                result["summary_markdown"] = _sm2
     except Exception:
         pass
-
-
-
-
-
 
 
     # --- Side Checks enforcement (photos-only): ensure Driver/Left Side bullet exists if Passenger/Right Side exists ---
@@ -1428,84 +1530,30 @@ async def vision_review(
     except Exception:
         pass
 
-    # --- Score ↔ narrative synchronization ---
-            m = re.search(r"(?is)\bFinal\s*score\b[^0-9]{0,10}(\d{1,3})\s*%?\b", text)
-        if m:
-            try:
-                v = int(m.group(1))
-                if 0 <= v <= 100:
-                    return v
-            except Exception:
-                pass
-        m = re.search(r"(?is)\bthe\s+compliance\s+score\s+is\s+set\s+at\s+(\d{1,3})\s*%?\b", text)
-        if m:
-            try:
-                v = int(m.group(1))
-                if 0 <= v <= 100:
-                    return v
-            except Exception:
-                pass
-        m = re.search(r"(?is)\bCompliance\s*Score\b[^0-9]{0,10}(\d{1,3})\s*%?\b", text)
-        if m:
-            try:
-                v = int(m.group(1))
-                if 0 <= v <= 100:
-                    return v
-            except Exception:
-                pass
-        return None
-
-    
-    try:
-        sm = (result.get("summary_markdown") or "")
-        if ai_intent == "damage_report_from_photos":
-            result["compliance_score"] = "N/A"
+# --- Score handling (LEAN / deterministic) ---
+# B) Simplify scoring to one pass:
+# - Photos-only: score is "N/A" and any "Compliance Score:" lines are stripped from narrative.
+# - All other intents: keep model-provided numeric score if valid; otherwise default to "100".
+try:
+    sm = (result.get("summary_markdown") or "")
+    if ai_intent == "damage_report_from_photos":
+        result["compliance_score"] = "N/A"
+        if isinstance(sm, str) and sm:
             sm = re.sub(r"(?im)^\s*(Final\s*score|Compliance\s*Score)\s*[:\-–]\s*\d{1,3}\s*%?\s*$", "", sm).strip()
+            sm = re.sub(r"(?im)^\s*Compliance\s*Score\s*:\s*\d{1,3}\s*%?\s*$", "", sm).strip()
             result["summary_markdown"] = sm
+    else:
+        v = (result.get("compliance_score") or "").strip()
+        if re.fullmatch(r"\d{1,3}", v):
+            s = max(0, min(100, int(v)))
+            result["compliance_score"] = str(s)
         else:
-            s_text = _extract_score_from_text(sm)
-            s_json = None
-            v = (result.get("compliance_score") or "").strip()
-            if re.fullmatch(r"\d{1,3}", v):
-                try:
-                    s_json = int(v)
-                except Exception:
-                    s_json = None
-            chosen = s_text if s_text is not None else s_json
-            if chosen is not None:
-                chosen = max(0, min(100, int(chosen)))
-                result["compliance_score"] = str(chosen)
-                result["summary_markdown"] = _canonicalize_score_in_narrative(sm, chosen)
-            else:
-                result["compliance_score"] = "N/A"
-                sm = re.sub(r"(?im)^\s*(Final\s*score|Compliance\s*Score)\s*[:\-–]\s*\d{1,3}\s*%?\s*$", "", sm).strip()
-                result["summary_markdown"] = sm
-    except Exception:
-        pass
+            # Deterministic fallback (avoid score/narrative rewrite wars)
+            result["compliance_score"] = "100"
+except Exception:
+    pass
 
-    # ---- AUTO-ADD Compliance Score Rationale with arithmetic when missing ----
-    try:
-        if ai_intent != "damage_report_from_photos":
-            sm = result.get("summary_markdown") or ""
-            score_str = (result.get("compliance_score") or "").strip()
-            if "## Compliance Score Rationale" not in sm and re.fullmatch(r"\d{1,3}", score_str):
-                score_int = max(0, min(100, int(score_str)))
-                if score_int < 100:
-                    deduction = 100 - score_int
-                    rationale_lines = [
-                        "",
-                        "## Compliance Score Rationale",
-                        f"Starting from 100%, a total deduction of {deduction} points was applied based on the minor, non-fatal documentation/formatting items described above, resulting in a final compliance score of {score_int}%.",
-                    ]
-                    if _prod_evidenced or _clean_retail_present:
-                        rationale_lines.append(
-                            "No deduction was applied for Production Date or Clean Retail value, as these items are evidenced in the file and treated as compliant."
-                        )
-                    sm = sm.rstrip() + "\n\n" + "\n".join(rationale_lines)
-                    result["summary_markdown"] = sm
-    except Exception:
-        pass
-
+# Clean Retail deterministic override
     # Clean Retail deterministic override
     if _clean_retail_present:
         try:
@@ -1773,31 +1821,6 @@ async def vision_review(
     except Exception:
         pass
 
-    # FINAL OVERRIDE of Compliance Score Rationale when PD / Clean Retail are evidenced
-    try:
-        if ai_intent != "damage_report_from_photos":
-            sm = result.get("summary_markdown") or ""
-            score_str = (result.get("compliance_score") or "").strip()
-            if re.fullmatch(r"\d{1,3}", score_str):
-                score_int = max(0, min(100, int(score_str)))
-                if score_int < 100 and (_clean_retail_present or _prod_evidenced):
-                    # Remove any existing "## Compliance Score Rationale" section entirely
-                    pattern = r"(?is)\n##\s*Compliance\s*Score\s*Rationale\b.*?(?=\n##\s|\Z)"
-                    sm_no_section = re.sub(pattern, "", sm).rstrip()
-
-                    deduction = 100 - score_int
-                    new_lines = [
-                        "",
-                        "## Compliance Score Rationale",
-                        f"Starting from 100%, a total deduction of {deduction} points was applied for minor, non-fatal documentation/formatting items noted above (e.g., small clarity or layout issues), resulting in a final compliance score of {score_int}%.",
-                    ]
-                    new_lines.append(
-                        "No deduction was taken for Production Date, Clean Retail value, or Release Paperwork, as these items are either evidenced in the file or outside the scope of this compliance audit."
-                    )
-                    sm_final = sm_no_section + "\n\n" + "\n".join(new_lines)
-                    result["summary_markdown"] = sm_final
-    except Exception:
-        pass
 
     # Normalize odometer field when photo is present, so header is clean
     try:
