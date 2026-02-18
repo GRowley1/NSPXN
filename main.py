@@ -177,12 +177,8 @@ DETAIL_TEMPLATES = {
     ),
 
     "damage_report_from_photos": (
-        """
-# AI-4-IA Damage Report (Photos Only)
+        """# AI-4-IA Damage Report (Photos Only)
 Create a professional damage report based ONLY on the provided photos.
-
-## Inputs Used
-- List exact Photo #s used and total photos provided.
 
 ## Photo-by-Photo Damage Ledger (REQUIRED - one row per photo)
 | Photo # | View/Side | Key Panels/Parts Visible | Damage/Condition |
@@ -203,13 +199,11 @@ Create a professional damage report based ONLY on the provided photos.
 - Passenger-side front fender: <condition or Not clearly shown> (Photo #)
 
 ## Detailed Audit Report
+- Do NOT include a separate 'Fraud & Authenticity Check' or 'Conclusion' section in summary_markdown; those belong only in the JSON fields fraud_markdown and conclusion.
+
 - Write a continuous 10–15 sentence narrative summarizing visible damage, impact zones, misalignment/gaps, and repair implications (photo-based).
 - If VIN label or odometer are visible, state them with Photo #. If not visible or unreadable, say so.
 
-## Fraud & Authenticity Check
-- Briefly state what was checked (duplicates/tampering, VIN/odo presence, consistency).
-
-## Conclusion
 - 1–3 sentence summary of scope and repair implications. Do NOT return "N/A".
 """
     ),
@@ -720,24 +714,39 @@ async def vision_review(
         if _v and _v not in _seen_v:
             _seen_v.add(_v); _tmp_v.append(_v)
     vin_candidates = _tmp_v
-
     # --- ODOMETER OCR LOCK (extract mileage from OCR text if visible) ---
-    # This makes it impossible for the narrative to claim the odometer is not visible when OCR captured a mileage value.
+    # Goal: capture the TRUE odometer reading and avoid confusing fuel range/distance-to-empty with odometer.
     odometer_value = None
     try:
         _odo_txt = uploaded_text_all or ""
-        # Common mileage patterns from digital clusters: "72,261 mi", "72261 mi", "72261 miles", "116000 km"
-        _m = re.search(r"(?i)\b(\d{1,3}(?:,\d{3})+|\d{4,7})\s*(mi|miles|km)\b", _odo_txt)
-        if _m:
-            _digits = _m.group(1).replace(",", "")
-            _unit = _m.group(2).lower()
-            if _unit == "miles":
-                _unit = "mi"
-            odometer_value = f"{int(_digits):,} {_unit}"
+        cands = []
+        for mm in re.finditer(r"(?i)\b(\d{1,3}(?:,\d{3})+|\d{1,7})\s*(mi|miles|km)\b", _odo_txt):
+            num = mm.group(1).replace(",", "")
+            unit = mm.group(2).lower()
+            if unit == "miles":
+                unit = "mi"
+            span = mm.span()
+            ctx = _odo_txt[max(0, span[0]-50): span[1]+50].lower()
+            cands.append((int(num), unit, ctx))
+        # Filter out likely fuel range / DTE values
+        filtered = []
+        for n, unit, ctx in cands:
+            if any(k in ctx for k in ["range", "to empty", "dte", "fuel", "distance"]):
+                continue
+            filtered.append((n, unit, ctx))
+        pool = filtered if filtered else cands
+        use = None
+        if pool:
+            # Prefer the largest plausible value for typical vehicles; if only small values exist, take the largest small value.
+            pool_sorted = sorted(pool, key=lambda x: x[0])
+            big = [x for x in pool_sorted if x[0] >= 1000]
+            small = [x for x in pool_sorted if x[0] <= 999]
+            use = big[-1] if big else (small[-1] if small else None)
+        if use:
+            n, unit, _ = use
+            odometer_value = f"{n:,} {unit}"
     except Exception:
         odometer_value = None
-
-
     # --- Closing Report: extract "Inspection Results" section for deterministic cross-check + shop-status ---
     def _extract_inspection_results_block(_txt: str) -> str:
         if not _txt:
@@ -1116,6 +1125,39 @@ async def vision_review(
         "conclusion": _get("conclusion"),
         "redaction_status": redaction_status,
     }
+    # --- POST-PARSE NORMALIZATION ---
+    # 1) Prefer OCR-derived odometer_value when present (avoids fuel-range confusion).
+    try:
+        if odometer_value:
+            result["odometer_estimate_only"] = str(odometer_value)
+    except Exception:
+        pass
+
+    # 2) Strip any embedded Fraud/Conclusion sections from summary_markdown (those are separate JSON fields and printed separately).
+    try:
+        sm = (result.get("summary_markdown") or "")
+        if sm:
+            sm = re.sub(r"(?is)^\s*##\s*Fraud\s*&\s*Authenticity\s*Check\s*.*?(?=^##\s*|\Z)", "", sm, flags=re.MULTILINE)
+            sm = re.sub(r"(?is)^\s*##\s*Conclusion\s*.*?(?=^##\s*|\Z)", "", sm, flags=re.MULTILINE)
+            sm = re.sub(r"(?is)\nFraud\s*&\s*Authenticity\s*Check\n.*", "", sm)
+            result["summary_markdown"] = sm.strip()
+    except Exception:
+        pass
+
+    # 3) If summary_markdown mentions an odometer number, replace it with the OCR-derived value (when present).
+    try:
+        if odometer_value and result.get("summary_markdown"):
+            sm2 = result["summary_markdown"]
+            if re.search(r"(?i)\bodometer\b", sm2):
+                sm2 = re.sub(
+                    r"(?i)(\bodometer\b[^\n]{0,60}?)(\d{2,7})(\s*(?:mi|miles|km))",
+                    lambda mm: mm.group(1) + odometer_value,
+                    sm2
+                )
+            result["summary_markdown"] = sm2
+    except Exception:
+        pass
+
 
     # ✅ FIX #2: Hard fallback so UI never gets an empty narrative ("No narrative generated")
     try:
