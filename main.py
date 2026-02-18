@@ -42,11 +42,18 @@ logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(levelname)s - %(
 log = logging.getLogger("nspxn")
 log.info(f"Using CLIENT_RULES_DIR={CLIENT_RULES_DIR}")
 
-# Use GPT-4o everywhere
-MODEL = os.getenv("OAI_MODEL", "gpt-4o")
+# Use selected model everywhere
+MODEL = os.getenv("OAI_MODEL") or os.getenv("OPENAI_MODEL") or "gpt-4.1"
+# GPT-5.x models use max_completion_tokens; GPT-4.x uses max_tokens
+_token_kw = "max_completion_tokens" if str(MODEL).startswith("gpt-5") else "max_tokens"
+
 if not os.getenv("OPENAI_API_KEY"):
     raise RuntimeError("OPENAI_API_KEY missing")
-client = OpenAI(api_key=os.environ["OPENAI_API_KEY"])
+try:
+    client = OpenAI(api_key=os.environ["OPENAI_API_KEY"], timeout=60.0, max_retries=2)
+except TypeError:
+    # Backwards-compatible init for older openai-python versions
+    client = OpenAI(api_key=os.environ["OPENAI_API_KEY"])
 
 # --------------------------------
 # Presidio: Analyzer/Anonymizer (preserve VIN & Claim #)
@@ -193,13 +200,13 @@ Create a concise, professional damage report based ONLY on the provided photos. 
 - **Passenger/Right Side**: <what is visible on right/passenger side; cite at least one Photo #>
 
 Rules:
-- If a side is shown but looks clean, say "No obvious damage visible from this angle" (do NOT say "no visible damage" or "intact").
+- If a side is shown but no damage is apparent, do NOT write any 'intact/clean/no damage' statement. Simply omit that area from the narrative unless needed for context.
 - If a side is NOT shown clearly, say "Not clearly shown in provided photos; cannot assess" (and do NOT guess).
 - Do NOT make blanket statements like "both sides show no visible damage". Address Driver/Left and Passenger/Right separately with citations.
 
 ## Front-End Checklist (MANDATORY - DO NOT OMIT HOOD)
 You MUST fill every line below. If unclear, say "Not clearly shown; cannot assess" (do not guess). If gaps/misalignment/buckling are visible, treat that as damage.
-- Hood: <dent/crease/buckle/misalignment/gap issue or 'No obvious damage visible from this angle'> (Photo #)
+- Hood: <dent/crease/buckle/misalignment/gap issue or 'Not clearly shown; cannot assess'> (Photo #)
 - Front bumper cover: <condition> (Photo #)
 - Grille: <condition> (Photo #)
 - Driver-side headlamp: <condition> (Photo #)
@@ -209,21 +216,14 @@ You MUST fill every line below. If unclear, say "Not clearly shown; cannot asses
 
 ## Other Views (use bullets; cite Photo #s)
 - **Rear**: bumper, tail lamps, hatch/trunk - describe each.
-- **Roof / upper body**: any damage or 'No obvious damage visible from this angle'.
-- **Interior** (if shown): seats, dash, airbags - describe deployment or "No obvious damage visible from this angle".
+- **Roof / upper body**: any damage or 'Not clearly shown; cannot assess'.
+- **Interior** (if shown): seats, dash, airbags - describe deployment or 'Not clearly shown; cannot assess'.
 
 ## Detailed Audit Report (narrative)
 - Write a continuous 10-15 sentence professional narrative that synthesizes the Side Checks and Front-End Checklist (do NOT contradict them).
 - Describe impact zones, visible misalignment/gap issues, repair vs replace logic (photo-based).
 - Cite VIN / odometer with Photo #s; if unreadable explain why.
 - Balance coverage: do NOT focus only on primary damage.
-
-## Estimated Repair Costs (photo-based rough only)
-- Body Labor: ...
-- Paint Labor / Materials: ...
-- Parts: ...
-- Sublet / Tax: ...
-- Rationale tied to observed panels / sides.
 
 ## Fraud & Authenticity Check
 - VIN match, odometer legibility, no tampering/duplicates/metadata issues.
@@ -339,7 +339,7 @@ SYSTEM_BASE = (
     "Populate exactly these keys (always include all, use 'N/A' when not applicable): "
     "['file_number','request_type','claim_number','vin','vin_verification','vehicle',"
     "'odometer_estimate_only','compliance_score','summary_brief','summary_markdown',"
-    "'fraud_markdown','primary_impact','secondary_impact','estimated_costs_markdown',"
+    "'fraud_markdown','primary_impact','secondary_impact',"
     "'conclusion']. "
     "Use evidence only from the provided inputs. Cite estimate page/line as 'p#/L#' and photos as 'Photo #'. "
     "Avoid guessing; if uncertain, say 'N/A' and why. summary_brief must be <= 280 chars (plain text)."
@@ -871,7 +871,7 @@ async def vision_review(
     KEYS = [
         "file_number","request_type","claim_number","vin","vin_verification","vehicle",
         "odometer_estimate_only","compliance_score","summary_brief","summary_markdown",
-        "fraud_markdown","primary_impact","secondary_impact","estimated_costs_markdown","conclusion"
+        "fraud_markdown","primary_impact","secondary_impact","conclusion"
     ]
 
     SYSTEM = SYSTEM_BASE
@@ -934,7 +934,7 @@ async def vision_review(
         "OUTPUT FORMAT (MANDATORY): Return ONLY a single strict JSON object with keys "
         "['file_number','request_type','claim_number','vin','vin_verification','vehicle',"
         "'odometer_estimate_only','compliance_score','summary_brief','summary_markdown',"
-        "'fraud_markdown','primary_impact','secondary_impact','estimated_costs_markdown','conclusion'] "
+        "'fraud_markdown','primary_impact','secondary_impact','conclusion'] "
         "and no extra text before or after.\n\n"
     ) + prompt_text
 
@@ -965,17 +965,40 @@ async def vision_review(
 
     if ai_intent == "damage_report_from_photos":
         prompt_text += (
-            "\n\nPHOTOS-ONLY MODE: Set 'compliance_score' to 'N/A'. "
-            "Do NOT include a '## Compliance Score Rationale' section."
-            "\nODOMETER TRANSCRIPTION: Use only the odometer photo for mileage. "
-            "If the digits are not fully readable, return 'Present — not clearly legible' and explain (glare/blur/angle). "
-            "Do not infer or estimate mileage from other sources."
+            "\n\nPHOTOS-ONLY MODE (STRICT DAMAGE CAPTURE): "
+            "Describe ONLY visible damage. "
+            "Do NOT state that any side, panel, system, or component is intact, undamaged, clean, unaffected, or structurally sound. "
+            "Do NOT clear any side of the vehicle. "
+            "Do NOT include any 'Estimated Repair Costs' section (or any costs/rationale/parts-labor-tax discussion). "
+            "If a side/corner is not clearly shown, state: 'not fully visible; cannot confirm.' "
+            "Do NOT conclude that damage is confined to one side unless all other sides are clearly and fully shown. "
+            "If side orientation (driver vs passenger) cannot be confirmed using clear visual anchors "
+            "(fuel door location, steering wheel visibility, VIN/door-label photo, consistent multi-angle reference), "
+            "DO NOT guess; use neutral phrasing (e.g., 'front-right corner', 'rear-left corner', 'side shown')."
         )
+
+        prompt_text += (
+            "\nINTERNAL 4-CORNER COVERAGE CHECK (DO NOT PRINT): "
+            "For each corner, classify as: damaged / intact cannot be stated / not shown. "
+            "Corners: Front-left, Front-right, Rear-left, Rear-right. "
+            "If a corner is not clearly shown, mark 'not shown' and do NOT write any intact/clean/no-damage statement about it."
+        )
+
+        prompt_text += (
+            "\nINTERNAL BUMPER FITMENT CHECK (DO NOT PRINT): "
+            "If any bumper cover shows gap/misalignment/loose fitment at corners, joints, lamps, or quarter interface, "
+            "mention bumper fitment/misalignment as visible damage/condition."
+        )
+
+        prompt_text += (
+            "\nINTERNAL CONSISTENCY CHECK (DO NOT PRINT): "
+            "Before finalizing, verify that damage visible from any angle is included and not contradicted elsewhere. "
+            "Do not omit damage visible in side-profile or multi-angle photos."
+        )
+
         prompt_text += (
             "\nABSOLUTE BAN (PHOTOS-ONLY): Do not reference or imply any estimate document. "
-            "Do not use phrases like 'the estimate', 'estimate suggests', 'p#/L#', 'CCC', 'labor rate', or any estimate page/line notation. "
-            "If you need to discuss costs, label them as 'photo-based rough costs' with explicit assumptions, and keep them independent of any estimate. "
-            "If no odometer photo is present in the upload set, output 'Missing' for odometer_estimate_only."
+            "Do not use phrases like 'the estimate', 'p#/L#', 'CCC', 'labor rate', or page/line notation."
         )
     else:
         prompt_text += SUPPLEMENT_HANDLING
@@ -1000,7 +1023,6 @@ async def vision_review(
 
     prompt_text += (
         "\n\nPHOTO NUMBER SANITY CHECK: Before finalizing, verify that every referenced Photo # actually exists and matches the content described."
-        "\nCOST RATIONALE REQUIREMENT: For each cost bucket (Body/Paint/Materials/Parts/Sublet/Tax), include a one-line rationale tied to observed operations or panel counts when you provide costs."
     )
 
     prompt_text += IDENTIFIERS_VERIFICATION_PROTOCOL
@@ -1113,23 +1135,30 @@ async def vision_review(
     max_tokens = MAX_TOKENS_BY_INTENT.get(ai_intent, 1500)
 
     # Call GPT and parse JSON (JSON hardened)
+    # Prefer the canonical SDK path (client.chat.completions). Keep fallback for older SDKs.
     try:
-        rsp = client.chat_completions.create(  # type: ignore[attr-defined]
-            model=MODEL,
-            messages=[{"role":"system","content": SYSTEM},
-                      {"role":"user","content": parts_payload}],
-            max_tokens=max_tokens,
-            temperature=0,
-            response_format={"type":"json_object"}
-        )
-    except AttributeError:
         rsp = client.chat.completions.create(
             model=MODEL,
             messages=[{"role":"system","content": SYSTEM},
                       {"role":"user","content": parts_payload}],
-            max_tokens=max_tokens,
+            **{_token_kw: max_tokens},
             temperature=0,
-            response_format={"type":"json_object"}
+            top_p=1,
+            presence_penalty=0,
+            frequency_penalty=0,
+            response_format={"type":"json_object"},
+        )
+    except AttributeError:
+        rsp = client.chat_completions.create(  # type: ignore[attr-defined]
+            model=MODEL,
+            messages=[{"role":"system","content": SYSTEM},
+                      {"role":"user","content": parts_payload}],
+            **{_token_kw: max_tokens},
+            temperature=0,
+            top_p=1,
+            presence_penalty=0,
+            frequency_penalty=0,
+            response_format={"type":"json_object"},
         )
 
     # --- Hardened JSON parse helper
@@ -1183,7 +1212,7 @@ async def vision_review(
                 model=MODEL,
                 messages=[{"role": "system", "content": SYSTEM},
                           {"role": "user", "content": shrunk}],
-                max_tokens=retry_tokens,
+                **{_token_kw: retry_tokens},
                 temperature=0,
                 response_format={"type": "json_object"}
             )
@@ -1204,7 +1233,7 @@ async def vision_review(
                     "Use exactly these keys (all required): "
                     "['file_number','request_type','claim_number','vin','vin_verification','vehicle',"
                     "'odometer_estimate_only','compliance_score','summary_brief','summary_markdown',"
-                    "'fraud_markdown','primary_impact','secondary_impact','estimated_costs_markdown','conclusion'] "
+                    "'fraud_markdown','primary_impact','secondary_impact','conclusion'] "
                     "Do not invent new keys. If a field is unavailable, use 'N/A'. "
                     "Here is the text:\n\n" + raw
                 }
@@ -1213,7 +1242,7 @@ async def vision_review(
                 fix_rsp = client.chat_completions.create(  # type: ignore[attr-defined]
                     model=MODEL,
                     messages=fix_prompt,
-                    max_tokens=max_tokens,
+                    **{_token_kw: max_tokens},
                     temperature=0,
                     response_format={"type":"json_object"}
                 )
@@ -1221,7 +1250,7 @@ async def vision_review(
                 fix_rsp = client.chat.completions.create(
                     model=MODEL,
                     messages=fix_prompt,
-                    max_tokens=max_tokens,
+                    **{_token_kw: max_tokens},
                     temperature=0,
                     response_format={"type":"json_object"}
                 )
@@ -1446,32 +1475,60 @@ async def vision_review(
     except Exception:
         pass
 
-    # --- Photos-only duplication cleanup (prevents repeated sections in PDF/email) ---
-    # In damage-report mode, the PDF/email already prints Estimated Repair Costs, Fraud, and Conclusion
-    # from their dedicated fields. If the model also includes these sections inside summary_markdown,
-    # it creates redundant repeated blocks.
+    # --- Photos-only cleanup (prevents repeated sections + bans "undamaged/clean/intact" claims in photos-only) ---
     try:
         if ai_intent == "damage_report_from_photos":
             _sm = (result.get("summary_markdown") or "")
             if isinstance(_sm, str) and _sm:
+
                 def _strip_sections(md: str, heads: List[str]) -> str:
                     out = md
                     for h in heads:
-                        rx = re.compile(r"(?is)^#{1,6}\s*" + re.escape(h) + r"\s*$.*?(?=^#{1,6}\s|\Z)", re.M)
+                        rx = re.compile(
+                            r"(?is)^#{1,6}\s*" + re.escape(h) + r"\s*$.*?(?=^#{1,6}\s|\Z)",
+                            re.M
+                        )
                         out = re.sub(rx, "", out)
                     out = re.sub(r"\n{3,}", "\n\n", out).strip()
                     return out
-                result["summary_markdown"] = _strip_sections(
+
+                # 1) Strip ALL variants of cost/fraud/conclusion sections if the model included them in summary_markdown
+                _sm2 = _strip_sections(
                     _sm,
-                    ["Estimated Repair Costs", "Fraud & Authenticity Check", "Fraud and Authenticity Check", "Conclusion"]
+                    [
+                        "Estimated Repair Costs",
+                        "Estimated Repair Cost",
+                        "Estimated Repair Costs Markdown",
+                        "Estimated Repair Cost Markdown",
+                        "Estimated Repair Costs (Markdown)",
+                        "Fraud & Authenticity Check",
+                        "Fraud and Authenticity Check",
+                        "Conclusion",
+                    ],
                 )
+
+                # 2) Strip non-heading "Estimated Repair Costs" blocks that slip through (e.g., "Estimated Repair Costs: N/A")
+                _sm2 = re.sub(
+                    r"(?is)(^|\n)\s*Estimated\s+Repair\s+Costs(?:\s+(?:Markdown|\(Markdown\)))?\s*:?\s*.*?(?=\n\s*(?:#{1,6}\s+|\Z))",
+                    "\n",
+                    _sm2
+                )
+
+                # 3) HARD BAN in PHOTOS-ONLY: remove any "intact/undamaged/clean/no visible damage" statements
+                # This prevents false clearing of sides/corners from appearing in the PDF/email.
+                _sm2 = re.sub(
+                    r"(?is)(^|[.\n])[^.\n]*\b("
+                    r"undamaged|intact|clean|unaffected|no\s+visible\s+damage|no\s+obvious\s+damage|no\s+signs\s+of\s+damage|"
+                    r"appears\s+intact|appears\s+undamaged|free\s+of\s+damage"
+                    r")\b[^.\n]*([.\n]|$)",
+                    r"\1",
+                    _sm2
+                )
+
+                _sm2 = re.sub(r"\n{3,}", "\n\n", _sm2).strip()
+                result["summary_markdown"] = _sm2
     except Exception:
         pass
-
-
-
-
-
 
 
     # --- Side Checks enforcement (photos-only): ensure Driver/Left Side bullet exists if Passenger/Right Side exists ---
@@ -2236,7 +2293,7 @@ async def vision_review(
             pdf_obj.set_font("Helvetica", "B", 12)
         except Exception:
             pdf_obj.set_font("Arial", "B", 12)
-        pdf_obj.cell(0, 8, "Uploaded Photo Thumbnails", ln=True)
+        pdf_obj.cell(0, 8, "Uploaded Photos", ln=True)
         pdf_obj.ln(2)
 
         # Layout (single-page, grid)
@@ -2299,8 +2356,7 @@ async def vision_review(
         mc(f"Inspected For: {ia_company}")
         pdf_status = result["redaction_status"].replace("✅", "OK")
         pdf.ln(2); mc(pdf_status)
-        pdf.ln(2); mc("Damage Summary"); mc((result["summary_markdown"] or "N/A").strip())
-        mc("Estimated Repair Costs"); mc((result["estimated_costs_markdown"] or "N/A").strip())
+        pdf.ln(2); mc("Condition Summary"); mc((result["summary_markdown"] or "N/A").strip())
         pdf.ln(2); mc("Fraud & Authenticity Check"); mc((result["fraud_markdown"] or 'N/A').strip())
         pdf.ln(2); mc("Conclusion"); mc((result["conclusion"] or 'N/A').strip())
 
@@ -2391,7 +2447,7 @@ async def vision_review(
         mc(f"Compliance Score: {result['compliance_score']}")
         pdf_status = result["redaction_status"].replace("✅", "OK")
         mc(pdf_status)
-        pdf.ln(3); mc("NSPXN.com Review Summary"); mc((smark or '').strip())
+        pdf.ln(3); mc("NSPXN.com Condition Summary"); mc((smark or '').strip())
         pdf.ln(3); mc("Fraud Detection"); mc((result["fraud_markdown"] or 'N/A').strip())
 
         # --- AI Disclaimer (after report content) ---
@@ -2460,8 +2516,6 @@ async def vision_review(
                 f"{result['redaction_status']}\n\n"
                 "Condition Summary\n"
                 f"{(result['summary_markdown'] or 'N/A')}\n\n"
-                "Estimated Repair Costs\n"
-                f"{(result['estimated_costs_markdown'] or 'N/A')}\n\n"
                 "Fraud & Authenticity Check\n"
                 f"{(result['fraud_markdown'] or 'N/A')}\n\n"
                 "Conclusion\n"
@@ -2511,7 +2565,7 @@ async def vision_review(
                 f"Odometer (from estimate): {result['odometer_estimate_only']}\n"
                 f"Compliance Score: {result['compliance_score']}\n\n"
                 f"{result['redaction_status']}\n\n"
-                "NSPXN.com Review Summary\n"
+                "NSPXN.com Condition Summary\n"
                 f"{result['summary_markdown']}\n\n"
                 "Fraud Detection\n"
                 f"{result['fraud_markdown']}\n"
