@@ -963,7 +963,7 @@ async def vision_review(
             model=MODEL,
             messages=[{"role":"system","content": SYSTEM},
                       {"role":"user","content": parts_payload}],
-            max_tokens=max_tokens,
+            **{_token_kw: max_tokens},
             temperature=0,
             top_p=1,
             presence_penalty=0,
@@ -975,7 +975,7 @@ async def vision_review(
             model=MODEL,
             messages=[{"role":"system","content": SYSTEM},
                       {"role":"user","content": parts_payload}],
-            max_tokens=max_tokens,
+            **{_token_kw: max_tokens},
             temperature=0,
             top_p=1,
             presence_penalty=0,
@@ -1034,7 +1034,7 @@ async def vision_review(
                 model=MODEL,
                 messages=[{"role": "system", "content": SYSTEM},
                           {"role": "user", "content": shrunk}],
-                max_tokens=retry_tokens,
+                **{_token_kw: retry_tokens},
                 temperature=0,
                 response_format={"type": "json_object"}
             )
@@ -1064,7 +1064,7 @@ async def vision_review(
                 fix_rsp = client.chat_completions.create(  # type: ignore[attr-defined]
                     model=MODEL,
                     messages=fix_prompt,
-                    max_tokens=max_tokens,
+            **{_token_kw: max_tokens},
                     temperature=0,
                     response_format={"type":"json_object"}
                 )
@@ -1072,7 +1072,7 @@ async def vision_review(
                 fix_rsp = client.chat.completions.create(
                     model=MODEL,
                     messages=fix_prompt,
-                    max_tokens=max_tokens,
+            **{_token_kw: max_tokens},
                     temperature=0,
                     response_format={"type":"json_object"}
                 )
