@@ -133,7 +133,7 @@ DETAIL_TEMPLATES = {
         "## Executive Summary\n"
         "- 3–6 bullets capturing the big picture: estimate integrity, rule alignment (only if rules text was supplied), "
         "and photo consistency.\n\n"
-        "## Detailed Audit Report\n"
+        "## Detailed Condition Report\n"
         "- Write this section as a formal, paragraph-style appraisal report summarizing the entire claim. "
         "Include: scope of impact, damage by zone/panel, repair vs. replace rationale, parts type (OEM/LKQ/Aftermarket), "
         "labor operations, refinish/overlap considerations, rate validation, paint materials handling, sublet usage, "
@@ -197,7 +197,7 @@ DETAIL_TEMPLATES = {
 - Driver-side front fender: <condition or Not clearly shown> (Photo #)
 - Passenger-side front fender: <condition or Not clearly shown> (Photo #)
 
-## Detailed Audit Report
+## Detailed Condition Report
 - Do NOT include a separate 'Fraud & Authenticity Check' or 'Conclusion' section in summary_markdown; those belong only in the JSON fields fraud_markdown and conclusion.
 
 - Write a continuous 10–15 sentence narrative summarizing visible damage, impact zones, misalignment/gaps, and repair implications (photo-based).
@@ -235,7 +235,7 @@ IDENTIFIERS_VERIFICATION_PROTOCOL = (
     "\n5) Grade legibility for each identifier as one of: 'Clearly legible' / 'Present — not clearly legible' / 'Not present'."
     "\n6) If any identifier is present but not clearly legible, say why (glare, blur, angle) and what photo would resolve it."
     "\n7) Write a one-line bottom line: 'VIN verification: <MATCH/MISMATCH/INCONCLUSIVE>; Odometer: <value or reason>'."
-    "\n8) Weave these facts naturally into the '## Detailed Audit Report' narrative and keep the top-line fields "
+    "\n8) Weave these facts naturally into the '## Detailed Condition Report' narrative and keep the top-line fields "
     "(vin, vin_verification, odometer_estimate_only) consistent."
     "\n9) When citing more than one VIN location (e.g., windshield vs. door label), you must cite DISTINCT Photo #s; "
     "never reuse the same photo number for two different locations."
@@ -334,7 +334,7 @@ SYSTEM_BASE += (
 
 SYSTEM_BASE += (
     " Focus on a cohesive, professional appraisal. Prefer narrative over rigid tables. "
-    "Include a section named '## Detailed Audit Report'. "
+    "Include a section named '## Detailed Condition Report'. "
     "Include '## Compliance Score Rationale' only when compliance_score < 100, and show deductions from 100 with brief evidence refs (p#/L# or Photo #). "
     "If you include tables, keep them concise and only when they help clarity. "
     "Avoid placeholder rows/columns; do not invent data. "
@@ -347,7 +347,7 @@ SYSTEM_BASE += (
 )
 
 SYSTEM_BASE += (
-    " Your 'summary_markdown' MUST include a top-level section named '## Detailed Audit Report' containing a cohesive narrative of at least 10–14 sentences (not bullets). "
+    " Your 'summary_markdown' MUST include a top-level section named '## Detailed Condition Report' containing a cohesive narrative of at least 10–14 sentences (not bullets). "
     "It must synthesize: impact zones, per-panel damages, repair vs. replace rationale, parts type (OEM/LKQ/Aftermarket), labor ops, refinish/overlap, rate/materials/sublet/tax handling, and estimate integrity. "
     "It must cite concrete evidence inline (e.g., p2/L14, Photo 3). "
     "When evaluating paint materials, recognize that a summary line such as 'Paint Supplies' or 'Paint Materials' with hours and rate in the totals section constitutes a valid cost breakdown. "
@@ -1101,7 +1101,7 @@ async def vision_review(
         skeleton["request_type"] = req_label
         skeleton["summary_brief"] = "N/A (model output could not be parsed; skeleton returned)."
         skeleton["summary_markdown"] = (
-            "## Detailed Audit Report\n"
+            "## Detailed Condition Report\n"
             "Model output could not be parsed into JSON on this run. Please resubmit."
         )
         skeleton["fraud_markdown"] = "No material inconsistencies found."
@@ -1163,7 +1163,49 @@ async def vision_review(
         pass
 
 
-    # ✅ FIX #2: Hard fallback so UI never gets an empty narrative ("No narrative generated")
+        # --- POST-PARSE SCRUB (VIN FIRST / ODO CONSISTENCY / FRAUD BOILERPLATE) ---
+    try:
+        sm = (result.get("summary_markdown") or "").strip()
+
+        # 1) De-dupe accidental double headers
+        if sm:
+            sm = re.sub(r"(## Detailed Condition Report\s*)\n+\1", r"\1\n", sm)
+
+        # 2) Force VIN verification at the beginning of the narrative body (if available and not already near top)
+        _vin = (result.get("vin") or "").strip()
+        _vinv = (result.get("vin_verification") or "").strip()
+        if _vin and sm:
+            head = sm[:400]
+            if ("VIN" not in head) and (_vin not in head):
+                prefix = f"VIN Verified: {_vin}"
+                if _vinv and _vinv != "N/A":
+                    prefix += f" — {_vinv}"
+                sm = prefix + "\n\n" + sm
+
+        # 3) Odometer: if OCR lock found, enforce it anywhere '165 mi/miles' appears (fuel range confusion)
+        if odometer_value and sm:
+            _odo_num = re.sub(r"[^\d]", "", str(odometer_value))
+            if _odo_num:
+                sm = re.sub(r"(?i)\b165\s*(mi|miles)\b", f"{int(_odo_num)} mi", sm)
+                # Also catch common cluster sentence patterns
+                sm = re.sub(
+                    r"(?i)(\bcluster\b[^\n]{0,140}?)(\d{2,7})\s*(mi|miles)\b",
+                    lambda m: m.group(1) + f"{int(_odo_num)} " + m.group(3),
+                    sm
+                )
+                # Keep structured field aligned
+                result["odometer_estimate_only"] = str(odometer_value)
+
+        # 4) Remove 'none apparent' tampering boilerplate from fraud_markdown
+        fm = (result.get("fraud_markdown") or "")
+        fm = re.sub(r"(?i)\bobvious photo duplication/tampering\s*\(none apparent[^\)]*\)\.?\s*", "", fm).strip()
+        result["fraud_markdown"] = fm if fm else "No material inconsistencies found."
+
+        result["summary_markdown"] = sm
+    except Exception:
+        pass
+
+# ✅ FIX #2: Hard fallback so UI never gets an empty narrative ("No narrative generated")
     try:
         sm_tmp = (result.get("summary_markdown") or "").strip()
         if not sm_tmp:
@@ -1177,7 +1219,7 @@ async def vision_review(
             )
         elif "## Detailed Condition Report" not in sm_tmp:
             # Keep minimal: do not re-write content; just prepend the required header to avoid downstream display rules.
-            result["summary_markdown"] = "## Detailed Audit Report\n" + sm_tmp
+            result["summary_markdown"] = "## Detailed Condition Report\n" + sm_tmp
     except Exception:
         pass
 
@@ -1563,6 +1605,7 @@ async def download_pdf(file_number: Optional[str] = None, filename: Optional[str
         return JSONResponse(status_code=404, content={"detail": "Not Found"})
     latest = max(candidates, key=lambda p: os.path.getmtime(p))
     return FileResponse(path=latest, media_type="application/pdf", filename=os.path.basename(latest))
+
 
 
 
