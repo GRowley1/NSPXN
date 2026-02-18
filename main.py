@@ -116,7 +116,7 @@ DETAIL_TEMPLATES = {
         "- Briefly list which documents, pages, and photos you actually referenced.\n\n"
         "## Executive Summary\n"
         "- 3–5 bullets summarizing overall compliance and key risks.\n\n"
-        "Condition Summary\n"
+        "## AI-4-IA Review Summary\n"
         "- Write a formal, paragraph-style appraisal narrative. Include scope of impact, damage by zone/panel, "
         "repair vs. replace rationale, parts type (OEM/LKQ/Aftermarket), labor ops, refinish overlap, rate validation, "
         "tax handling, and estimate integrity. Reference evidence inline (e.g., 'p2/L14', 'Photo 3'). "
@@ -133,7 +133,7 @@ DETAIL_TEMPLATES = {
         "## Executive Summary\n"
         "- 3–6 bullets capturing the big picture: estimate integrity, rule alignment (only if rules text was supplied), "
         "and photo consistency.\n\n"
-        "## Detailed Condition Report\n"
+        "## Detailed Audit Report\n"
         "- Write this section as a formal, paragraph-style appraisal report summarizing the entire claim. "
         "Include: scope of impact, damage by zone/panel, repair vs. replace rationale, parts type (OEM/LKQ/Aftermarket), "
         "labor operations, refinish/overlap considerations, rate validation, paint materials handling, sublet usage, "
@@ -177,18 +177,23 @@ DETAIL_TEMPLATES = {
     ),
 
     "damage_report_from_photos": (
-        """# Photos Only Condition Report
-        
-## Photo-by-Photo Condition Summary 
+        """
+# AI-4-IA Damage Report (Photos Only)
+Create a professional damage report based ONLY on the provided photos.
+
+## Inputs Used
+- List exact Photo #s used and total photos provided.
+
+## Photo-by-Photo Damage Ledger (REQUIRED - one row per photo)
 | Photo # | View/Side | Key Panels/Parts Visible | Damage/Condition |
 |---:|---|---|---|
 - Cover EVERY provided photo. If no damage is obvious from that angle, write: "No obvious damage visible from this angle" (do not use the word intact).
 
-## Side Checks
+## Side Checks (MANDATORY)
 - **Driver/Left Side**: <what is visible; cite Photo #; if not shown, say not shown>
 - **Passenger/Right Side**: <what is visible; cite Photo #; if not shown, say not shown>
 
-## Front-End Checklist
+## Front-End Checklist (MANDATORY - DO NOT OMIT HOOD)
 - Hood: <condition or Not clearly shown> (Photo #)
 - Front bumper cover: <condition or Not clearly shown> (Photo #)
 - Grille: <condition or Not clearly shown> (Photo #)
@@ -197,12 +202,14 @@ DETAIL_TEMPLATES = {
 - Driver-side front fender: <condition or Not clearly shown> (Photo #)
 - Passenger-side front fender: <condition or Not clearly shown> (Photo #)
 
-## Detailed Condition Report
-- Do NOT include a separate 'Fraud & Authenticity Check' or 'Conclusion' section in summary_markdown; those belong only in the JSON fields fraud_markdown and conclusion.
-
+## Detailed Audit Report
 - Write a continuous 10–15 sentence narrative summarizing visible damage, impact zones, misalignment/gaps, and repair implications (photo-based).
 - If VIN label or odometer are visible, state them with Photo #. If not visible or unreadable, say so.
 
+## Fraud & Authenticity Check
+- Briefly state what was checked (duplicates/tampering, VIN/odo presence, consistency).
+
+## Conclusion
 - 1–3 sentence summary of scope and repair implications. Do NOT return "N/A".
 """
     ),
@@ -235,7 +242,7 @@ IDENTIFIERS_VERIFICATION_PROTOCOL = (
     "\n5) Grade legibility for each identifier as one of: 'Clearly legible' / 'Present — not clearly legible' / 'Not present'."
     "\n6) If any identifier is present but not clearly legible, say why (glare, blur, angle) and what photo would resolve it."
     "\n7) Write a one-line bottom line: 'VIN verification: <MATCH/MISMATCH/INCONCLUSIVE>; Odometer: <value or reason>'."
-    "\n8) Weave these facts naturally into the '## Detailed Condition Report' narrative and keep the top-line fields "
+    "\n8) Weave these facts naturally into the '## Detailed Audit Report' narrative and keep the top-line fields "
     "(vin, vin_verification, odometer_estimate_only) consistent."
     "\n9) When citing more than one VIN location (e.g., windshield vs. door label), you must cite DISTINCT Photo #s; "
     "never reuse the same photo number for two different locations."
@@ -334,7 +341,7 @@ SYSTEM_BASE += (
 
 SYSTEM_BASE += (
     " Focus on a cohesive, professional appraisal. Prefer narrative over rigid tables. "
-    "Include a section named '## Detailed Condition Report'. "
+    "Include a section named '## Detailed Audit Report'. "
     "Include '## Compliance Score Rationale' only when compliance_score < 100, and show deductions from 100 with brief evidence refs (p#/L# or Photo #). "
     "If you include tables, keep them concise and only when they help clarity. "
     "Avoid placeholder rows/columns; do not invent data. "
@@ -347,7 +354,7 @@ SYSTEM_BASE += (
 )
 
 SYSTEM_BASE += (
-    " Your 'summary_markdown' MUST include a top-level section named '## Detailed Condition Report' containing a cohesive narrative of at least 10–14 sentences (not bullets). "
+    " Your 'summary_markdown' MUST include a top-level section named '## Detailed Audit Report' containing a cohesive narrative of at least 10–14 sentences (not bullets). "
     "It must synthesize: impact zones, per-panel damages, repair vs. replace rationale, parts type (OEM/LKQ/Aftermarket), labor ops, refinish/overlap, rate/materials/sublet/tax handling, and estimate integrity. "
     "It must cite concrete evidence inline (e.g., p2/L14, Photo 3). "
     "When evaluating paint materials, recognize that a summary line such as 'Paint Supplies' or 'Paint Materials' with hours and rate in the totals section constitutes a valid cost breakdown. "
@@ -406,7 +413,7 @@ def _maybe_ocr_image_text(im: Image.Image) -> str:
     except Exception:
         return ""
 
-def _add_bytes(parts: List[Dict[str,Any]], files_seen: List[str], photo_index: Optional[List[str]], thumb_paths: Optional[List[str]], raw: bytes, fname: str, used: int, max_images: int, pdf_text_fulls: Optional[List[str]] = None) -> int:
+def _add_bytes(parts: List[Dict[str,Any]], files_seen: List[str], photo_index: Optional[List[str]], thumb_paths: Optional[List[str]], raw: bytes, fname: str, used: int, max_images: int, pdf_text_fulls: Optional[List[str]] = None, ocr_pairs: Optional[List[Dict[str, Any]]] = None) -> int:
     low = fname.lower()
     if low.endswith(SUPPORTED_PDF_EXTS) and used < max_images:
         try:
@@ -434,14 +441,27 @@ def _add_bytes(parts: List[Dict[str,Any]], files_seen: List[str], photo_index: O
             files_seen.append(f"{fname} (pdf, could not be converted)")
     elif low.endswith(SUPPORTED_IMAGE_EXTS) and used < max_images:
         im_ref = None
+        raw_for_vin = None
         try:
             im = Image.open(io.BytesIO(raw)).convert("RGB")
             im_ref = im.copy()
-            im.thumbnail((1400,1400))
-            b = io.BytesIO(); im.save(b, format="JPEG", quality=65, optimize=True)
+
+            # Preserve a higher-quality copy for VIN label / QR-barcode decoding (NO filename usage).
+            bv = io.BytesIO()
+            im_ref.save(bv, format="JPEG", quality=92, optimize=True)
+            raw_for_vin = bv.getvalue()
+
+            # Use the same preprocessing for ZIP and loose JPGs (keep higher res for small label text).
+            max_dim = 2048
+            if max(im.size) > max_dim:
+                scale = max_dim / float(max(im.size))
+                im = im.resize((int(im.width * scale), int(im.height * scale)))
+            b = io.BytesIO()
+            im.save(b, format="JPEG", quality=65, optimize=True)
             raw = b.getvalue()
         except Exception:
             im_ref = None
+            raw_for_vin = None
         parts.append(_image_part_from_bytes(raw))
         used += 1
         if photo_index is not None:
@@ -460,6 +480,11 @@ def _add_bytes(parts: List[Dict[str,Any]], files_seen: List[str], photo_index: O
                 pass
         if im_ref is not None:
             txt = _maybe_ocr_image_text(im_ref)
+            if ocr_pairs is not None:
+                try:
+                    ocr_pairs.append({"name": fname, "text": (txt or ""), "raw_for_vin": raw_for_vin})
+                except Exception:
+                    pass
             if txt:
                 parts.insert(0, {"type":"text", "text": txt[:12000]})
                 files_seen.append(f"{fname} (ocr text extracted)")
@@ -589,6 +614,7 @@ async def vision_review(
     files_seen: List[str] = []
     photo_index: List[str] = []
     thumbnail_paths: List[str] = []
+    ocr_pairs: List[Dict[str, Any]] = []
 
     # --- 422 guard: avoid FastAPI validation failures when frontend keys vary ---
     # Accept missing/alternate keys without raising 422; return a clear 400 instead.
@@ -629,7 +655,7 @@ async def vision_review(
         return JSONResponse(status_code=400, content={"error": "Missing required field: file_number"})
     if not files:
         return JSONResponse(status_code=400, content={"error": "Missing required upload: files"})
-    vin_candidates: List[str] = []  # collected from filenames and OCR text
+    vin_candidates: List[str] = []  # reserved (filenames not used)
     MAX_IMAGES = 48
     used = 0
     # Coalesce Add\'l Notes from multiple possible frontend field names
@@ -665,10 +691,6 @@ async def vision_review(
         raw = await f.read()
         fname = f.filename or "upload"
         low = fname.lower()
-        try:
-            vin_candidates += re.findall(VIN_PATTERN, fname.upper())
-        except Exception:
-            pass
         if low.endswith(".zip"):
             try:
                 zf = zipfile.ZipFile(io.BytesIO(raw))
@@ -681,10 +703,6 @@ async def vision_review(
                 members = members[:MAX_ZIP_FILES]
             for zi in members:
                 inner_name = zi.filename
-                try:
-                    vin_candidates += re.findall(VIN_PATTERN, inner_name.upper())
-                except Exception:
-                    pass
                 if ".." in inner_name or inner_name.startswith(("/", "\\")):
                     files_seen.append(f"{fname}::{inner_name} (skipped unsafe path)"); continue
                 if zi.file_size > MAX_ENTRY_SIZE:
@@ -693,9 +711,9 @@ async def vision_review(
                     data = zf.read(zi)
                 except Exception as e:
                     files_seen.append(f"{fname}::{inner_name} (read error: {e})"); continue
-                used = _add_bytes(parts, files_seen, photo_index, thumbnail_paths, data, f"{fname}::{inner_name}", used, MAX_IMAGES, pdf_text_fulls=pdf_text_fulls)
+                used = _add_bytes(parts, files_seen, photo_index, thumbnail_paths, data, f"{fname}::{inner_name}", used, MAX_IMAGES, pdf_text_fulls=pdf_text_fulls, ocr_pairs=ocr_pairs)
         else:
-            used = _add_bytes(parts, files_seen, photo_index, thumbnail_paths, raw, fname, used, MAX_IMAGES, pdf_text_fulls=pdf_text_fulls)
+            used = _add_bytes(parts, files_seen, photo_index, thumbnail_paths, raw, fname, used, MAX_IMAGES, pdf_text_fulls=pdf_text_fulls, ocr_pairs=ocr_pairs)
 
     # Collect uploaded TEXT ONLY for evidence checks
     uploaded_text_blobs = []
@@ -703,53 +721,112 @@ async def vision_review(
         if isinstance(p, dict) and p.get("type") == "text" and isinstance(p.get("text"), str):
             uploaded_text_blobs.append(p["text"])
     uploaded_text_all = "\n".join(uploaded_text_blobs)
+    # --- VIN EXTRACTION (door label OCR -> QR/barcode) ---
+    # Do NOT use filenames. Prefer driver-door certification label OCR; if not found, attempt QR/barcode decode.
+    vin_from_label = None
+    vin_from_label_photo = None
+
+    def _looks_like_door_label(txt: str) -> bool:
+        if not txt:
+            return False
+        t = txt.upper()
+        keys = ["MFD BY", "MANUFACTURED", "GVWR", "GAWR", "TIRE SIZE", "CONFORMS TO"]
+        return sum(1 for k in keys if k in t) >= 2
+
+    # (b) Door label OCR first
     try:
-        vin_candidates += re.findall(VIN_PATTERN, uploaded_text_all.upper())
+        for rec in ocr_pairs:
+            if not isinstance(rec, dict):
+                continue
+            t = rec.get("text") or ""
+            if _looks_like_door_label(t):
+                mvin = re.search(VIN_PATTERN, t.upper())
+                if mvin:
+                    vin_from_label = mvin.group(0)
+                    vin_from_label_photo = rec.get("name") or None
+                    break
     except Exception:
-        pass
+        vin_from_label = None
+        vin_from_label_photo = None
+
+    # (c) If OCR didn't yield a VIN, try a dedicated vision decode for VIN/QR/barcode on the best label candidate
+    def _decode_vin_from_label_or_qr(raw_bytes: Optional[bytes]) -> Optional[str]:
+        if not raw_bytes:
+            return None
+        try:
+            prompt = (
+                "Return ONLY JSON: {\"vin\": \"...\"}.\n"
+                "Task: Read the vehicle VIN from the door-jamb certification label text and/or decode any QR/barcode if present.\n"
+                "Rules: VIN must be exactly 17 characters (A-H, J-N, P, R-Z, 0-9; no I/O/Q). "
+                "If not fully legible, return {\"vin\": null}.\n"
+            )
+            rsp_v = client.chat.completions.create(
+                model=MODEL,
+                messages=[
+                    {"role": "system", "content": "You extract VINs from vehicle door-jamb certification labels. JSON only."},
+                    {"role": "user", "content": [{"type": "text", "text": prompt}, _image_part_from_bytes(raw_bytes)]},
+                ],
+                **{_token_kw: 300},
+                temperature=0,
+                response_format={"type": "json_object"},
+            )
+            raw_v = (rsp_v.choices[0].message.content or "").strip()
+            try:
+                data_v = json.loads(raw_v)
+            except Exception:
+                data_v = None
+            if isinstance(data_v, dict):
+                vv = data_v.get("vin")
+                if isinstance(vv, str):
+                    vv = vv.strip().upper()
+                    if re.fullmatch(VIN_PATTERN, vv):
+                        return vv
+        except Exception:
+            return None
+        return None
+
+    if not vin_from_label:
+        try:
+            candidate = None
+            for rec in ocr_pairs:
+                if isinstance(rec, dict) and _looks_like_door_label(rec.get("text") or "") and rec.get("raw_for_vin"):
+                    candidate = rec
+                    break
+            if candidate is None:
+                for rec in ocr_pairs:
+                    if isinstance(rec, dict) and rec.get("raw_for_vin"):
+                        candidate = rec
+                        break
+            if candidate is not None:
+                vin_from_label = _decode_vin_from_label_or_qr(candidate.get("raw_for_vin"))
+                vin_from_label_photo = candidate.get("name") if vin_from_label else None
+        except Exception:
+            pass
+
     # normalize + keep unique order
     _seen_v = set(); _tmp_v=[]
     for _v in vin_candidates:
         if _v and _v not in _seen_v:
             _seen_v.add(_v); _tmp_v.append(_v)
     vin_candidates = _tmp_v
+
     # --- ODOMETER OCR LOCK (extract mileage from OCR text if visible) ---
-    # Goal: capture the TRUE odometer reading and avoid confusing fuel range/distance-to-empty with odometer.
+    # This makes it impossible for the narrative to claim the odometer is not visible when OCR captured a mileage value.
     odometer_value = None
     try:
         _odo_txt = uploaded_text_all or ""
-        cands = []
-        for mm in re.finditer(r"(?i)\b(\d{1,3}(?:,\d{3})+|\d{1,7})\s*(mi|miles|km)\b", _odo_txt):
-            num = mm.group(1).replace(",", "")
-            unit = mm.group(2).lower()
-            if unit == "miles":
-                unit = "mi"
-            span = mm.span()
-            ctx = _odo_txt[max(0, span[0]-50): span[1]+50].lower()
-            cands.append((int(num), unit, ctx))
-        # Filter out likely fuel range / DTE values
-        filtered = []
-        for n, unit, ctx in cands:
-            if any(k in ctx for k in ["range", "to empty", "dte", "fuel", "distance"]):
-                continue
-            filtered.append((n, unit, ctx))
-        pool = filtered if filtered else cands
-        use = None
-        if pool:
-            # Prefer the largest plausible value for typical vehicles; if only small values exist, take the largest small value.
-            pool_sorted = sorted(pool, key=lambda x: x[0])
-            big = [x for x in pool_sorted if x[0] >= 1000]
-            small = [x for x in pool_sorted if x[0] <= 999]
-            vals_small = {x[0] for x in small}
-            if 157 in vals_small and 165 in vals_small:
-                use = [x for x in small if x[0] == 157][0]
-            else:
-                use = big[-1] if big else (small[-1] if small else None)
-        if use:
-            n, unit, _ = use
-            odometer_value = f"{n:,} {unit}"
+        # Common mileage patterns from digital clusters: "72,261 mi", "72261 mi", "72261 miles", "116000 km"
+        _m = re.search(r"(?i)\b(\d{1,3}(?:,\d{3})+|\d{4,7})\s*(mi|miles|km)\b", _odo_txt)
+        if _m:
+            _digits = _m.group(1).replace(",", "")
+            _unit = _m.group(2).lower()
+            if _unit == "miles":
+                _unit = "mi"
+            odometer_value = f"{int(_digits):,} {_unit}"
     except Exception:
         odometer_value = None
+
+
     # --- Closing Report: extract "Inspection Results" section for deterministic cross-check + shop-status ---
     def _extract_inspection_results_block(_txt: str) -> str:
         if not _txt:
@@ -915,8 +992,7 @@ async def vision_review(
         "INSTRUCTIONS:\n"
         "- Return strict JSON only.\n"
         "- Use the template below for narrative formatting.\n\n"
-        + (FRONT_CORNER_ORIENTATION_GUARD + DAMAGE_SIDE_GUARD) if ai_intent == "damage_report_from_photos" else ""
-+ DETAIL_TEMPLATES.get(ai_intent, DETAIL_TEMPLATES['comprehensive'])
+        + DETAIL_TEMPLATES.get(ai_intent, DETAIL_TEMPLATES['comprehensive'])
     )
 
 
@@ -976,7 +1052,7 @@ async def vision_review(
             model=MODEL,
             messages=[{"role":"system","content": SYSTEM},
                       {"role":"user","content": parts_payload}],
-            **{_token_kw: max_tokens},
+            max_tokens=max_tokens,
             temperature=0,
             top_p=1,
             presence_penalty=0,
@@ -988,7 +1064,7 @@ async def vision_review(
             model=MODEL,
             messages=[{"role":"system","content": SYSTEM},
                       {"role":"user","content": parts_payload}],
-            **{_token_kw: max_tokens},
+            max_tokens=max_tokens,
             temperature=0,
             top_p=1,
             presence_penalty=0,
@@ -1030,6 +1106,19 @@ async def vision_review(
         return JSONResponse(status_code=500, content={"error":"Model returned no content."})
 
     data = _try_parse_json(raw)
+    # Prefer door-label VIN when present (OCR -> QR/barcode). Do NOT use filenames.
+    try:
+        if isinstance(data, dict) and vin_from_label:
+            v_model = (data.get("vin") or "").strip().upper()
+            if not re.fullmatch(VIN_PATTERN, v_model):
+                data["vin"] = vin_from_label
+                if not (data.get("vin_verification") or "").strip():
+                    data["vin_verification"] = "INCONCLUSIVE (door label VIN extracted; compare to other docs if present)"
+            elif v_model != vin_from_label:
+                data["vin_verification"] = f"MISMATCH (door label: {vin_from_label}; other source: {v_model})"
+    except Exception:
+        pass
+
 
     # One safe retry on truncation
     try:
@@ -1047,7 +1136,7 @@ async def vision_review(
                 model=MODEL,
                 messages=[{"role": "system", "content": SYSTEM},
                           {"role": "user", "content": shrunk}],
-                **{_token_kw: retry_tokens},
+                max_tokens=retry_tokens,
                 temperature=0,
                 response_format={"type": "json_object"}
             )
@@ -1077,7 +1166,7 @@ async def vision_review(
                 fix_rsp = client.chat_completions.create(  # type: ignore[attr-defined]
                     model=MODEL,
                     messages=fix_prompt,
-            **{_token_kw: max_tokens},
+                    max_tokens=max_tokens,
                     temperature=0,
                     response_format={"type":"json_object"}
                 )
@@ -1085,7 +1174,7 @@ async def vision_review(
                 fix_rsp = client.chat.completions.create(
                     model=MODEL,
                     messages=fix_prompt,
-            **{_token_kw: max_tokens},
+                    max_tokens=max_tokens,
                     temperature=0,
                     response_format={"type":"json_object"}
                 )
@@ -1101,7 +1190,7 @@ async def vision_review(
         skeleton["request_type"] = req_label
         skeleton["summary_brief"] = "N/A (model output could not be parsed; skeleton returned)."
         skeleton["summary_markdown"] = (
-            "## Detailed Condition Report\n"
+            "## Detailed Audit Report\n"
             "Model output could not be parsed into JSON on this run. Please resubmit."
         )
         skeleton["fraud_markdown"] = "No material inconsistencies found."
@@ -1129,97 +1218,22 @@ async def vision_review(
         "conclusion": _get("conclusion"),
         "redaction_status": redaction_status,
     }
-    # --- POST-PARSE NORMALIZATION ---
-    # 1) Prefer OCR-derived odometer_value when present (avoids fuel-range confusion).
-    try:
-        if odometer_value:
-            result["odometer_estimate_only"] = str(odometer_value)
-    except Exception:
-        pass
 
-    # 2) Strip any embedded Fraud/Conclusion sections from summary_markdown (those are separate JSON fields and printed separately).
-    try:
-        sm = (result.get("summary_markdown") or "")
-        if sm:
-            sm = re.sub(r"(?is)^\s*##\s*Fraud\s*&\s*Authenticity\s*Check\s*.*?(?=^##\s*|\Z)", "", sm, flags=re.MULTILINE)
-            sm = re.sub(r"(?is)^\s*##\s*Conclusion\s*.*?(?=^##\s*|\Z)", "", sm, flags=re.MULTILINE)
-            sm = re.sub(r"(?is)\nFraud\s*&\s*Authenticity\s*Check\n.*", "", sm)
-            result["summary_markdown"] = sm.strip()
-    except Exception:
-        pass
-
-    # 3) If summary_markdown mentions an odometer number, replace it with the OCR-derived value (when present).
-    try:
-        if odometer_value and result.get("summary_markdown"):
-            sm2 = result["summary_markdown"]
-            if re.search(r"(?i)\bodometer\b", sm2):
-                sm2 = re.sub(
-                    r"(?i)(\bodometer\b[^\n]{0,60}?)(\d{2,7})(\s*(?:mi|miles|km))",
-                    lambda mm: mm.group(1) + odometer_value,
-                    sm2
-                )
-            result["summary_markdown"] = sm2
-    except Exception:
-        pass
-
-
-        # --- POST-PARSE SCRUB (VIN FIRST / ODO CONSISTENCY / FRAUD BOILERPLATE) ---
-    try:
-        sm = (result.get("summary_markdown") or "").strip()
-
-        # 1) De-dupe accidental double headers
-        if sm:
-            sm = re.sub(r"(## Detailed Condition Report\s*)\n+\1", r"\1\n", sm)
-
-        # 2) Force VIN verification at the beginning of the narrative body (if available and not already near top)
-        _vin = (result.get("vin") or "").strip()
-        _vinv = (result.get("vin_verification") or "").strip()
-        if _vin and sm:
-            head = sm[:400]
-            if ("VIN" not in head) and (_vin not in head):
-                prefix = f"VIN Verified: {_vin}"
-                if _vinv and _vinv != "N/A":
-                    prefix += f" — {_vinv}"
-                sm = prefix + "\n\n" + sm
-
-        # 3) Odometer: if OCR lock found, enforce it anywhere '165 mi/miles' appears (fuel range confusion)
-        if odometer_value and sm:
-            _odo_num = re.sub(r"[^\d]", "", str(odometer_value))
-            if _odo_num:
-                sm = re.sub(r"(?i)\b165\s*(mi|miles)\b", f"{int(_odo_num)} mi", sm)
-                # Also catch common cluster sentence patterns
-                sm = re.sub(
-                    r"(?i)(\bcluster\b[^\n]{0,140}?)(\d{2,7})\s*(mi|miles)\b",
-                    lambda m: m.group(1) + f"{int(_odo_num)} " + m.group(3),
-                    sm
-                )
-                # Keep structured field aligned
-                result["odometer_estimate_only"] = str(odometer_value)
-
-        # 4) Remove 'none apparent' tampering boilerplate from fraud_markdown
-        fm = (result.get("fraud_markdown") or "")
-        fm = re.sub(r"(?i)\bobvious photo duplication/tampering\s*\(none apparent[^\)]*\)\.?\s*", "", fm).strip()
-        result["fraud_markdown"] = fm if fm else "No material inconsistencies found."
-
-        result["summary_markdown"] = sm
-    except Exception:
-        pass
-
-# ✅ FIX #2: Hard fallback so UI never gets an empty narrative ("No narrative generated")
+    # ✅ FIX #2: Hard fallback so UI never gets an empty narrative ("No narrative generated")
     try:
         sm_tmp = (result.get("summary_markdown") or "").strip()
         if not sm_tmp:
             result["summary_markdown"] = (
-                "## Detailed Condition Report\n"
+                "## Detailed Audit Report\n"
                 "Narrative fallback: The model returned an empty narrative field. "
                 "Please re-run with the same inputs; core identifiers and score fields were still returned.\n\n"
                 "## Overall Assessment\n"
                 f"Request Type: {result.get('request_type','N/A')}\n"
                 f"Compliance Score: {result.get('compliance_score','N/A')}\n"
             )
-        elif "## Detailed Condition Report" not in sm_tmp:
+        elif "## Detailed Audit Report" not in sm_tmp:
             # Keep minimal: do not re-write content; just prepend the required header to avoid downstream display rules.
-            result["summary_markdown"] = "## Detailed Condition Report\n" + sm_tmp
+            result["summary_markdown"] = "## Detailed Audit Report\n" + sm_tmp
     except Exception:
         pass
 
@@ -1374,7 +1388,7 @@ async def vision_review(
 
 
         safe_file = _safe(file_number)
-        pdf_filename = f"AI_Damage_Report_{safe_file}.pdf"
+        pdf_filename = f"AI_Condition_Report_{safe_file}.pdf"
     else:
         pdf.cell(0,10,"NSPXN.com Condition Report", ln=True, align="C")
         pdf.set_font_size(10); pdf.ln(3)
@@ -1605,6 +1619,7 @@ async def download_pdf(file_number: Optional[str] = None, filename: Optional[str
         return JSONResponse(status_code=404, content={"detail": "Not Found"})
     latest = max(candidates, key=lambda p: os.path.getmtime(p))
     return FileResponse(path=latest, media_type="application/pdf", filename=os.path.basename(latest))
+
 
 
 
