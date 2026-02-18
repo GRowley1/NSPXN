@@ -42,15 +42,11 @@ logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(levelname)s - %(
 log = logging.getLogger("nspxn")
 log.info(f"Using CLIENT_RULES_DIR={CLIENT_RULES_DIR}")
 
-# Use selected model everywhere
-MODEL = os.getenv("OAI_MODEL") or os.getenv("OPENAI_MODEL") or "gpt-5.2"
+# Use GPT-5.2 everywhere
+MODEL = os.getenv("OAI_MODEL", "gpt-5.2")
 if not os.getenv("OPENAI_API_KEY"):
     raise RuntimeError("OPENAI_API_KEY missing")
-try:
-    client = OpenAI(api_key=os.environ["OPENAI_API_KEY"], timeout=180.0, max_retries=1)
-except TypeError:
-    # Backwards-compatible init for older openai-python versions
-    client = OpenAI(api_key=os.environ["OPENAI_API_KEY"])
+client = OpenAI(api_key=os.environ["OPENAI_API_KEY"])
 
 # --------------------------------
 # Presidio: Analyzer/Anonymizer (preserve VIN & Claim #)
@@ -180,6 +176,13 @@ Create a concise, professional damage report based ONLY on the provided photos. 
 ## Inputs Used
 - List exact Photo #s used and total photos provided.
 
+## Quick Stats
+- Claim # (if visible): <value or N/A>
+- File #: <value or N/A>
+- Odometer (if visible): <value or 'Present - not clearly legible'>
+- Primary Impact: <main area(s)>
+- Secondary / Bilateral Impact: <any additional areas or 'None clearly visible'>
+
 ## Photo-by-Photo Damage Ledger (REQUIRED - one row per photo)
 | Photo # | View/Side | Key Panels/Parts Visible | Condition Description (damage or 'No obvious damage visible from this angle') |
 |-------:|-----------|---------------------------|--------------------------------------------------------------------------------|
@@ -215,6 +218,12 @@ You MUST fill every line below. If unclear, say "Not clearly shown; cannot asses
 - Cite VIN / odometer with Photo #s; if unreadable explain why.
 - Balance coverage: do NOT focus only on primary damage.
 
+## Estimated Repair Costs (photo-based rough only)
+- Body Labor: ...
+- Paint Labor / Materials: ...
+- Parts: ...
+- Sublet / Tax: ...
+- Rationale tied to observed panels / sides.
 
 ## Fraud & Authenticity Check
 - VIN match, odometer legibility, no tampering/duplicates/metadata issues.
@@ -469,16 +478,10 @@ def _add_bytes(parts: List[Dict[str,Any]], files_seen: List[str], photo_index: O
         if thumb_paths is not None:
             try:
                 im_save = im_ref if im_ref is not None else Image.open(io.BytesIO(raw)).convert("RGB")
-                im_save.thumbnail((650, 650))
+                im_save.thumbnail((900, 900))
                 thumb_name = f"thumb_{uuid.uuid4().hex}.jpg"
                 thumb_path = os.path.join(PDF_DIR, thumb_name)
-                im_save.save(
-                    thumb_path,
-                    format="JPEG",
-                    quality=45,
-                    optimize=True,
-                    progressive=True,
-                )
+                im_save.save(thumb_path, format="JPEG", quality=75, optimize=True)
                 thumb_paths.append(thumb_path)
             except Exception:
                 pass
@@ -1273,28 +1276,6 @@ async def vision_review(
         "redaction_status": redaction_status,
     }
 
-    # --- LEAN SCORE NORMALIZER (deterministic; no narrative rewrite wars) ---
-    # Photos-only: compliance_score must be "N/A" and score lines removed from narrative.
-    # All other intents: keep a valid numeric score if provided; else default to "100".
-    try:
-        sm0 = (result.get("summary_markdown") or "")
-        if ai_intent == "damage_report_from_photos":
-            result["compliance_score"] = "N/A"
-            if isinstance(sm0, str) and sm0:
-                sm0 = re.sub(r"(?im)^\s*(Final\s*score|Compliance\s*Score)\s*[:\-–]\s*\d{1,3}\s*%?\s*$", "", sm0).strip()
-                sm0 = re.sub(r"(?im)^\s*Compliance\s*Score\s*:\s*\d{1,3}\s*%?\s*$", "", sm0).strip()
-                result["summary_markdown"] = sm0
-        else:
-            v = (result.get("compliance_score") or "").strip()
-            if re.fullmatch(r"\d{1,3}", v):
-                s = max(0, min(100, int(v)))
-                result["compliance_score"] = str(s)
-            else:
-                result["compliance_score"] = "100"
-    except Exception:
-        pass
-
-
     # ✅ FIX #2: Hard fallback so UI never gets an empty narrative ("No narrative generated")
     try:
         sm_tmp = (result.get("summary_markdown") or "").strip()
@@ -1516,9 +1497,95 @@ async def vision_review(
     except Exception:
         pass
 
+    # --- Score ↔ narrative synchronization ---
+    def _extract_score_from_text(text: str):
+        if not text:
+            return None
+        m = re.search(r"(?is)\bFinal\s*score\b[^0-9]{0,10}(\d{1,3})\s*%?\b", text)
+        if m:
+            try:
+                v = int(m.group(1))
+                if 0 <= v <= 100:
+                    return v
+            except Exception:
+                pass
+        m = re.search(r"(?is)\bthe\s+compliance\s+score\s+is\s+set\s+at\s+(\d{1,3})\s*%?\b", text)
+        if m:
+            try:
+                v = int(m.group(1))
+                if 0 <= v <= 100:
+                    return v
+            except Exception:
+                pass
+        m = re.search(r"(?is)\bCompliance\s*Score\b[^0-9]{0,10}(\d{1,3})\s*%?\b", text)
+        if m:
+            try:
+                v = int(m.group(1))
+                if 0 <= v <= 100:
+                    return v
+            except Exception:
+                pass
+        return None
 
-    # --- Score synchronization removed (lean mode) ---
+    def _canonicalize_score_in_narrative(narr: str, score_int: int) -> str:
+        if not narr:
+            narr = ""
+        scrub_lines = r"(?im)^\s*(Final\s*score|Compliance\s*Score)\s*[:\-–]\s*\d{1,3}\s*%?\s*$"
+        narr = re.sub(scrub_lines, "", narr)
+        narr = re.sub(r"(?is)\bthe\s+compliance\s+score\s+is\s+set\s+at\s+\d{1,3}\s*%?\b",
+                      "the compliance score is set as below", narr)
+        narr = re.sub(r"\n{3,}", "\n\n", narr).strip()
+        return (narr + f"\n\nCompliance Score: {score_int}").strip()
 
+    try:
+        sm = (result.get("summary_markdown") or "")
+        if ai_intent == "damage_report_from_photos":
+            result["compliance_score"] = "N/A"
+            sm = re.sub(r"(?im)^\s*(Final\s*score|Compliance\s*Score)\s*[:\-–]\s*\d{1,3}\s*%?\s*$", "", sm).strip()
+            result["summary_markdown"] = sm
+        else:
+            s_text = _extract_score_from_text(sm)
+            s_json = None
+            v = (result.get("compliance_score") or "").strip()
+            if re.fullmatch(r"\d{1,3}", v):
+                try:
+                    s_json = int(v)
+                except Exception:
+                    s_json = None
+            chosen = s_text if s_text is not None else s_json
+            if chosen is not None:
+                chosen = max(0, min(100, int(chosen)))
+                result["compliance_score"] = str(chosen)
+                result["summary_markdown"] = _canonicalize_score_in_narrative(sm, chosen)
+            else:
+                result["compliance_score"] = "N/A"
+                sm = re.sub(r"(?im)^\s*(Final\s*score|Compliance\s*Score)\s*[:\-–]\s*\d{1,3}\s*%?\s*$", "", sm).strip()
+                result["summary_markdown"] = sm
+    except Exception:
+        pass
+
+    # ---- AUTO-ADD Compliance Score Rationale with arithmetic when missing ----
+    try:
+        if ai_intent != "damage_report_from_photos":
+            sm = result.get("summary_markdown") or ""
+            score_str = (result.get("compliance_score") or "").strip()
+            if "## Compliance Score Rationale" not in sm and re.fullmatch(r"\d{1,3}", score_str):
+                score_int = max(0, min(100, int(score_str)))
+                if score_int < 100:
+                    deduction = 100 - score_int
+                    rationale_lines = [
+                        "",
+                        "## Compliance Score Rationale",
+                        f"Starting from 100%, a total deduction of {deduction} points was applied based on the minor, non-fatal documentation/formatting items described above, resulting in a final compliance score of {score_int}%.",
+                    ]
+                    if _prod_evidenced or _clean_retail_present:
+                        rationale_lines.append(
+                            "No deduction was applied for Production Date or Clean Retail value, as these items are evidenced in the file and treated as compliant."
+                        )
+                    sm = sm.rstrip() + "\n\n" + "\n".join(rationale_lines)
+                    result["summary_markdown"] = sm
+    except Exception:
+        pass
 
     # Clean Retail deterministic override
     if _clean_retail_present:
@@ -1787,9 +1854,31 @@ async def vision_review(
     except Exception:
         pass
 
+    # FINAL OVERRIDE of Compliance Score Rationale when PD / Clean Retail are evidenced
+    try:
+        if ai_intent != "damage_report_from_photos":
+            sm = result.get("summary_markdown") or ""
+            score_str = (result.get("compliance_score") or "").strip()
+            if re.fullmatch(r"\d{1,3}", score_str):
+                score_int = max(0, min(100, int(score_str)))
+                if score_int < 100 and (_clean_retail_present or _prod_evidenced):
+                    # Remove any existing "## Compliance Score Rationale" section entirely
+                    pattern = r"(?is)\n##\s*Compliance\s*Score\s*Rationale\b.*?(?=\n##\s|\Z)"
+                    sm_no_section = re.sub(pattern, "", sm).rstrip()
 
-    # --- Final compliance rationale override removed (lean mode) ---
-
+                    deduction = 100 - score_int
+                    new_lines = [
+                        "",
+                        "## Compliance Score Rationale",
+                        f"Starting from 100%, a total deduction of {deduction} points was applied for minor, non-fatal documentation/formatting items noted above (e.g., small clarity or layout issues), resulting in a final compliance score of {score_int}%.",
+                    ]
+                    new_lines.append(
+                        "No deduction was taken for Production Date, Clean Retail value, or Release Paperwork, as these items are either evidenced in the file or outside the scope of this compliance audit."
+                    )
+                    sm_final = sm_no_section + "\n\n" + "\n".join(new_lines)
+                    result["summary_markdown"] = sm_final
+    except Exception:
+        pass
 
     # Normalize odometer field when photo is present, so header is clean
     try:
@@ -2221,6 +2310,7 @@ async def vision_review(
         pdf_status = result["redaction_status"].replace("✅", "OK")
         pdf.ln(2); mc(pdf_status)
         pdf.ln(2); mc("Condition Summary"); mc((result["summary_markdown"] or "N/A").strip())
+        mc("Estimated Repair Costs"); mc((result["estimated_costs_markdown"] or "N/A").strip())
         pdf.ln(2); mc("Fraud & Authenticity Check"); mc((result["fraud_markdown"] or 'N/A').strip())
         pdf.ln(2); mc("Conclusion"); mc((result["conclusion"] or 'N/A').strip())
 
@@ -2380,6 +2470,8 @@ async def vision_review(
                 f"{result['redaction_status']}\n\n"
                 "Condition Summary\n"
                 f"{(result['summary_markdown'] or 'N/A')}\n\n"
+                "Estimated Repair Costs\n"
+                f"{(result['estimated_costs_markdown'] or 'N/A')}\n\n"
                 "Fraud & Authenticity Check\n"
                 f"{(result['fraud_markdown'] or 'N/A')}\n\n"
                 "Conclusion\n"
