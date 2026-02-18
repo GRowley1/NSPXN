@@ -177,19 +177,18 @@ DETAIL_TEMPLATES = {
     ),
 
     "damage_report_from_photos": (
-        """NSPXN.com Condition Report (Photos Only)
-Create a professional damage report based ONLY on the provided photos.
-
+        """# Photos Only Condition Report
+        
 ## Photo-by-Photo Condition Summary 
 | Photo # | View/Side | Key Panels/Parts Visible | Damage/Condition |
 |---:|---|---|---|
 - Cover EVERY provided photo. If no damage is obvious from that angle, write: "No obvious damage visible from this angle" (do not use the word intact).
 
-## Side Checks (MANDATORY)
+## Side Checks
 - **Driver/Left Side**: <what is visible; cite Photo #; if not shown, say not shown>
 - **Passenger/Right Side**: <what is visible; cite Photo #; if not shown, say not shown>
 
-## Front-End Checklist (MANDATORY - DO NOT OMIT HOOD)
+## Front-End Checklist
 - Hood: <condition or Not clearly shown> (Photo #)
 - Front bumper cover: <condition or Not clearly shown> (Photo #)
 - Grille: <condition or Not clearly shown> (Photo #)
