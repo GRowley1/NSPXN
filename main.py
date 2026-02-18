@@ -116,7 +116,7 @@ DETAIL_TEMPLATES = {
         "- Briefly list which documents, pages, and photos you actually referenced.\n\n"
         "## Executive Summary\n"
         "- 3–5 bullets summarizing overall compliance and key risks.\n\n"
-        "## AI-4-IA Review Summary\n"
+        "Condition Summary\n"
         "- Write a formal, paragraph-style appraisal narrative. Include scope of impact, damage by zone/panel, "
         "repair vs. replace rationale, parts type (OEM/LKQ/Aftermarket), labor ops, refinish overlap, rate validation, "
         "tax handling, and estimate integrity. Reference evidence inline (e.g., 'p2/L14', 'Photo 3'). "
@@ -177,10 +177,10 @@ DETAIL_TEMPLATES = {
     ),
 
     "damage_report_from_photos": (
-        """# AI-4-IA Damage Report (Photos Only)
+        """NSPXN.com Condition Report (Photos Only)
 Create a professional damage report based ONLY on the provided photos.
 
-## Photo-by-Photo Damage Ledger (REQUIRED - one row per photo)
+## Photo-by-Photo Condition Summary 
 | Photo # | View/Side | Key Panels/Parts Visible | Damage/Condition |
 |---:|---|---|---|
 - Cover EVERY provided photo. If no damage is obvious from that angle, write: "No obvious damage visible from this angle" (do not use the word intact).
@@ -1164,14 +1164,14 @@ async def vision_review(
         sm_tmp = (result.get("summary_markdown") or "").strip()
         if not sm_tmp:
             result["summary_markdown"] = (
-                "## Detailed Audit Report\n"
+                "## Detailed Condition Report\n"
                 "Narrative fallback: The model returned an empty narrative field. "
                 "Please re-run with the same inputs; core identifiers and score fields were still returned.\n\n"
                 "## Overall Assessment\n"
                 f"Request Type: {result.get('request_type','N/A')}\n"
                 f"Compliance Score: {result.get('compliance_score','N/A')}\n"
             )
-        elif "## Detailed Audit Report" not in sm_tmp:
+        elif "## Detailed Condition Report" not in sm_tmp:
             # Keep minimal: do not re-write content; just prepend the required header to avoid downstream display rules.
             result["summary_markdown"] = "## Detailed Audit Report\n" + sm_tmp
     except Exception:
