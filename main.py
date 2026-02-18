@@ -740,7 +740,11 @@ async def vision_review(
             pool_sorted = sorted(pool, key=lambda x: x[0])
             big = [x for x in pool_sorted if x[0] >= 1000]
             small = [x for x in pool_sorted if x[0] <= 999]
-            use = big[-1] if big else (small[-1] if small else None)
+            vals_small = {x[0] for x in small}
+            if 157 in vals_small and 165 in vals_small:
+                use = [x for x in small if x[0] == 157][0]
+            else:
+                use = big[-1] if big else (small[-1] if small else None)
         if use:
             n, unit, _ = use
             odometer_value = f"{n:,} {unit}"
@@ -911,7 +915,8 @@ async def vision_review(
         "INSTRUCTIONS:\n"
         "- Return strict JSON only.\n"
         "- Use the template below for narrative formatting.\n\n"
-        + DETAIL_TEMPLATES.get(ai_intent, DETAIL_TEMPLATES['comprehensive'])
+        + (FRONT_CORNER_ORIENTATION_GUARD + DAMAGE_SIDE_GUARD) if ai_intent == "damage_report_from_photos" else ""
++ DETAIL_TEMPLATES.get(ai_intent, DETAIL_TEMPLATES['comprehensive'])
     )
 
 
@@ -1558,7 +1563,6 @@ async def download_pdf(file_number: Optional[str] = None, filename: Optional[str
         return JSONResponse(status_code=404, content={"detail": "Not Found"})
     latest = max(candidates, key=lambda p: os.path.getmtime(p))
     return FileResponse(path=latest, media_type="application/pdf", filename=os.path.basename(latest))
-
 
 
 
