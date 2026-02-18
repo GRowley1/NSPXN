@@ -42,8 +42,8 @@ logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(levelname)s - %(
 log = logging.getLogger("nspxn")
 log.info(f"Using CLIENT_RULES_DIR={CLIENT_RULES_DIR}")
 
-# Use GPT-5.2 everywhere
-MODEL = os.getenv("OAI_MODEL", "gpt-5.2")
+# Use GPT-4o everywhere
+MODEL = os.getenv("OAI_MODEL", "gpt-4o")
 if not os.getenv("OPENAI_API_KEY"):
     raise RuntimeError("OPENAI_API_KEY missing")
 client = OpenAI(api_key=os.environ["OPENAI_API_KEY"])
@@ -1112,34 +1112,24 @@ async def vision_review(
     }
     max_tokens = MAX_TOKENS_BY_INTENT.get(ai_intent, 1500)
 
-    # GPT-5.x models use max_completion_tokens; GPT-4.x uses max_tokens
-    _token_kw = "max_completion_tokens" if str(MODEL).startswith("gpt-5") else "max_tokens"
-
     # Call GPT and parse JSON (JSON hardened)
-    # Prefer the canonical SDK path (client.chat.completions). Keep fallback for older SDKs.
     try:
-        rsp = client.chat.completions.create(
-            model=MODEL,
-            messages=[{"role":"system","content": SYSTEM},
-                      {"role":"user","content": parts_payload}],
-            **{_token_kw: max_tokens},
-            temperature=0,
-            top_p=1,
-            presence_penalty=0,
-            frequency_penalty=0,
-            response_format={"type":"json_object"},
-        )
-    except AttributeError:
         rsp = client.chat_completions.create(  # type: ignore[attr-defined]
             model=MODEL,
             messages=[{"role":"system","content": SYSTEM},
                       {"role":"user","content": parts_payload}],
-            **{_token_kw: max_tokens},
+            max_tokens=max_tokens,
             temperature=0,
-            top_p=1,
-            presence_penalty=0,
-            frequency_penalty=0,
-            response_format={"type":"json_object"},
+            response_format={"type":"json_object"}
+        )
+    except AttributeError:
+        rsp = client.chat.completions.create(
+            model=MODEL,
+            messages=[{"role":"system","content": SYSTEM},
+                      {"role":"user","content": parts_payload}],
+            max_tokens=max_tokens,
+            temperature=0,
+            response_format={"type":"json_object"}
         )
 
     # --- Hardened JSON parse helper
@@ -1193,7 +1183,7 @@ async def vision_review(
                 model=MODEL,
                 messages=[{"role": "system", "content": SYSTEM},
                           {"role": "user", "content": shrunk}],
-                **{_token_kw: retry_tokens},
+                max_tokens=retry_tokens,
                 temperature=0,
                 response_format={"type": "json_object"}
             )
@@ -1223,7 +1213,7 @@ async def vision_review(
                 fix_rsp = client.chat_completions.create(  # type: ignore[attr-defined]
                     model=MODEL,
                     messages=fix_prompt,
-                    **{_token_kw: max_tokens},
+                    max_tokens=max_tokens,
                     temperature=0,
                     response_format={"type":"json_object"}
                 )
@@ -1231,7 +1221,7 @@ async def vision_review(
                 fix_rsp = client.chat.completions.create(
                     model=MODEL,
                     messages=fix_prompt,
-                    **{_token_kw: max_tokens},
+                    max_tokens=max_tokens,
                     temperature=0,
                     response_format={"type":"json_object"}
                 )
@@ -2246,7 +2236,7 @@ async def vision_review(
             pdf_obj.set_font("Helvetica", "B", 12)
         except Exception:
             pdf_obj.set_font("Arial", "B", 12)
-        pdf_obj.cell(0, 8, "Uploaded Photos", ln=True)
+        pdf_obj.cell(0, 8, "Uploaded Photo Thumbnails", ln=True)
         pdf_obj.ln(2)
 
         # Layout (single-page, grid)
@@ -2309,7 +2299,7 @@ async def vision_review(
         mc(f"Inspected For: {ia_company}")
         pdf_status = result["redaction_status"].replace("✅", "OK")
         pdf.ln(2); mc(pdf_status)
-        pdf.ln(2); mc("Condition Summary"); mc((result["summary_markdown"] or "N/A").strip())
+        pdf.ln(2); mc("Damage Summary"); mc((result["summary_markdown"] or "N/A").strip())
         mc("Estimated Repair Costs"); mc((result["estimated_costs_markdown"] or "N/A").strip())
         pdf.ln(2); mc("Fraud & Authenticity Check"); mc((result["fraud_markdown"] or 'N/A').strip())
         pdf.ln(2); mc("Conclusion"); mc((result["conclusion"] or 'N/A').strip())
@@ -2401,7 +2391,7 @@ async def vision_review(
         mc(f"Compliance Score: {result['compliance_score']}")
         pdf_status = result["redaction_status"].replace("✅", "OK")
         mc(pdf_status)
-        pdf.ln(3); mc("NSPXN.com Condition Summary"); mc((smark or '').strip())
+        pdf.ln(3); mc("NSPXN.com Review Summary"); mc((smark or '').strip())
         pdf.ln(3); mc("Fraud Detection"); mc((result["fraud_markdown"] or 'N/A').strip())
 
         # --- AI Disclaimer (after report content) ---
@@ -2521,7 +2511,7 @@ async def vision_review(
                 f"Odometer (from estimate): {result['odometer_estimate_only']}\n"
                 f"Compliance Score: {result['compliance_score']}\n\n"
                 f"{result['redaction_status']}\n\n"
-                "NSPXN.com Condition Summary\n"
+                "NSPXN.com Review Summary\n"
                 f"{result['summary_markdown']}\n\n"
                 "Fraud Detection\n"
                 f"{result['fraud_markdown']}\n"
