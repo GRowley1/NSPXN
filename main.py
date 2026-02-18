@@ -43,14 +43,14 @@ log = logging.getLogger("nspxn")
 log.info(f"Using CLIENT_RULES_DIR={CLIENT_RULES_DIR}")
 
 # Use selected model everywhere
-MODEL = os.getenv("OAI_MODEL") or os.getenv("OPENAI_MODEL") or "gpt-4.1"
+MODEL = os.getenv("OAI_MODEL") or os.getenv("OPENAI_MODEL") or "gpt-5.2"
 # GPT-5.x models use max_completion_tokens; GPT-4.x uses max_tokens
 _token_kw = "max_completion_tokens" if str(MODEL).startswith("gpt-5") else "max_tokens"
 
 if not os.getenv("OPENAI_API_KEY"):
     raise RuntimeError("OPENAI_API_KEY missing")
 try:
-    client = OpenAI(api_key=os.environ["OPENAI_API_KEY"], timeout=60.0, max_retries=2)
+    client = OpenAI(api_key=os.environ["OPENAI_API_KEY"], timeout=120.0, max_retries=1)
 except TypeError:
     # Backwards-compatible init for older openai-python versions
     client = OpenAI(api_key=os.environ["OPENAI_API_KEY"])
@@ -177,60 +177,40 @@ DETAIL_TEMPLATES = {
     ),
 
     "damage_report_from_photos": (
-        """# AI-4-IA Damage Report
-Create a concise, professional damage report based ONLY on the provided photos. Cover all visible sides and panels exhaustively. Do not omit panels like the hood.
+        """
+# AI-4-IA Damage Report (Photos Only)
+Create a professional damage report based ONLY on the provided photos.
 
 ## Inputs Used
 - List exact Photo #s used and total photos provided.
 
-## Quick Stats
-- Claim # (if visible): <value or N/A>
-- File #: <value or N/A>
-- Odometer (if visible): <value or 'Present - not clearly legible'>
-- Primary Impact: <main area(s)>
-- Secondary / Bilateral Impact: <any additional areas or 'None clearly visible'>
-
 ## Photo-by-Photo Damage Ledger (REQUIRED - one row per photo)
-| Photo # | View/Side | Key Panels/Parts Visible | Condition Description (damage or 'No obvious damage visible from this angle') |
-|-------:|-----------|---------------------------|--------------------------------------------------------------------------------|
-- Cover EVERY provided photo. For clean views, explicitly write 'No obvious damage visible from this angle on [panels/side]'. Do NOT skip rows or omit photos.
+| Photo # | View/Side | Key Panels/Parts Visible | Damage/Condition |
+|---:|---|---|---|
+- Cover EVERY provided photo. If no damage is obvious from that angle, write: "No obvious damage visible from this angle" (do not use the word intact).
 
-## Side Checks (MANDATORY - always include BOTH bullets)
-- **Driver/Left Side**: <what is visible on left/driver side; cite at least one Photo #>
-- **Passenger/Right Side**: <what is visible on right/passenger side; cite at least one Photo #>
-
-Rules:
-- If a side is shown but no damage is apparent, do NOT write any 'intact/clean/no damage' statement. Simply omit that area from the narrative unless needed for context.
-- If a side is NOT shown clearly, say "Not clearly shown in provided photos; cannot assess" (and do NOT guess).
-- Do NOT make blanket statements like "both sides show no visible damage". Address Driver/Left and Passenger/Right separately with citations.
+## Side Checks (MANDATORY)
+- **Driver/Left Side**: <what is visible; cite Photo #; if not shown, say not shown>
+- **Passenger/Right Side**: <what is visible; cite Photo #; if not shown, say not shown>
 
 ## Front-End Checklist (MANDATORY - DO NOT OMIT HOOD)
-You MUST fill every line below. If unclear, say "Not clearly shown; cannot assess" (do not guess). If gaps/misalignment/buckling are visible, treat that as damage.
-- Hood: <dent/crease/buckle/misalignment/gap issue or 'Not clearly shown; cannot assess'> (Photo #)
-- Front bumper cover: <condition> (Photo #)
-- Grille: <condition> (Photo #)
-- Driver-side headlamp: <condition> (Photo #)
-- Passenger-side headlamp: <condition> (Photo #)
-- Driver-side front fender: <condition> (Photo #)
-- Passenger-side front fender: <condition> (Photo #)
+- Hood: <condition or Not clearly shown> (Photo #)
+- Front bumper cover: <condition or Not clearly shown> (Photo #)
+- Grille: <condition or Not clearly shown> (Photo #)
+- Driver-side headlamp: <condition or Not clearly shown> (Photo #)
+- Passenger-side headlamp: <condition or Not clearly shown> (Photo #)
+- Driver-side front fender: <condition or Not clearly shown> (Photo #)
+- Passenger-side front fender: <condition or Not clearly shown> (Photo #)
 
-## Other Views (use bullets; cite Photo #s)
-- **Rear**: bumper, tail lamps, hatch/trunk - describe each.
-- **Roof / upper body**: any damage or 'Not clearly shown; cannot assess'.
-- **Interior** (if shown): seats, dash, airbags - describe deployment or 'Not clearly shown; cannot assess'.
-
-## Detailed Audit Report (narrative)
-- Write a continuous 10-15 sentence professional narrative that synthesizes the Side Checks and Front-End Checklist (do NOT contradict them).
-- Describe impact zones, visible misalignment/gap issues, repair vs replace logic (photo-based).
-- Cite VIN / odometer with Photo #s; if unreadable explain why.
-- Balance coverage: do NOT focus only on primary damage.
+## Detailed Audit Report
+- Write a continuous 10–15 sentence narrative summarizing visible damage, impact zones, misalignment/gaps, and repair implications (photo-based).
+- If VIN label or odometer are visible, state them with Photo #. If not visible or unreadable, say so.
 
 ## Fraud & Authenticity Check
-- VIN match, odometer legibility, no tampering/duplicates/metadata issues.
+- Briefly state what was checked (duplicates/tampering, VIN/odo presence, consistency).
 
 ## Conclusion
-- Summarize scope and repair implications in 1-3 sentences.
-- 'No fraud indicators identified' if clean.
+- 1–3 sentence summary of scope and repair implications. Do NOT return "N/A".
 """
     ),
 }
@@ -336,13 +316,13 @@ ALLOWED_INTENTS = {"guidelines_only","comprehensive","damage_report_from_photos"
 
 SYSTEM_BASE = (
     "You are an auto-claims appraisal assistant. Return ONLY valid JSON (no code fences). "
-    "Populate exactly these keys (always include all, use 'N/A' when not applicable): "
+    "Always include all required keys: "
     "['file_number','request_type','claim_number','vin','vin_verification','vehicle',"
     "'odometer_estimate_only','compliance_score','summary_brief','summary_markdown',"
-    "'fraud_markdown','primary_impact','secondary_impact',"
-    "'conclusion']. "
-    "Use evidence only from the provided inputs. Cite estimate page/line as 'p#/L#' and photos as 'Photo #'. "
-    "Avoid guessing; if uncertain, say 'N/A' and why. summary_brief must be <= 280 chars (plain text)."
+    "'fraud_markdown','primary_impact','secondary_impact','conclusion']. "
+    "Use only provided evidence. Cite photos as 'Photo #' and docs as 'p#/L#' when available. "
+    "Do not guess. If something is not visible, say why. "
+    "NEVER return 'N/A' for summary_markdown, fraud_markdown, or conclusion."
 )
 
 SYSTEM_BASE += (
@@ -904,187 +884,29 @@ async def vision_review(
             "- Use these exact tags (e.g., 'Supplement S01 and S02') when describing supplements in the narrative.\n"
         )
 
+    # -----------------------
+    # Minimal prompt (LET GPT DO THE WORK)
+    # -----------------------
     prompt_text = (
-        f"REQUEST TYPE SELECTED (exact): '{req_label}'. Use this exact string in 'request_type'.\n\n"
-        "FILES SEEN (echo verbatim in '## Inputs Used'):\n- "
-        + ("\n- ".join(files_seen) if files_seen else "none")
-        + "\n\nPHOTO INDEX (MANDATORY — use this mapping for ALL Photo # citations):\n"
-        + ("\n".join([f"Photo {i+1}: {name}" for i, name in enumerate(photo_index)]) if photo_index else "No photos were included.")
+        f"REQUEST TYPE (use exactly in request_type): {req_label}\n"
+        f"FILE #: {file_number}\n"
+        f"CLIENT: {ia_company}\n\n"
+        "PHOTO INDEX (use Photo # citations exactly as listed):\n"
+        + ("\n".join([f"Photo {i+1}: {name}" for i, name in enumerate(photo_index)]) if photo_index else "No photos provided.")
         + "\n\n"
-        + "\n\nCLIENT RULES (if provided; else blank):\n"
-        + (client_rules[:2000] if client_rules else "")
-        + "\n\nADD'L NOTES FOR AI REVIEW (priority focus; only applies to guidelines/review items):\n"
-        + (ai_notes_used[:2000] if ai_notes_used else "")
-        + supplement_block
-        + "\n\nANALYSIS LAYOUT (guidance, not strict):\n"
-        + DETAIL_TEMPLATES.get(ai_intent, DETAIL_TEMPLATES["comprehensive"])
-    )
-    
-    if ai_notes_used:
-        _note = ai_notes_used[:2000]
-        prompt_text += (
-            "\n\nADD'L NOTES (MANDATORY):\n"
-            "- You MUST include a short subsection titled \"### Add'l Notes Addressed\" inside '## Detailed Audit Report'.\n"
-            "- Quote the note verbatim, then respond to it as a CHECK ITEM (do not reinterpret locations like front/rear/left/right from the note).\n"
-            "- If Add’l Notes specifies a corner for a component (wheel/tire/rim), treat that corner as the required reference. Do not substitute another corner. If unsure, say ‘corner not independently verified’ but do not contradict the note. \n"
-            "- If the requested item is not clearly visible in photos, write: 'Not verifiable from provided photos' and specify the exact photo needed. Do not speculate; stick to observable facts.\n"
-            f"- Note to address (verbatim): \"{_note}\"\n"
-        )
-    prompt_text = (
-        "OUTPUT FORMAT (MANDATORY): Return ONLY a single strict JSON object with keys "
-        "['file_number','request_type','claim_number','vin','vin_verification','vehicle',"
-        "'odometer_estimate_only','compliance_score','summary_brief','summary_markdown',"
-        "'fraud_markdown','primary_impact','secondary_impact','conclusion'] "
-        "and no extra text before or after.\n\n"
-    ) + prompt_text
-
-    # --- Closing Report cross-check injection (Inspection Results vs Detailed Audit Report) ---
-    if inspection_results_text:
-        prompt_text += (
-            "\n\nCLOSING REPORT — INSPECTION RESULTS (verbatim extract):\n"
-            + inspection_results_text[:2000]
-            + "\n\nCLOSING REPORT CROSS-CHECK (MANDATORY):\n"
-            "- In your '## Detailed Audit Report' narrative, explicitly confirm your narrative matches the Inspection Results above.\n"
-            "- If the Inspection Results indicate 'Not at Shop' / 'Owner location', do NOT claim Repair Facility info is missing and do NOT deduct for it.\n"
-            "- If the Inspection Results list a named shop/repair facility, ensure your Repair Facility discussion is consistent with that documentation.\n"
-        )
-    if _possible_supp_amount:
-        prompt_text += (
-            "\n\nCLOSING REPORT NOTE: 'Possible Supplement Amount' is present ($" + str(_possible_supp_amount) + "). "
-            "This alone does NOT mean the estimate is a supplement. Do NOT label the estimate as a Supplement unless explicit supplement tags (e.g., S01/S02) or 'Supplement Summary' are present.\n"
-        )
-
-    if photos_provided:
-        prompt_text += (
-            "\n\nPHOTOS PROVIDED: This upload includes photos/images. "
-            "Do NOT say 'photos not provided', 'not provided here', or similar. "
-            "Assess provided photos and do not mark required photos as missing unless they are truly absent."
-        )
-
-    # (removed duplicate NO_INTACT_IF_DAMAGED_RULE append; applied later with other guards)
-
-    if ai_intent == "damage_report_from_photos":
-        prompt_text += (
-            "\n\nPHOTOS-ONLY MODE (STRICT DAMAGE CAPTURE): "
-            "Describe ONLY visible damage. "
-            "Do NOT state that any side, panel, system, or component is intact, undamaged, clean, unaffected, or structurally sound. "
-            "Do NOT clear any side of the vehicle. "
-            "Do NOT include any 'Estimated Repair Costs' section (or any costs/rationale/parts-labor-tax discussion). "
-            "If a side/corner is not clearly shown, state: 'not fully visible; cannot confirm.' "
-            "Do NOT conclude that damage is confined to one side unless all other sides are clearly and fully shown. "
-            "If side orientation (driver vs passenger) cannot be confirmed using clear visual anchors "
-            "(fuel door location, steering wheel visibility, VIN/door-label photo, consistent multi-angle reference), "
-            "DO NOT guess; use neutral phrasing (e.g., 'front-right corner', 'rear-left corner', 'side shown')."
-        )
-
-        prompt_text += (
-            "\nINTERNAL 4-CORNER COVERAGE CHECK (DO NOT PRINT): "
-            "For each corner, classify as: damaged / intact cannot be stated / not shown. "
-            "Corners: Front-left, Front-right, Rear-left, Rear-right. "
-            "If a corner is not clearly shown, mark 'not shown' and do NOT write any intact/clean/no-damage statement about it."
-        )
-
-        prompt_text += (
-            "\nINTERNAL BUMPER FITMENT CHECK (DO NOT PRINT): "
-            "If any bumper cover shows gap/misalignment/loose fitment at corners, joints, lamps, or quarter interface, "
-            "mention bumper fitment/misalignment as visible damage/condition."
-        )
-
-        prompt_text += (
-            "\nINTERNAL CONSISTENCY CHECK (DO NOT PRINT): "
-            "Before finalizing, verify that damage visible from any angle is included and not contradicted elsewhere. "
-            "Do not omit damage visible in side-profile or multi-angle photos."
-        )
-
-        prompt_text += (
-            "\nABSOLUTE BAN (PHOTOS-ONLY): Do not reference or imply any estimate document. "
-            "Do not use phrases like 'the estimate', 'p#/L#', 'CCC', 'labor rate', or page/line notation."
-        )
-    else:
-        prompt_text += SUPPLEMENT_HANDLING
-
-    if ai_intent == "comprehensive":
-        prompt_text += (
-            "\n\nUploader note: If odometer and registration photos are present, report their legibility accurately. "
-            "If they are not present, state 'Missing' plainly. Do not assume their presence if they cannot be visually confirmed."
-        )
-
-    if client_rules.strip():
-        prompt_text += (
-            "\n\nWhen client_rules text is provided, you MUST include a section titled '## Client Guidelines Comparison' "
-            "with 3–8 concise bullets. For each, quote the relevant rule fragment and mark Aligned / Not Aligned / Not Evidenced, "
-            "citing evidence (p#/L# or Photo #). Also weave any material rule alignment/misalignment into the '## Detailed Audit Report' narrative."
-        )
-        prompt_text += (
-            "\n\nWeave the following static audit questions naturally into the '## Detailed Audit Report' narrative "
-            "(do NOT present as a separate Q&A list; integrate answers inline and cite evidence with p#/L# and Photo # as applicable):\n"
-            + "\n".join(f"- {q}" for q in STATIC_AUDIT_QUESTIONS)
-        )
-
-    prompt_text += (
-        "\n\nPHOTO NUMBER SANITY CHECK: Before finalizing, verify that every referenced Photo # actually exists and matches the content described."
+        "CLIENT RULES (only if provided):\n"
+        + (client_rules[:1500] if client_rules else "")
+        + "\n\n"
+        "ADD'L NOTES (only if provided):\n"
+        + (ai_notes_used[:1500] if ai_notes_used else "")
+        + "\n\n"
+        "INSTRUCTIONS:\n"
+        "- Return strict JSON only.\n"
+        "- Use the template below for narrative formatting.\n\n"
+        + DETAIL_TEMPLATES.get(ai_intent, DETAIL_TEMPLATES['comprehensive'])
     )
 
-    prompt_text += IDENTIFIERS_VERIFICATION_PROTOCOL
-    prompt_text += CONSISTENCY_GUARD
-    prompt_text += NO_INTACT_IF_DAMAGED_RULE
-    prompt_text += DAMAGE_SIDE_GUARD
-    prompt_text += FRONT_CORNER_ORIENTATION_GUARD
-    prompt_text += BILATERAL_DAMAGE_MANDATE
-    prompt_text += PARTS_SOURCE_GUARD
 
-    # --------- EVIDENCE FLAGS ----------
-    flags = []
-    if _not_at_shop:
-        flags.append(
-            "- Closing Report Inspection Results indicate the vehicle is NOT at a repair facility (Owner location / Not at Shop). "
-            "Do NOT treat Repair Facility information as required and do NOT deduct for it."
-        )
-    if _paint_materials_present:
-        flags.append(
-            "- Paint materials summary line is present in the estimate totals (e.g., 'Paint Supplies' on the totals page). "
-            "Treat paint materials as evidenced even if not itemized per panel."
-        )
-    if _clean_retail_present:
-        flags.append(
-            "- Clean Retail Value printout is present (e.g., J.D. Power / NADA / KBB / Edmunds / Carfax / Cars.com). "
-            "If the year/trim/mileage do not match the estimate/VIN, state 'Present — mismatched' and specify the differences. "
-            "Do not mark it 'Not Evidenced'."
-        )
-    if _advisor_present:
-        flags.append(
-            "- A refreshed copy of the Advisor Report is present in the documents. "
-            "Do not state it is missing."
-        )
-    if _vin_photo_present:
-        flags.append(
-            "- A driver-door VIN label/photo is present. Treat Production Date as evidenced by the same label; do NOT deduct or claim 'not separately documented'."
-        )
-    if _odo_photo_present:
-        flags.append(
-            "- An odometer photo is present. Do not mark the odometer as missing; transcribe the digits and cite the Photo #."
-        )
-    if _prod_date_present:
-        flags.append(
-            "- A production date (Date of Mfr/MFD DATE) is visible on a door label photo. Do not mark Production Date as missing; cite the Photo # and the month/year."
-        )
-    if _closing_no_aftermarket and not _explicit_non_oem_parts:
-        flags.append(
-            "- Closing Report states no aftermarket/LKQ parts were included and the estimate line items do not explicitly indicate non-OEM parts. "
-            "Do NOT describe any replaced parts as aftermarket/A/M/LKQ; treat them as OEM unless line items explicitly say otherwise."
-        )
-    elif _explicit_non_oem_parts:
-        flags.append(
-            "- Non-OEM parts indicators (A/M/Aftermarket/LKQ/etc.) appear in the estimate line items. "
-            "If you discuss parts type, be specific and cite the exact estimate line(s) showing the indicator."
-        )
-
-    # ✅ FIX #1: Actually inject evidence flags into the prompt (previously you computed flags but never used them)
-    if flags:
-        prompt_text += (
-            "\n\nEVIDENCE FLAGS (obey these and do NOT contradict them):\n"
-            + "\n".join(flags)
-        )
 
     parts_payload: List[Dict[str,Any]] = []
     redaction_success = False
@@ -1141,7 +963,7 @@ async def vision_review(
             model=MODEL,
             messages=[{"role":"system","content": SYSTEM},
                       {"role":"user","content": parts_payload}],
-            **{_token_kw: max_tokens},
+            max_tokens=max_tokens,
             temperature=0,
             top_p=1,
             presence_penalty=0,
@@ -1153,7 +975,7 @@ async def vision_review(
             model=MODEL,
             messages=[{"role":"system","content": SYSTEM},
                       {"role":"user","content": parts_payload}],
-            **{_token_kw: max_tokens},
+            max_tokens=max_tokens,
             temperature=0,
             top_p=1,
             presence_penalty=0,
@@ -1212,7 +1034,7 @@ async def vision_review(
                 model=MODEL,
                 messages=[{"role": "system", "content": SYSTEM},
                           {"role": "user", "content": shrunk}],
-                **{_token_kw: retry_tokens},
+                max_tokens=retry_tokens,
                 temperature=0,
                 response_format={"type": "json_object"}
             )
@@ -1242,7 +1064,7 @@ async def vision_review(
                 fix_rsp = client.chat_completions.create(  # type: ignore[attr-defined]
                     model=MODEL,
                     messages=fix_prompt,
-                    **{_token_kw: max_tokens},
+                    max_tokens=max_tokens,
                     temperature=0,
                     response_format={"type":"json_object"}
                 )
@@ -1250,7 +1072,7 @@ async def vision_review(
                 fix_rsp = client.chat.completions.create(
                     model=MODEL,
                     messages=fix_prompt,
-                    **{_token_kw: max_tokens},
+                    max_tokens=max_tokens,
                     temperature=0,
                     response_format={"type":"json_object"}
                 )
@@ -1310,929 +1132,6 @@ async def vision_review(
         elif "## Detailed Audit Report" not in sm_tmp:
             # Keep minimal: do not re-write content; just prepend the required header to avoid downstream display rules.
             result["summary_markdown"] = "## Detailed Audit Report\n" + sm_tmp
-    except Exception:
-        pass
-
-    # --- VIN IN NARRATIVE ENFORCER (MINIMAL) ---
-    # Ensure a verified/observed VIN appears in the narrative (summary_markdown) when VIN is present.
-    try:
-        _vin = (result.get("vin") or "").strip()
-        if re.fullmatch(r"[A-HJ-NPR-Z0-9]{17}", _vin or ""):
-            _sm = (result.get("summary_markdown") or "")
-            if _vin not in _sm:
-                _vv = (result.get("vin_verification") or "").lower()
-                _status = "verified" if any(k in _vv for k in ("verified", "match", "matches", "confirmed")) else "observed"
-                _vin_line = f"VIN {_status}: {_vin}"
-                if "## Detailed Audit Report" in _sm:
-                    _pre, _post = _sm.split("## Detailed Audit Report", 1)
-                    # Insert immediately after the section header
-                    result["summary_markdown"] = _pre + "## Detailed Audit Report\n" + _vin_line + "\n" + _post.lstrip("\n")
-                else:
-                    result["summary_markdown"] = "## Detailed Audit Report\n" + _vin_line + "\n\n" + _sm.lstrip("\n")
-    except Exception:
-        pass
-
-    # --- ODOMETER CONSISTENCY ENFORCER (SILENT) ---
-    # If OCR captured a mileage value, remove any statements implying the odometer/mileage is not visible/unknown,
-    # and ensure the output mentions the mileage at least once.
-    try:
-        if odometer_value:
-            _neg_rx = r"(?is)(^|[\n\.\!\?])\s*(?:the\s+)?(?:odometer|mileage)[^\n\.\!\?]*(?:not\s+visible|cannot\s+be\s+confirmed|unknown|unconfirmed|cannot\s+confirm)[^\n\.\!\?]*[\n\.\!\?]"
-            for _k in ("summary_markdown", "summary_brief", "vin_verification", "conclusion"):
-                _t = result.get(_k)
-                if isinstance(_t, str) and _t:
-                    _t2 = re.sub(_neg_rx, "\n", _t)
-                    result[_k] = _t2
-
-            # Ensure at least one explicit odometer line exists in summary_markdown
-            _sm = result.get("summary_markdown") or ""
-            if isinstance(_sm, str) and not re.search(r"(?i)\bodometer\b.*\d", _sm):
-                result["summary_markdown"] = _sm.rstrip() + f"\n\nOdometer visible: {odometer_value}.\n"
-    except Exception:
-        pass
-
-
-    
-# --- VIN: ELIMINATE FALSE "PROVIDED VIN" + FORCE VERIFIED VIN IN NARRATIVE ---
-    # Goal:
-    # 1) Never claim "provided VIN" / "VIN matches" unless we actually have a 17-char VIN value.
-    # 2) If we have a VIN value AND verification indicates a match/verified, force the VIN string into the narrative.
-    # 3) If model omitted VIN but OCR/filename produced one, backfill result['vin'] deterministically.
-    try:
-        _cand_vins = vin_candidates[:] if isinstance(vin_candidates, list) else []
-        _vin_val = (result.get("vin") or "").strip()
-        _vin_ver = (result.get("vin_verification") or "").strip()
-
-        def _is_real_vin(v: str) -> bool:
-            return bool(re.fullmatch(r"[A-HJ-NPR-Z0-9]{17}", (v or "").strip().upper()))
-
-        # Backfill VIN if missing/placeholder and we have candidates from OCR/filename
-        if (not _is_real_vin(_vin_val)) and _cand_vins:
-            for _v in _cand_vins:
-                if _is_real_vin(_v):
-                    _vin_val = _v.strip().upper()
-                    result["vin"] = _vin_val
-                    break
-
-        _has_vin = _is_real_vin(_vin_val)
-        # If we don't have a real VIN, scrub any "provided VIN" / "VIN matches" language from narrative-related fields
-        if not _has_vin:
-            _bad = r"(?is)\b(vin\s+(?:matches|matched|verified|confirm(?:ed|s)|consistent)\s+(?:the\s+)?provided\s+vin|provided\s+vin)\b.*?(?:\.|\n)"
-            for _k in ("summary_markdown", "summary_brief", "vin_verification", "conclusion"):
-                _t = result.get(_k)
-                if isinstance(_t, str) and _t:
-                    result[_k] = re.sub(_bad, "", _t).strip()
-
-        # Determine "verified" status only if we have VIN and verification says so OR narrative implies verified
-        _vin_verified = False
-        if _has_vin:
-            if re.search(r"(?i)\b(match|matched|verified|confirm(?:ed|s)|consistent)\b", _vin_ver):
-                _vin_verified = True
-            else:
-                # If model narrative already says VIN verified/matched, treat as verified
-                _sm0 = (result.get("summary_markdown") or "")
-                if isinstance(_sm0, str) and re.search(r"(?i)\bvin\b.*\b(verified|matched|match|confirmed|consistent)\b", _sm0):
-                    _vin_verified = True
-
-        # Force VIN string into narrative when verified (and avoid duplicates)
-        if _has_vin and _vin_verified:
-            _sm = (result.get("summary_markdown") or "")
-            if isinstance(_sm, str):
-                if _vin_val not in _sm:
-                    vin_line = f"VIN verified: {_vin_val}."
-                    if "## Detailed Audit Report" in _sm:
-                        _sm = re.sub(
-                            r"(##\s*Detailed\s+Audit\s+Report\s*\n)",
-                            r"\1" + vin_line + "\n",
-                            _sm,
-                            count=1,
-                            flags=re.IGNORECASE,
-                        )
-                    else:
-                        _sm = ("## Detailed Audit Report\n" + vin_line + "\n\n" + _sm).strip()
-                    result["summary_markdown"] = _sm
-
-                # Keep brief consistent if room
-                _sb = (result.get("summary_brief") or "")
-                if isinstance(_sb, str) and _vin_val not in _sb:
-                    cand = (_sb.strip() + f" VIN verified: {_vin_val}.").strip()
-                    if len(cand) <= 280:
-                        result["summary_brief"] = cand
-    except Exception:
-        pass
-
-    # --- DEDUPE REPEATED SECTIONS IN NARRATIVE (MODEL OCCASIONALLY REPEATS) ---
-    try:
-        _sm = (result.get("summary_markdown") or "")
-        if isinstance(_sm, str) and _sm:
-            # Treat these headings as section boundaries even if missing leading "##"
-            _section_names = [
-                "Estimated Repair Costs",
-                "Fraud & Authenticity Check",
-                "Fraud and Authenticity Check",
-                "Conclusion",
-            ]
-            # Build a regex that catches both "## Heading" and plain "Heading" at line start
-            _head_rx = re.compile(r"(?m)^(##\s*)?(" + "|".join(re.escape(s) for s in _section_names) + r")\s*$")
-            lines = _sm.splitlines()
-            out = []
-            seen = set()
-            skip_mode = False
-            current_head = None
-
-            i = 0
-            while i < len(lines):
-                line = lines[i]
-                m = _head_rx.match(line.strip())
-                if m:
-                    head = m.group(2)
-                    # normalize
-                    key = head.lower()
-                    if key in seen:
-                        # skip this repeated section entirely until next recognized heading
-                        skip_mode = True
-                        current_head = key
-                        i += 1
-                        # consume until next heading (but do not consume that heading; loop will handle)
-                        while i < len(lines):
-                            if _head_rx.match(lines[i].strip()):
-                                break
-                            i += 1
-                        continue
-                    else:
-                        seen.add(key)
-                        skip_mode = False
-                        current_head = key
-                        # Keep heading as-is
-                        out.append(line)
-                        i += 1
-                        continue
-                if not skip_mode:
-                    out.append(line)
-                i += 1
-
-            result["summary_markdown"] = "\n".join(out).strip()
-    except Exception:
-        pass
-
-    # --- Photos-only cleanup (prevents repeated sections + bans "undamaged/clean/intact" claims in photos-only) ---
-    try:
-        if ai_intent == "damage_report_from_photos":
-            _sm = (result.get("summary_markdown") or "")
-            if isinstance(_sm, str) and _sm:
-
-                def _strip_sections(md: str, heads: List[str]) -> str:
-                    out = md
-                    for h in heads:
-                        rx = re.compile(
-                            r"(?is)^#{1,6}\s*" + re.escape(h) + r"\s*$.*?(?=^#{1,6}\s|\Z)",
-                            re.M
-                        )
-                        out = re.sub(rx, "", out)
-                    out = re.sub(r"\n{3,}", "\n\n", out).strip()
-                    return out
-
-                # 1) Strip ALL variants of cost/fraud/conclusion sections if the model included them in summary_markdown
-                _sm2 = _strip_sections(
-                    _sm,
-                    [
-                        "Estimated Repair Costs",
-                        "Estimated Repair Cost",
-                        "Estimated Repair Costs Markdown",
-                        "Estimated Repair Cost Markdown",
-                        "Estimated Repair Costs (Markdown)",
-                        "Fraud & Authenticity Check",
-                        "Fraud and Authenticity Check",
-                        "Conclusion",
-                    ],
-                )
-
-                # 2) Strip non-heading "Estimated Repair Costs" blocks that slip through (e.g., "Estimated Repair Costs: N/A")
-                _sm2 = re.sub(
-                    r"(?is)(^|\n)\s*Estimated\s+Repair\s+Costs(?:\s+(?:Markdown|\(Markdown\)))?\s*:?\s*.*?(?=\n\s*(?:#{1,6}\s+|\Z))",
-                    "\n",
-                    _sm2
-                )
-
-                # 3) HARD BAN in PHOTOS-ONLY: remove any "intact/undamaged/clean/no visible damage" statements
-                # This prevents false clearing of sides/corners from appearing in the PDF/email.
-                _sm2 = re.sub(
-                    r"(?is)(^|[.\n])[^.\n]*\b("
-                    r"undamaged|intact|clean|unaffected|no\s+visible\s+damage|no\s+obvious\s+damage|no\s+signs\s+of\s+damage|"
-                    r"appears\s+intact|appears\s+undamaged|free\s+of\s+damage"
-                    r")\b[^.\n]*([.\n]|$)",
-                    r"\1",
-                    _sm2
-                )
-
-                _sm2 = re.sub(r"\n{3,}", "\n\n", _sm2).strip()
-                result["summary_markdown"] = _sm2
-    except Exception:
-        pass
-
-
-    # --- Side Checks enforcement (photos-only): ensure Driver/Left Side bullet exists if Passenger/Right Side exists ---
-    try:
-        if ai_intent == "damage_report_from_photos":
-            _sm_sc = (result.get("summary_markdown") or "")
-            if ("**Passenger/Right Side**" in _sm_sc) and ("**Driver/Left Side**" not in _sm_sc):
-                result["summary_markdown"] = _sm_sc.replace(
-                    "**Passenger/Right Side**",
-                    "**Driver/Left Side**: Not clearly addressed in model output; review left/driver-side photos and add notes if needed.\n- **Passenger/Right Side**",
-                    1
-                )
-    except Exception:
-        pass
-
-    # --- Score ↔ narrative synchronization ---
-    def _extract_score_from_text(text: str):
-        if not text:
-            return None
-        m = re.search(r"(?is)\bFinal\s*score\b[^0-9]{0,10}(\d{1,3})\s*%?\b", text)
-        if m:
-            try:
-                v = int(m.group(1))
-                if 0 <= v <= 100:
-                    return v
-            except Exception:
-                pass
-        m = re.search(r"(?is)\bthe\s+compliance\s+score\s+is\s+set\s+at\s+(\d{1,3})\s*%?\b", text)
-        if m:
-            try:
-                v = int(m.group(1))
-                if 0 <= v <= 100:
-                    return v
-            except Exception:
-                pass
-        m = re.search(r"(?is)\bCompliance\s*Score\b[^0-9]{0,10}(\d{1,3})\s*%?\b", text)
-        if m:
-            try:
-                v = int(m.group(1))
-                if 0 <= v <= 100:
-                    return v
-            except Exception:
-                pass
-        return None
-
-    def _canonicalize_score_in_narrative(narr: str, score_int: int) -> str:
-        if not narr:
-            narr = ""
-        scrub_lines = r"(?im)^\s*(Final\s*score|Compliance\s*Score)\s*[:\-–]\s*\d{1,3}\s*%?\s*$"
-        narr = re.sub(scrub_lines, "", narr)
-        narr = re.sub(r"(?is)\bthe\s+compliance\s+score\s+is\s+set\s+at\s+\d{1,3}\s*%?\b",
-                      "the compliance score is set as below", narr)
-        narr = re.sub(r"\n{3,}", "\n\n", narr).strip()
-        return (narr + f"\n\nCompliance Score: {score_int}").strip()
-
-    try:
-        sm = (result.get("summary_markdown") or "")
-        if ai_intent == "damage_report_from_photos":
-            result["compliance_score"] = "N/A"
-            sm = re.sub(r"(?im)^\s*(Final\s*score|Compliance\s*Score)\s*[:\-–]\s*\d{1,3}\s*%?\s*$", "", sm).strip()
-            result["summary_markdown"] = sm
-        else:
-            s_text = _extract_score_from_text(sm)
-            s_json = None
-            v = (result.get("compliance_score") or "").strip()
-            if re.fullmatch(r"\d{1,3}", v):
-                try:
-                    s_json = int(v)
-                except Exception:
-                    s_json = None
-            chosen = s_text if s_text is not None else s_json
-            if chosen is not None:
-                chosen = max(0, min(100, int(chosen)))
-                result["compliance_score"] = str(chosen)
-                result["summary_markdown"] = _canonicalize_score_in_narrative(sm, chosen)
-            else:
-                result["compliance_score"] = "N/A"
-                sm = re.sub(r"(?im)^\s*(Final\s*score|Compliance\s*Score)\s*[:\-–]\s*\d{1,3}\s*%?\s*$", "", sm).strip()
-                result["summary_markdown"] = sm
-    except Exception:
-        pass
-
-    # ---- AUTO-ADD Compliance Score Rationale with arithmetic when missing ----
-    try:
-        if ai_intent != "damage_report_from_photos":
-            sm = result.get("summary_markdown") or ""
-            score_str = (result.get("compliance_score") or "").strip()
-            if "## Compliance Score Rationale" not in sm and re.fullmatch(r"\d{1,3}", score_str):
-                score_int = max(0, min(100, int(score_str)))
-                if score_int < 100:
-                    deduction = 100 - score_int
-                    rationale_lines = [
-                        "",
-                        "## Compliance Score Rationale",
-                        f"Starting from 100%, a total deduction of {deduction} points was applied based on the minor, non-fatal documentation/formatting items described above, resulting in a final compliance score of {score_int}%.",
-                    ]
-                    if _prod_evidenced or _clean_retail_present:
-                        rationale_lines.append(
-                            "No deduction was applied for Production Date or Clean Retail value, as these items are evidenced in the file and treated as compliant."
-                        )
-                    sm = sm.rstrip() + "\n\n" + "\n".join(rationale_lines)
-                    result["summary_markdown"] = sm
-    except Exception:
-        pass
-
-    # Clean Retail deterministic override
-    if _clean_retail_present:
-        try:
-            sm = result.get("summary_markdown") or ""
-            # 1) Flip or remove "missing clean retail" style statements
-            sm = re.sub(
-                r"(?im)^\s*[-*]\s*Missing\s+clean\s+retail\s+value\s+printout[^\n]*$",
-                "",
-                sm,
-            )
-            sm = re.sub(
-                r"(?is)\bodometer\s+photo\s+not\s+present\b.*?(?:\n|$)", "", sm
-            )
-            sm = re.sub(
-                r"(?is)\bmissing\s+(?:a\s+)?clean\s+retail\s+value\s+printout\b[^\n\.]*",
-                "Clean retail value printout is present via valuation (e.g., NADA/J.D. Power/KBB/Edmunds/Carfax/Cars.com)",
-                sm,
-            )
-            sm = re.sub(
-                r"(?is)a\s+printout\s+showing\s+the\s+clean\s+retail\s+value[^.]*\.",
-                "A valuation printout (e.g., J.D. Power or NADA clean retail page) is present in the file and satisfies this requirement.",
-                sm,
-            )
-            sm = re.sub(
-                r"(?is)\bclean\s+retail\s+value[^.\n]*Not\s+Evidenced[^.\n]*",
-                "Clean retail value requirement is evidenced by the valuation printout (e.g., NADA/J.D. Power/KBB).",
-                sm,
-            )
-            sm = re.sub(
-                r"(?is)\bNo\s+printout\s+found\b",
-                "Valuation printout confirmed present in file.",
-                sm,
-            )
-            # New: Also rewrite the longer paragraph variant
-            sm = re.sub(
-                r"(?is)Also,\s+the\s+client\s+rules\s+require\s+a\s+printout\s+showing\s+the\s+Clean\s+Retail\s+Value\s+of\s+the\s+unit,[^.]*\.\s*The\s+NADA\s+value\s+is\s+mentioned[^.]*\.\s*These\s+omissions\s+reduce\s+compliance\.",
-                "Client rules require a printout showing the Clean Retail Value of the unit; a valuation printout (e.g., J.D. Power or NADA clean retail page) is present in the file and satisfies this requirement.",
-                sm,
-            )
-            # 2) Client Guidelines bullet: convert 'Not Evidenced' to 'Aligned'
-            sm = re.sub(
-                r'(?im)^-?\s*"Printout\s+showing\s+the\s+Clean\s+Retail\s+Value\s+of\s+the\s+unit\s+is\s+required[^"]*"\s*-\s*Not\s+Evidenced[^\n]*$',
-                '- "Printout showing the Clean Retail Value of the unit is required with all files" - Aligned (valuation printout present in file, e.g., NADA/J.D. Power page).',
-                sm,
-            )
-            # 3) Risks bullet about missing clean retail: remove
-            sm = re.sub(
-                r"(?im)^\s*[-*]\s*High:\s*Missing\s+clean\s+retail\s+value\s+printout[^\n]*$",
-                "",
-                sm,
-            )
-            # 4) Conclusion/summary variants mentioning absence of clean retail
-            sm = re.sub(
-                r"(?is)Missing\s+repair\s+facility\s+info\s+and\s+clean\s+retail\s+value\s+printout\s+are\s+noted\s+compliance\s+issues\.",
-                "Only minor documentation items are noted; core estimate, Clean Retail value evidence, and production date requirements are satisfied.",
-                sm,
-            )
-            sm = re.sub(
-                r"(?is)Compliance\s+is\s+reduced\s+due\s+to\s+missing\s+repair\s+facility\s+information\s+and\s+absence\s+of\s+a\s+clean\s+retail\s+value\s+printout\.",
-                "Compliance is modestly reduced due to minor non-fatal documentation items only; Production Date and Clean Retail value requirements are satisfied in this file.",
-                sm,
-            )
-
-            # Backstop replacements
-            sm_fixed = re.sub(
-                r"(?i)(Clean\s+retail\s+value[^:\n]*:\s*)(Not\s+Evidenced[^.\n]*)",
-                r"\1Evidenced (Clean Retail printout present via NADA/J.D. Power/KBB/Edmunds/Carfax/Cars.com)",
-                sm,
-            )
-            sm_fixed = sm_fixed.replace(
-                "Clean retail value printout: Not Evidenced (NADA/J.D. Power/KBB/etc. required on all files).",
-                "Clean retail value printout: Evidenced (Clean Retail printout present via NADA/J.D. Power/KBB/etc.).",
-                )
-            result["summary_markdown"] = sm_fixed
-
-            sb = result.get("summary_brief") or ""
-            sb = re.sub(
-                r"(?i)Clean\s+retail\s+value[^.]*Not Evidenced[^.]*",
-                "Clean Retail value printout present and compliant.",
-                sb,
-            )
-            sb = re.sub(
-                r"(?is)\bmissing\s+(?:a\s+)?clean\s+retail\s+value\s+printout\b[^.]*",
-                "Clean Retail value printout present via J.D. Power/NADA/KBB valuation.",
-                sb,
-            )
-            sb = re.sub(
-                r"(?is)absence\s+of\s+a\s+clean\s+retail\s+value\s+printout",
-                "minor non-fatal documentation items (not related to Clean Retail value requirement)",
-                sb,
-            )
-
-            # --- scrub release paperwork mentions out of brief as a deduction reason ---
-            if "release paperwork" in sb.lower():
-                sb = re.sub(
-                    r"(?is)\band\s+release\s+paperwork\b",
-                    "",
-                    sb,
-                )
-                sb = re.sub(
-                    r"(?is)\bincomplete\s+release\s+paperwork\b[^\.]*",
-                    "",
-                    sb,
-                )
-
-            result["summary_brief"] = sb
-        except Exception:
-            pass
-
-    # Narrative cleanup to remove false "missing" claims if evidence present
-    try:
-        sm = result.get("summary_markdown") or ""
-        orig_sm = sm
-        lower_sm = sm.lower()
-
-        if _odo_photo_present:
-            sm = re.sub(r"(?im)^\s*[-*]\s*Missing\s+odometer\s+photo.*$", "", sm)
-            sm = re.sub(r"(?is)\bodometer\s+photo\s+not\s+present\b.*?(?:\n|$)", "", sm)
-            sm = re.sub(r"(?is)\bthe\s+odometer\s+(?:photo\s+)?is\s+missing\b.*?(?:\n|$)", "", sm)
-
-        if _prod_evidenced:
-            sm = re.sub(
-                r"(?im)^\s*[-*]\s*Missing\s+production\s+date\s*(?:plate|photo)?[^\n]*$",
-                "",
-                sm,
-            )
-            sm = re.sub(
-                r"(?is)\bfile\s+is\s+missing\s+(?:a\s+)?production\s+date\s+photo\b[^\n\.]*",
-                "Production date is documented on the driver-door VIN label photo and satisfies the client requirement",
-                sm,
-            )
-            sm = re.sub(
-                r"(?is)\bmissing\s+(?:a\s+)?production\s+date\s+photo\b[^\n\.]*",
-                "Production date is documented on the driver-door VIN label photo",
-                sm,
-            )
-            sm = re.sub(
-                r"(?is)\bproduction\s+date\s+(?:plate\s+)?(?:photo\s+)?not\s+present\b.*?(?:\n|$)",
-                "",
-                sm,
-            )
-            sm = re.sub(
-                r"(?is)\bno\s+production\s+date(?:\s+(?:plate|photo|image))?\b.*?(?:\n|$)",
-                "",
-                sm,
-            )
-            sm = re.sub(
-                r"(?is)\bproduction\s+date\s+not\s+separately\s+documented\b.*?(?:\n|$)",
-                "",
-                sm,
-            )
-            sm = re.sub(
-                r"(?is)\bthe\s+production\s+date(?:\s+(?:plate|photo|image))?\s+is\s+missing\b.*?(?:\n|$)",
-                "",
-                sm,
-            )
-            sm = re.sub(
-                r'(?im)^-?\s*"Production\s+Date\s+Photo\s+is\s+mandatory"\s*-\s*Not\s+Evidenced[^\n]*$',
-                '- "Production Date Photo is mandatory" - Aligned (production date documented on the driver-door VIN label photo).',
-                sm,
-            )
-            sm = re.sub(
-                r"(?im)^\s*[-*]\s*High:\s*Missing\s+production\s+date\s*photo[^\n]*$",
-                "",
-                sm,
-            )
-            sm = re.sub(
-                r"(?is)The\s+production\s+date\s+is\s+listed\s+in\s+the\s+estimate\s*\(p1\)\s*but\s+no\s+separate\s+photo\s+of\s+the\s+production\s+date\s+sticker\s+is\s+provided,\s*which\s+is\s+a\s+client\s+rule\s+requirement\.",
-                "",
-                sm,
-            )
-            sm = re.sub(
-                r"Client rules compliance is mostly met except for the Production date is documented on the driver-door VIN label photo\.",
-                "Client rules compliance is mostly met. Production date is documented on the driver-door VIN label photo.",
-                sm,
-            )
-            sm = re.sub(
-                r"(?is)client rules compliance is mostly met except for the production date is documented on the driver-door vin label photo",
-                "Client rules compliance is mostly met and the Production date is documented on the driver-door VIN label photo",
-                sm,
-            )
-        elif _prod_date_present:
-            sm = re.sub(
-                r"(?im)^\s*[-*]\s*Missing\s+production\s+date\s*(?:plate|photo)?[^\n]*$",
-                "",
-                sm,
-            )
-            sm = re.sub(
-                r"(?is)\bproduction\s+date\s+(?:plate\s+)?(?:photo\s+)?not\s+present\b.*?(?:\n|$)",
-                "",
-                sm,
-            )
-            sm = re.sub(
-                r"(?is)\bno\s+production\s+date(?:\s+(?:plate|photo|image))?\b.*?(?:\n|$)",
-                "",
-                sm,
-            )
-            sm = re.sub(
-                r"(?is)\bproduction\s+date\s+not\s+separately\s+documented\b.*?(?:\n|$)",
-                "",
-                sm,
-            )
-            sm = re.sub(
-                r"(?is)\bthe\s+production\s+date(?:\s+(?:plate|photo|image))?\s+is\s+missing\b.*?(?:\n|$)",
-                "",
-                sm,
-            )
-            sm = re.sub(
-                r'(?im)^-?\s*"Production\s+Date\s+Photo\s+is\s+mandatory"\s*-\s*Not\s+Evidenced[^\n]*$',
-                '- "Production Date Photo is mandatory" - Aligned (production date documented on a door label photo).',
-                sm,
-            )
-            sm = re.sub(
-                r"(?im)^\s*[-*]\s*High:\s*Missing\s+production\s+date\s*photo[^\n]*$",
-                "",
-                sm,
-            )
-
-        # --- Release paperwork must never be a compliance deduction ---
-        if "release paperwork" in lower_sm:
-            sm = re.sub(
-                r"(?is)The\s+absence\s+of\s+repair\s+facility\s+information\s+and\s+incomplete\s+release\s+paperwork\s+reduce\s+compliance\s+but\s+do\s+not\s+affect\s+the\s+technical\s+accuracy\s+of\s+the\s+estimate\.",
-                "The absence of repair facility information is noted as a minor documentation item but does not affect the technical accuracy of the estimate.",
-                sm,
-            )
-            sm = re.sub(
-                r"(?im)^\s*[-*]\s*Missing\s+release\s+paperwork[^\n]*$",
-                "",
-                sm,
-            )
-            sm = re.sub(
-                r"(?is)\band\s+release\s+paperwork\b",
-                "",
-                sm,
-            )
-            sm = re.sub(
-                r"(?is)\bincomplete\s+release\s+paperwork\b[^\.]*\.",
-                "",
-                sm,
-            )
-
-        # Repair Facility + Owner's location: do NOT deduct
-        if _not_at_shop and "repair facility" in lower_sm:
-            sm = re.sub(r"(?is)\babsence\s+of\s+repair\s+facility\s+(?:details|info|information)\b[^\.]*\.(?:\s*)", "", sm)
-            sm = re.sub(
-                r"(?is)However,\s+the\s+file\s+lacks\s+repair\s+facility\s+information[^\.]*\.",
-                "",
-                sm,
-            )
-            sm = re.sub(
-                r"(?is)Missing\s+repair\s+facility\s+info[^\.]*\.",
-                "",
-                sm,
-            )
-            sm = re.sub(
-                r"(?is)missing\s+repair\s+facility\s+information\b[^\.]*\.",
-                "",
-                sm,
-            )
-
-        sm = re.sub(r"\n{3,}", "\n\n", sm).strip()
-        if len(sm) < 120:
-            sm = orig_sm.strip()
-        result["summary_markdown"] = sm if sm else orig_sm.strip()
-    except Exception:
-        pass
-
-    # FINAL OVERRIDE of Compliance Score Rationale when PD / Clean Retail are evidenced
-    try:
-        if ai_intent != "damage_report_from_photos":
-            sm = result.get("summary_markdown") or ""
-            score_str = (result.get("compliance_score") or "").strip()
-            if re.fullmatch(r"\d{1,3}", score_str):
-                score_int = max(0, min(100, int(score_str)))
-                if score_int < 100 and (_clean_retail_present or _prod_evidenced):
-                    # Remove any existing "## Compliance Score Rationale" section entirely
-                    pattern = r"(?is)\n##\s*Compliance\s*Score\s*Rationale\b.*?(?=\n##\s|\Z)"
-                    sm_no_section = re.sub(pattern, "", sm).rstrip()
-
-                    deduction = 100 - score_int
-                    new_lines = [
-                        "",
-                        "## Compliance Score Rationale",
-                        f"Starting from 100%, a total deduction of {deduction} points was applied for minor, non-fatal documentation/formatting items noted above (e.g., small clarity or layout issues), resulting in a final compliance score of {score_int}%.",
-                    ]
-                    new_lines.append(
-                        "No deduction was taken for Production Date, Clean Retail value, or Release Paperwork, as these items are either evidenced in the file or outside the scope of this compliance audit."
-                    )
-                    sm_final = sm_no_section + "\n\n" + "\n".join(new_lines)
-                    result["summary_markdown"] = sm_final
-    except Exception:
-        pass
-
-    # Normalize odometer field when photo is present, so header is clean
-    try:
-        if _odo_photo_present:
-            sm = result.get("summary_markdown") or ""
-            odo_field = (result.get("odometer_estimate_only") or "").strip()
-
-            # Narrative overrides header: if the narrative says mileage is unknown or explicitly indicates
-            # there is no odometer photo, do NOT force "Present and legible in photos...".
-            _narr_says_no_odo = bool(re.search(
-                r"(?is)\b("
-                r"no\s+odometer\s+photo|"
-                r"odometer\s+photo\s+is\s+missing|"
-                r"mileage\s+is\s+unknown|"
-                r"mileage\s+not\s+documented|"
-                r"odometer\s+reading\s+is\s+(?:marked\s+)?unknown"
-                r")\b",
-                sm,
-            ))
-
-            if _narr_says_no_odo:
-                _odo_photo_present = False
-                if odo_field in {"", "N/A"}:
-                    result["odometer_estimate_only"] = "UNK / Unknown (no odometer photo provided)."
-            else:
-                # Try to extract explicit mileage from narrative
-                m_odo = re.search(r"(?is)odometer\s+reading\s+of\s+([0-9,]+)\s*miles", sm)
-                if m_odo:
-                    miles = m_odo.group(1)
-                    result["odometer_estimate_only"] = f"{miles} miles (confirmed by estimate and photos)."
-                else:
-                    # Fallback generic phrasing
-                    result["odometer_estimate_only"] = "Present and legible in photos (e.g., odometer photo)."
-
-                # Clean any weird "No, odometer photo present..." phrasing from brief or narrative
-                for key in ("summary_brief", "summary_markdown"):
-                    txt = result.get(key) or ""
-                    if txt:
-                        txt = re.sub(
-                            r"No,\s*odometer\s+photo\s+present\s+and\s+legible\s*\(Photo\s*\d+\)",
-                            "Odometer is present and legible in the photos and matches the estimate.",
-                            txt,
-                            flags=re.IGNORECASE,
-                        )
-                        result[key] = txt
-    except Exception:
-        pass
-
-    # Non-empty Fraud fallback
-    if not result["fraud_markdown"] or result["fraud_markdown"].strip().upper() in {"", "N/A"}:
-        result["fraud_markdown"] = (
-            "No material inconsistencies found. Checks performed: VIN match across estimate and photos, "
-            "odometer/registration presence and legibility, duplicate/edited images, timestamp continuity, and "
-            "panel/impact consistency."
-        )
-
-    # ---- FINAL FORBIDDEN-DEDuction scrubber + optional score restore (prevents "Production date documented" being treated as a deficiency) ----
-    try:
-        def _scrub_forbidden(_t_in: str) -> str:
-            if not _t_in:
-                return _t_in
-            _t = str(_t_in)
-
-            # Production Date: if door-label VIN photo or prod date is evidenced, never call it missing or a deduction.
-            if _prod_evidenced:
-                _t = re.sub(r"(?is)\bmissing\s+(?:mandatory\s+)?production\s+date\s+(?:photo|plate|sticker|label)\b[^.\n]*[\.]?", "", _t)
-                _t = re.sub(r"(?is)\bmissing\s+production\s+date\s+photos?\b[^.\n]*[\.]?", "", _t)
-                _t = re.sub(r"(?is)\bmandatory\s+production\s+date\s+photo\b[^.\n]*[\.]?", "", _t)
-
-                # Neutralize the common contradiction where "Production date is documented..." is incorrectly framed as an exception/deficiency.
-                _t = re.sub(
-                    r"(?is)\bexcept\s+for\s+(?:the\s+)?production\s+date\s+is\s+documented\s+on\s+the\s+driver-door\s+vin\s+label\s+photo\b[^.\n]*[\.]?",
-                    "Production date is documented on the driver-door VIN label photo. ",
-                    _t,
-                )
-                _t = re.sub(
-                    r"(?is)\bcompliance\s+is\s+reduced\s+due\s+to\s+[^.\n]*\bproduction\s+date\b[^.\n]*[\.]?",
-                    "",
-                    _t,
-                )
-
-            # Clean Retail: if detected, don't call it missing/absent.
-            if _clean_retail_present:
-                _t = re.sub(r"(?is)\bmissing\s+(?:a\s+)?clean\s+retail\s+value\s+printout\b[^.\n]*[\.]?", "", _t)
-                _t = re.sub(r"(?is)\babsence\s+of\s+(?:a\s+)?clean\s+retail\s+value\s+printout\b[^.\n]*[\.]?", "", _t)
-
-            # Parts source: prevent false aftermarket/LKQ statements when not evidenced in line items.
-            if _closing_no_aftermarket and not _explicit_non_oem_parts:
-                # Replace common phrasing that incorrectly asserts aftermarket/LKQ usage.
-                _t = re.sub(r"(?i)\b(aftermarket|a/m|non\s*oem|quality\s+replacement)\b(?=\s+(parts?|components?))", "OEM", _t)
-                _t = re.sub(r"(?i)\b(lkq|recycled|used|rcy)\b(?=\s+(parts?|components?))", "OEM", _t)
-                _t = re.sub(r"(?is)\busing\s+oem\s+oem\b", "using OEM", _t)
-                # Remove any broad sentence that still claims aftermarket was used (keep disclaimers if present).
-                _t = re.sub(
-                    r"(?is)\bthe\s+estimate\s+calls\s+for\b[^.\n]{0,220}\baftermarket\b[^.\n]{0,220}\.",
-                    "The estimate specifies replacement parts without explicit non-OEM indicators in the line items; do not label them as aftermarket unless the line items say so.",
-                    _t,
-                )
-
-            # Release paperwork is outside the scope; never claim compliance reduction for it.
-            _t = re.sub(r"(?is)\bmissing\s+release\s+paperwork\b[^.\n]*[\.]?", "", _t)
-            _t = re.sub(r"(?is)\bincomplete\s+release\s+paperwork\b[^.\n]*[\.]?", "", _t)
-            _t = re.sub(r"(?is)\bcompliance\s+is\s+reduced\s+due\s+to\s+[^.\n]*\brelease\s+paperwork\b[^.\n]*[\.]?", "", _t)
-
-            # Repair Facility: scrub missing-language ONLY when Closing Report indicates owner location / not at shop.
-            if _not_at_shop:
-                _t = re.sub(r"(?is)\bmissing\s+repair\s+facility\s+(?:info|information|details)\b[^.\n]*[\.]?", "", _t)
-                _t = re.sub(r"(?is)\babsence\s+of\s+repair\s+facility\s+(?:info|information|details)\b[^.\n]*[\.]?", "", _t)
-                _t = re.sub(r"(?is)\bcompliance\s+is\s+reduced\s+due\s+to\s+[^.\n]*\brepair\s+facility\b[^.\n]*[\.]?", "", _t)
-                _t = re.sub(r"(?is)\bdue\s+to\s+missing\s+repair\s+facility\s+(?:info|information|details)\b", "due to minor non-fatal documentation items", _t)
-
-            # General cleanup
-            _t = re.sub(r"[ \t]{2,}", " ", _t)
-            _t = re.sub(r"\n{3,}", "\n\n", _t).strip()
-            return _t
-
-        # Apply scrubber to conclusion, brief, and narrative (prevents contradictory final evaluation lines)
-        result["conclusion"] = _scrub_forbidden(result.get("conclusion") or "")
-        result["summary_brief"] = _scrub_forbidden(result.get("summary_brief") or "")
-
-        _sm_before = result.get("summary_markdown") or ""
-        _sm_after = _scrub_forbidden(_sm_before)
-
-        # SCORE OVERRIDE: If the only apparent deductions are forbidden ones (Production Date when door-label is present,
-        # or Repair Facility when Closing Report indicates owner location/not at shop), restore score to 100 and remove the rationale section.
-        try:
-            if ai_intent != "damage_report_from_photos":
-                _sm_work = _sm_after if _sm_after else _sm_before
-                score_str = (result.get("compliance_score") or "").strip()
-                if re.fullmatch(r"\d{1,3}", score_str):
-                    score_int = max(0, min(100, int(score_str)))
-                    if score_int < 100:
-                        lower = (_sm_work or "").lower()
-
-                        forbidden_hit = False
-                        if _prod_evidenced and (("missing production date" in lower) or ("production date photo" in lower) or ("except for" in lower and "production date" in lower) or ("reduced due" in lower and "production date" in lower)):
-                            forbidden_hit = True
-                        if _not_at_shop and (("repair facility" in lower and ("missing" in lower or "absence" in lower or "reduced" in lower))):
-                            forbidden_hit = True
-
-                        if forbidden_hit:
-                            score_int = 100
-                            result["compliance_score"] = "100"
-
-                            # strip rationale section if present
-                            _sm_work = re.sub(r"(?is)\n##\s*Compliance\s*Score\s*Rationale\b.*?(?=\n##\s|\Z)", "", _sm_work).strip()
-
-                            # remove any lingering forbidden phrases
-                            _sm_work = re.sub(r"(?is)\bCompliance\s+is\s+reduced\s+due\s+to\s+[^.]*\bproduction\s+date\b[^.]*\.", "", _sm_work)
-                            _sm_work = re.sub(r"(?is)\bCompliance\s+is\s+reduced\s+due\s+to\s+[^.]*\brepair\s+facility\b[^.]*\.", "", _sm_work)
-
-                            # ensure score line is consistent
-                            _sm_work = re.sub(r"(?im)^\s*(Final\s*score|Compliance\s*Score)\s*[:\-–]\s*\d{1,3}\s*%?\s*$", "", _sm_work)
-                            _sm_work = re.sub(r"\n{3,}", "\n\n", _sm_work).strip()
-                            _sm_work = (_sm_work + f"\n\nCompliance Score: {score_int}").strip()
-
-                            _sm_after = _sm_work
-        except Exception:
-            pass
-
-        if _sm_after and _sm_after.strip():
-            result["summary_markdown"] = _sm_after
-    except Exception:
-        pass
-
-    
-    
-    # --- Airbag deployment contradiction resolver (silent; prevents "no deployment" when deployment is also stated) ---
-    # If any portion of the output indicates an airbag is deployed, remove any conflicting "no airbag deployment" claims.
-    def _resolve_airbag_contradictions(text: str) -> str:
-        if not text:
-            return text
-        try:
-            t = str(text)
-            tl = t.lower()
-
-            pos = bool(re.search(r"(?i)\b(airbag|air\s*bag)\b[^.\n]{0,60}\b(deploy(?:ed|ment)|deployed)\b", t)) or \
-                  bool(re.search(r"(?i)\b(deployed)\b[^.\n]{0,60}\b(airbag|air\s*bag)\b", t))
-            neg = bool(re.search(r"(?i)\bno\s+(airbag|air\s*bag)\s+deployment\b|\bno\s+airbags\s+deployed\b|\bwithout\s+airbag\s+deployment\b", t))
-
-            if not (pos and neg):
-                return t
-
-            # Remove sentence(s) that assert no deployment.
-            sentences = re.split(r"(?<=[\.\!\?])\s+", t)
-            keep = []
-            for s in sentences:
-                if re.search(r"(?i)\bno\s+(airbag|air\s*bag)\s+deployment\b|\bno\s+airbags\s+deployed\b|\bwithout\s+airbag\s+deployment\b", s):
-                    continue
-                keep.append(s)
-            out = " ".join(keep).strip()
-
-            # Also remove any standalone bullet/line variants.
-            out = re.sub(r"(?im)^\s*[-*]\s*.*\bno\s+(airbag|air\s*bag)\s+deployment\b.*$\n?", "", out)
-            out = re.sub(r"\n{3,}", "\n\n", out).strip()
-            return out
-        except Exception:
-            return text
-
-# --- Panel contradiction resolver (minimal; prevents "intact/no visible damage" when same panel is described as damaged elsewhere) ---
-    def _resolve_panel_contradictions(narr: str) -> str:
-        if not narr:
-            return narr
-        try:
-            nl = narr.lower()
-            damage_re = re.compile(r"\b(damage|damaged|crush|crushed|dent|dented|crease|creased|broken|fracture|fractured|torn|tear|scrape|scuff|gouge|bent|buckl|misalign|displace|missing|crack|cracked|hole|puncture|caved|collapsed)\b", re.I)
-            intact_re = re.compile(r"(no visible damage|appears? intact|undamaged|no damage)\b", re.I)
-
-            # Common panel/component phrases with optional side modifiers
-            part_re = re.compile(
-                r"\b((?:left|right|driver|passenger)\s+(?:front|rear)?\s*(?:bumper|fender|door|quarter(?:\s*panel)?|headlight|lamp|hood|grille|mirror|rocker|wheel|rim|tire|pillar|roof|trunk|liftgate|tailgate|taillight))\b",
-                re.I
-            )
-            abbr_re = re.compile(r"\b(LF|RF|LR|RR)\s+(?:bumper|fender|door|quarter|headlight|hood|grille|mirror|rocker)\b", re.I)
-
-            def _panel_has_damage(panel: str) -> bool:
-                p = panel.lower()
-                start = 0
-                while True:
-                    i = nl.find(p, start)
-                    if i == -1:
-                        return False
-                    w0 = max(0, i - 140)
-                    w1 = min(len(nl), i + len(p) + 140)
-                    if damage_re.search(nl[w0:w1]):
-                        return True
-                    start = i + len(p)
-
-            # Split into sentences conservatively
-            sentences = re.split(r"(?<=[\.\!\?])\s+", narr)
-            changed = False
-            out = []
-            for s in sentences:
-                if not s or not intact_re.search(s):
-                    out.append(s)
-                    continue
-                panels = set([p.strip().lower() for p in part_re.findall(s)] + [p.strip().lower() for p in abbr_re.findall(s)])
-                if not panels:
-                    out.append(s)
-                    continue
-                # If any panel mentioned in an "intact/no damage" sentence is also described as damaged elsewhere, rewrite this sentence.
-                conflict_panels = [p for p in panels if _panel_has_damage(p)]
-                if conflict_panels:
-                    # preserve trailing photo citation parentheses if present
-                    cite = ""
-                    m_cite = re.search(r"(\((?:Photos?|photo)\s*[^)]*\))\s*$", s, re.I)
-                    if m_cite:
-                        cite = " " + m_cite.group(1).strip()
-                    out.append(None)  # conflict detected: drop intact/no-damage sentence (do not print conflict notes)
-                    changed = True
-                else:
-                    out.append(s)
-            return " ".join([x for x in out if x is not None]).strip() if changed else narr
-        except Exception:
-            return narr
-
-    try:
-        _sm = (result.get("summary_markdown") or "")
-        if _sm:
-            result["summary_markdown"] = _resolve_panel_contradictions(_sm)
-    except Exception:
-        pass
-
-    # --- Airbag deployment contradiction resolver (silent) ---
-    try:
-        for _k in ("summary_markdown", "summary_brief", "conclusion"):
-            if result.get(_k):
-                result[_k] = _resolve_airbag_contradictions(result.get(_k) or "")
-    except Exception:
-        pass
-
-
-
-    # --- Photos-only cleanup: remove risky "no damage/intact" claims for specific front-corner panels ---
-    # Rationale: In photos-only mode, the model can mis-orient left/right; it's safer to omit
-    # "no obvious/visible damage" declarations for left/right front fender/bumper/headlamp unless clearly supported.
-    def _scrub_front_corner_no_damage_claims(text: str) -> str:
-        if not text:
-            return text
-        t = str(text)
-
-        # Remove bullet-lines that assert "no damage" / "no obvious damage" on specific front-corner components.
-        bad_line = re.compile(
-            r"(?im)^\s*[-*]\s*\*\*(?:Driver/Left Side|Passenger/Right Side)\*\*:\s*.*\b(?:left|right)\s+front\b.*\b(?:fender|bumper|headlight|lamp|corner)\b.*\b(?:no\s+obvious\s+damage|no\s+visible\s+damage|undamaged|intact)\b.*$"
-        )
-        t = re.sub(bad_line, "", t)
-
-        bad_line2 = re.compile(
-            r"(?im)^\s*[-*]\s*(?:left|right)\s+front\b.*\b(?:fender|bumper|headlight|lamp|corner)\b.*\b(?:no\s+obvious\s+damage|no\s+visible\s+damage|undamaged|intact)\b.*$"
-        )
-        t = re.sub(bad_line2, "", t)
-
-        # Remove sentence-level claims inside paragraphs.
-        bad_sent = re.compile(
-            r"(?is)\b(?:left|right)\s+front\b[^.]{0,120}\b(?:fender|bumper|headlight|lamp|corner)\b[^.]{0,120}\b(?:no\s+obvious\s+damage|no\s+visible\s+damage|undamaged|intact)\b[^.]{0,80}\."
-        )
-        t = re.sub(bad_sent, "", t)
-
-        # Clean up spacing.
-        t = re.sub(r"\n{3,}", "\n\n", t).strip()
-        return t
-
-    try:
-        if ai_intent == "damage_report_from_photos":
-            _sm2 = (result.get("summary_markdown") or "")
-            if _sm2:
-                result["summary_markdown"] = _scrub_front_corner_no_damage_claims(_sm2)
     except Exception:
         pass
 
@@ -2618,6 +1517,7 @@ async def download_pdf(file_number: Optional[str] = None, filename: Optional[str
         return JSONResponse(status_code=404, content={"detail": "Not Found"})
     latest = max(candidates, key=lambda p: os.path.getmtime(p))
     return FileResponse(path=latest, media_type="application/pdf", filename=os.path.basename(latest))
+
 
 
 
