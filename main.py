@@ -403,6 +403,37 @@ def _maybe_ocr_image_text(im: Image.Image) -> str:
     except Exception:
         return ""
 
+
+def _qr_decode_vin_from_pil(im: Image.Image) -> Optional[str]:
+    """Best-effort local QR/barcode decode for VIN (optional deps)."""
+    try:
+        import cv2  # type: ignore
+        import numpy as np  # type: ignore
+        arr = cv2.cvtColor(np.array(im.convert("RGB")), cv2.COLOR_RGB2BGR)
+        det = cv2.QRCodeDetector()
+        val, _, _ = det.detectAndDecode(arr)
+        if val:
+            s = str(val).strip().upper()
+            m = re.search(VIN_PATTERN, s)
+            if m:
+                return m.group(0)
+    except Exception:
+        pass
+    try:
+        from pyzbar.pyzbar import decode  # type: ignore
+        for d in decode(im.convert("RGB")):
+            try:
+                s = d.data.decode("utf-8", "ignore").strip().upper()
+            except Exception:
+                s = str(d.data).strip().upper()
+            m = re.search(VIN_PATTERN, s)
+            if m:
+                return m.group(0)
+    except Exception:
+        pass
+    return None
+
+
 def _add_bytes(parts: List[Dict[str,Any]], files_seen: List[str], photo_index: Optional[List[str]], thumb_paths: Optional[List[str]], raw: bytes, fname: str, used: int, max_images: int, pdf_text_fulls: Optional[List[str]] = None, ocr_pairs: Optional[List[Dict[str, Any]]] = None) -> int:
     low = fname.lower()
     if low.endswith(SUPPORTED_PDF_EXTS) and used < max_images:
@@ -432,15 +463,14 @@ def _add_bytes(parts: List[Dict[str,Any]], files_seen: List[str], photo_index: O
     elif low.endswith(SUPPORTED_IMAGE_EXTS) and used < max_images:
         im_ref = None
         raw_for_vin = None
+        qr_vin = None
         try:
             im = Image.open(io.BytesIO(raw)).convert("RGB")
             im_ref = im.copy()
-
-            # Preserve a higher-quality copy for VIN label / QR-barcode decoding (NO filename usage).
-            bv = io.BytesIO()
-            im_ref.save(bv, format="JPEG", quality=92, optimize=True)
-            raw_for_vin = bv.getvalue()
-
+            # Preserve ORIGINAL bytes for VIN label / QR/barcode decoding (before any resizing or recompression).
+            raw_for_vin = raw
+            # Secondary confirmation: attempt local QR/barcode decode from the ORIGINAL image (before resizing).
+            qr_vin = _qr_decode_vin_from_pil(im_ref)
             # Use the same preprocessing for ZIP and loose JPGs (keep higher res for small label text).
             max_dim = 2048
             if max(im.size) > max_dim:
@@ -472,7 +502,7 @@ def _add_bytes(parts: List[Dict[str,Any]], files_seen: List[str], photo_index: O
             txt = _maybe_ocr_image_text(im_ref)
             if ocr_pairs is not None:
                 try:
-                    ocr_pairs.append({"name": fname, "text": (txt or ""), "raw_for_vin": raw_for_vin})
+                    ocr_pairs.append({"name": fname, "text": (txt or ""), "raw_for_vin": raw_for_vin, "qr_vin": (qr_vin or None)})
                 except Exception:
                     pass
             if txt:
@@ -715,6 +745,8 @@ async def vision_review(
     # Do NOT use filenames. Prefer driver-door certification label OCR; if not found, attempt QR/barcode decode.
     vin_from_label = None
     vin_from_label_photo = None
+    vin_from_qr = None
+    vin_from_qr_photo = None
 
     def _looks_like_door_label(txt: str) -> bool:
         if not txt:
@@ -738,6 +770,24 @@ async def vision_review(
     except Exception:
         vin_from_label = None
         vin_from_label_photo = None
+    # (c) QR/barcode VIN as secondary confirmation (prefer same photo as door label if available)
+    try:
+        if vin_from_label_photo:
+            for rec in ocr_pairs:
+                if isinstance(rec, dict) and (rec.get("name") == vin_from_label_photo) and rec.get("qr_vin"):
+                    vin_from_qr = str(rec.get("qr_vin") or "").strip().upper() or None
+                    vin_from_qr_photo = rec.get("name") or None
+                    break
+        if not vin_from_qr:
+            for rec in ocr_pairs:
+                if isinstance(rec, dict) and rec.get("qr_vin"):
+                    vin_from_qr = str(rec.get("qr_vin") or "").strip().upper() or None
+                    vin_from_qr_photo = rec.get("name") or None
+                    break
+    except Exception:
+        vin_from_qr = None
+        vin_from_qr_photo = None
+
 
     # (c) If OCR didn't yield a VIN, try a dedicated vision decode for VIN/QR/barcode on the best label candidate
     def _decode_vin_from_label_or_qr(raw_bytes: Optional[bytes]) -> Optional[str]:
@@ -788,7 +838,11 @@ async def vision_review(
                         candidate = rec
                         break
             if candidate is not None:
-                vin_from_label = _decode_vin_from_label_or_qr(candidate.get("raw_for_vin"))
+                # Prefer local QR/barcode VIN if available before calling the vision model.
+                if candidate.get("qr_vin"):
+                    vin_from_label = str(candidate.get("qr_vin") or "").strip().upper() or None
+                if not vin_from_label:
+                    vin_from_label = _decode_vin_from_label_or_qr(candidate.get("raw_for_vin"))
                 vin_from_label_photo = candidate.get("name") if vin_from_label else None
         except Exception:
             pass
@@ -1106,6 +1160,13 @@ async def vision_review(
                     data["vin_verification"] = "INCONCLUSIVE (door label VIN extracted; compare to other docs if present)"
             elif v_model != vin_from_label:
                 data["vin_verification"] = f"MISMATCH (door label: {vin_from_label}; other source: {v_model})"
+            # Secondary confirmation vs QR/barcode if available
+            if vin_from_qr:
+                if vin_from_label == vin_from_qr:
+                    if not re.search(r"\bMATCH\b|\bMISMATCH\b", str(data.get("vin_verification") or ""), flags=re.IGNORECASE):
+                        data["vin_verification"] = "MATCH (door label + QR/barcode)"
+                else:
+                    data["vin_verification"] = f"MISMATCH (door label: {vin_from_label}; QR/barcode: {vin_from_qr})"
     except Exception:
         pass
 
