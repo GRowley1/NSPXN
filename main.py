@@ -202,12 +202,6 @@ Create a professional damage report based ONLY on the provided photos.
 ## Detailed Condition Report
 - Write a continuous 10–15 sentence narrative summarizing visible damage, impact zones, misalignment/gaps, and repair implications (photo-based).
 - If VIN label or odometer are visible, state them with Photo #. If not visible or unreadable, say so.
-
-## Fraud & Authenticity Check
-- Briefly state what was checked (duplicates/tampering, VIN/odo presence, consistency).
-
-## Conclusion
-- 1–3 sentence summary of scope and repair implications. Do NOT return "N/A".
 """
     ),
 }
