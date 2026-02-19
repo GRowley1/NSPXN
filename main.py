@@ -1030,8 +1030,8 @@ async def vision_review(
         "CLIENT RULES (only if provided):\n"
         + (client_rules[:1500] if client_rules else "")
         + "\n\n"
-        "### ADD'L NOTES (PRIORITY — MUST BE ADDRESSED IN REPORT)\n"
-        + (ai_notes_used[:1500] if ai_notes_used else "None provided.")
+"### ADD'L NOTES (PRIORITY — MUST BE ADDRESSED IN REPORT)\n"
++ (ai_notes_used[:1500] if ai_notes_used else "None provided.")
         + "\n\n"
         "INSTRUCTIONS:\n"
         "- Return strict JSON only.\n"
@@ -1151,33 +1151,53 @@ async def vision_review(
 
     data = _try_parse_json(raw)
     # Prefer door-label VIN when present (OCR -> QR/barcode). Do NOT use filenames.
-# --- HARD VIN LOCK (door label wins; QR only confirms) ---
-try:
-    if isinstance(data, dict):
+    # --- HARD VIN LOCK (door label wins; QR only confirms) ---
+    try:
+        if isinstance(data, dict):
 
-        # 1) If door-label VIN exists, it is authoritative.
-        if vin_from_label:
-            data["vin"] = vin_from_label
+            # 1) If door-label VIN exists, it is authoritative.
+            if vin_from_label:
+                data["vin"] = vin_from_label
 
-            if vin_from_qr:
-                if vin_from_qr == vin_from_label:
-                    data["vin_verification"] = "MATCH (door label + QR)"
+                if vin_from_qr:
+                    if vin_from_qr == vin_from_label:
+                        data["vin_verification"] = "MATCH (door label + QR)"
+                    else:
+                        data["vin_verification"] = (
+                            f"MISMATCH (door label: {vin_from_label}; QR: {vin_from_qr})"
+                        )
                 else:
                     data["vin_verification"] = (
-                        f"MISMATCH (door label: {vin_from_label}; QR: {vin_from_qr})"
+                        "INCONCLUSIVE (door label extracted; no secondary confirmation)"
                     )
-            else:
-                data["vin_verification"] = (
-                    "INCONCLUSIVE (door label extracted; no secondary confirmation)"
-                )
 
-        # 2) If no door label but QR found
-        elif vin_from_qr:
-            data["vin"] = vin_from_qr
-            data["vin_verification"] = "INCONCLUSIVE (QR only; door label not detected)"
+            # 2) If no door label but QR found
+            elif vin_from_qr:
+                data["vin"] = vin_from_qr
+                data["vin_verification"] = "INCONCLUSIVE (QR only; door label not detected)"
 
-except Exception:
-    pass
+    except Exception:
+        pass
+
+    # Prefer door-label VIN when present (OCR -> QR/barcode). Do NOT use filenames.
+    try:
+        if isinstance(data, dict) and vin_from_label:
+            v_model = (data.get("vin") or "").strip().upper()
+            if not re.fullmatch(VIN_PATTERN, v_model):
+                data["vin"] = vin_from_label
+                if not (data.get("vin_verification") or "").strip():
+                    data["vin_verification"] = "INCONCLUSIVE (door label VIN extracted; compare to other docs if present)"
+            elif v_model != vin_from_label:
+                data["vin_verification"] = f"MISMATCH (door label: {vin_from_label}; other source: {v_model})"
+            # Secondary confirmation vs QR/barcode if available
+            if vin_from_qr:
+                if vin_from_label == vin_from_qr:
+                    if not re.search(r"\bMATCH\b|\bMISMATCH\b", str(data.get("vin_verification") or ""), flags=re.IGNORECASE):
+                        data["vin_verification"] = "MATCH (door label + QR/barcode)"
+                else:
+                    data["vin_verification"] = f"MISMATCH (door label: {vin_from_label}; QR/barcode: {vin_from_qr})"
+    except Exception:
+        pass
 
 
     # One safe retry on truncation
@@ -1267,7 +1287,7 @@ except Exception:
         "vin": _get("vin"),
         "vin_verification": _get("vin_verification"),
         "vehicle": _get("vehicle"),
-        "odometer_estimate_only": (odometer_value if odometer_value else _get("odometer_estimate_only")),
+"odometer_estimate_only": (odometer_value if odometer_value else _get("odometer_estimate_only")),
         "compliance_score": _get("compliance_score"),
         "summary_brief": _get("summary_brief"),
         "summary_markdown": _get("summary_markdown"),
@@ -1297,7 +1317,7 @@ except Exception:
     except Exception:
         pass
 
-# -----------------------
+    # -----------------------
     # PDF helpers
     # -----------------------
     def _pdf_sanitize(text: str, max_token_len: int = 60) -> str:
@@ -1660,9 +1680,9 @@ except Exception:
         "pdf_filename": pdf_filename
     }
 
-# -----------------------
+    # -----------------------
 # PDF download
-# -----------------------
+    # -----------------------
 @app.get("/download-pdf")
 async def download_pdf(file_number: Optional[str] = None, filename: Optional[str] = None):
     if filename:
@@ -1679,3 +1699,4 @@ async def download_pdf(file_number: Optional[str] = None, filename: Optional[str
         return JSONResponse(status_code=404, content={"detail": "Not Found"})
     latest = max(candidates, key=lambda p: os.path.getmtime(p))
     return FileResponse(path=latest, media_type="application/pdf", filename=os.path.basename(latest))
+
