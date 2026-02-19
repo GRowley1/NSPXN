@@ -748,53 +748,12 @@ async def vision_review(
     vin_from_qr = None
     vin_from_qr_photo = None
 
-    # VISION_SECONDARY_CONFIRMATION
-    # If we have a door-label VIN but no local QR decode, try vision VIN/QR decode on the SAME label photo bytes.
-    try:
-        if vin_from_label and not vin_from_qr and vin_from_label_photo:
-            _raw = None
-            for rec in ocr_pairs:
-                if isinstance(rec, dict) and rec.get("name") == vin_from_label_photo and rec.get("raw_for_vin"):
-                    _raw = rec.get("raw_for_vin")
-                    break
-            _vv = _decode_vin_from_label_or_qr(_raw) if _raw else None
-            if _vv and re.fullmatch(VIN_PATTERN, _vv):
-                vin_from_qr = _vv
-                vin_from_qr_photo = vin_from_label_photo
-    except Exception:
-        pass
-
-
     def _looks_like_door_label(txt: str) -> bool:
         if not txt:
             return False
         t = txt.upper()
         keys = ["MFD BY", "MANUFACTURED", "GVWR", "GAWR", "TIRE SIZE", "CONFORMS TO"]
         return sum(1 for k in keys if k in t) >= 2
-
-    def _vin_check_digit_ok(vin: str) -> bool:
-        """ISO 3779 VIN check digit validation (position 9)."""
-        try:
-            vin = (vin or "").strip().upper()
-            if not re.fullmatch(VIN_PATTERN, vin):
-                return False
-            tr = {
-                **{c: i for c, i in zip("ABCDEFGH", [1,2,3,4,5,6,7,8])},
-                **{c: i for c, i in zip("JKLMN",   [1,2,3,4,5])},
-                **{c: i for c, i in zip("PR",      [7,9])},
-                **{c: i for c, i in zip("STUVWXYZ",[2,3,4,5,6,7,8,9])},
-                **{str(i): i for i in range(10)},
-            }
-            weights = [8,7,6,5,4,3,2,10,0,9,8,7,6,5,4,3,2]
-            total = 0
-            for ch, w in zip(vin, weights):
-                total += tr.get(ch, 0) * w
-            rem = total % 11
-            chk = "X" if rem == 10 else str(rem)
-            return vin[8] == chk
-        except Exception:
-            return False
-
 
     # (b) Door label OCR first
     try:
@@ -895,51 +854,19 @@ async def vision_review(
             _seen_v.add(_v); _tmp_v.append(_v)
     vin_candidates = _tmp_v
 
-    # Final VIN choice: prefer QR/vision-confirmed VIN; otherwise door-label OCR VIN.
-    vin_final = None
-    vin_source = None
-    try:
-        if vin_from_qr and re.fullmatch(VIN_PATTERN, vin_from_qr):
-            vin_final = vin_from_qr
-            vin_source = f"QR/Vision ({vin_from_qr_photo or 'photo unknown'})"
-        elif vin_from_label and re.fullmatch(VIN_PATTERN, vin_from_label):
-            vin_final = vin_from_label
-            vin_source = f"Door Label OCR ({vin_from_label_photo or 'photo unknown'})"
-        if vin_from_label and vin_from_qr and vin_from_label != vin_from_qr:
-            vin_source = f"QR/Vision override (label OCR mismatch: {vin_from_label})"
-        if vin_final and (not _vin_check_digit_ok(vin_final)) and vin_from_qr:
-            vin_final = vin_from_qr
-            vin_source = f"QR/Vision (check-digit override; label OCR invalid)"
-    except Exception:
-        pass
-
     # --- ODOMETER OCR LOCK (extract mileage from OCR text if visible) ---
     # This makes it impossible for the narrative to claim the odometer is not visible when OCR captured a mileage value.
     odometer_value = None
     try:
         _odo_txt = uploaded_text_all or ""
-        # Extract all mileage-like readings; prefer the smallest low-mile 'mi' reading to avoid fuel-range (e.g., 165 mi)
-        _matches = re.findall(r"(?i)\b(\d{1,3}(?:,\d{3})+|\d{1,7})\s*(mi|miles|km)\b", _odo_txt)
-        if _matches:
-            vals = []
-            for _d, _u in _matches:
-                try:
-                    _n = int(str(_d).replace(",", ""))
-                except Exception:
-                    continue
-                _u = (_u or "").lower()
-                if _u == "miles":
-                    _u = "mi"
-                vals.append((_n, _u))
-            if vals:
-                mi_vals = [n for (n,u) in vals if u == "mi"]
-                if mi_vals:
-                    low = [n for n in mi_vals if n <= 2000]
-                    pick = min(low) if low else mi_vals[0]
-                    odometer_value = f"{pick:,} mi"
-                else:
-                    n,u = vals[0]
-                    odometer_value = f"{n:,} {u}"
+        # Common mileage patterns from digital clusters: "72,261 mi", "72261 mi", "72261 miles", "116000 km"
+        _m = re.search(r"(?i)\b(\d{1,3}(?:,\d{3})+|\d{4,7})\s*(mi|miles|km)\b", _odo_txt)
+        if _m:
+            _digits = _m.group(1).replace(",", "")
+            _unit = _m.group(2).lower()
+            if _unit == "miles":
+                _unit = "mi"
+            odometer_value = f"{int(_digits):,} {_unit}"
     except Exception:
         odometer_value = None
 
@@ -1096,7 +1023,6 @@ async def vision_review(
     prompt_text = (
         f"REQUEST TYPE (use exactly in request_type): {req_label}\n"
         f"FILE #: {file_number}\n"
-        f"VIN (verified): {vin_final or 'N/A'} ({vin_source or ''})\n"
         f"CLIENT: {ia_company}\n\n"
         "PHOTO INDEX (use Photo # citations exactly as listed):\n"
         + ("\n".join([f"Photo {i+1}: {name}" for i, name in enumerate(photo_index)]) if photo_index else "No photos provided.")
@@ -1104,8 +1030,8 @@ async def vision_review(
         "CLIENT RULES (only if provided):\n"
         + (client_rules[:1500] if client_rules else "")
         + "\n\n"
-        "ADD'L NOTES (only if provided):\n"
-        + (ai_notes_used[:1500] if ai_notes_used else "")
+        "### ADD'L NOTES (PRIORITY — MUST BE ADDRESSED IN REPORT)\n"
+        + (ai_notes_used[:1500] if ai_notes_used else "None provided.")
         + "\n\n"
         "INSTRUCTIONS:\n"
         "- Return strict JSON only.\n"
@@ -1224,33 +1150,34 @@ async def vision_review(
         return JSONResponse(status_code=500, content={"error":"Model returned no content."})
 
     data = _try_parse_json(raw)
-    # force VIN from vin_final (door-label/QR) to prevent OCR drift in the narrative
-    try:
-        if isinstance(data, dict) and vin_final:
-            data["vin"] = vin_final
-            data["vin_verification"] = (f"Verified from {vin_source}" if vin_source else "Verified from photos")
-    except Exception:
-        pass
-
     # Prefer door-label VIN when present (OCR -> QR/barcode). Do NOT use filenames.
-    try:
-        if isinstance(data, dict) and vin_from_label:
-            v_model = (data.get("vin") or "").strip().upper()
-            if not re.fullmatch(VIN_PATTERN, v_model):
-                data["vin"] = vin_from_label
-                if not (data.get("vin_verification") or "").strip():
-                    data["vin_verification"] = "INCONCLUSIVE (door label VIN extracted; compare to other docs if present)"
-            elif v_model != vin_from_label:
-                data["vin_verification"] = f"MISMATCH (door label: {vin_from_label}; other source: {v_model})"
-            # Secondary confirmation vs QR/barcode if available
+# --- HARD VIN LOCK (door label wins; QR only confirms) ---
+try:
+    if isinstance(data, dict):
+
+        # 1) If door-label VIN exists, it is authoritative.
+        if vin_from_label:
+            data["vin"] = vin_from_label
+
             if vin_from_qr:
-                if vin_from_label == vin_from_qr:
-                    if not re.search(r"\bMATCH\b|\bMISMATCH\b", str(data.get("vin_verification") or ""), flags=re.IGNORECASE):
-                        data["vin_verification"] = "MATCH (door label + QR/barcode)"
+                if vin_from_qr == vin_from_label:
+                    data["vin_verification"] = "MATCH (door label + QR)"
                 else:
-                    data["vin_verification"] = f"MISMATCH (door label: {vin_from_label}; QR/barcode: {vin_from_qr})"
-    except Exception:
-        pass
+                    data["vin_verification"] = (
+                        f"MISMATCH (door label: {vin_from_label}; QR: {vin_from_qr})"
+                    )
+            else:
+                data["vin_verification"] = (
+                    "INCONCLUSIVE (door label extracted; no secondary confirmation)"
+                )
+
+        # 2) If no door label but QR found
+        elif vin_from_qr:
+            data["vin"] = vin_from_qr
+            data["vin_verification"] = "INCONCLUSIVE (QR only; door label not detected)"
+
+except Exception:
+    pass
 
 
     # One safe retry on truncation
@@ -1340,7 +1267,7 @@ async def vision_review(
         "vin": _get("vin"),
         "vin_verification": _get("vin_verification"),
         "vehicle": _get("vehicle"),
-        "odometer_estimate_only": _get("odometer_estimate_only"),
+        "odometer_estimate_only": (odometer_value if odometer_value else _get("odometer_estimate_only")),
         "compliance_score": _get("compliance_score"),
         "summary_brief": _get("summary_brief"),
         "summary_markdown": _get("summary_markdown"),
@@ -1524,7 +1451,7 @@ async def vision_review(
         pdf_filename = f"AI_Condition_Report_{safe_file}.pdf"
     else:
         pdf.cell(0,10,"NSPXN.com Condition Report", ln=True, align="C")
-        pdf.set_font_size(12); pdf.ln(3)
+        pdf.set_font_size(10); pdf.ln(3)
         mc(f"File Number: {file_number}")
         mc(f"Inspected For: {ia_company}")
         mc(f"Appraiser ID #: {appraiser_id}")
