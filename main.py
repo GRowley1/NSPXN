@@ -178,22 +178,19 @@ DETAIL_TEMPLATES = {
 
     "damage_report_from_photos": (
         """
-# AI-4-IA Damage Report (Photos Only)
+# Condition Report (Photos Only)
 Create a professional damage report based ONLY on the provided photos.
 
-## Inputs Used
-- List exact Photo #s used and total photos provided.
-
-## Photo-by-Photo Damage Ledger (REQUIRED - one row per photo)
+## Photo-by-Photo Condition Summary
 | Photo # | View/Side | Key Panels/Parts Visible | Damage/Condition |
 |---:|---|---|---|
 - Cover EVERY provided photo. If no damage is obvious from that angle, write: "No obvious damage visible from this angle" (do not use the word intact).
 
-## Side Checks (MANDATORY)
+## Side Checks
 - **Driver/Left Side**: <what is visible; cite Photo #; if not shown, say not shown>
 - **Passenger/Right Side**: <what is visible; cite Photo #; if not shown, say not shown>
 
-## Front-End Checklist (MANDATORY - DO NOT OMIT HOOD)
+## Front-End Checklist
 - Hood: <condition or Not clearly shown> (Photo #)
 - Front bumper cover: <condition or Not clearly shown> (Photo #)
 - Grille: <condition or Not clearly shown> (Photo #)
@@ -202,7 +199,7 @@ Create a professional damage report based ONLY on the provided photos.
 - Driver-side front fender: <condition or Not clearly shown> (Photo #)
 - Passenger-side front fender: <condition or Not clearly shown> (Photo #)
 
-## Detailed Audit Report
+## Detailed Condition Report
 - Write a continuous 10–15 sentence narrative summarizing visible damage, impact zones, misalignment/gaps, and repair implications (photo-based).
 - If VIN label or odometer are visible, state them with Photo #. If not visible or unreadable, say so.
 
