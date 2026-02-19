@@ -772,24 +772,29 @@ async def vision_review(
         vin_from_label_photo = None
     # (c) QR/barcode VIN as secondary confirmation (prefer same photo as door label if available)
     try:
+        # First: if we already know which photo looks like the door label, prefer its QR/barcode
         if vin_from_label_photo:
             for rec in ocr_pairs:
                 if isinstance(rec, dict) and (rec.get("name") == vin_from_label_photo) and rec.get("qr_vin"):
                     vin_from_qr = str(rec.get("qr_vin") or "").strip().upper() or None
                     vin_from_qr_photo = rec.get("name") or None
                     break
+        # Otherwise: pick the first successfully decoded QR/barcode VIN from ANY image
         if not vin_from_qr:
             for rec in ocr_pairs:
                 if isinstance(rec, dict) and rec.get("qr_vin"):
                     vin_from_qr = str(rec.get("qr_vin") or "").strip().upper() or None
                     vin_from_qr_photo = rec.get("name") or None
                     break
+        # Normalize: only keep if it looks like a real VIN
+        if vin_from_qr and not re.fullmatch(VIN_PATTERN, vin_from_qr):
+            vin_from_qr = None
+            vin_from_qr_photo = None
     except Exception:
         vin_from_qr = None
         vin_from_qr_photo = None
 
-
-    # (c) If OCR didn't yield a VIN, try a dedicated vision decode for VIN/QR/barcode on the best label candidate
+# (c) If OCR didn't yield a VIN, try a dedicated vision decode for VIN/QR/barcode on the best label candidate
     def _decode_vin_from_label_or_qr(raw_bytes: Optional[bytes]) -> Optional[str]:
         if not raw_bytes:
             return None
@@ -827,25 +832,48 @@ async def vision_review(
 
     if not vin_from_label:
         try:
-            candidate = None
+            # Pick the best VIN label candidate with minimal heuristics:
+            # 1) any image that already decoded a QR/barcode VIN
+            # 2) highest "door label" keyword score from OCR text
+            # 3) fall back to first image with preserved original bytes
+            candidates = []
             for rec in ocr_pairs:
-                if isinstance(rec, dict) and _looks_like_door_label(rec.get("text") or "") and rec.get("raw_for_vin"):
-                    candidate = rec
+                if not isinstance(rec, dict):
+                    continue
+                if not rec.get("raw_for_vin"):
+                    continue
+                t = (rec.get("text") or "")
+                score = 0
+                if t:
+                    tu = t.upper()
+                    for k in ("MFD BY", "MANUFACTURED", "GVWR", "GAWR", "TIRE SIZE", "CONFORMS TO"):
+                        if k in tu:
+                            score += 1
+                candidates.append((rec, score))
+            # Prefer any record with a decoded QR VIN
+            candidate_order = []
+            for rec, score in candidates:
+                if rec.get("qr_vin"):
+                    candidate_order.append(rec)
+            if not candidate_order:
+                # Highest score first
+                candidates.sort(key=lambda x: x[1], reverse=True)
+                candidate_order = [r for r, _s in candidates]
+            # Try a few candidates (prevents "first image" failures)
+            for cand in candidate_order[:4]:
+                # Prefer local QR/barcode VIN (already decoded on ORIGINAL image) before calling vision
+                if cand.get("qr_vin") and re.fullmatch(VIN_PATTERN, str(cand.get("qr_vin") or "").strip().upper()):
+                    vin_from_label = str(cand.get("qr_vin") or "").strip().upper()
+                    vin_from_label_photo = cand.get("name") or None
                     break
-            if candidate is None:
-                for rec in ocr_pairs:
-                    if isinstance(rec, dict) and rec.get("raw_for_vin"):
-                        candidate = rec
-                        break
-            if candidate is not None:
-                # Prefer local QR/barcode VIN if available before calling the vision model.
-                if candidate.get("qr_vin"):
-                    vin_from_label = str(candidate.get("qr_vin") or "").strip().upper() or None
-                if not vin_from_label:
-                    vin_from_label = _decode_vin_from_label_or_qr(candidate.get("raw_for_vin"))
-                vin_from_label_photo = candidate.get("name") if vin_from_label else None
+                v_try = _decode_vin_from_label_or_qr(cand.get("raw_for_vin"))
+                if v_try and re.fullmatch(VIN_PATTERN, v_try):
+                    vin_from_label = v_try
+                    vin_from_label_photo = cand.get("name") or None
+                    break
         except Exception:
             pass
+
 
     # normalize + keep unique order
     _seen_v = set(); _tmp_v=[]
@@ -855,18 +883,42 @@ async def vision_review(
     vin_candidates = _tmp_v
 
     # --- ODOMETER OCR LOCK (extract mileage from OCR text if visible) ---
-    # This makes it impossible for the narrative to claim the odometer is not visible when OCR captured a mileage value.
+    # Prevents cluster "range" miles from being mistaken as odometer miles when both appear.
     odometer_value = None
     try:
         _odo_txt = uploaded_text_all or ""
-        # Common mileage patterns from digital clusters: "72,261 mi", "72261 mi", "72261 miles", "116000 km"
-        _m = re.search(r"(?i)\b(\d{1,3}(?:,\d{3})+|\d{4,7})\s*(mi|miles|km)\b", _odo_txt)
-        if _m:
-            _digits = _m.group(1).replace(",", "")
-            _unit = _m.group(2).lower()
-            if _unit == "miles":
-                _unit = "mi"
-            odometer_value = f"{int(_digits):,} {_unit}"
+        matches = []
+        for m in re.finditer(r"(?i)\b(\d{1,3}(?:,\d{3})+|\d{2,7})\s*(mi|miles|km)\b", _odo_txt):
+            digits = m.group(1).replace(",", "")
+            unit = m.group(2).lower()
+            if unit == "miles":
+                unit = "mi"
+            try:
+                val = int(digits)
+            except Exception:
+                continue
+            # Context window for 'odo' hints
+            ctx = (_odo_txt[max(0, m.start()-30):m.end()+30] or "").lower()
+            ctx_score = 0
+            if "odo" in ctx or "odometer" in ctx:
+                ctx_score += 5
+            if "range" in ctx or "fuel" in ctx:
+                ctx_score -= 2
+            matches.append((val, unit, ctx_score))
+        if matches:
+            # Prefer anything that looks like a real odometer (>= 1000 miles) first.
+            big = [x for x in matches if x[0] >= 1000]
+            if big:
+                big.sort(key=lambda x: (x[2], x[0]), reverse=True)
+                pick = big[0]
+            else:
+                # For low-mile vehicles, choose the lowest value (often avoids fuel range).
+                matches.sort(key=lambda x: (x[2], -x[0]), reverse=True)
+                if all(x[2] == matches[0][2] for x in matches):
+                    pick = min(matches, key=lambda x: x[0])
+                else:
+                    pick = matches[0]
+            odometer_value = f"{pick[0]:,} {pick[1]}"
     except Exception:
         odometer_value = None
 
@@ -1034,6 +1086,7 @@ async def vision_review(
         + (ai_notes_used[:1500] if ai_notes_used else "")
         + "\n\n"
         "INSTRUCTIONS:\n"
+        "- You MUST incorporate any ADD'L NOTES provided by the user (e.g., driver/passenger orientation, loose parts identification) into the narrative and photo-by-photo summary.\n"
         "- Return strict JSON only.\n"
         "- Use the template below for narrative formatting.\n\n"
         + DETAIL_TEMPLATES.get(ai_intent, DETAIL_TEMPLATES['comprehensive'])
