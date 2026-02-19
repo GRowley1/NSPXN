@@ -45,7 +45,7 @@ log.info(f"Using CLIENT_RULES_DIR={CLIENT_RULES_DIR}")
 # Use selected model everywhere
 MODEL = os.getenv("OAI_MODEL") or os.getenv("OPENAI_MODEL") or "gpt-5.2"
 # GPT-5.x models use max_completion_tokens; GPT-4.x uses max_tokens
-_token_kw = "max_completion_tokens"  # forced for GPT-5+ compatibility
+_token_kw = "max_completion_tokens"
 
 if not os.getenv("OPENAI_API_KEY"):
     raise RuntimeError("OPENAI_API_KEY missing")
@@ -1043,7 +1043,7 @@ async def vision_review(
         "guidelines_only": 1500,
         "damage_report_from_photos": 2400
     }
-    max_completion_tokens= MAX_TOKENS_BY_INTENT.get(ai_intent, 1500)
+    max_tokens = MAX_TOKENS_BY_INTENT.get(ai_intent, 1500)
 
     # Call GPT and parse JSON (JSON hardened)
     # Prefer the canonical SDK path (client.chat.completions). Keep fallback for older SDKs.
@@ -1052,7 +1052,7 @@ async def vision_review(
             model=MODEL,
             messages=[{"role":"system","content": SYSTEM},
                       {"role":"user","content": parts_payload}],
-            max_completion_tokens=max_tokens,
+            max_tokens=max_tokens,
             temperature=0,
             top_p=1,
             presence_penalty=0,
@@ -1064,7 +1064,7 @@ async def vision_review(
             model=MODEL,
             messages=[{"role":"system","content": SYSTEM},
                       {"role":"user","content": parts_payload}],
-            max_completion_tokens=max_tokens,
+            max_tokens=max_tokens,
             temperature=0,
             top_p=1,
             presence_penalty=0,
@@ -1136,7 +1136,7 @@ async def vision_review(
                 model=MODEL,
                 messages=[{"role": "system", "content": SYSTEM},
                           {"role": "user", "content": shrunk}],
-                max_completion_tokens=retry_tokens,
+                max_tokens=retry_tokens,
                 temperature=0,
                 response_format={"type": "json_object"}
             )
@@ -1166,7 +1166,7 @@ async def vision_review(
                 fix_rsp = client.chat_completions.create(  # type: ignore[attr-defined]
                     model=MODEL,
                     messages=fix_prompt,
-                    max_completion_tokens=max_tokens,
+                    max_tokens=max_tokens,
                     temperature=0,
                     response_format={"type":"json_object"}
                 )
@@ -1174,7 +1174,7 @@ async def vision_review(
                 fix_rsp = client.chat.completions.create(
                     model=MODEL,
                     messages=fix_prompt,
-                    max_completion_tokens=max_tokens,
+                    max_tokens=max_tokens,
                     temperature=0,
                     response_format={"type":"json_object"}
                 )
