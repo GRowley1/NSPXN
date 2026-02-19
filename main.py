@@ -133,14 +133,14 @@ DETAIL_TEMPLATES = {
         "## Executive Summary\n"
         "- 3–6 bullets capturing the big picture: estimate integrity, rule alignment (only if rules text was supplied), "
         "and photo consistency.\n\n"
-        "## Detailed Audit Report\n"
+        "## Detailed Condition Report\n"
         "- Write this section as a formal, paragraph-style appraisal report summarizing the entire claim. "
         "Include: scope of impact, damage by zone/panel, repair vs. replace rationale, parts type (OEM/LKQ/Aftermarket), "
         "labor operations, refinish/overlap considerations, rate validation, paint materials handling, sublet usage, "
         "tax/markup accuracy, and overall estimate integrity. Cite photos and estimate lines (e.g., 'Photo 3', 'p2/L14'). "
         "Close with compliance to any provided client rules and a clear final recommendation (Repairable vs. Total Loss). "
         "Do not declare Repairable/Total Loss unless the estimate itself explicitly marks 'Total Loss' or an ACV comparison is provided. "
-        "If the shop info is listed under Repair Facility on ANY estimate, add only the shop name to the Detailed Audit Report narrative. "
+        "If the shop info is listed under Repair Facility on ANY estimate, add only the shop name to the Detailed Condition Report narrative. "
         "If a Printout showing the Clean Retail Value or Estimated Trade-In Value of the unit is present which may include ANY of the following: NADA, J.D. Power, Kelly Blue Book, Edmunds, Carfax, or Cars.com, DO NOT declare as missing if any of these are present. "
         "Minimum 10–14 sentences (one continuous narrative, not bullets).\n\n"
         "## Photo-by-Photo Damage Ledger\n"
@@ -239,7 +239,7 @@ IDENTIFIERS_VERIFICATION_PROTOCOL = (
     "\n5) Grade legibility for each identifier as one of: 'Clearly legible' / 'Present — not clearly legible' / 'Not present'."
     "\n6) If any identifier is present but not clearly legible, say why (glare, blur, angle) and what photo would resolve it."
     "\n7) Write a one-line bottom line: 'VIN verification: <MATCH/MISMATCH/INCONCLUSIVE>; Odometer: <value or reason>'."
-    "\n8) Weave these facts naturally into the '## Detailed Audit Report' narrative and keep the top-line fields "
+    "\n8) Weave these facts naturally into the '## Detailed Condition Report' narrative and keep the top-line fields "
     "(vin, vin_verification, odometer_estimate_only) consistent."
     "\n9) When citing more than one VIN location (e.g., windshield vs. door label), you must cite DISTINCT Photo #s; "
     "never reuse the same photo number for two different locations."
@@ -338,12 +338,12 @@ SYSTEM_BASE += (
 
 SYSTEM_BASE += (
     " Focus on a cohesive, professional appraisal. Prefer narrative over rigid tables. "
-    "Include a section named '## Detailed Audit Report'. "
+    "Include a section named '## Detailed Condition Report'. "
     "Include '## Compliance Score Rationale' only when compliance_score < 100, and show deductions from 100 with brief evidence refs (p#/L# or Photo #). "
     "If you include tables, keep them concise and only when they help clarity. "
     "Avoid placeholder rows/columns; do not invent data. "
     "When client_rules text is provided, also include a section titled '## Client Guidelines Comparison' with 3–8 concise bullets quoting the relevant rule fragment and citing evidence (p#/L#, Photo #); "
-    "weave any material rule alignment/misalignment into the Detailed Audit Report narrative."
+    "weave any material rule alignment/misalignment into the Detailed Condition Report narrative."
     "When a valuation/clean retail printout exists but the header doesn’t match the estimate’s VIN/year/trim/mileage, label it “Present — mismatched (detail the differences)” and request a corrected printout; never mark it Missing/Not Evidenced. "
     "If a legible driver-door VIN label photo is present, treat Production Date as evidenced; do not mark 'missing' or deduct for lack of a separate photo. "
     "Only deduct for missing Repair Facility info when the Closing Report or other documents clearly show the vehicle is at a named repair facility AND the estimate's 'Repair Facility' section does not list that same facility; "
@@ -351,7 +351,7 @@ SYSTEM_BASE += (
 )
 
 SYSTEM_BASE += (
-    " Your 'summary_markdown' MUST include a top-level section named '## Detailed Audit Report' containing a cohesive narrative of at least 10–14 sentences (not bullets). "
+    " Your 'summary_markdown' MUST include a top-level section named '## Detailed Condition Report' containing a cohesive narrative of at least 10–14 sentences (not bullets). "
     "It must synthesize: impact zones, per-panel damages, repair vs. replace rationale, parts type (OEM/LKQ/Aftermarket), labor ops, refinish/overlap, rate/materials/sublet/tax handling, and estimate integrity. "
     "It must cite concrete evidence inline (e.g., p2/L14, Photo 3). "
     "When evaluating paint materials, recognize that a summary line such as 'Paint Supplies' or 'Paint Materials' with hours and rate in the totals section constitutes a valid cost breakdown. "
@@ -1187,7 +1187,7 @@ async def vision_review(
         skeleton["request_type"] = req_label
         skeleton["summary_brief"] = "N/A (model output could not be parsed; skeleton returned)."
         skeleton["summary_markdown"] = (
-            "## Detailed Audit Report\n"
+            "## Detailed Condition Report\n"
             "Model output could not be parsed into JSON on this run. Please resubmit."
         )
         skeleton["fraud_markdown"] = "No material inconsistencies found."
@@ -1221,16 +1221,16 @@ async def vision_review(
         sm_tmp = (result.get("summary_markdown") or "").strip()
         if not sm_tmp:
             result["summary_markdown"] = (
-                "## Detailed Audit Report\n"
+                "## Detailed Condition Report\n"
                 "Narrative fallback: The model returned an empty narrative field. "
                 "Please re-run with the same inputs; core identifiers and score fields were still returned.\n\n"
                 "## Overall Assessment\n"
                 f"Request Type: {result.get('request_type','N/A')}\n"
                 f"Compliance Score: {result.get('compliance_score','N/A')}\n"
             )
-        elif "## Detailed Audit Report" not in sm_tmp:
+        elif "## Detailed Condition Report" not in sm_tmp:
             # Keep minimal: do not re-write content; just prepend the required header to avoid downstream display rules.
-            result["summary_markdown"] = "## Detailed Audit Report\n" + sm_tmp
+            result["summary_markdown"] = "## Detailed Condition Report\n" + sm_tmp
     except Exception:
         pass
 
