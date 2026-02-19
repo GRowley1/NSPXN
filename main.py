@@ -179,7 +179,6 @@ DETAIL_TEMPLATES = {
     "damage_report_from_photos": (
         """
 # Condition Report (Photos Only)
-Create a professional damage report based ONLY on the provided photos.
 
 ## Photo-by-Photo Condition Summary
 | Photo # | View/Side | Key Panels/Parts Visible | Damage/Condition |
@@ -1348,7 +1347,7 @@ async def vision_review(
         mc(f"Inspected For: {ia_company}")
         pdf_status = result["redaction_status"].replace("✅", "OK")
         pdf.ln(2); mc(pdf_status)
-        pdf.ln(2); mc("Condition Summary"); mc((result["summary_markdown"] or "N/A").strip())
+        pdf.ln(2); mc("Report Selected"); mc((result["summary_markdown"] or "N/A").strip())
         pdf.ln(2); mc("Fraud & Authenticity Check"); mc((result["fraud_markdown"] or 'N/A').strip())
         pdf.ln(2); mc("Conclusion"); mc((result["conclusion"] or 'N/A').strip())
 
