@@ -1538,6 +1538,91 @@ async def vision_review(
         pass
 
 
+    # -----------------------
+    # Photos-Only OUTPUT HARDENING (prevents blank/N/A reports; enforces Add'l Notes)
+    # -----------------------
+    def _bad_field(v: str) -> bool:
+        s = (v or "").strip()
+        if not s:
+            return True
+        if s.strip().upper() == "N/A":
+            return True
+        # Common failure pattern: all fields N/A or placeholder-only
+        if s.startswith("N/A"):
+            return True
+        return False
+
+    try:
+        if ai_intent == "damage_report_from_photos":
+            _bad = (
+                _bad_field(result.get("summary_markdown") or "")
+                or _bad_field(result.get("estimated_costs_markdown") or "")
+                or _bad_field(result.get("fraud_markdown") or "")
+                or _bad_field(result.get("conclusion") or "")
+            )
+
+            if _bad:
+                retry_preamble = (
+                    "CRITICAL RETRY (PHOTOS-ONLY): Your prior output was invalid because required fields were blank or 'N/A'.\n"
+                    "Return ONLY valid JSON (no prose, no code fences).\n"
+                    "Hard rules:\n"
+                    "- NEVER return 'N/A' for summary_markdown, estimated_costs_markdown, fraud_markdown, or conclusion.\n"
+                    "- You MUST explicitly address the Add'l Notes in the narrative (e.g., 'Impact to Right Front') and describe the impact zone accordingly.\n"
+                    "- estimated_costs_markdown MUST be a PHOTOS-ONLY approximation: create body/paint/frame/mechanical hours and an OEM parts list with approximate $ by part.\n"
+                    "- Paint & Materials MUST be modeled as $ per refinish hour (not a percent).\n"
+                    "- Forbidden phrases: 'from estimate', 'from documentation', 'not evidenced', 'no documentation provided'.\n"
+                )
+
+                retry_parts = list(parts_payload)  # shallow copy is enough
+                # Replace the first text block with a retry preamble + original prompt
+                if retry_parts and isinstance(retry_parts[0], dict) and retry_parts[0].get("type") == "text":
+                    retry_parts[0] = {"type": "text", "text": retry_preamble + "\n\n" + (retry_parts[0].get("text") or "")}
+                else:
+                    retry_parts.insert(0, {"type": "text", "text": retry_preamble})
+
+                retry_tokens = min(3200, max_tokens + 500)
+
+                try:
+                    rsp_retry = client.chat.completions.create(
+                        model=MODEL,
+                        messages=[{"role": "system", "content": SYSTEM},
+                                  {"role": "user", "content": retry_parts}],
+                        max_completion_tokens=retry_tokens,
+                        temperature=0,
+                        top_p=1,
+                        presence_penalty=0,
+                        frequency_penalty=0,
+                        response_format={"type": "json_object"},
+                    )
+                except AttributeError:
+                    rsp_retry = client.chat_completions.create(  # type: ignore[attr-defined]
+                        model=MODEL,
+                        messages=[{"role": "system", "content": SYSTEM},
+                                  {"role": "user", "content": retry_parts}],
+                        max_completion_tokens=retry_tokens,
+                        temperature=0,
+                        top_p=1,
+                        presence_penalty=0,
+                        frequency_penalty=0,
+                        response_format={"type": "json_object"},
+                    )
+
+                raw_retry = (rsp_retry.choices[0].message.content or "")
+                data_retry = _try_parse_json(raw_retry)
+
+                if isinstance(data_retry, dict):
+                    # Only overwrite the output fields; preserve file_number/request_type etc.
+                    for k in ("summary_brief","summary_markdown","fraud_markdown","primary_impact","secondary_impact","estimated_costs_markdown","conclusion","claim_number","vin","vin_verification","vehicle","odometer_estimate_only","compliance_score"):
+                        if k in data_retry and data_retry.get(k) is not None:
+                            result[k] = str(data_retry.get(k))
+                    # Re-apply the narrative header guard if needed
+                    sm_retry = (result.get("summary_markdown") or "").strip()
+                    if sm_retry and "## Detailed Condition Report" not in sm_retry:
+                        result["summary_markdown"] = "## Detailed Condition Report\n" + sm_retry
+    except Exception:
+        # Fail-open: never break the request if retry logic fails.
+        pass
+
         # -----------------------
     # Approximate Repair Cost Breakdown
     # - Prefer model-provided `estimated_costs_markdown` (especially for Photos-Only).
@@ -2048,4 +2133,5 @@ async def download_pdf(file_number: Optional[str] = None, filename: Optional[str
         return JSONResponse(status_code=404, content={"detail": "Not Found"})
     latest = max(candidates, key=lambda p: os.path.getmtime(p))
     return FileResponse(path=latest, media_type="application/pdf", filename=os.path.basename(latest))
+
 
