@@ -109,45 +109,6 @@ def _safe(s: str) -> str:
     return re.sub(r"[^\w.\-]+", "-", (s or "").strip()).strip("-_. ")
 
 
-
-def _normalize_ai_notes(raw: str, max_len: int = 800) -> str:
-    """Normalize/sanitize Add'l Notes so they can't break JSON/structured prompting."""
-    if raw is None:
-        return "No additional notes provided."
-    s = str(raw).strip()
-    if not s:
-        return "No additional notes provided."
-
-    # Remove ASCII control chars except newline/tab
-    s = re.sub(r"[\x00-\x08\x0B\x0C\x0E-\x1F\x7F]", " ", s)
-
-    # Normalize newlines + collapse whitespace
-    s = s.replace("\r\n", "\n").replace("\r", "\n")
-    s = re.sub(r"[ \t]+", " ", s)
-    s = re.sub(r"\n{3,}", "\n\n", s).strip()
-
-    # Neutralize common schema-breakers
-    s = s.replace("```", "'''")
-    # Avoid curly braces interfering with JSON-format instructions
-    s = s.replace("{", "(").replace("}", ")")
-
-    if len(s) > max_len:
-        s = s[:max_len].rstrip() + "…"
-    return s
-
-def _ai_notes_block(ai_notes_clean: str) -> str:
-    """Always return a consistent, clearly-delimited notes block."""
-    return (
-        "\n\nADDL_NOTES_FOR_AI_REVIEW (USER PROVIDED):\n"
-        "<<<\n"
-        f"{ai_notes_clean}\n"
-        ">>>\n"
-        "REQUIREMENT:\n"
-        "- You MUST consider these notes while analyzing the photos.\n"
-        "- Use them to guide focus/wording, but DO NOT invent damage.\n"
-        "- If notes conflict with visible evidence or orientation is unclear, say so and defer to what is visible.\n"
-    )
-
 # -----------------------
 # Approximate Repair Cost Breakdown (location-based rates)
 # -----------------------
@@ -174,57 +135,6 @@ def _extract_inspection_location(text: str) -> str:
     if m2:
         return (m2.group(1) or "").strip()
     return ""
-
-def _extract_zip5(*texts: str) -> str:
-    """Return the first 5-digit ZIP found in any provided text (best-effort)."""
-    for t in texts:
-        if not t:
-            continue
-        m = re.search(r"\b(\d{5})(?:-\d{4})?\b", str(t))
-        if m:
-            return m.group(1)
-    return ""
-
-def _zip_to_city_state(zip5: str) -> Optional[Dict[str, str]]:
-    """Best-effort ZIP -> City/State via Zippopotam (public). Fail-open."""
-    z = (zip5 or "").strip()
-    if not re.fullmatch(r"\d{5}", z):
-        return None
-    try:
-        url = f"https://api.zippopotam.us/us/{z}"
-        req = urllib.request.Request(url, headers={"Accept": "application/json"})
-        with urllib.request.urlopen(req, timeout=6) as resp:
-            raw = resp.read().decode("utf-8", "ignore")
-        data = json.loads(raw) if raw else {}
-        if not isinstance(data, dict):
-            return None
-        places = data.get("places") or []
-        if not places:
-            return None
-        p0 = places[0] if isinstance(places[0], dict) else {}
-        city = (p0.get("place name") or "").strip()
-        state = (p0.get("state abbreviation") or "").strip().upper()
-        if city and state:
-            return {"city": city, "state": state, "zip": z}
-    except Exception:
-        return None
-    return None
-
-def _normalize_location_with_zip(location: str, *fallback_texts: str) -> str:
-    """If location lacks City/State but has ZIP, expand it using ZIP->City/State."""
-    loc = (location or "").strip()
-    zip5 = _extract_zip5(loc, *fallback_texts)
-    if not zip5:
-        return loc
-    # If already contains a state, just ensure ZIP is present
-    if _parse_state_from_location(loc):
-        return loc
-    z = _zip_to_city_state(zip5)
-    if z:
-        return f"{z['city']}, {z['state']} {z['zip']}"
-    # At least return ZIP if nothing else
-    return zip5
-
 
 def _parse_state_from_location(loc: str) -> str:
     if not loc:
@@ -279,7 +189,6 @@ def _fetch_rates_from_laborratehero(location: str) -> Optional[Dict[str, float]]
 
 def _lookup_rates(location: str) -> Dict[str, float]:
     """Return a complete rate card (with fallbacks)."""
-    location = _normalize_location_with_zip(location)
     state = _parse_state_from_location(location)
     base = _fallback_rates_by_state(state)
     ext = _fetch_rates_from_laborratehero(location) or {}
@@ -338,6 +247,96 @@ def _num(x: Optional[float]) -> float:
         return float(x) if x is not None else 0.0
     except Exception:
         return 0.0
+
+
+def _parse_money_amount(text: str) -> Optional[float]:
+    """Best-effort parse of a dollar amount from text. Returns None if not found."""
+    if not text:
+        return None
+    # Prefer explicit 'Approximate repair total' or 'Approximate Total Repair Cost'
+    patterns = [
+        r"(?i)Approximate\s+repair\s+total\s*:\s*\$\s*([0-9][0-9,]*(?:\.[0-9]{1,2})?)",
+        r"(?i)Approximate\s+Total\s+Repair\s+Cost\s*\$\s*\d*\s*\+.*?=\s*\*\*\$\s*([0-9][0-9,]*(?:\.[0-9]{1,2})?)\*\*",
+        r"(?i)\*\*\$\s*([0-9][0-9,]*(?:\.[0-9]{1,2})?)\*\*",
+        r"\$\s*([0-9][0-9,]*(?:\.[0-9]{1,2})?)",
+    ]
+    for rx in patterns:
+        m = re.search(rx, text)
+        if m:
+            try:
+                return float(m.group(1).replace(",", ""))
+            except Exception:
+                continue
+    return None
+
+
+def _apply_severity_tier_checkmarks(md: str) -> str:
+    """Ensure Severity Tier has a single checked box based on the parsed Approximate repair total."""
+    if not md:
+        return md
+    total = _parse_money_amount(md)
+    if total is None:
+        return md
+
+    # Tier logic
+    tier = "minor"
+    if total >= 25000:
+        tier = "tlt"
+    elif total >= 10000:
+        tier = "major"
+    elif total >= 3500:
+        tier = "moderate"
+
+    def _box(is_checked: bool) -> str:
+        return "☑" if is_checked else "☐"
+
+    # Normalize/replace any existing Severity Tier block lines if present
+    lines = md.splitlines()
+    out = []
+    in_tier = False
+    for ln in lines:
+        if re.search(r"(?i)^\s*#+\s*Severity\s+Tier\b", ln) or re.search(r"(?i)^\s*Severity\s+Tier\b", ln):
+            in_tier = True
+            out.append(ln)
+            continue
+        if in_tier:
+            # Stop when the next header starts
+            if re.match(r"^\s*#+\s+\S", ln):
+                in_tier = False
+                out.append(ln)
+                continue
+            # Replace tier option lines (handles bullets or checkbox lines)
+            if re.search(r"(?i)Minor\s*\(<\s*\$\s*3,?500\)", ln) or re.search(r"(?i)Minor", ln) and "<" in ln and "3,500" in ln:
+                out.append(f"- {_box(tier=='minor')} Minor (< $3,500)")
+                continue
+            if re.search(r"(?i)Moderate", ln) and ("10,000" in ln or "10000" in ln):
+                out.append(f"- {_box(tier=='moderate')} Moderate ($3,500–$10,000)")
+                continue
+            if re.search(r"(?i)Major", ln) and ("10,000" in ln or "10000" in ln):
+                out.append(f"- {_box(tier=='major')} Major ($10,000+)")
+                continue
+            if re.search(r"(?i)Total\s+Loss\s+Threshold\s+Approaching", ln):
+                out.append(f"- {_box(tier=='tlt')} Likely Total Loss Threshold Approaching")
+                continue
+            # Skip any old checkbox-ish lines in the tier block (we'll rebuild only recognized ones)
+            if re.search(r"(?i)\bMinor\b|\bModerate\b|\bMajor\b|Total\s+Loss\s+Threshold", ln):
+                continue
+            out.append(ln)
+        else:
+            out.append(ln)
+
+    md2 = "\n".join(out)
+
+    # If there was no tier block, append one
+    if not re.search(r"(?i)Severity\s+Tier", md2):
+        md2 += (
+            "\n\n### Severity Tier\n"
+            f"- {_box(tier=='minor')} Minor (< $3,500)\n"
+            f"- {_box(tier=='moderate')} Moderate ($3,500–$10,000)\n"
+            f"- {_box(tier=='major')} Major ($10,000+)\n"
+            f"- {_box(tier=='tlt')} Likely Total Loss Threshold Approaching\n"
+        )
+    return md2
 
 def _extract_hours_and_parts_totals(text: str) -> Dict[str, Any]:
     """Parse estimate totals (best effort)."""
@@ -493,24 +492,6 @@ DETAIL_TEMPLATES = {
 ## Detailed Condition Report
 - Write a continuous 10–15 sentence narrative summarizing visible damage, impact zones, misalignment/gaps, and repair implications (photo-based).
 - If VIN label or odometer are visible, state them with Photo #. If not visible or unreadable, say so.
-
-## Approximate Repair Cost Breakdown (Populate JSON field 'estimated_costs_markdown')
-- You MUST produce a cost approximation derived from the PHOTOS ONLY (do not reference estimates, documents, or 'not evidenced').
-- Provide AI-derived hours and assumptions:
-  • Body labor hours
-  • Paint labor hours
-  • Paint & materials cost = (paint hours × $/refinish hr)
-  • If structural damage is observed in photos: add Setup & Measure = 2.0 hrs @ body rate and include frame hours @ frame rate
-  • If airbags/ADAS/mechanical damage is observed: include mechanical hours @ mechanical rate
-- Provide an OEM replacement parts list (each part with an approximate $).
-- Apply tax ONLY to (parts + paint materials). Do NOT tax labor.
-- Include the Severity Tier checkboxes:
-  ☐ Minor (< $3,500)
-  ☐ Moderate ($3,500–$10,000)
-  ☐ Major ($10,000+)
-  ☐ Likely Total Loss Threshold Approaching
-- Include a Repair Cost Disclaimer stating this is an approximation, not an official estimate.
-- Forbidden phrases: 'from estimate', 'from documentation', 'not evidenced', 'no documentation provided'.
 """
     ),
 }
@@ -619,10 +600,10 @@ SYSTEM_BASE = (
     "Always include all required keys: "
     "['file_number','request_type','claim_number','vin','vin_verification','vehicle',"
     "'odometer_estimate_only','compliance_score','summary_brief','summary_markdown',"
-    "'fraud_markdown','primary_impact','secondary_impact','estimated_costs_markdown','conclusion']. "
+    "'fraud_markdown','primary_impact','secondary_impact','conclusion']. "
     "Use only provided evidence. Cite photos as 'Photo #' and docs as 'p#/L#' when available. "
     "Do not guess. If something is not visible, say why. "
-    "NEVER return 'N/A' for summary_markdown, fraud_markdown, estimated_costs_markdown, or conclusion. For request_type 'Create a Damage Report from Photos', 'estimated_costs_markdown' must be a photos-only approximation (no document/estimate dependency language) and must model Paint & Materials as a $ per refinish hour rate (not a percent)."
+    "NEVER return 'N/A' for summary_markdown, fraud_markdown, or conclusion."
 )
 
 SYSTEM_BASE += (
@@ -996,7 +977,7 @@ async def vision_review(
         try:
             _form = await request.form()
             # First try common variants explicitly
-            for _k in ("ai_notes","ai-notes","addl_notes","additional_notes","notes","ai_review_notes","ai_notes_box","addlNote","addlNoteText"):
+            for _k in ("ai_notes","addl_notes","additional_notes","notes","ai_review_notes","ai_notes_box","addlNote","addlNoteText"):
                 _v = str(_form.get(_k, "") or "").strip()
                 if _v:
                     ai_notes_used = _v
@@ -1011,10 +992,6 @@ async def vision_review(
                             break
         except Exception:
             pass
-    # Normalize/sanitize notes so they cannot break structured prompting
-    ai_notes_used = _normalize_ai_notes(ai_notes_used)
-    ai_notes_block = _ai_notes_block(ai_notes_used)
-
     pdf_text_fulls: List[str] = []  # full PDF text for supplement detection
 
     # Anti-zipbomb guardrails
@@ -1168,24 +1145,96 @@ async def vision_review(
             _seen_v.add(_v); _tmp_v.append(_v)
     vin_candidates = _tmp_v
 
-    # --- ODOMETER OCR LOCK (extract mileage from OCR text if visible) ---
-    # This makes it impossible for the narrative to claim the odometer is not visible when OCR captured a mileage value.
+    # --- ODOMETER OCR LOCK (prefer cluster/odometer photo; avoid ZIP OCR noise) ---
+    # This makes it very difficult for the narrative/header to drift on mileage when an odometer photo exists.
     odometer_value = None
     try:
-        _odo_txt = uploaded_text_all or ""
-        # Common mileage patterns from digital clusters: "72,261 mi", "72261 mi", "72261 miles", "116000 km"
-        _m = re.search(r"(?i)\b(\d{1,3}(?:,\d{3})+|\d{4,7})\s*(mi|miles|km)\b", _odo_txt)
-        if _m:
-            _digits = _m.group(1).replace(",", "")
-            _unit = _m.group(2).lower()
-            if _unit == "miles":
-                _unit = "mi"
-            odometer_value = f"{int(_digits):,} {_unit}"
+        candidates = []
+        for rec in (ocr_pairs or []):
+            if not isinstance(rec, dict):
+                continue
+            name = str(rec.get("name") or "")
+            t = str(rec.get("text") or "")
+            if not t:
+                continue
+            # Score higher if the OCR text looks like an instrument cluster / start message
+            score = 0
+            tl = t.lower()
+            if "odometer" in tl or "miles" in tl or " mi" in tl:
+                score += 2
+            if "press brake" in tl or "push button" in tl or "to start" in tl:
+                score += 2
+            if "rpm" in tl or "mph" in tl or "km/h" in tl:
+                score += 1
+            if re.search(r"(?i)odo|odometer|cluster|instrument", name):
+                score += 2
+
+            m = re.search(r"(?i)\b(\d{1,3}(?:,\d{3})+|\d{4,7})\s*(mi|miles|km)\b", t)
+            if m:
+                digits = m.group(1).replace(",", "")
+                unit = m.group(2).lower()
+                unit = "mi" if unit == "miles" else unit
+                # Prefer 4–7 digit readings
+                if 4 <= len(digits) <= 7:
+                    score += 3
+                candidates.append((score, digits, unit, name))
+
+        best_name = None
+        if candidates:
+            candidates.sort(key=lambda x: (x[0], len(x[1])), reverse=True)
+            best = candidates[0]
+            best_name = best[3]
+            odometer_value = f"{int(best[1]):,} {best[2]}"
+        else:
+            # Fallback: scan combined OCR text (least reliable)
+            _odo_txt = uploaded_text_all or ""
+            _m = re.search(r"(?i)\b(\d{1,3}(?:,\d{3})+|\d{4,7})\s*(mi|miles|km)\b", _odo_txt)
+            if _m:
+                _digits = _m.group(1).replace(",", "")
+                _unit = _m.group(2).lower()
+                _unit = "mi" if _unit == "miles" else _unit
+                odometer_value = f"{int(_digits):,} {_unit}"
+
+        # Optional: one-shot vision confirmation on the best odometer candidate (fixes ZIP vs JPG drift).
+        if best_name and odometer_value:
+            try:
+                raw_img = None
+                for rec in (ocr_pairs or []):
+                    if isinstance(rec, dict) and str(rec.get("name") or "") == best_name and rec.get("raw_for_vin"):
+                        raw_img = rec.get("raw_for_vin")
+                        break
+                if raw_img:
+                    odo_prompt = (
+                        "Return ONLY JSON: {\"odometer\": \"<digits> mi\"}.\n"
+                        "Task: Read the odometer mileage from the instrument cluster photo. "
+                        "If not clearly legible, return {\"odometer\": null}. "
+                        "Do not guess."
+                    )
+                    rsp_o = client.chat.completions.create(
+                        model=MODEL,
+                        messages=[
+                            {"role": "system", "content": "You read vehicle odometers from instrument cluster photos. JSON only."},
+                            {"role": "user", "content": [{"type": "text", "text": odo_prompt}, _image_part_from_bytes(raw_img)]},
+                        ],
+                        max_completion_tokens=180,
+                        temperature=0,
+                        response_format={"type": "json_object"},
+                    )
+                    raw_o = (rsp_o.choices[0].message.content or "").strip()
+                    try:
+                        data_o = json.loads(raw_o)
+                    except Exception:
+                        data_o = None
+                    if isinstance(data_o, dict):
+                        vv = data_o.get("odometer")
+                        if isinstance(vv, str) and re.search(r"\b\d{3,7}\b", vv):
+                            odometer_value = vv.strip()
+            except Exception:
+                pass
     except Exception:
         odometer_value = None
 
-
-    # --- Closing Report: extract "Inspection Results" section for deterministic cross-check + shop-status ---
+# --- Closing Report: extract "Inspection Results" section for deterministic cross-check + shop-status ---
     def _extract_inspection_results_block(_txt: str) -> str:
         if not _txt:
             return ""
@@ -1298,7 +1347,7 @@ async def vision_review(
     KEYS = [
         "file_number","request_type","claim_number","vin","vin_verification","vehicle",
         "odometer_estimate_only","compliance_score","summary_brief","summary_markdown",
-        "fraud_markdown","primary_impact","secondary_impact","estimated_costs_markdown","conclusion"
+        "fraud_markdown","primary_impact","secondary_impact","conclusion"
     ]
 
     SYSTEM = SYSTEM_BASE
@@ -1334,6 +1383,23 @@ async def vision_review(
     # -----------------------
     # Minimal prompt (LET GPT DO THE WORK)
     # -----------------------
+    # --- Rates/Location normalization for Photos-Only cost breakdown ---
+    # Use ZIP found in Inspection Location text and/or IA_Company to resolve City/State for rate lookup.
+    _rate_location = _normalize_location_with_zip(_extract_inspection_location(uploaded_text_all or ""), ia_company, uploaded_text_all)
+    _rate_card = _lookup_rates(_rate_location)
+    _tax_rate_dec = _lookup_tax_rate(_rate_location)
+    rate_block = ""
+    if ai_intent == "damage_report_from_photos":
+        rate_block = (
+            "\n\nLABOR RATE ASSUMPTIONS (MUST USE EXACTLY; derived from ZIP→City/State normalization):\n"
+            f"- Inspection Location (normalized): {_rate_location or 'Not provided'}\n"
+            f"- Body labor: ${_rate_card.get('body_rate', 0):.0f}/hr\n"
+            f"- Refinish (paint) labor: ${_rate_card.get('paint_rate', 0):.0f}/hr\n"
+            f"- Frame/structural labor: ${_rate_card.get('frame_rate', 0):.0f}/hr\n"
+            f"- Mechanical/diagnostic labor: ${_rate_card.get('mechanical_rate', 0):.0f}/hr\n"
+            f"- Paint & materials: ${_rate_card.get('paint_supplies_rate', 0):.0f} per refinish hour (NOT a %)\n"
+            f"- Parts/materials tax rate (apply ONLY to parts + paint materials): {float(_tax_rate_dec or 0.0)*100:.3f}%\n"
+        )
     prompt_text = (
         f"REQUEST TYPE (use exactly in request_type): {req_label}\n"
         f"FILE #: {file_number}\n"
@@ -1343,11 +1409,12 @@ async def vision_review(
         + "\n\n"
         "CLIENT RULES (only if provided):\n"
         + (client_rules[:1500] if client_rules else "")
-        + ai_notes_block
+        + "\n\n"
+"### ADD'L NOTES (PRIORITY — MUST BE ADDRESSED IN REPORT)\n"
++ (ai_notes_used[:1500] if ai_notes_used else "None provided.")
         + "\n\n"
         "INSTRUCTIONS:\n"
         "- Return strict JSON only.\n"
-        "- REQUIRED: Populate 'estimated_costs_markdown' in the JSON.\n"
         "- Use the template below for narrative formatting.\n\n"
         + DETAIL_TEMPLATES.get(ai_intent, DETAIL_TEMPLATES['comprehensive'])
     )
@@ -1550,7 +1617,7 @@ async def vision_review(
                     "Use exactly these keys (all required): "
                     "['file_number','request_type','claim_number','vin','vin_verification','vehicle',"
                     "'odometer_estimate_only','compliance_score','summary_brief','summary_markdown',"
-                    "'fraud_markdown','primary_impact','secondary_impact','estimated_costs_markdown','conclusion'] "
+                    "'fraud_markdown','primary_impact','secondary_impact','conclusion'] "
                     "Do not invent new keys. If a field is unavailable, use 'N/A'. "
                     "Here is the text:\n\n" + raw
                 }
@@ -1632,273 +1699,139 @@ async def vision_review(
 
 
     # -----------------------
-    # Photos-Only OUTPUT HARDENING (prevents blank/N/A reports; enforces Add'l Notes)
+    # Approximate Repair Cost Breakdown (backend-calculated; NOT an official estimate)
     # -----------------------
-    def _bad_field(v: str) -> bool:
-        """Return True if the model gave a placeholder/empty section.
-        This catches bare 'N/A' AND markdown sections that are effectively only headings + N/A.
-        """
-        s = (v or "").strip()
-        if not s:
-            return True
-        up = s.strip().upper()
-
-        # Bare placeholders
-        if up in ("N/A", "NA", "NONE", "NULL"):
-            return True
-        if up.startswith("N/A") and len(up) <= 8:
-            return True
-
-        # If it's markdown, strip headings/blank lines and see if anything substantive remains
-        lines = [ln.strip() for ln in s.splitlines() if ln.strip()]
-        # remove markdown headings and common labels
-        stripped = []
-        for ln in lines:
-            if ln.startswith("#"):
-                continue
-            if ln.lower() in ("report selected", "approximate repair cost breakdown", "fraud & authenticity check", "fraud detection", "conclusion"):
-                continue
-            stripped.append(ln)
-
-        if not stripped:
-            return True
-
-        # If after stripping headings the only remaining content is 'N/A'
-        if len(stripped) == 1 and stripped[0].strip().upper() in ("N/A", "NA", "NONE", "NULL"):
-            return True
-
-        # If the remaining content is extremely short and contains only placeholders
-        joined = " ".join(stripped).strip().upper()
-        if joined in ("N/A", "NA", "NONE", "NULL"):
-            return True
-
-        return False
-
     try:
-        if ai_intent == "damage_report_from_photos":
-            _bad = (
-                _bad_field(result.get("summary_markdown") or "")
-                or _bad_field(result.get("estimated_costs_markdown") or "")
-                or _bad_field(result.get("fraud_markdown") or "")
-                or _bad_field(result.get("conclusion") or "")
-            )
+        inspection_location = _extract_inspection_location(uploaded_text_all or "")
+        rates = _lookup_rates(inspection_location)
+        tax_rate = _lookup_tax_rate(inspection_location)
 
-            if _bad:
-                retry_preamble = (
-                    "CRITICAL RETRY (PHOTOS-ONLY): Your prior output was invalid because required fields were blank or 'N/A'.\n"
-                    "Return ONLY valid JSON (no prose, no code fences).\n"
-                    "Hard rules:\n"
-                    "- NEVER return 'N/A' for summary_markdown, estimated_costs_markdown, fraud_markdown, or conclusion.\n"
-                    "- You MUST explicitly address the Add'l Notes in the narrative (e.g., 'Impact to Right Front') and describe the impact zone accordingly.\n"
-                    "- estimated_costs_markdown MUST be a PHOTOS-ONLY approximation: create body/paint/frame/mechanical hours and an OEM parts list with approximate $ by part.\n"
-                    "- Paint & Materials MUST be modeled as $ per refinish hour (not a percent).\n"
-                    "- Forbidden phrases: 'from estimate', 'from documentation', 'not evidenced', 'no documentation provided'.\n"
-                )
+        totals = _extract_hours_and_parts_totals(uploaded_text_all or "")
 
-                retry_parts = list(parts_payload)  # shallow copy is enough
-                # Replace the first text block with a retry preamble + original prompt
-                if retry_parts and isinstance(retry_parts[0], dict) and retry_parts[0].get("type") == "text":
-                    retry_parts[0] = {"type": "text", "text": retry_preamble + "\n\n" + (retry_parts[0].get("text") or "")}
-                else:
-                    retry_parts.insert(0, {"type": "text", "text": retry_preamble})
+        # Structural trigger: if structural is observed in docs OR in model narrative, add setup/measure and allow frame labor bucket.
+        structural_flag = _structural_observed([uploaded_text_all or "", result.get("summary_markdown") or ""])
 
-                retry_tokens = min(3200, max_tokens + 500)
+        setup_measure_hours = 2.0 if structural_flag else 0.0
 
-                try:
-                    rsp_retry = client.chat.completions.create(
-                        model=MODEL,
-                        messages=[{"role": "system", "content": SYSTEM},
-                                  {"role": "user", "content": retry_parts}],
-                        max_completion_tokens=retry_tokens,
-                        temperature=0,
-                        top_p=1,
-                        presence_penalty=0,
-                        frequency_penalty=0,
-                        response_format={"type": "json_object"},
-                    )
-                except AttributeError:
-                    rsp_retry = client.chat_completions.create(  # type: ignore[attr-defined]
-                        model=MODEL,
-                        messages=[{"role": "system", "content": SYSTEM},
-                                  {"role": "user", "content": retry_parts}],
-                        max_completion_tokens=retry_tokens,
-                        temperature=0,
-                        top_p=1,
-                        presence_penalty=0,
-                        frequency_penalty=0,
-                        response_format={"type": "json_object"},
-                    )
+        body_hours = totals.get("body_hours")
+        paint_hours = totals.get("paint_hours")
+        frame_hours = totals.get("frame_hours")
+        mech_hours = totals.get("mech_hours")
+        parts_total = totals.get("parts_total")
 
-                raw_retry = (rsp_retry.choices[0].message.content or "")
-                data_retry = _try_parse_json(raw_retry)
+        # Paint supplies modeled as $ per refinish hour (NOT a percent)
+        paint_supplies_rate = float(rates.get("paint_supplies_rate") or 0.0)
+        paint_supplies_total = (_num(paint_hours) * paint_supplies_rate) if paint_hours is not None else 0.0
 
-                if isinstance(data_retry, dict):
-                    # Only overwrite the output fields; preserve file_number/request_type etc.
-                    for k in ("summary_brief","summary_markdown","fraud_markdown","primary_impact","secondary_impact","estimated_costs_markdown","conclusion","claim_number","vin","vin_verification","vehicle","odometer_estimate_only","compliance_score"):
-                        if k in data_retry and data_retry.get(k) is not None:
-                            result[k] = str(data_retry.get(k))
-                    # Re-apply the narrative header guard if needed
-                    sm_retry = (result.get("summary_markdown") or "").strip()
-                    if sm_retry and "## Detailed Condition Report" not in sm_retry:
-                        result["summary_markdown"] = "## Detailed Condition Report\n" + sm_retry
+        body_labor_total = (_num(body_hours) + setup_measure_hours) * float(rates.get("body_rate") or 0.0) if (body_hours is not None or setup_measure_hours) else 0.0
+        paint_labor_total = _num(paint_hours) * float(rates.get("paint_rate") or 0.0) if paint_hours is not None else 0.0
 
-                    # If the retry STILL returned placeholders, force a non-N/A minimal scaffold (never print dead 'N/A')
-                    if (
-                        _bad_field(result.get("summary_markdown") or "")
-                        or _bad_field(result.get("estimated_costs_markdown") or "")
-                        or _bad_field(result.get("fraud_markdown") or "")
-                        or _bad_field(result.get("conclusion") or "")
-                    ):
-                        _notes = (ai_notes_used or "").strip()
-                        if not _notes or _notes.lower().startswith("no additional notes"):
-                            _notes = "(No additional notes provided.)"
+        # Frame labor only if structural observed; otherwise do not roll it in even if a stray number is parsed.
+        frame_labor_total = 0.0
+        if structural_flag and frame_hours is not None:
+            frame_labor_total = _num(frame_hours) * float(rates.get("frame_rate") or 0.0)
 
-                        result["summary_markdown"] = (
-                            "## Detailed Condition Report\n"
-                            "Photo-based narrative could not be generated on this run due to a model compliance error.\n"
-                            f"Add'l Notes received: {_notes}\n"
-                            "Please re-run. (This placeholder is generated by NSPXN to avoid blank/N/A reports.)"
-                        )
-                        result["estimated_costs_markdown"] = (
-                            "## Approximate Repair Cost Breakdown (Photos-Only Approximation)\n"
-                            "The model failed to generate a cost breakdown on this run. Please re-run with the same photo set.\n"
-                            "Paint & Materials are modeled as $/refinish hour; tax applies to parts + paint materials only."
-                        )
-                        result["fraud_markdown"] = "No material inconsistencies found."
-                        result["conclusion"] = (
-                            "Conclusion unavailable due to model compliance error on this run. Please re-run."
-                        )
+        mech_labor_total = _num(mech_hours) * float(rates.get("mechanical_rate") or 0.0) if mech_hours is not None else 0.0
 
+        taxable = _num(parts_total) + _num(paint_supplies_total)
+        tax_total = taxable * float(tax_rate or 0.0)
+
+        approx_total = (
+            _num(body_labor_total)
+            + _num(paint_labor_total)
+            + _num(frame_labor_total)
+            + _num(mech_labor_total)
+            + _num(parts_total)
+            + _num(paint_supplies_total)
+            + _num(tax_total)
+        )
+
+        # Estimated Severity Tier (based on approximation total; best-effort)
+        # - If ACV/vehicle value is found in docs, flag total-loss-threshold approaching when approx_total >= 75% of ACV.
+        # - If ACV not found, use a conservative proxy threshold of $20,000+ to flag "approaching".
+        acv_value = None
+        try:
+            _t = uploaded_text_all or ""
+            m_acv = re.search(r"\b(?:ACV|Actual\s+Cash\s+Value)\b[^\$\d]{0,40}\$?\s*([0-9]{1,3}(?:,[0-9]{3})*(?:\.[0-9]{2})?|[0-9]+(?:\.[0-9]{2})?)", _t, re.IGNORECASE)
+            if m_acv:
+                acv_value = float(m_acv.group(1).replace(",", ""))
+        except Exception:
+            acv_value = None
+
+        tier_minor = approx_total < 3500
+        tier_moderate = (approx_total >= 3500) and (approx_total <= 10000)
+        tier_major = approx_total > 10000
+
+        tl_flag = False
+        tl_basis = ""
+        if acv_value and acv_value > 0:
+            tl_flag = (approx_total / acv_value) >= 0.75
+            tl_basis = f"(basis: approx total is {approx_total/acv_value:.0%} of ACV ${acv_value:,.0f} found in docs)"
+        else:
+            tl_flag = approx_total >= 20000
+            tl_basis = "(basis: ACV not evidenced; using conservative $20,000 proxy trigger)"
+
+        severity_md = (
+            "**Estimated Severity Tier (based on this approximation only):**\n"
+            f"- [{'x' if tier_minor else ' '}] Minor (< $3,500)\n"
+            f"- [{'x' if tier_moderate else ' '}] Moderate ($3,500–$10,000)\n"
+            f"- [{'x' if tier_major else ' '}] Major ($10,000+)\n"
+            f"- [{'x' if tl_flag else ' '}] Likely Total Loss Threshold Approaching {tl_basis}\n"
+        )
+
+        # Parts list (best effort)
+        parts_lines = totals.get("parts_lines") or []
+        parts_md = ""
+        if parts_lines:
+            parts_md = "\n".join([f"- {ln}" for ln in parts_lines[:20]])
+        elif parts_total is not None:
+            parts_md = "- Parts total present, but individual part line items were not reliably extractable from provided text."
+        else:
+            parts_md = "- Parts costs not evidenced in the provided documentation."
+
+        estimated_costs_markdown = (
+            "## Approximate Repair Cost Breakdown (Approximation Only)\n\n"
+            f"**Inspection Location:** {inspection_location or 'Not found in documents'}\n\n"
+            "**Regional Average Rates (source: configured rate card / fallback):**\n"
+            f"- Avg Body Rate: ${rates.get('body_rate', 0):.0f}/hr\n"
+            f"- Avg Paint Rate: ${rates.get('paint_rate', 0):.0f}/hr\n"
+            f"- Avg Frame Rate: ${rates.get('frame_rate', 0):.0f}/hr\n"
+            f"- Avg Mechanical Rate: ${rates.get('mechanical_rate', 0):.0f}/hr\n"
+            f"- Paint & Materials Rate: ${rates.get('paint_supplies_rate', 0):.0f} per refinish hr\n"
+            f"- Parts/Materials Tax Rate: {float(tax_rate or 0.0)*100:.3f}%\n\n"
+            "**Hours & Totals (best-effort from estimate/docs; photo-only claims may be blank):**\n"
+            f"- Approx Total Labor Hours @ Body Rate: {('%.1f' % _num(body_hours)) if body_hours is not None else 'Not evidenced'}\n"
+            f"- Approx Total Paint Labor Hours @ Paint Rate: {('%.1f' % _num(paint_hours)) if paint_hours is not None else 'Not evidenced'}\n"
+            f"- Approx Total Paint Supplies @ ${rates.get('paint_supplies_rate', 0):.0f}/refinish hr: {_money(paint_supplies_total)}\n"
+            f"- Setup & Measure (if structural observed): {('2.0 hrs' if structural_flag else 'Not applied')}\n"
+            f"- Approx Total Frame Labor (if structural observed) @ Frame Rate: {('%.1f hrs' % _num(frame_hours)) if (structural_flag and frame_hours is not None) else ('Structural observed — hours not evidenced' if structural_flag else 'Not applied')}\n"
+            f"- Approx Mechanical/ADAS/Airbag/Suspension Hours @ Mechanical Rate: {('%.1f' % _num(mech_hours)) if mech_hours is not None else 'Not evidenced'}\n\n"
+            "**Approx Cost of OEM Parts Needed (from estimate where available):**\n"
+            f"{parts_md}\n\n"
+            "**Tax (parts + paint supplies only):**\n"
+            f"- Taxable subtotal: {_money(taxable)}\n"
+            f"- Estimated tax: {_money(tax_total)}\n\n"
+            "**Approximated Repair Cost Total (Approximation Only):**\n"
+            f"- **{_money(approx_total)}**\n\n"
+            f"{severity_md}\n\n"
+            "_Repair Cost Disclaimer: This section is an AI-generated approximation of repair-related costs based on observed damage, best-effort extracted hours/parts, and regional average rates. "
+            "It is not an official repair estimate, may omit hidden damage or required operations, and must be validated by a qualified appraiser using an estimating platform._"
+        )
+
+        result["estimated_costs_markdown"] = estimated_costs_markdown
+    except Exception as _e_cost:
+        # Never fail the request for cost calculation issues
+        result["estimated_costs_markdown"] = (
+            "## Approximate Repair Cost Breakdown (Approximation Only)\n"
+            "Unable to calculate due to missing/invalid location or rate inputs on this run."
+        )
+    
+    # --- Enforce Severity Tier checkbox selection in the cost breakdown (based on computed total) ---
+    try:
+        result["estimated_costs_markdown"] = _apply_severity_tier_checkmarks(result.get("estimated_costs_markdown") or "")
     except Exception:
-        # Fail-open: never break the request if retry logic fails.
         pass
 
-        # -----------------------
-    # Approximate Repair Cost Breakdown
-    # - Prefer model-provided `estimated_costs_markdown` (especially for Photos-Only).
-    # - Fail-open: never break the run if cost math cannot be produced.
-    # -----------------------
-    try:
-        _existing_costs = (result.get("estimated_costs_markdown") or "").strip()
-
-        if not _existing_costs:
-            inspection_location = _normalize_location_with_zip(_extract_inspection_location(uploaded_text_all or ""), ia_company, uploaded_text_all)
-            rates = _lookup_rates(inspection_location)
-            tax_rate = _lookup_tax_rate(inspection_location)
-
-            # Photos-only: do NOT depend on documents/estimates. The model is instructed to generate hours/parts.
-            # This backend block is only a minimal fallback if the model omitted the field.
-            if ai_intent == "damage_report_from_photos":
-                structural_flag = _structural_observed([result.get("summary_markdown") or ""])
-
-                result["estimated_costs_markdown"] = (
-                    "## Approximate Repair Cost Breakdown (Photos-Only Approximation)\n\n"
-                    f"**Inspection Location:** {inspection_location or 'Not provided'}\n\n"
-                    "**Rates Used (regional average / fallback):**\n"
-                    f"- Avg Body Rate: ${rates.get('body_rate', 0):.0f}/hr\n"
-                    f"- Avg Paint Rate: ${rates.get('paint_rate', 0):.0f}/hr\n"
-                    f"- Avg Frame Rate: ${rates.get('frame_rate', 0):.0f}/hr\n"
-                    f"- Avg Mechanical Rate: ${rates.get('mechanical_rate', 0):.0f}/hr\n"
-                    f"- Paint & Materials Rate: ${rates.get('paint_supplies_rate', 0):.0f} per refinish hr\n"
-                    f"- Parts/Materials Tax Rate: {float(tax_rate or 0.0)*100:.3f}%\n\n"
-                    "**AI-Derived Repair Scope:**\n"
-                    "- Body labor hours: (model should provide)\n"
-                    "- Paint labor hours: (model should provide)\n"
-                    f"- Setup & Measure (if structural observed): {('2.0 hrs @ body rate' if structural_flag else '0.0 hrs')}\n"
-                    "- Frame labor hours (if structural observed): (model should provide)\n"
-                    "- Mechanical/ADAS/Airbag/Suspension hours (if observed): (model should provide)\n\n"
-                    "**OEM Parts Needed (with approximate $ by part):**\n"
-                    "- (model should provide)\n\n"
-                    "**Tax (parts + paint materials only):**\n"
-                    "- (model should provide)\n\n"
-                    "**Approximated Repair Cost Total (Approximation Only):**\n"
-                    "- (model should provide)\n\n"
-                    "**Estimated Severity Tier (based on this approximation only):**\n"
-                    "- [ ] Minor (< $3,500)\n"
-                    "- [ ] Moderate ($3,500–$10,000)\n"
-                    "- [ ] Major ($10,000+)\n"
-                    "- [ ] Likely Total Loss Threshold Approaching\n\n"
-                    "_Repair Cost Disclaimer: This section is an AI-generated approximation of repair-related costs based on observed damage in photos and regional average rates. "
-                    "It is not an official repair estimate and must be validated by a qualified appraiser using an estimating platform._"
-                )
-            else:
-                # Non-photos intents: best-effort parse from documents (if present), using $/refinish-hr materials.
-                totals = _extract_hours_and_parts_totals(uploaded_text_all or "")
-
-                structural_flag = _structural_observed([uploaded_text_all or "", result.get("summary_markdown") or ""])
-                setup_measure_hours = 2.0 if structural_flag else 0.0
-
-                body_hours = totals.get("body_hours")
-                paint_hours = totals.get("paint_hours")
-                frame_hours = totals.get("frame_hours")
-                mech_hours = totals.get("mech_hours")
-                parts_total = totals.get("parts_total")
-
-                paint_supplies_rate = float(rates.get("paint_supplies_rate") or 0.0)
-                paint_supplies_total = (_num(paint_hours) * paint_supplies_rate) if paint_hours is not None else 0.0
-
-                body_labor_total = (_num(body_hours) + setup_measure_hours) * float(rates.get("body_rate") or 0.0) if (body_hours is not None or setup_measure_hours) else 0.0
-                paint_labor_total = _num(paint_hours) * float(rates.get("paint_rate") or 0.0) if paint_hours is not None else 0.0
-
-                frame_labor_total = 0.0
-                if structural_flag and frame_hours is not None:
-                    frame_labor_total = _num(frame_hours) * float(rates.get("frame_rate") or 0.0)
-
-                mech_labor_total = _num(mech_hours) * float(rates.get("mechanical_rate") or 0.0) if mech_hours is not None else 0.0
-
-                taxable = _num(parts_total) + _num(paint_supplies_total)
-                tax_total = taxable * float(tax_rate or 0.0)
-
-                approx_total = (
-                    _num(body_labor_total)
-                    + _num(paint_labor_total)
-                    + _num(frame_labor_total)
-                    + _num(mech_labor_total)
-                    + _num(parts_total)
-                    + _num(paint_supplies_total)
-                    + _num(tax_total)
-                )
-
-                parts_lines = totals.get("parts_lines") or []
-                if parts_lines:
-                    parts_md = "\n".join([f"- {ln}" for ln in parts_lines[:20]])
-                else:
-                    parts_md = "- (Itemized OEM parts list not available from parsed text.)"
-
-                result["estimated_costs_markdown"] = (
-                    "## Approximate Repair Cost Breakdown (Approximation Only)\n\n"
-                    f"**Inspection Location:** {inspection_location or 'Not provided'}\n\n"
-                    "**Regional Average Rates (configured / fallback):**\n"
-                    f"- Avg Body Rate: ${rates.get('body_rate', 0):.0f}/hr\n"
-                    f"- Avg Paint Rate: ${rates.get('paint_rate', 0):.0f}/hr\n"
-                    f"- Avg Frame Rate: ${rates.get('frame_rate', 0):.0f}/hr\n"
-                    f"- Avg Mechanical Rate: ${rates.get('mechanical_rate', 0):.0f}/hr\n"
-                    f"- Paint & Materials Rate: ${rates.get('paint_supplies_rate', 0):.0f} per refinish hr\n"
-                    f"- Parts/Materials Tax Rate: {float(tax_rate or 0.0)*100:.3f}%\n\n"
-                    "**Hours & Totals:**\n"
-                    f"- Approx Total Labor Hours @ Body Rate: {('%.1f' % _num(body_hours)) if body_hours is not None else 'Unknown'}\n"
-                    f"- Approx Total Paint Labor Hours @ Paint Rate: {('%.1f' % _num(paint_hours)) if paint_hours is not None else 'Unknown'}\n"
-                    f"- Approx Total Paint Supplies @ ${rates.get('paint_supplies_rate', 0):.0f}/refinish hr: {_money(paint_supplies_total)}\n"
-                    f"- Setup & Measure (if structural observed): {('2.0 hrs' if structural_flag else '0.0 hrs')}\n"
-                    f"- Approx Total Frame Labor (if structural observed) @ Frame Rate: {('%.1f hrs' % _num(frame_hours)) if (structural_flag and frame_hours is not None) else ('Unknown' if structural_flag else '0.0 hrs')}\n"
-                    f"- Approx Mechanical/ADAS/Airbag/Suspension Hours @ Mechanical Rate: {('%.1f' % _num(mech_hours)) if mech_hours is not None else 'Unknown'}\n\n"
-                    "**Approx Cost of OEM Parts Needed:**\n"
-                    f"{parts_md}\n\n"
-                    "**Tax (parts + paint materials only):**\n"
-                    f"- Taxable subtotal: {_money(taxable)}\n"
-                    f"- Estimated tax: {_money(tax_total)}\n\n"
-                    "**Approximated Repair Cost Total (Approximation Only):**\n"
-                    f"- **{_money(approx_total)}**\n\n"
-                    "_Repair Cost Disclaimer: This section is an approximation. It is not an official repair estimate and must be validated by a qualified appraiser using an estimating platform._"
-                )
-
-    except Exception:
-        # Never fail the request for cost calculation issues
-        if not (result.get("estimated_costs_markdown") or "").strip():
-            result["estimated_costs_markdown"] = (
-                "## Approximate Repair Cost Breakdown (Approximation Only)\n"
-                "Unable to generate cost approximation on this run."
-            )
 # -----------------------
     # PDF helpers
     # -----------------------
