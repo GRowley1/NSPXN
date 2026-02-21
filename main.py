@@ -109,6 +109,45 @@ def _safe(s: str) -> str:
     return re.sub(r"[^\w.\-]+", "-", (s or "").strip()).strip("-_. ")
 
 
+
+def _normalize_ai_notes(raw: str, max_len: int = 800) -> str:
+    """Normalize/sanitize Add'l Notes so they can't break JSON/structured prompting."""
+    if raw is None:
+        return "No additional notes provided."
+    s = str(raw).strip()
+    if not s:
+        return "No additional notes provided."
+
+    # Remove ASCII control chars except newline/tab
+    s = re.sub(r"[\x00-\x08\x0B\x0C\x0E-\x1F\x7F]", " ", s)
+
+    # Normalize newlines + collapse whitespace
+    s = s.replace("\r\n", "\n").replace("\r", "\n")
+    s = re.sub(r"[ \t]+", " ", s)
+    s = re.sub(r"\n{3,}", "\n\n", s).strip()
+
+    # Neutralize common schema-breakers
+    s = s.replace("```", "'''")
+    # Avoid curly braces interfering with JSON-format instructions
+    s = s.replace("{", "(").replace("}", ")")
+
+    if len(s) > max_len:
+        s = s[:max_len].rstrip() + "…"
+    return s
+
+def _ai_notes_block(ai_notes_clean: str) -> str:
+    """Always return a consistent, clearly-delimited notes block."""
+    return (
+        "\n\nADDL_NOTES_FOR_AI_REVIEW (USER PROVIDED):\n"
+        "<<<\n"
+        f"{ai_notes_clean}\n"
+        ">>>\n"
+        "REQUIREMENT:\n"
+        "- You MUST consider these notes while analyzing the photos.\n"
+        "- Use them to guide focus/wording, but DO NOT invent damage.\n"
+        "- If notes conflict with visible evidence or orientation is unclear, say so and defer to what is visible.\n"
+    )
+
 # -----------------------
 # Approximate Repair Cost Breakdown (location-based rates)
 # -----------------------
@@ -920,6 +959,10 @@ async def vision_review(
                             break
         except Exception:
             pass
+    # Normalize/sanitize notes so they cannot break structured prompting
+    ai_notes_used = _normalize_ai_notes(ai_notes_used)
+    ai_notes_block = _ai_notes_block(ai_notes_used)
+
     pdf_text_fulls: List[str] = []  # full PDF text for supplement detection
 
     # Anti-zipbomb guardrails
@@ -1248,9 +1291,7 @@ async def vision_review(
         + "\n\n"
         "CLIENT RULES (only if provided):\n"
         + (client_rules[:1500] if client_rules else "")
-        + "\n\n"
-"### ADD'L NOTES (PRIORITY — MUST BE ADDRESSED IN REPORT)\n"
-+ (ai_notes_used[:1500] if ai_notes_used else "None provided.")
+        + ai_notes_block
         + "\n\n"
         "INSTRUCTIONS:\n"
         "- Return strict JSON only.\n"
