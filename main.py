@@ -234,6 +234,51 @@ def _lookup_tax_rate(location: str) -> float:
     }
     return float(state_map.get(state, 0.08))
 
+
+def _extract_zip(*texts: str) -> str:
+    """Return first 5-digit ZIP found in any provided text (best-effort)."""
+    for t in texts:
+        if not t:
+            continue
+        m = re.search(r"\b(\d{5})(?:-\d{4})?\b", str(t))
+        if m:
+            return m.group(1)
+    return ""
+
+def _zip_to_city_state(zip5: str) -> Dict[str, str]:
+    """Resolve ZIP -> {city,state} via Zippopotam.us. Fail-open with empty dict."""
+    if not zip5:
+        return {}
+    try:
+        url = f"https://api.zippopotam.us/us/{zip5}"
+        req = urllib.request.Request(url, headers={"Accept": "application/json"})
+        with urllib.request.urlopen(req, timeout=6) as resp:
+            raw = resp.read().decode("utf-8", "ignore")
+        data = json.loads(raw) if raw else {}
+        places = data.get("places") if isinstance(data, dict) else None
+        if isinstance(places, list) and places:
+            place = places[0] if isinstance(places[0], dict) else {}
+            city = (place.get("place name") or "").strip()
+            state = (place.get("state abbreviation") or "").strip()
+            if city and state:
+                return {"city": city, "state": state}
+    except Exception:
+        pass
+    return {}
+
+def _normalize_location_with_zip(inspection_location: str, ia_company: str, uploaded_text_all: str) -> str:
+    """Build normalized 'City, ST ZIP' for rate lookup from Inspection Location and/or IA_Company."""
+    zip5 = _extract_zip(inspection_location, ia_company, uploaded_text_all)
+    if zip5:
+        cs = _zip_to_city_state(zip5)
+        if cs.get("city") and cs.get("state"):
+            return f"{cs['city']}, {cs['state']} {zip5}"
+        # If city/state lookup fails, keep what we have but include ZIP
+        if inspection_location:
+            return f"{inspection_location.strip()} {zip5}".strip()
+        return zip5
+    return (inspection_location or ia_company or "").strip()
+
 def _money(x: Optional[float]) -> str:
     try:
         if x is None:
@@ -977,7 +1022,7 @@ async def vision_review(
         try:
             _form = await request.form()
             # First try common variants explicitly
-            for _k in ("ai_notes","addl_notes","additional_notes","notes","ai_review_notes","ai_notes_box","addlNote","addlNoteText"):
+            for _k in ("ai_notes","ai-notes","addl_notes","additional_notes","notes","ai_review_notes","ai_notes_box","addlNote","addlNoteText"):
                 _v = str(_form.get(_k, "") or "").strip()
                 if _v:
                     ai_notes_used = _v
@@ -1347,7 +1392,7 @@ async def vision_review(
     KEYS = [
         "file_number","request_type","claim_number","vin","vin_verification","vehicle",
         "odometer_estimate_only","compliance_score","summary_brief","summary_markdown",
-        "fraud_markdown","primary_impact","secondary_impact","conclusion"
+        "estimated_costs_markdown","fraud_markdown","primary_impact","secondary_impact","conclusion"
     ]
 
     SYSTEM = SYSTEM_BASE
@@ -1410,8 +1455,10 @@ async def vision_review(
         "CLIENT RULES (only if provided):\n"
         + (client_rules[:1500] if client_rules else "")
         + "\n\n"
-"### ADD'L NOTES (PRIORITY — MUST BE ADDRESSED IN REPORT)\n"
-+ (ai_notes_used[:1500] if ai_notes_used else "None provided.")
+        + (rate_block or "")
+        + "\n"
+        "### ADD'L NOTES (PRIORITY — MUST BE ADDRESSED IN REPORT)\n"
+        + (ai_notes_used[:1500] if ai_notes_used else "None provided.")
         + "\n\n"
         "INSTRUCTIONS:\n"
         "- Return strict JSON only.\n"
@@ -1617,7 +1664,7 @@ async def vision_review(
                     "Use exactly these keys (all required): "
                     "['file_number','request_type','claim_number','vin','vin_verification','vehicle',"
                     "'odometer_estimate_only','compliance_score','summary_brief','summary_markdown',"
-                    "'fraud_markdown','primary_impact','secondary_impact','conclusion'] "
+                    "'estimated_costs_markdown','fraud_markdown','primary_impact','secondary_impact','conclusion'] "
                     "Do not invent new keys. If a field is unavailable, use 'N/A'. "
                     "Here is the text:\n\n" + raw
                 }
