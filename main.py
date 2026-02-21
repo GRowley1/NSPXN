@@ -402,6 +402,24 @@ DETAIL_TEMPLATES = {
 ## Detailed Condition Report
 - Write a continuous 10–15 sentence narrative summarizing visible damage, impact zones, misalignment/gaps, and repair implications (photo-based).
 - If VIN label or odometer are visible, state them with Photo #. If not visible or unreadable, say so.
+
+## Approximate Repair Cost Breakdown (Populate JSON field 'estimated_costs_markdown')
+- You MUST produce a cost approximation derived from the PHOTOS ONLY (do not reference estimates, documents, or 'not evidenced').
+- Provide AI-derived hours and assumptions:
+  • Body labor hours
+  • Paint labor hours
+  • Paint & materials cost = (paint hours × $/refinish hr)
+  • If structural damage is observed in photos: add Setup & Measure = 2.0 hrs @ body rate and include frame hours @ frame rate
+  • If airbags/ADAS/mechanical damage is observed: include mechanical hours @ mechanical rate
+- Provide an OEM replacement parts list (each part with an approximate $).
+- Apply tax ONLY to (parts + paint materials). Do NOT tax labor.
+- Include the Severity Tier checkboxes:
+  ☐ Minor (< $3,500)
+  ☐ Moderate ($3,500–$10,000)
+  ☐ Major ($10,000+)
+  ☐ Likely Total Loss Threshold Approaching
+- Include a Repair Cost Disclaimer stating this is an approximation, not an official estimate.
+- Forbidden phrases: 'from estimate', 'from documentation', 'not evidenced', 'no documentation provided'.
 """
     ),
 }
@@ -510,10 +528,10 @@ SYSTEM_BASE = (
     "Always include all required keys: "
     "['file_number','request_type','claim_number','vin','vin_verification','vehicle',"
     "'odometer_estimate_only','compliance_score','summary_brief','summary_markdown',"
-    "'fraud_markdown','primary_impact','secondary_impact','conclusion']. "
+    "'fraud_markdown','primary_impact','secondary_impact','estimated_costs_markdown','conclusion']. "
     "Use only provided evidence. Cite photos as 'Photo #' and docs as 'p#/L#' when available. "
     "Do not guess. If something is not visible, say why. "
-    "NEVER return 'N/A' for summary_markdown, fraud_markdown, or conclusion."
+    "NEVER return 'N/A' for summary_markdown, fraud_markdown, estimated_costs_markdown, or conclusion. For request_type 'Create a Damage Report from Photos', 'estimated_costs_markdown' must be a photos-only approximation (no document/estimate dependency language) and must model Paint & Materials as a $ per refinish hour rate (not a percent)."
 )
 
 SYSTEM_BASE += (
@@ -1185,7 +1203,7 @@ async def vision_review(
     KEYS = [
         "file_number","request_type","claim_number","vin","vin_verification","vehicle",
         "odometer_estimate_only","compliance_score","summary_brief","summary_markdown",
-        "fraud_markdown","primary_impact","secondary_impact","conclusion"
+        "fraud_markdown","primary_impact","secondary_impact","estimated_costs_markdown","conclusion"
     ]
 
     SYSTEM = SYSTEM_BASE
@@ -1236,6 +1254,7 @@ async def vision_review(
         + "\n\n"
         "INSTRUCTIONS:\n"
         "- Return strict JSON only.\n"
+        "- REQUIRED: Populate 'estimated_costs_markdown' in the JSON.\n"
         "- Use the template below for narrative formatting.\n\n"
         + DETAIL_TEMPLATES.get(ai_intent, DETAIL_TEMPLATES['comprehensive'])
     )
@@ -1438,7 +1457,7 @@ async def vision_review(
                     "Use exactly these keys (all required): "
                     "['file_number','request_type','claim_number','vin','vin_verification','vehicle',"
                     "'odometer_estimate_only','compliance_score','summary_brief','summary_markdown',"
-                    "'fraud_markdown','primary_impact','secondary_impact','conclusion'] "
+                    "'fraud_markdown','primary_impact','secondary_impact','estimated_costs_markdown','conclusion'] "
                     "Do not invent new keys. If a field is unavailable, use 'N/A'. "
                     "Here is the text:\n\n" + raw
                 }
@@ -1519,134 +1538,133 @@ async def vision_review(
         pass
 
 
-    # -----------------------
-    # Approximate Repair Cost Breakdown (backend-calculated; NOT an official estimate)
+        # -----------------------
+    # Approximate Repair Cost Breakdown
+    # - Prefer model-provided `estimated_costs_markdown` (especially for Photos-Only).
+    # - Fail-open: never break the run if cost math cannot be produced.
     # -----------------------
     try:
-        inspection_location = _extract_inspection_location(uploaded_text_all or "")
-        rates = _lookup_rates(inspection_location)
-        tax_rate = _lookup_tax_rate(inspection_location)
+        _existing_costs = (result.get("estimated_costs_markdown") or "").strip()
 
-        totals = _extract_hours_and_parts_totals(uploaded_text_all or "")
+        if not _existing_costs:
+            inspection_location = _extract_inspection_location(uploaded_text_all or "")
+            rates = _lookup_rates(inspection_location)
+            tax_rate = _lookup_tax_rate(inspection_location)
 
-        # Structural trigger: if structural is observed in docs OR in model narrative, add setup/measure and allow frame labor bucket.
-        structural_flag = _structural_observed([uploaded_text_all or "", result.get("summary_markdown") or ""])
+            # Photos-only: do NOT depend on documents/estimates. The model is instructed to generate hours/parts.
+            # This backend block is only a minimal fallback if the model omitted the field.
+            if ai_intent == "damage_report_from_photos":
+                structural_flag = _structural_observed([result.get("summary_markdown") or ""])
 
-        setup_measure_hours = 2.0 if structural_flag else 0.0
+                result["estimated_costs_markdown"] = (
+                    "## Approximate Repair Cost Breakdown (Photos-Only Approximation)\n\n"
+                    f"**Inspection Location:** {inspection_location or 'Not provided'}\n\n"
+                    "**Rates Used (regional average / fallback):**\n"
+                    f"- Avg Body Rate: ${rates.get('body_rate', 0):.0f}/hr\n"
+                    f"- Avg Paint Rate: ${rates.get('paint_rate', 0):.0f}/hr\n"
+                    f"- Avg Frame Rate: ${rates.get('frame_rate', 0):.0f}/hr\n"
+                    f"- Avg Mechanical Rate: ${rates.get('mechanical_rate', 0):.0f}/hr\n"
+                    f"- Paint & Materials Rate: ${rates.get('paint_supplies_rate', 0):.0f} per refinish hr\n"
+                    f"- Parts/Materials Tax Rate: {float(tax_rate or 0.0)*100:.3f}%\n\n"
+                    "**AI-Derived Repair Scope:**\n"
+                    "- Body labor hours: (model should provide)\n"
+                    "- Paint labor hours: (model should provide)\n"
+                    f"- Setup & Measure (if structural observed): {('2.0 hrs @ body rate' if structural_flag else '0.0 hrs')}\n"
+                    "- Frame labor hours (if structural observed): (model should provide)\n"
+                    "- Mechanical/ADAS/Airbag/Suspension hours (if observed): (model should provide)\n\n"
+                    "**OEM Parts Needed (with approximate $ by part):**\n"
+                    "- (model should provide)\n\n"
+                    "**Tax (parts + paint materials only):**\n"
+                    "- (model should provide)\n\n"
+                    "**Approximated Repair Cost Total (Approximation Only):**\n"
+                    "- (model should provide)\n\n"
+                    "**Estimated Severity Tier (based on this approximation only):**\n"
+                    "- [ ] Minor (< $3,500)\n"
+                    "- [ ] Moderate ($3,500–$10,000)\n"
+                    "- [ ] Major ($10,000+)\n"
+                    "- [ ] Likely Total Loss Threshold Approaching\n\n"
+                    "_Repair Cost Disclaimer: This section is an AI-generated approximation of repair-related costs based on observed damage in photos and regional average rates. "
+                    "It is not an official repair estimate and must be validated by a qualified appraiser using an estimating platform._"
+                )
+            else:
+                # Non-photos intents: best-effort parse from documents (if present), using $/refinish-hr materials.
+                totals = _extract_hours_and_parts_totals(uploaded_text_all or "")
 
-        body_hours = totals.get("body_hours")
-        paint_hours = totals.get("paint_hours")
-        frame_hours = totals.get("frame_hours")
-        mech_hours = totals.get("mech_hours")
-        parts_total = totals.get("parts_total")
+                structural_flag = _structural_observed([uploaded_text_all or "", result.get("summary_markdown") or ""])
+                setup_measure_hours = 2.0 if structural_flag else 0.0
 
-        # Paint supplies modeled as $ per refinish hour (NOT a percent)
-        paint_supplies_rate = float(rates.get("paint_supplies_rate") or 0.0)
-        paint_supplies_total = (_num(paint_hours) * paint_supplies_rate) if paint_hours is not None else 0.0
+                body_hours = totals.get("body_hours")
+                paint_hours = totals.get("paint_hours")
+                frame_hours = totals.get("frame_hours")
+                mech_hours = totals.get("mech_hours")
+                parts_total = totals.get("parts_total")
 
-        body_labor_total = (_num(body_hours) + setup_measure_hours) * float(rates.get("body_rate") or 0.0) if (body_hours is not None or setup_measure_hours) else 0.0
-        paint_labor_total = _num(paint_hours) * float(rates.get("paint_rate") or 0.0) if paint_hours is not None else 0.0
+                paint_supplies_rate = float(rates.get("paint_supplies_rate") or 0.0)
+                paint_supplies_total = (_num(paint_hours) * paint_supplies_rate) if paint_hours is not None else 0.0
 
-        # Frame labor only if structural observed; otherwise do not roll it in even if a stray number is parsed.
-        frame_labor_total = 0.0
-        if structural_flag and frame_hours is not None:
-            frame_labor_total = _num(frame_hours) * float(rates.get("frame_rate") or 0.0)
+                body_labor_total = (_num(body_hours) + setup_measure_hours) * float(rates.get("body_rate") or 0.0) if (body_hours is not None or setup_measure_hours) else 0.0
+                paint_labor_total = _num(paint_hours) * float(rates.get("paint_rate") or 0.0) if paint_hours is not None else 0.0
 
-        mech_labor_total = _num(mech_hours) * float(rates.get("mechanical_rate") or 0.0) if mech_hours is not None else 0.0
+                frame_labor_total = 0.0
+                if structural_flag and frame_hours is not None:
+                    frame_labor_total = _num(frame_hours) * float(rates.get("frame_rate") or 0.0)
 
-        taxable = _num(parts_total) + _num(paint_supplies_total)
-        tax_total = taxable * float(tax_rate or 0.0)
+                mech_labor_total = _num(mech_hours) * float(rates.get("mechanical_rate") or 0.0) if mech_hours is not None else 0.0
 
-        approx_total = (
-            _num(body_labor_total)
-            + _num(paint_labor_total)
-            + _num(frame_labor_total)
-            + _num(mech_labor_total)
-            + _num(parts_total)
-            + _num(paint_supplies_total)
-            + _num(tax_total)
-        )
+                taxable = _num(parts_total) + _num(paint_supplies_total)
+                tax_total = taxable * float(tax_rate or 0.0)
 
-        # Estimated Severity Tier (based on approximation total; best-effort)
-        # - If ACV/vehicle value is found in docs, flag total-loss-threshold approaching when approx_total >= 75% of ACV.
-        # - If ACV not found, use a conservative proxy threshold of $20,000+ to flag "approaching".
-        acv_value = None
-        try:
-            _t = uploaded_text_all or ""
-            m_acv = re.search(r"\b(?:ACV|Actual\s+Cash\s+Value)\b[^\$\d]{0,40}\$?\s*([0-9]{1,3}(?:,[0-9]{3})*(?:\.[0-9]{2})?|[0-9]+(?:\.[0-9]{2})?)", _t, re.IGNORECASE)
-            if m_acv:
-                acv_value = float(m_acv.group(1).replace(",", ""))
-        except Exception:
-            acv_value = None
+                approx_total = (
+                    _num(body_labor_total)
+                    + _num(paint_labor_total)
+                    + _num(frame_labor_total)
+                    + _num(mech_labor_total)
+                    + _num(parts_total)
+                    + _num(paint_supplies_total)
+                    + _num(tax_total)
+                )
 
-        tier_minor = approx_total < 3500
-        tier_moderate = (approx_total >= 3500) and (approx_total <= 10000)
-        tier_major = approx_total > 10000
+                parts_lines = totals.get("parts_lines") or []
+                if parts_lines:
+                    parts_md = "\n".join([f"- {ln}" for ln in parts_lines[:20]])
+                else:
+                    parts_md = "- (Itemized OEM parts list not available from parsed text.)"
 
-        tl_flag = False
-        tl_basis = ""
-        if acv_value and acv_value > 0:
-            tl_flag = (approx_total / acv_value) >= 0.75
-            tl_basis = f"(basis: approx total is {approx_total/acv_value:.0%} of ACV ${acv_value:,.0f} found in docs)"
-        else:
-            tl_flag = approx_total >= 20000
-            tl_basis = "(basis: ACV not evidenced; using conservative $20,000 proxy trigger)"
+                result["estimated_costs_markdown"] = (
+                    "## Approximate Repair Cost Breakdown (Approximation Only)\n\n"
+                    f"**Inspection Location:** {inspection_location or 'Not provided'}\n\n"
+                    "**Regional Average Rates (configured / fallback):**\n"
+                    f"- Avg Body Rate: ${rates.get('body_rate', 0):.0f}/hr\n"
+                    f"- Avg Paint Rate: ${rates.get('paint_rate', 0):.0f}/hr\n"
+                    f"- Avg Frame Rate: ${rates.get('frame_rate', 0):.0f}/hr\n"
+                    f"- Avg Mechanical Rate: ${rates.get('mechanical_rate', 0):.0f}/hr\n"
+                    f"- Paint & Materials Rate: ${rates.get('paint_supplies_rate', 0):.0f} per refinish hr\n"
+                    f"- Parts/Materials Tax Rate: {float(tax_rate or 0.0)*100:.3f}%\n\n"
+                    "**Hours & Totals:**\n"
+                    f"- Approx Total Labor Hours @ Body Rate: {('%.1f' % _num(body_hours)) if body_hours is not None else 'Unknown'}\n"
+                    f"- Approx Total Paint Labor Hours @ Paint Rate: {('%.1f' % _num(paint_hours)) if paint_hours is not None else 'Unknown'}\n"
+                    f"- Approx Total Paint Supplies @ ${rates.get('paint_supplies_rate', 0):.0f}/refinish hr: {_money(paint_supplies_total)}\n"
+                    f"- Setup & Measure (if structural observed): {('2.0 hrs' if structural_flag else '0.0 hrs')}\n"
+                    f"- Approx Total Frame Labor (if structural observed) @ Frame Rate: {('%.1f hrs' % _num(frame_hours)) if (structural_flag and frame_hours is not None) else ('Unknown' if structural_flag else '0.0 hrs')}\n"
+                    f"- Approx Mechanical/ADAS/Airbag/Suspension Hours @ Mechanical Rate: {('%.1f' % _num(mech_hours)) if mech_hours is not None else 'Unknown'}\n\n"
+                    "**Approx Cost of OEM Parts Needed:**\n"
+                    f"{parts_md}\n\n"
+                    "**Tax (parts + paint materials only):**\n"
+                    f"- Taxable subtotal: {_money(taxable)}\n"
+                    f"- Estimated tax: {_money(tax_total)}\n\n"
+                    "**Approximated Repair Cost Total (Approximation Only):**\n"
+                    f"- **{_money(approx_total)}**\n\n"
+                    "_Repair Cost Disclaimer: This section is an approximation. It is not an official repair estimate and must be validated by a qualified appraiser using an estimating platform._"
+                )
 
-        severity_md = (
-            "**Estimated Severity Tier (based on this approximation only):**\n"
-            f"- [{'x' if tier_minor else ' '}] Minor (< $3,500)\n"
-            f"- [{'x' if tier_moderate else ' '}] Moderate ($3,500–$10,000)\n"
-            f"- [{'x' if tier_major else ' '}] Major ($10,000+)\n"
-            f"- [{'x' if tl_flag else ' '}] Likely Total Loss Threshold Approaching {tl_basis}\n"
-        )
-
-        # Parts list (best effort)
-        parts_lines = totals.get("parts_lines") or []
-        parts_md = ""
-        if parts_lines:
-            parts_md = "\n".join([f"- {ln}" for ln in parts_lines[:20]])
-        elif parts_total is not None:
-            parts_md = "- Parts total present, but individual part line items were not reliably extractable from provided text."
-        else:
-            parts_md = "- Parts costs not evidenced in the provided documentation."
-
-        estimated_costs_markdown = (
-            "## Approximate Repair Cost Breakdown (Approximation Only)\n\n"
-            f"**Inspection Location:** {inspection_location or 'Not found in documents'}\n\n"
-            "**Regional Average Rates (source: configured rate card / fallback):**\n"
-            f"- Avg Body Rate: ${rates.get('body_rate', 0):.0f}/hr\n"
-            f"- Avg Paint Rate: ${rates.get('paint_rate', 0):.0f}/hr\n"
-            f"- Avg Frame Rate: ${rates.get('frame_rate', 0):.0f}/hr\n"
-            f"- Avg Mechanical Rate: ${rates.get('mechanical_rate', 0):.0f}/hr\n"
-            f"- Paint & Materials Rate: ${rates.get('paint_supplies_rate', 0):.0f} per refinish hr\n"
-            f"- Parts/Materials Tax Rate: {float(tax_rate or 0.0)*100:.3f}%\n\n"
-            "**Hours & Totals (best-effort from estimate/docs; photo-only claims may be blank):**\n"
-            f"- Approx Total Labor Hours @ Body Rate: {('%.1f' % _num(body_hours)) if body_hours is not None else 'Not evidenced'}\n"
-            f"- Approx Total Paint Labor Hours @ Paint Rate: {('%.1f' % _num(paint_hours)) if paint_hours is not None else 'Not evidenced'}\n"
-            f"- Approx Total Paint Supplies @ ${rates.get('paint_supplies_rate', 0):.0f}/refinish hr: {_money(paint_supplies_total)}\n"
-            f"- Setup & Measure (if structural observed): {('2.0 hrs' if structural_flag else 'Not applied')}\n"
-            f"- Approx Total Frame Labor (if structural observed) @ Frame Rate: {('%.1f hrs' % _num(frame_hours)) if (structural_flag and frame_hours is not None) else ('Structural observed — hours not evidenced' if structural_flag else 'Not applied')}\n"
-            f"- Approx Mechanical/ADAS/Airbag/Suspension Hours @ Mechanical Rate: {('%.1f' % _num(mech_hours)) if mech_hours is not None else 'Not evidenced'}\n\n"
-            "**Approx Cost of OEM Parts Needed (from estimate where available):**\n"
-            f"{parts_md}\n\n"
-            "**Tax (parts + paint supplies only):**\n"
-            f"- Taxable subtotal: {_money(taxable)}\n"
-            f"- Estimated tax: {_money(tax_total)}\n\n"
-            "**Approximated Repair Cost Total (Approximation Only):**\n"
-            f"- **{_money(approx_total)}**\n\n"
-            f"{severity_md}\n\n"
-            "_Repair Cost Disclaimer: This section is an AI-generated approximation of repair-related costs based on observed damage, best-effort extracted hours/parts, and regional average rates. "
-            "It is not an official repair estimate, may omit hidden damage or required operations, and must be validated by a qualified appraiser using an estimating platform._"
-        )
-
-        result["estimated_costs_markdown"] = estimated_costs_markdown
-    except Exception as _e_cost:
+    except Exception:
         # Never fail the request for cost calculation issues
-        result["estimated_costs_markdown"] = (
-            "## Approximate Repair Cost Breakdown (Approximation Only)\n"
-            "Unable to calculate due to missing/invalid location or rate inputs on this run."
-        )
-    # -----------------------
+        if not (result.get("estimated_costs_markdown") or "").strip():
+            result["estimated_costs_markdown"] = (
+                "## Approximate Repair Cost Breakdown (Approximation Only)\n"
+                "Unable to generate cost approximation on this run."
+            )
+# -----------------------
     # PDF helpers
     # -----------------------
     def _pdf_sanitize(text: str, max_token_len: int = 60) -> str:
