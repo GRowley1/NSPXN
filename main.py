@@ -2076,7 +2076,7 @@ async def vision_review(
                 pass
 
 
-def add_thumbnail_page(pdf_obj: FPDF, image_paths: List[str]) -> None:
+    def add_thumbnail_page(pdf_obj: FPDF, image_paths: List[str]) -> None:
         """Append exactly ONE page containing thumbnails of all uploaded photos (as space allows)."""
         if not image_paths:
             return
@@ -2413,16 +2413,6 @@ async def download_pdf(file_number: Optional[str] = None, filename: Optional[str
         return JSONResponse(status_code=404, content={"detail": "Not Found"})
     latest = max(candidates, key=lambda p: os.path.getmtime(p))
     return FileResponse(path=latest, media_type="application/pdf", filename=os.path.basename(latest))
-
-
-
-
-
-
-
-
-
-
 
 
 
