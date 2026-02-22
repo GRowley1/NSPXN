@@ -1612,181 +1612,6 @@ async def vision_review(
         "redaction_status": redaction_status,
     }
 
-
-    # -----------------------
-    # Cost Markdown Scrub + Severity Tier Checkbox Enforcement
-    # -----------------------
-    def _scrub_cost_markdown(md: str) -> str:
-        """Remove phrases/lines the user explicitly does not want printed in the PDF output."""
-        if not isinstance(md, str):
-            return md
-        s = md.replace("\r\n", "\n").replace("\r", "\n")
-
-        banned_subs = (
-            "from estimate",
-            "from documentation",
-            "not evidenced",
-            "no documentation provided",
-            "photo-only claims may be blank",
-            "best-effort",
-        )
-
-        out_lines = []
-        for ln in s.splitlines():
-            raw_ln = ln
-            lnl = raw_ln.lower().strip()
-
-            # Drop the model-added heading variants (we render the header in PDF ourselves)
-            if re.search(r"^\s*#{1,6}\s*approximate\s+repair\s+cost\s+breakdown\b", raw_ln, flags=re.I):
-                continue
-            if re.search(r"^\s*#{1,6}\s*approximate\s+repair\s+cost\s+breakdown\s*\(\s*photos\s*only\s*\)\s*$", raw_ln, flags=re.I):
-                continue
-
-            # Remove inspection-location callouts entirely (user doesn't want this printed)
-            if re.search(r"^\s*#{1,6}\s*inspection\s+location\b", raw_ln, flags=re.I):
-                continue
-            if re.search(r"\*\*\s*inspection\s+location\s*\*\*\s*:", raw_ln, flags=re.I):
-                continue
-
-            # Remove arithmetic "Estimated total: $A + $B = $C" lines (user wants ONE total only)
-            if re.search(r"(?i)\bestimated\s+total\b\s*:", raw_ln):
-                continue
-            if ("+" in raw_ln and "=" in raw_ln and re.search(r"\$\s*[0-9]", raw_ln)):
-                continue
-
-            # Remove our own editorial parentheticals
-            if re.search(r"\(\s*best-?effort.*\)$", raw_ln, flags=re.I):
-                continue
-
-            # Never call it an estimate
-            raw_ln = re.sub(r"(?i)\bestimated\s+repair\s+total\b", "Approximate Repair Total", raw_ln)
-            raw_ln = re.sub(r"(?i)\bestimated\s+total\b", "Approximate Total", raw_ln)
-
-            # Rename TL language
-            raw_ln = raw_ln.replace("Possible Total Loss Threshold Approaching", "Possible Total Loss Threshold Approaching")
-
-            # Drop or neutralize banned phrases
-            lnl2 = raw_ln.lower()
-            if any(b in lnl2 for b in banned_subs):
-                if ":" in raw_ln:
-                    left = raw_ln.split(":", 1)[0].rstrip()
-                    out_lines.append(f"{left}: (photo-derived approximation)")
-                else:
-                    continue
-            else:
-                out_lines.append(raw_ln)
-
-        return "\n".join(out_lines).strip()
-    def _parse_approx_total(md: str) -> Optional[float]:
-        if not isinstance(md, str) or not md.strip():
-            return None
-
-        # Ignore arithmetic subtotal lines that can mislead tier selection.
-        cleaned_lines = []
-        for ln in md.replace("\r\n", "\n").replace("\r", "\n").splitlines():
-            if re.search(r"(?i)\bestimated\s+total\b\s*:", ln):
-                continue
-            if ("+" in ln and "=" in ln and re.search(r"\$\s*[0-9]", ln)):
-                continue
-            cleaned_lines.append(ln)
-        cleaned = "\n".join(cleaned_lines)
-
-        # Prefer explicit labeled totals.
-        candidates = [
-            r"(?i)\bapprox(?:imate|\.?)(?:\s+repair)?\s+total\s*[:\-]?\s*\$\s*([0-9][0-9,]*(?:\.[0-9]{1,2})?)",
-            r"(?i)\bapproximat(?:ed|e)\s+repair\s+cost\s+total\b[\s\S]{0,80}?\$\s*([0-9][0-9,]*(?:\.[0-9]{1,2})?)",
-            r"(?i)\btotal\s+amount\b\s*[:\-]?\s*\$\s*([0-9][0-9,]*(?:\.[0-9]{1,2})?)",
-            # Bold total line: "- **$23,239**"
-            r"\*\*\$\s*([0-9][0-9,]*(?:\.[0-9]{1,2})?)\*\*",
-        ]
-        for rx in candidates:
-            m = re.search(rx, cleaned)
-            if m:
-                try:
-                    return float(m.group(1).replace(",", ""))
-                except Exception:
-                    pass
-
-        # Last resort: take the largest dollar value in the cost section text.
-        vals = []
-        for m in re.finditer(r"\$\s*([0-9][0-9,]*(?:\.[0-9]{1,2})?)", cleaned):
-            try:
-                vals.append(float(m.group(1).replace(",", "")))
-            except Exception:
-                pass
-        return max(vals) if vals else None
-
-
-    def _enforce_severity_tier(md: str) -> str:
-        """Ensure Severity Tier appears with checkboxes and one tier is checked based on approximate total."""
-        if not isinstance(md, str):
-            return md
-
-        total = _parse_approx_total(md)
-
-        def tier_for(v: Optional[float]) -> Optional[str]:
-            if v is None:
-                return None
-            if v < 3500:
-                return "minor"
-            if v <= 10000:
-                return "moderate"
-            return "major"
-
-        tier = tier_for(total)
-
-        # Optional TL-approaching check: only check if explicitly very high or docs explicitly indicate TL
-        tl_approaching = False
-        try:
-            if total is not None and total >= 25000:
-                tl_approaching = True
-        except Exception:
-            tl_approaching = False
-
-        # Normalize any "☐" style into markdown checkboxes
-        lines = md.replace("\r\n", "\n").replace("\r", "\n").splitlines()
-        norm = []
-        for ln in lines:
-            ln2 = ln
-            ln2 = ln2.replace("☐", "- [ ]").replace("☑", "- [x]")
-            norm.append(ln2)
-
-        # Detect existing checkbox lines
-        has_any = any(re.search(r"(?i)\[\s*[xX ]\s*\].*(minor|moderate|major|total\s+loss)", ln) for ln in norm)
-        if not has_any:
-            # Append a clean severity block if missing
-            norm.append("")
-            norm.append("### Severity Tier")
-            norm.append("- [ ] Minor (< $3,500)")
-            norm.append("- [ ] Moderate ($3,500–$10,000)")
-            norm.append("- [ ] Major ($10,000+)")
-            norm.append("- [ ] Possible Total Loss Threshold Approaching")
-
-        def mark_line(ln: str) -> str:
-            lnl = ln.lower()
-            if "minor" in lnl and "total loss" not in lnl:
-                return re.sub(r"\[\s*[xX ]\s*\]", "[x]" if tier == "minor" else "[ ]", ln)
-            if "moderate" in lnl:
-                return re.sub(r"\[\s*[xX ]\s*\]", "[x]" if tier == "moderate" else "[ ]", ln)
-            if "major" in lnl and "total loss" not in lnl:
-                return re.sub(r"\[\s*[xX ]\s*\]", "[x]" if tier == "major" else "[ ]", ln)
-            if "total loss" in lnl:
-                return re.sub(r"\[\s*[xX ]\s*\]", "[x]" if tl_approaching else "[ ]", ln)
-            return ln
-
-        enforced = [mark_line(ln) for ln in norm]
-        return "\n".join(enforced).strip()
-
-    # Apply scrub + severity enforcement early (model-provided costs) so the PDF never prints banned phrases
-    try:
-        _md0 = result.get("estimated_costs_markdown") or ""
-        _md0 = _scrub_cost_markdown(_md0)
-        _md0 = _enforce_severity_tier(_md0)
-        if _md0:
-            result["estimated_costs_markdown"] = _md0
-    except Exception:
-        pass
-
     # ✅ FIX #2: Hard fallback so UI never gets an empty narrative ("No narrative generated")
     try:
         sm_tmp = (result.get("summary_markdown") or "").strip()
@@ -1992,7 +1817,7 @@ async def vision_review(
                     "- [ ] Minor (< $3,500)\n"
                     "- [ ] Moderate ($3,500–$10,000)\n"
                     "- [ ] Major ($10,000+)\n"
-                    "- [ ] Possible Total Loss Threshold Approaching\n\n"
+                    "- [ ] Likely Total Loss Threshold Approaching\n\n"
                     "_Repair Cost Disclaimer: This section is an AI-generated approximation of repair-related costs based on observed damage in photos and regional average rates. "
                     "It is not an official repair estimate and must be validated by a qualified appraiser using an estimating platform._"
                 )
@@ -2075,17 +1900,6 @@ async def vision_review(
                 "Unable to generate cost approximation on this run."
             )
 # -----------------------
-
-    # Final scrub pass after any backend fallback cost-building
-    try:
-        _md1 = result.get("estimated_costs_markdown") or ""
-        _md1 = _scrub_cost_markdown(_md1)
-        _md1 = _enforce_severity_tier(_md1)
-        if _md1:
-            result["estimated_costs_markdown"] = _md1
-    except Exception:
-        pass
-
     # PDF helpers
     # -----------------------
     def _pdf_sanitize(text: str, max_token_len: int = 60) -> str:
@@ -2132,7 +1946,137 @@ async def vision_review(
             pdf.multi_cell(effective_w, 6, (_pdf_sanitize(str(s))[:2000] + " …"))
 
 
-    def add_thumbnail_page(pdf_obj: FPDF, image_paths: List[str]) -> None:
+    
+    def render_repair_cost_section(pdf_obj: FPDF, md: str) -> None:
+        """Render the Approximate Repair Cost Breakdown in a controlled PDF format.
+        - Never prints model headings like '## Approximate Repair Cost Breakdown (Photos Only)'
+        - Never prints '### Totals' blocks or arithmetic 'A + B = C' lines
+        - Prints ONE total line: 'Approximate Repair Cost Total: $X'
+        - Renders 'Repair Cost Disclaimer' in the same style as the main Disclaimer block
+        """
+        if not isinstance(md, str):
+            md = str(md or "")
+        text = md.replace("\r\n", "\n").replace("\r", "\n")
+
+        # Extract Repair Cost Disclaimer block (remove from body; render separately)
+        disclaimer_text = ""
+        body_lines = []
+        in_disclaimer = False
+        for ln in text.splitlines():
+            if (re.search(r"(?i)^\s*#{1,6}\s*repair\s+cost\s+disclaimer\b", ln)
+                or re.search(r"(?i)^\s*\*\*\s*repair\s+cost\s+disclaimer\s*\*\*\s*:", ln)
+                or re.search(r"(?i)^\s*_?repair\s+cost\s+disclaimer\s*:", ln)):
+                in_disclaimer = True
+                # Capture inline disclaimer text after ":" if present
+                m_inline = re.search(r":\s*(.+)\s*$", ln)
+                if m_inline:
+                    disclaimer_text += (m_inline.group(1).strip() + " ")
+                continue
+            if in_disclaimer:
+                # Stop on next heading
+                if re.search(r"^\s*#{1,6}\s+\w", ln):
+                    in_disclaimer = False
+                else:
+                    if ln.strip():
+                        disclaimer_text += (ln.strip() + " ")
+                    continue
+            if in_disclaimer:
+                continue
+            body_lines.append(ln)
+
+        disclaimer_text = (disclaimer_text or "").strip()
+
+        # Remove headings + Totals blocks + arithmetic lines; keep Severity Tier lines for later
+        severity_lines = []
+        cleaned = []
+        skip_totals = False
+        for ln in body_lines:
+            s = ln.strip()
+            if re.search(r"^\s*#{1,6}\s*approximate\s+repair\s+cost\s+breakdown\b", ln, flags=re.I):
+                continue
+            if re.search(r"^\s*#{1,6}\s*totals\b", ln, flags=re.I):
+                skip_totals = True
+                continue
+            if skip_totals:
+                if re.search(r"^\s*#{1,6}\s+\w", ln):  # next section
+                    skip_totals = False
+                else:
+                    continue
+            # Drop explicit arithmetic totals
+            if re.search(r"(?i)\bestimated\s+total\b\s*:", ln):
+                continue
+            if ("+" in ln and "=" in ln and re.search(r"\$\s*[0-9]", ln)):
+                continue
+
+            # Collect severity tier lines (checkbox list)
+            if re.search(r"(?i)(minor\s*\(|moderate\s*\(|major\s*\(|total\s+loss\s+threshold)", ln):
+                severity_lines.append(ln.replace("Likely Total Loss Threshold Approaching","Possible Total Loss Threshold Approaching"))
+                continue
+
+            # Remove any 'Estimated' wording in section titles
+            if re.search(r"(?i)^\s*#{1,6}\s*approximate\s+total\s+repair\s+cost\b", ln):
+                continue
+
+            # Never print inspection location inside this section
+            if re.search(r"(?i)inspection\s+location\s*:", ln):
+                continue
+
+            cleaned.append(ln)
+
+        # Compute total from remaining markdown (use existing parser)
+        try:
+            total_val = _parse_approx_total(md)
+        except Exception:
+            total_val = None
+
+        # Print body (excluding tier + disclaimer)
+        body_text = "\n".join([ln for ln in cleaned if ln.strip()]).strip()
+        if body_text:
+            mc(body_text)
+
+        # ONE total line (always)
+        if total_val is not None:
+            try:
+                pdf_obj.set_font("Helvetica", "B", 11)
+            except Exception:
+                pdf_obj.set_font("Arial", "B", 11)
+            pdf_obj.ln(1)
+            pdf_obj.cell(0, 6, f"Approximate Repair Cost Total: {_money(total_val)}", ln=True)
+            try:
+                pdf_obj.set_font("Helvetica", "", 11)
+            except Exception:
+                pdf_obj.set_font("Arial", "", 11)
+
+        # Severity Tier block (ensure present + checkmarks already enforced in md)
+        if severity_lines:
+            pdf_obj.ln(1)
+            mc("Severity Tier")
+            for ln in severity_lines:
+                mc(ln.replace("☐","[ ]").replace("☑","[x]"))
+
+        # Repair Cost Disclaimer styled like main disclaimer block
+        if disclaimer_text:
+            try:
+                pdf_obj.ln(4)
+                x_left = pdf_obj.l_margin
+                x_right = pdf_obj.w - pdf_obj.r_margin
+                y_line = pdf_obj.get_y()
+                pdf_obj.set_draw_color(180, 180, 180)
+                pdf_obj.line(x_left, y_line, x_right, y_line)
+                pdf_obj.ln(3)
+
+                pdf_obj.set_text_color(90, 90, 90)
+                pdf_obj.set_font("Helvetica", "B", 9)
+                pdf_obj.cell(0, 5, "Repair Cost Disclaimer:", ln=True)
+                pdf_obj.set_font("Helvetica", "", 8)
+                pdf_obj.multi_cell(0, 4, _pdf_sanitize(disclaimer_text))
+                pdf_obj.set_text_color(0, 0, 0)
+            except Exception:
+                # fail-open: don't break PDF rendering
+                pass
+
+
+def add_thumbnail_page(pdf_obj: FPDF, image_paths: List[str]) -> None:
         """Append exactly ONE page containing thumbnails of all uploaded photos (as space allows)."""
         if not image_paths:
             return
@@ -2206,18 +2150,7 @@ async def vision_review(
         pdf_status = result["redaction_status"].replace("✅", "OK")
         pdf.ln(2); mc(pdf_status)
         pdf.ln(2); mc("Report Selected"); mc((result["summary_markdown"] or "N/A").strip())
-        pdf.ln(2)
-        # Centered bold section header (user requested)
-        try:
-            pdf.set_font("Helvetica", "B", 11)
-        except Exception:
-            pdf.set_font("Arial", "B", 11)
-        pdf.cell(0, 6, "Approximate Repair Cost Breakdown", ln=True, align="C")
-        try:
-            pdf.set_font("Helvetica", "", 11)
-        except Exception:
-            pdf.set_font("Arial", "", 11)
-        mc((result.get("estimated_costs_markdown") or "").strip())
+        pdf.ln(2); mc("Approximate Repair Cost Breakdown"); mc((result.get("estimated_costs_markdown") or "").strip())
         pdf.ln(2); mc("Fraud & Authenticity Check"); mc((result["fraud_markdown"] or 'N/A').strip())
         pdf.ln(2); mc("Conclusion"); mc((result["conclusion"] or 'N/A').strip())
 
@@ -2309,18 +2242,7 @@ async def vision_review(
         pdf_status = result["redaction_status"].replace("✅", "OK")
         mc(pdf_status)
         pdf.ln(3); mc("NSPXN.com Condition Summary"); mc((smark or '').strip())
-        pdf.ln(3)
-        # Centered bold section header (user requested)
-        try:
-            pdf.set_font("Helvetica", "B", 11)
-        except Exception:
-            pdf.set_font("Arial", "B", 11)
-        pdf.cell(0, 6, "Approximate Repair Cost Breakdown", ln=True, align="C")
-        try:
-            pdf.set_font("Helvetica", "", 11)
-        except Exception:
-            pdf.set_font("Arial", "", 11)
-        mc((result.get("estimated_costs_markdown") or "").strip())
+        pdf.ln(3); mc("Approximate Repair Cost Breakdown"); mc((result.get("estimated_costs_markdown") or "").strip())
         pdf.ln(3); mc("Fraud Detection"); mc((result["fraud_markdown"] or 'N/A').strip())
 
         # --- AI Disclaimer (after report content) ---
@@ -2491,6 +2413,10 @@ async def download_pdf(file_number: Optional[str] = None, filename: Optional[str
         return JSONResponse(status_code=404, content={"detail": "Not Found"})
     latest = max(candidates, key=lambda p: os.path.getmtime(p))
     return FileResponse(path=latest, media_type="application/pdf", filename=os.path.basename(latest))
+
+
+
+
 
 
 
