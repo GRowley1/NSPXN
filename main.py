@@ -2450,7 +2450,12 @@ async def vision_review(
         pdf.ln(2)
 
         # Vehicle Identification (boxed + color-coded)
-        section_bar("VEHICLE IDENTIFICATION")
+        pdf.set_fill_color(30, 58, 95)
+        pdf.set_text_color(255, 255, 255)
+        pdf.set_font("Arial", "B", 12)
+        pdf.cell(0, 8, "VEHICLE IDENTIFICATION", ln=True, fill=True)
+        pdf.set_text_color(0, 0, 0)
+        pdf.ln(2)
 
         def _mc_fill(line: str) -> None:
             try:
