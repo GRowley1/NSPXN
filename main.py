@@ -2026,11 +2026,14 @@ async def vision_review(
         t = str(md_text).replace("\r\n", "\n").replace("\r", "\n")
 
 
+        t_clean = re.sub(r"\*\*", "", t)
+
+
 
         def _amt(pat: str) -> Optional[float]:
 
 
-            m = re.search(pat, t, flags=re.IGNORECASE | re.MULTILINE)
+            m = re.search(pat, t_clean, flags=re.IGNORECASE | re.MULTILINE)
 
 
             if not m:
@@ -2141,11 +2144,11 @@ async def vision_review(
             s = (ln or "").strip()
 
             # Remove model-emitted subtotal lines (we render one clean total line only)
-            if re.search(r"(?i)^\s*Subtotal\b", s):
+            if re.search(r"(?i)^\s*[-*]?\s*Subtotal\b", s):
                 continue
-            if re.search(r"(?i)^\s*Approximate\s+Repair\s+Cost\s+Total\s*:", s):
+            if re.search(r"(?i)^\s*[-*]?\s*Approximate\s+Repair\s+Cost\s+Total\s*:", s):
                 continue
-            if re.search(r"(?i)^\s*Approximate\s+Total\s+Repair\s+Cost\s*:", s):
+            if re.search(r"(?i)^\s*[-*]?\s*Approximate\s+Total\s+Repair\s+Cost\s*:", s):
                 continue
             # Also remove any standalone 'Approximate Repair Cost Total: $10,000' variants the model may emit
             if re.search(r"(?i)^\s*Approximate\s+Repair\s+Cost\s+Total\b", s) and "$" in s:
@@ -2160,7 +2163,7 @@ async def vision_review(
         out_lines = []
         inserted = False
         for ln in base.splitlines():
-            if (not inserted) and re.search(r"(?i)^\s*#{1,6}\s*Severity\s+Tier\b", ln.strip()):
+            if (not inserted) and re.search(r"(?i)^\s*(?:#{1,6}\s*)?Severity\s+Tier\b", ln.strip()):
                 out_lines.append(f"Approximate Repair Cost Total: {_money2(total_val)}")
                 inserted = True
             out_lines.append(ln)
@@ -2274,7 +2277,7 @@ async def vision_review(
             s = (ln or "").strip()
 
 
-            if re.search(r"(?i)^\s*#(0, 6)\s*Severity\s+Tier\b", s):
+            if re.search(r"(?i)^\s*#{0,6}\s*Severity\s+Tier\b", s):
 
 
                 i += 1
@@ -2292,7 +2295,7 @@ async def vision_review(
                     ns = (nxt or "").strip()
 
 
-                    if re.search(r"^\s*#(1, 6)\s+\S", ns):
+                    if re.search(r"^\s*#{1,6}\s+\S", ns):
 
 
                         break
@@ -2477,9 +2480,9 @@ async def vision_review(
                 continue
 
             # Remove any existing total line; we will compute/insert a clean one
-            if re.search(r"(?i)^\s*Approximate\s+Repair\s+Cost\s+Total\s*:", s):
+            if re.search(r"(?i)^\s*[-*]?\s*Approximate\s+Repair\s+Cost\s+Total\s*:", s):
                 continue
-            if re.search(r"(?i)^\s*Approximate\s+Total\s+Repair\s+Cost\s*:", s):
+            if re.search(r"(?i)^\s*[-*]?\s*Approximate\s+Total\s+Repair\s+Cost\s*:", s):
                 continue
 
             cleaned.append(ln)
@@ -2578,7 +2581,7 @@ async def vision_review(
                 continue
 
             # Never print 'Subtotal' lines; we compute/print one clean total line
-            if re.search(r"(?i)^\s*Subtotal\b", s):
+            if re.search(r"(?i)^\s*[-*]?\s*Subtotal\b", s):
                 continue
 
             cleaned.append(ln)
@@ -2708,10 +2711,38 @@ async def vision_review(
         pdf.cell(0,10,"NSPXN.com Condition Report", ln=True, align="C")
         pdf.set_font_size(10); pdf.ln(3)
 
-        mc(f"Claim #: {result['claim_number'] or 'N/A'}    File #: {file_number or 'N/A'}")
-        mc(f"Inspected For: {ia_company}")
-        pdf_status = result["redaction_status"].replace("✅", "OK")
-        pdf.ln(2); mc(pdf_status)
+        # Vehicle Identification (format aligned to the approved 2zip layout)
+        try:
+            pdf.set_font("Helvetica","B",12)
+        except Exception:
+            pdf.set_font("Arial","B",12)
+        mc("VEHICLE IDENTIFICATION")
+        try:
+            pdf.set_font("Helvetica","",11)
+        except Exception:
+            pdf.set_font("Arial","",11)
+
+        _claim_no = result.get("claim_number") or "N/A"
+        _file_no = file_number or "N/A"
+        _vin = result.get("vin") or "N/A"
+        _vin_ver = result.get("vin_verification") or "N/A"
+        _vehicle = result.get("vehicle") or "N/A"
+        _odo = result.get("odometer_estimate_only") or result.get("odometer") or "N/A"
+        _pri = result.get("primary_impact") or "N/A"
+        _sec = result.get("secondary_impact") or "N/A"
+        _red = (result.get("redaction_status") or "").replace("✅", "OK") or "Redacted PII: N/A"
+
+        mc(f"File # {_file_no}")
+        mc(f"Claim # {_claim_no}")
+        mc(f"Inspected For {ia_company}")
+        mc(f"VIN {_vin}")
+        mc(f"VIN Verification {_vin_ver}")
+        mc(f"Vehicle {_vehicle}")
+        mc(f"Odometer {_odo}")
+        mc(f"Primary Impact {_pri}")
+        mc(f"Secondary Impact {_sec}")
+        mc(f"Redaction Status {_red}")
+
         pdf.ln(2); mc("Report Selected")
         _summary_md = (result["summary_markdown"] or "N/A").strip()
         # Hard scrub: never allow a generic 'Vehicle Damage Report' heading to appear in the PDF
@@ -3003,32 +3034,3 @@ async def download_pdf(file_number: Optional[str] = None, filename: Optional[str
         return JSONResponse(status_code=404, content={"detail": "Not Found"})
     latest = max(candidates, key=lambda p: os.path.getmtime(p))
     return FileResponse(path=latest, media_type="application/pdf", filename=os.path.basename(latest))
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
