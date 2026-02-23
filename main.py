@@ -1957,6 +1957,30 @@ async def vision_review(
 
 
     
+
+    def section_bar(title: str) -> None:
+        """Render a consistent colored section header bar (PDF-only helper)."""
+        try:
+            pdf.ln(3)
+        except Exception:
+            pass
+        pdf.set_fill_color(30, 58, 95)
+        pdf.set_text_color(255, 255, 255)
+        try:
+            pdf.set_font("Helvetica", "B", 12)
+        except Exception:
+            pdf.set_font("Arial", "B", 12)
+        pdf.cell(0, 8, _pdf_sanitize(title), ln=True, fill=True)
+        pdf.set_text_color(0, 0, 0)
+        try:
+            pdf.set_font("Helvetica", "", 11)
+        except Exception:
+            pdf.set_font("Arial", "", 11)
+        try:
+            pdf.ln(1)
+        except Exception:
+            pass
+
     def _money2(x: Optional[float]) -> str:
         try:
             if x is None:
@@ -1984,17 +2008,17 @@ async def vision_review(
                 return None
 
         # Prefer explicit totals (bold amounts) from the model output
-        body_labor = _grab_amount(r"^\s*[-*]?\s*Body\s+labor\s*:\s*.*?(?:\*\*)?\$\s*([0-9][0-9,]*(?:\.[0-9]{2})?)(?:\*\*)?")
-        paint_labor = _grab_amount(r"^\s*[-*]?\s*Paint\s+labor\s*:\s*.*?(?:\*\*)?\$\s*([0-9][0-9,]*(?:\.[0-9]{2})?)(?:\*\*)?")
-        mech_labor = _grab_amount(r"^\s*[-*]?\s*Mechanical[^:]*:\s*.*?(?:\*\*)?\$\s*([0-9][0-9,]*(?:\.[0-9]{2})?)(?:\*\*)?")
-        frame_labor = _grab_amount(r"^\s*[-*]?\s*Frame\s+labor\s*:\s*.*?(?:\*\*)?\$\s*([0-9][0-9,]*(?:\.[0-9]{2})?)(?:\*\*)?")
+        body_labor = _grab_amount(r"^\s*[-*]?\s*Body\s+labor\s*:\s*.*?\*\*\$\s*([0-9][0-9,]*(?:\.[0-9]{2})?)\*\*")
+        paint_labor = _grab_amount(r"^\s*[-*]?\s*Paint\s+labor\s*:\s*.*?\*\*\$\s*([0-9][0-9,]*(?:\.[0-9]{2})?)\*\*")
+        mech_labor = _grab_amount(r"^\s*[-*]?\s*Mechanical[^:]*:\s*.*?\*\*\$\s*([0-9][0-9,]*(?:\.[0-9]{2})?)\*\*")
+        frame_labor = _grab_amount(r"^\s*[-*]?\s*Frame\s+labor\s*:\s*.*?\*\*\$\s*([0-9][0-9,]*(?:\.[0-9]{2})?)\*\*")
 
-        paint_mat = _grab_amount(r"^\s*[-*]?\s*Paint\s*&\s*materials\s*:\s*.*?(?:\*\*)?\$\s*([0-9][0-9,]*(?:\.[0-9]{2})?)(?:\*\*)?")
+        paint_mat = _grab_amount(r"^\s*[-*]?\s*Paint\s*&\s*materials\s*:\s*.*?\*\*\$\s*([0-9][0-9,]*(?:\.[0-9]{2})?)\*\*")
         parts_sub = _grab_amount(r"^\s*\*\*\s*Estimated\s+parts\s+subtotal\s*:\s*\$\s*([0-9][0-9,]*(?:\.[0-9]{2})?)")
         if parts_sub is None:
-            parts_sub = _grab_amount(r"^\s*[-*]?\s*Parts\s+subtotal\s*:\s*(?:\*\*)?\$\s*([0-9][0-9,]*(?:\.[0-9]{2})?)(?:\*\*)?")
+            parts_sub = _grab_amount(r"^\s*[-*]?\s*Parts\s+subtotal\s*:\s*\*\*\$\s*([0-9][0-9,]*(?:\.[0-9]{2})?)\*\*")
 
-        tax_amt = _grab_amount(r"^\s*[-*]?\s*(?:Sales\s+tax|Estimated\s+tax)\b.*?(?:\*\*)?\$\s*([0-9][0-9,]*(?:\.[0-9]{2})?)(?:\*\*)?")
+        tax_amt = _grab_amount(r"^\s*[-*]?\s*(?:Sales\s+tax|Estimated\s+tax)\b.*?\*\*\$\s*([0-9][0-9,]*(?:\.[0-9]{2})?)\*\*")
 
         # If the model failed to provide the key components, do not guess a total here.
         components = [body_labor, paint_labor, mech_labor, frame_labor, paint_mat, parts_sub, tax_amt]
@@ -2277,11 +2301,7 @@ async def vision_review(
             if ("+" in ln and "=" in ln and re.search(r"\$\s*[0-9]", ln)):
                 continue
 
-                        # Never print a model-provided "Severity Tier" heading (we render our own once)
-            if re.search(r"(?i)^\s*#{1,6}\s*Severity\s+Tier\b", s) or s.lower() == "severity tier":
-                continue
-
-# Collect severity tier lines (checkbox list)
+            # Collect severity tier lines (checkbox list)
             if re.search(r"(?i)(minor\s*\(|moderate\s*\(|major\s*\(|total\s+loss\s+threshold)", ln):
                 severity_lines.append(ln.replace("Likely Total Loss Threshold Approaching","Possible Total Loss Threshold Approaching"))
                 continue
@@ -2437,112 +2457,44 @@ async def vision_review(
         poi15_hit = False
 
     if ai_intent == "damage_report_from_photos":
-        # Title (larger + bold)
-        try:
-            pdf.set_font("Helvetica", "B", 16)
-        except Exception:
-            pdf.set_font("Arial", "B", 16)
-        pdf.cell(0, 10, "NSPXN.com Condition Report", ln=True, align="C")
-        try:
-            pdf.set_font("Helvetica", "", 10)
-        except Exception:
-            pdf.set_font("Arial", "", 10)
-        pdf.ln(2)
+        pdf.cell(0,10,"NSPXN.com Condition Report", ln=True, align="C")
+        pdf.set_font_size(10); pdf.ln(3)
 
-        # Vehicle Identification (boxed + color-coded)
-        pdf.set_fill_color(30, 58, 95)
-        pdf.set_text_color(255, 255, 255)
-        pdf.set_font("Arial", "B", 12)
-        pdf.cell(0, 8, "VEHICLE IDENTIFICATION", ln=True, fill=True)
-        pdf.set_text_color(0, 0, 0)
-        pdf.ln(2)
-
-        def _mc_fill(line: str) -> None:
-            try:
-                effective_w = pdf.w - pdf.l_margin - pdf.r_margin
-                if effective_w <= 5:
-                    effective_w = 180
-                safe = _pdf_sanitize(line)
-                if not safe.strip():
-                    safe = "-"
-                pdf.set_x(pdf.l_margin)
-                pdf.set_fill_color(245, 245, 245)
-                pdf.multi_cell(effective_w, 6, safe, fill=True)
-            except Exception:
-                # fail-open
-                mc(line)
-
-        _claim_no = (result.get("claim_number") or "N/A").strip() or "N/A"
-        _file_no = (file_number or "N/A").strip() or "N/A"
-        _vin = (result.get("vin") or "N/A").strip() or "N/A"
-        _vin_ver = (result.get("vin_verification") or "N/A").strip() or "N/A"
-        _vehicle = (result.get("vehicle") or "N/A").strip() or "N/A"
-        _odo = (result.get("odometer_estimate_only") or result.get("odometer") or "N/A").strip() or "N/A"
-        _pri = (result.get("primary_impact") or "N/A").strip() or "N/A"
-        _sec = (result.get("secondary_impact") or "N/A").strip() or "N/A"
-        _red = (result.get("redaction_status") or "").replace("✅", "OK").strip() or "Redacted PII: N/A"
-
-        _mc_fill(f"File #: {_file_no}")
-        _mc_fill(f"Claim #: {_claim_no}")
-        _mc_fill(f"Inspected For: {ia_company or 'N/A'}")
-        _mc_fill(f"VIN: {_vin}")
-        _mc_fill(f"VIN Verification: {_vin_ver}")
-        _mc_fill(f"Vehicle: {_vehicle}")
-        _mc_fill(f"Odometer: {_odo}")
-        _mc_fill(f"Primary Impact: {_pri}")
-        _mc_fill(f"Secondary Impact: {_sec}")
-        _mc_fill(f"Redaction Status: {_red}")
-
-        # Report Summary
-        _summary_md = (result.get("summary_markdown") or "").strip()
-
-        # Hard scrub: never allow a generic 'Vehicle Damage Report' heading to appear in the PDF
-        _summary_md = re.sub(r"(?im)^\s*VEHICLE\s+DAMAGE\s+REPORT\s*$", "", _summary_md).strip()
-        _summary_md = re.sub(r"\n{3,}", "\n\n", _summary_md).strip()
-
+        mc(f"Claim #: {result['claim_number'] or 'N/A'}    File #: {file_number or 'N/A'}")
+        mc(f"Inspected For: {ia_company}")
+        pdf_status = result["redaction_status"].replace("✅", "OK")
+        pdf.ln(2); mc(pdf_status)
+        pdf.ln(2); mc("Report Selected")
+        _summary_md = (result["summary_markdown"] or "N/A").strip()
         if ai_intent == "damage_report_from_photos":
             _summary_md = _scrub_photo_only_narrative_cost_headers(_summary_md)
-
-        # Odometer consistency scrub (PDF-only): if the narrative contains a different mileage, replace it with the Vehicle ID mileage.
-        try:
-            if _odo and _odo != "N/A":
-                def _odo_norm(sv: str) -> str:
-                    return re.sub(r"\s+", " ", (sv or "").strip().lower())
-                _odo_n = _odo_norm(_odo)
-                def _sub_odo(m):
-                    seen = f"{m.group(1)} {m.group(2)}"
-                    if _odo_norm(seen) == _odo_n:
-                        return m.group(0)
-                    return _odo
-                _summary_md = re.sub(r"(?i)\b(\d{1,3}(?:,\d{3})+|\d{4,7})\s*(mi|miles|km)\b", _sub_odo, _summary_md)
-        except Exception:
-            pass
-
-        section_bar("REPORT SUMMARY")
-        mc(_summary_md if _summary_md else "-")
+        mc(_summary_md)
         pdf.ln(2)
-
-        # Controlled Repair Cost section rendering
+        # Controlled Repair Cost section rendering (prevents duplicate headings, Totals blocks, duplicate tiers, and bad totals)
         _raw_costs_md = result.get("estimated_costs_markdown") or ""
         costs_md = _strip_unwanted_cost_lines_for_pdf(_raw_costs_md)
 
-        # Compute + inject one clean total line (prevents bad totals like "$10,000" from tier ranges)
+        # Compute a clean approximate total from the model's section totals (prevents bad/rounded totals like "$10,000")
         _computed_total = _compute_cost_total_from_md(_raw_costs_md) or _compute_cost_total_from_md(costs_md)
         costs_md = _inject_clean_total_line(costs_md, _computed_total)
 
-        # Normalize/force Severity Tier checkmarks and ensure the block appears only once
+        # Normalize/force Severity Tier checkmarks from the (clean) total line
         costs_md = _enforce_severity_tier_checkmarks(costs_md)
 
-        section_bar("APPROXIMATE REPAIR COST BREAKDOWN")
+        try:
+            pdf.set_font("Helvetica","B",12)
+        except Exception:
+            pdf.set_font("Arial","B",12)
+        pdf.cell(0,8,"Approximate Repair Cost Breakdown", ln=True, align="C")
+        try:
+            pdf.set_font("Helvetica","",11)
+        except Exception:
+            pdf.set_font("Arial","",11)
         render_repair_cost_section(pdf, costs_md)
+        pdf.ln(2); mc("Fraud & Authenticity Check"); mc((result["fraud_markdown"] or 'N/A').strip())
+        pdf.ln(2); mc("Conclusion"); mc((result["conclusion"] or 'N/A').strip())
 
-        section_bar("FRAUD & AUTHENTICITY CHECK")
-        mc((result.get("fraud_markdown") or "").strip() or "-")
-
-        section_bar("CONCLUSION")
-        mc((result.get("conclusion") or "").strip() or "-")
-
-        # --- Combined Disclaimer (end of report) ---
+        # --- AI Disclaimer (after Conclusion) ---
         try:
             pdf.ln(4)
             x_left = pdf.l_margin
@@ -2558,24 +2510,18 @@ async def vision_review(
             pdf.set_font("Helvetica", "", 8)
 
             disclaimer_body = (
-                "This report is based solely on photographic evidence and is intended as a preliminary visual damage assessment only. "
-                "It does not constitute a formal appraisal, repair estimate, or safety certification. Hidden structural, mechanical, or "
-                "electronic damage may exist beyond what is visible in the photographs. All findings should be verified by a qualified "
-                "collision repair technician, appraiser, and/or insurance adjuster performing a physical inspection. This report was generated "
-                "using artificial intelligence. AI systems may make errors or misinterpret visual information. All photos, damage descriptions, "
-                "conclusions, and findings must be independently reviewed and verified by a qualified appraiser before preparing or finalizing any "
-                "repair estimate. This repair cost is an approximation derived from the visible conditions in the provided photos only. Actual repair "
-                "scope and cost may change after teardown, measurement, and confirmation of hidden damage, glass bonding requirements, and any sensor/"
-                "trim replacement needs."
+                "This report was generated using artificial intelligence. AI systems may make errors or misinterpret "
+                "visual information. All photos, damage descriptions, conclusions, and findings must be independently "
+                "reviewed and verified by a qualified appraiser before preparing or finalizing any repair estimate."
             )
             pdf.multi_cell(0, 4, disclaimer_body)
             pdf.set_text_color(0, 0, 0)
         except Exception:
             pass
 
+
         safe_file = _safe(file_number)
         pdf_filename = f"AI_Condition_Report_{safe_file}.pdf"
-
     else:
         pdf.cell(0,10,"NSPXN.com Condition Report", ln=True, align="C")
         pdf.set_font_size(10); pdf.ln(3)
