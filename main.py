@@ -1957,55 +1957,142 @@ async def vision_review(
 
 
     
-    def _parse_approx_total(md_text: str) -> Optional[float]:
-        """Parse the approximate repair total from estimated_costs_markdown (best-effort).
-        Prefers a standalone/bold total near the end of the cost section.
+    def _money2(x: Optional[float]) -> str:
+        try:
+            if x is None:
+                return "$0.00"
+            return "${:,.2f}".format(float(x))
+        except Exception:
+            return "$0.00"
+
+    def _compute_cost_total_from_md(md_text: str) -> Optional[float]:
+        """Compute a photo-only approximate total from the model's cost markdown.
+        We intentionally sum the *section totals* (labor totals, paint materials, parts subtotal, tax)
+        to avoid double-counting per-part lines.
         """
         if not md_text:
             return None
-        t = str(md_text).replace("\r\n","\n").replace("\r","\n")
+        t = str(md_text).replace("\r\n", "\n").replace("\r", "\n")
 
-        # 1) Prefer explicit label variants
-        label_patterns = [
-            r"(?im)^\s*\*\*?\s*Approximate\s+Repair\s+Cost\s+Total\s*[:\-]?\s*\*\*?\s*\$\s*([0-9][0-9,]*)",
-            r"(?im)^\s*\*\*?\s*Approximate\s+Total\s+Repair\s+Cost\s*[:\-]?\s*\*\*?\s*\$\s*([0-9][0-9,]*)",
-        ]
-        for pat in label_patterns:
-            m = re.search(pat, t)
-            if m:
-                try:
-                    return float(m.group(1).replace(",", ""))
-                except Exception:
-                    pass
-
-        # 2) Prefer a standalone line that is just $X,XXX (often bolded)
-        standalone = []
-        for ln in t.splitlines():
-            s = ln.strip()
-            # strip markdown bold
-            s2 = re.sub(r"^[*_]+|[*_]+$", "", s).strip()
-            m = re.fullmatch(r"\$\s*([0-9][0-9,]*)", s2)
-            if m:
-                try:
-                    standalone.append(float(m.group(1).replace(",", "")))
-                except Exception:
-                    pass
-        if standalone:
-            return standalone[-1]
-
-        # 3) Otherwise: take the last dollar amount after a 'Tax' section (common structure)
-        tail = t
-        m_tax = re.search(r"(?is)\bTax\b.*", t)
-        if m_tax:
-            tail = t[m_tax.start():]
-        monies = re.findall(r"\$\s*([0-9][0-9,]*)", tail)
-        if monies:
-            # choose the last amount in the tail
+        def _grab_amount(pat: str) -> Optional[float]:
+            m = re.search(pat, t, flags=re.IGNORECASE | re.MULTILINE)
+            if not m:
+                return None
             try:
-                return float(monies[-1].replace(",", ""))
+                return float(m.group(1).replace(",", ""))
             except Exception:
                 return None
-        return None
+
+        # Prefer explicit totals (bold amounts) from the model output
+        body_labor = _grab_amount(r"^\s*[-*]?\s*Body\s+labor\s*:\s*.*?\*\*\$\s*([0-9][0-9,]*(?:\.[0-9]{2})?)\*\*")
+        paint_labor = _grab_amount(r"^\s*[-*]?\s*Paint\s+labor\s*:\s*.*?\*\*\$\s*([0-9][0-9,]*(?:\.[0-9]{2})?)\*\*")
+        mech_labor = _grab_amount(r"^\s*[-*]?\s*Mechanical[^:]*:\s*.*?\*\*\$\s*([0-9][0-9,]*(?:\.[0-9]{2})?)\*\*")
+        frame_labor = _grab_amount(r"^\s*[-*]?\s*Frame\s+labor\s*:\s*.*?\*\*\$\s*([0-9][0-9,]*(?:\.[0-9]{2})?)\*\*")
+
+        paint_mat = _grab_amount(r"^\s*[-*]?\s*Paint\s*&\s*materials\s*:\s*.*?\*\*\$\s*([0-9][0-9,]*(?:\.[0-9]{2})?)\*\*")
+        parts_sub = _grab_amount(r"^\s*\*\*\s*Estimated\s+parts\s+subtotal\s*:\s*\$\s*([0-9][0-9,]*(?:\.[0-9]{2})?)")
+        if parts_sub is None:
+            parts_sub = _grab_amount(r"^\s*[-*]?\s*Parts\s+subtotal\s*:\s*\*\*\$\s*([0-9][0-9,]*(?:\.[0-9]{2})?)\*\*")
+
+        tax_amt = _grab_amount(r"^\s*[-*]?\s*(?:Sales\s+tax|Estimated\s+tax)\b.*?\*\*\$\s*([0-9][0-9,]*(?:\.[0-9]{2})?)\*\*")
+
+        # If the model failed to provide the key components, do not guess a total here.
+        components = [body_labor, paint_labor, mech_labor, frame_labor, paint_mat, parts_sub, tax_amt]
+        have_any = any(v is not None for v in components)
+        have_core = (parts_sub is not None) and (tax_amt is not None) and (paint_mat is not None)
+        if not (have_any and have_core):
+            return None
+
+        total = 0.0
+        for v in (body_labor, paint_labor, mech_labor, frame_labor, paint_mat, parts_sub, tax_amt):
+            if isinstance(v, (int, float)):
+                total += float(v)
+        return round(total, 2)
+
+    def _inject_clean_total_line(md_text: str, total_val: Optional[float]) -> str:
+        """Remove any existing total lines and insert a single clean total line."""
+        if not md_text:
+            return md_text or ""
+        t = str(md_text).replace("\r\n", "\n").replace("\r", "\n")
+
+        lines = []
+        for ln in t.splitlines():
+            s = (ln or "").strip()
+            if re.search(r"(?i)^\s*Approximate\s+Repair\s+Cost\s+Total\s*:", s):
+                continue
+            if re.search(r"(?i)^\s*Approximate\s+Total\s+Repair\s+Cost\s*:", s):
+                continue
+            # Also remove any standalone 'Approximate Repair Cost Total: $10,000' variants the model may emit
+            if re.search(r"(?i)^\s*Approximate\s+Repair\s+Cost\s+Total\b", s) and "$" in s:
+                continue
+            lines.append(ln)
+        base = "\n".join(lines).strip()
+
+        if total_val is None:
+            return base
+
+        # Insert the total line immediately before the Severity Tier heading if present; otherwise append near the end.
+        out_lines = []
+        inserted = False
+        for ln in base.splitlines():
+            if (not inserted) and re.search(r"(?i)^\s*#{1,6}\s*Severity\s+Tier\b", ln.strip()):
+                out_lines.append(f"Approximate Repair Cost Total: {_money2(total_val)}")
+                inserted = True
+            out_lines.append(ln)
+        if not inserted:
+            out_lines.append(f"Approximate Repair Cost Total: {_money2(total_val)}")
+        return "\n".join(out_lines).strip()
+
+
+    def _parse_approx_total(md_text: str) -> Optional[float]:
+            """Parse the approximate repair total from estimated_costs_markdown (best-effort).
+            Prefers a standalone/bold total near the end of the cost section.
+            """
+            if not md_text:
+                return None
+            t = str(md_text).replace("\r\n","\n").replace("\r","\n")
+
+            # 1) Prefer explicit label variants
+            label_patterns = [
+                r"(?im)^\s*\*\*?\s*Approximate\s+Repair\s+Cost\s+Total\s*[:\-]?\s*\*\*?\s*\$\s*([0-9][0-9,]*(?:\.[0-9]{1,2})?)",
+                r"(?im)^\s*\*\*?\s*Approximate\s+Total\s+Repair\s+Cost\s*[:\-]?\s*\*\*?\s*\$\s*([0-9][0-9,]*(?:\.[0-9]{1,2})?)",
+            ]
+            for pat in label_patterns:
+                m = re.search(pat, t)
+                if m:
+                    try:
+                        return float(m.group(1).replace(",", ""))
+                    except Exception:
+                        pass
+
+            # 2) Prefer a standalone line that is just $X,XXX (often bolded)
+            standalone = []
+            for ln in t.splitlines():
+                s = ln.strip()
+                # strip markdown bold
+                s2 = re.sub(r"^[*_]+|[*_]+$", "", s).strip()
+                m = re.fullmatch(r"\$\s*([0-9][0-9,]*(?:\.[0-9]{1,2})?)", s2)
+                if m:
+                    try:
+                        standalone.append(float(m.group(1).replace(",", "")))
+                    except Exception:
+                        pass
+            if standalone:
+                return standalone[-1]
+
+            # 3) Otherwise: take the last dollar amount after a 'Tax' section (common structure)
+            tail = t
+            m_tax = re.search(r"(?is)\bTax\b.*", t)
+            if m_tax:
+                tail = t[m_tax.start():]
+            monies = re.findall(r"\$\s*([0-9][0-9,]*(?:\.[0-9]{1,2})?)", tail)
+            if monies:
+                # choose the last amount in the tail
+                try:
+                    return float(monies[-1].replace(",", ""))
+                except Exception:
+                    return None
+            return None
 
     def _enforce_severity_tier_checkmarks(md_text: str) -> str:
         """Rewrite the Severity Tier block to ensure exactly one box is checked based on parsed total."""
@@ -2059,29 +2146,75 @@ async def vision_review(
         return (t2 + "\n" + sev_block).strip() + "\n"
 
     def _strip_unwanted_cost_lines_for_pdf(md_text: str) -> str:
-        """Remove known unwanted lines in cost markdown before PDF render."""
+        """Remove known unwanted lines in cost markdown before PDF render.
+        This is used ONLY for Photos-Only PDFs to prevent model-inserted prompt headers,
+        'Totals' math blocks, duplicate section headers, and any estimate/docs language.
+        """
         if not md_text:
             return md_text or ""
         t = str(md_text).replace("Likely Total Loss Threshold Approaching", "Possible Total Loss Threshold Approaching")
-        cleaned = []
+        cleaned: List[str] = []
         for ln in t.splitlines():
-            if ln.strip() == "Approximate Repair Cost Breakdown":
+            s = (ln or "").strip()
+
+            # Remove model/prompt headers and echoes
+            if s in ("Approximate Repair Cost Breakdown", "(See estimated_costs_markdown field.)"):
                 continue
-            if re.search(r"(?i)^\s*##\s*Approximate\s+Repair\s+Cost\s+Breakdown\s*\(Photos\s*Only\)\s*$", ln.strip()):
+            if re.search(r"(?i)\bPopulate\s+JSON\s+field\b", s):
                 continue
-            if re.search(r"(?i)^\s*###\s*Totals\b", ln.strip()):
+            if re.search(r"(?i)^\s*##\s*Approximate\s+Repair\s+Cost\s+Breakdown\b", s):
                 continue
-            if re.search(r"(?i)\bbest-?effort\b|\bfrom\s+estimate\b|\bfrom\s+docs\b|\bnot\s+evidenced\b", ln):
+
+            # Remove Totals blocks / arithmetic
+            if re.search(r"(?i)^\s*###\s*Totals\b", s):
                 continue
-            # remove arithmetic totals line
             if ("+" in ln and "=" in ln and re.search(r"\$\s*[0-9]", ln)):
                 continue
-            if re.search(r"(?i)^\s*###\s*Approximate\s+Total\s+Repair\s+Cost\b", ln.strip()):
+            if re.search(r"(?i)^\s*###\s*Approximate\s+Total\s+Repair\s+Cost\b", s):
                 continue
-            if re.search(r"(?i)^\s*[-*]\s*Estimated\s+total\b", ln.strip()):
+            if re.search(r"(?i)^\s*[-*]\s*Estimated\s+total\b", s):
                 continue
+
+            # Remove Severity headings/labels here (we render a normalized block later)
+            if re.search(r"(?i)^\s*###\s*Severity\s+Tier\b", s):
+                continue
+            if s.lower() == "severity tier":
+                continue
+
+            # Remove unwanted notes/disclaimers inserted by older logic
+            if re.search(r"(?i)\bbest-?effort\b|\bfrom\s+estimate\b|\bfrom\s+docs\b|\bnot\s+evidenced\b", ln):
+                continue
+
+            # Never print Inspection Location inside the cost section (per your requirement)
+            if re.search(r"(?i)^\*\*Inspection\s+Location\*\*\s*:", s) or re.search(r"(?i)^Inspection\s+Location\s*:", s):
+                continue
+
+            # Remove any existing total line; we will compute/insert a clean one
+            if re.search(r"(?i)^\s*Approximate\s+Repair\s+Cost\s+Total\s*:", s):
+                continue
+            if re.search(r"(?i)^\s*Approximate\s+Total\s+Repair\s+Cost\s*:", s):
+                continue
+
             cleaned.append(ln)
         return "\n".join(cleaned).strip()
+
+    def _scrub_photo_only_narrative_cost_headers(md_text: str) -> str:
+        """Remove the model's internal prompt cost headers from the main narrative.
+        We render the cost breakdown as its own controlled PDF section.
+        """
+        if not md_text:
+            return md_text or ""
+        out: List[str] = []
+        for ln in str(md_text).replace("\r\n", "\n").replace("\r", "\n").splitlines():
+            s = (ln or "").strip()
+            if re.search(r"(?i)^\s*##\s*Approximate\s+Repair\s+Cost\s+Breakdown\b", s):
+                continue
+            if re.search(r"(?i)\bPopulate\s+JSON\s+field\b", ln):
+                continue
+            if re.search(r"(?i)\bSee\s+estimated_costs_markdown\s+field\b", ln):
+                continue
+            out.append(ln)
+        return "\n".join(out).strip()
 
     def render_repair_cost_section(pdf_obj: FPDF, md: str) -> None:
         """Render the Approximate Repair Cost Breakdown in a controlled PDF format.
@@ -2165,19 +2298,37 @@ async def vision_review(
         except Exception:
             total_val = None
 
-        # Print body (excluding tier + disclaimer)
-        body_text = "\n".join([ln for ln in cleaned if ln.strip()]).strip()
-        if body_text:
-            mc(body_text)
+        # Print body (excluding tier + disclaimer) in a readable, structured way
+        if cleaned:
+            for ln in cleaned:
+                s = (ln or "").strip()
+                if not s:
+                    pdf_obj.ln(2)
+                    continue
+                # Render markdown sub-headings as bold lines
+                if re.match(r"^#{3,6}\s+\S", s):
+                    heading = re.sub(r"^#{3,6}\s*", "", s).strip()
+                    try:
+                        pdf_obj.set_font("Helvetica", "B", 11)
+                    except Exception:
+                        pdf_obj.set_font("Arial", "B", 11)
+                    pdf_obj.ln(1)
+                    pdf_obj.cell(0, 6, _pdf_sanitize(heading), ln=True)
+                    try:
+                        pdf_obj.set_font("Helvetica", "", 11)
+                    except Exception:
+                        pdf_obj.set_font("Arial", "", 11)
+                    continue
+                mc(s)
 
-        # ONE total line (always)
+        # ONE total line (always) — use cents when available
         if total_val is not None:
             try:
                 pdf_obj.set_font("Helvetica", "B", 11)
             except Exception:
                 pdf_obj.set_font("Arial", "B", 11)
             pdf_obj.ln(1)
-            pdf_obj.cell(0, 6, f"Approximate Repair Cost Total: {_money(total_val)}", ln=True)
+            pdf_obj.cell(0, 6, f"Approximate Repair Cost Total: {_money2(total_val)}", ln=True)
             try:
                 pdf_obj.set_font("Helvetica", "", 11)
             except Exception:
@@ -2207,6 +2358,10 @@ async def vision_review(
                 pdf_obj.set_font("Helvetica", "", 8)
                 pdf_obj.multi_cell(0, 4, _pdf_sanitize(disclaimer_text))
                 pdf_obj.set_text_color(0, 0, 0)
+                try:
+                    pdf_obj.set_font("Helvetica", "", 11)
+                except Exception:
+                    pdf_obj.set_font("Arial", "", 11)
             except Exception:
                 # fail-open: don't break PDF rendering
                 pass
@@ -2285,11 +2440,23 @@ async def vision_review(
         mc(f"Inspected For: {ia_company}")
         pdf_status = result["redaction_status"].replace("✅", "OK")
         pdf.ln(2); mc(pdf_status)
-        pdf.ln(2); mc("Report Selected"); mc((result["summary_markdown"] or "N/A").strip())
+        pdf.ln(2); mc("Report Selected")
+        _summary_md = (result["summary_markdown"] or "N/A").strip()
+        if ai_intent == "damage_report_from_photos":
+            _summary_md = _scrub_photo_only_narrative_cost_headers(_summary_md)
+        mc(_summary_md)
         pdf.ln(2)
-        # Controlled Repair Cost section rendering (prevents duplicate headings, Totals blocks, and uncheckmarked tiers)
-        costs_md = _strip_unwanted_cost_lines_for_pdf(result.get("estimated_costs_markdown") or "")
+        # Controlled Repair Cost section rendering (prevents duplicate headings, Totals blocks, duplicate tiers, and bad totals)
+        _raw_costs_md = result.get("estimated_costs_markdown") or ""
+        costs_md = _strip_unwanted_cost_lines_for_pdf(_raw_costs_md)
+
+        # Compute a clean approximate total from the model's section totals (prevents bad/rounded totals like "$10,000")
+        _computed_total = _compute_cost_total_from_md(_raw_costs_md) or _compute_cost_total_from_md(costs_md)
+        costs_md = _inject_clean_total_line(costs_md, _computed_total)
+
+        # Normalize/force Severity Tier checkmarks from the (clean) total line
         costs_md = _enforce_severity_tier_checkmarks(costs_md)
+
         try:
             pdf.set_font("Helvetica","B",12)
         except Exception:
@@ -2562,6 +2729,7 @@ async def download_pdf(file_number: Optional[str] = None, filename: Optional[str
         return JSONResponse(status_code=404, content={"detail": "Not Found"})
     latest = max(candidates, key=lambda p: os.path.getmtime(p))
     return FileResponse(path=latest, media_type="application/pdf", filename=os.path.basename(latest))
+
 
 
 
