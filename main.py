@@ -1969,6 +1969,7 @@ async def vision_review(
         title_clean = str(title or "").strip()
         cmap = {
             "REPORT SUMMARY": (176, 98, 16),
+            "VEHICLE IDENTIFICATION": (28, 78, 128),
             "APPROXIMATE REPAIR COST BREAKDOWN": (46, 125, 50),
             "FRAUD & AUTHENTICITY CHECK": (93, 64, 140),
             "CONCLUSION": (55, 55, 55),
@@ -2221,10 +2222,24 @@ async def vision_review(
         except Exception:
             pass
 
-        monies = re.findall(r"\$\s*([0-9][0-9,]*(?:\.[0-9]{1,2})?)", t)
-        if monies:
+        # Final fallback: take the last currency amount that is NOT part of the Severity Tier checkbox/range lines.
+        # This prevents incorrectly treating tier boundaries like "$10,000+" as the computed total.
+        candidates = []
+        for ln in t.splitlines():
+            s = (ln or "").strip()
+            if not s:
+                continue
+            if re.search(r"(?i)\bMinor\b|\bModerate\b|\bMajor\b|Total\s+Loss\s+Threshold", s):
+                continue
+            for m_amt in re.finditer(r"\$\s*([0-9][0-9,]*(?:\.[0-9]{1,2})?)", s):
+                # If the amount is immediately followed by a "+" (e.g., "$10,000+"), ignore it.
+                endpos = m_amt.end()
+                if endpos < len(s) and s[endpos] == "+":
+                    continue
+                candidates.append(m_amt.group(1))
+        if candidates:
             try:
-                return float(monies[-1].replace(",", ""))
+                return float(candidates[-1].replace(",", ""))
             except Exception:
                 return None
         return None
@@ -2567,6 +2582,10 @@ async def vision_review(
             if ("+" in ln and "=" in ln and re.search(r"\$\s*[0-9]", ln)):
                 continue
 
+            # Skip any Severity Tier headings emitted by the model; we render a single normalized heading below.
+            if re.search(r"(?i)^\s*#{1,6}\s*Severity\s+Tier\b", s):
+                continue
+
             # Collect severity tier lines (checkbox list)
             if re.search(r"(?i)(minor\s*\(|moderate\s*\(|major\s*\(|total\s+loss\s+threshold)", ln):
                 severity_lines.append(ln.replace("Likely Total Loss Threshold Approaching","Possible Total Loss Threshold Approaching"))
@@ -2637,7 +2656,15 @@ async def vision_review(
         # Severity Tier block (ensure present + checkmarks already enforced in md)
         if severity_lines:
             pdf_obj.ln(1)
+            try:
+                pdf_obj.set_font("Helvetica", "B", 11)
+            except Exception:
+                pdf_obj.set_font("Arial", "B", 11)
             mc("Severity Tier")
+            try:
+                pdf_obj.set_font("Helvetica", "", 11)
+            except Exception:
+                pdf_obj.set_font("Arial", "", 11)
             for ln in severity_lines:
                 mc(ln.replace("☐","[ ]").replace("☑","[x]"))
 
@@ -2708,19 +2735,20 @@ async def vision_review(
         poi15_hit = False
 
     if ai_intent == "damage_report_from_photos":
-        pdf.cell(0,10,"NSPXN.com Condition Report", ln=True, align="C")
-        pdf.set_font_size(10); pdf.ln(3)
-
-        # Vehicle Identification (format aligned to the approved 2zip layout)
+        # Title (locked)
         try:
-            pdf.set_font("Helvetica","B",12)
+            pdf.set_font("Helvetica","B",18)
         except Exception:
-            pdf.set_font("Arial","B",12)
-        mc("VEHICLE IDENTIFICATION")
+            pdf.set_font("Arial","B",18)
+        pdf.cell(0,10,"NSPXN.com Condition Report", ln=True, align="C")
         try:
             pdf.set_font("Helvetica","",11)
         except Exception:
             pdf.set_font("Arial","",11)
+        pdf.ln(3)
+
+        # Vehicle Identification (locked formatting)
+        section_bar("VEHICLE IDENTIFICATION")
 
         _claim_no = result.get("claim_number") or "N/A"
         _file_no = file_number or "N/A"
@@ -2732,16 +2760,16 @@ async def vision_review(
         _sec = result.get("secondary_impact") or "N/A"
         _red = (result.get("redaction_status") or "").replace("✅", "OK") or "Redacted PII: N/A"
 
-        mc(f"File # {_file_no}")
-        mc(f"Claim # {_claim_no}")
-        mc(f"Inspected For {ia_company}")
-        mc(f"VIN {_vin}")
-        mc(f"VIN Verification {_vin_ver}")
-        mc(f"Vehicle {_vehicle}")
-        mc(f"Odometer {_odo}")
-        mc(f"Primary Impact {_pri}")
-        mc(f"Secondary Impact {_sec}")
-        mc(f"Redaction Status {_red}")
+        mc(f"File #: {_file_no}")
+        mc(f"Claim #: {_claim_no}")
+        mc(f"Inspected For: {ia_company}")
+        mc(f"VIN: {_vin}")
+        mc(f"VIN Verification: {_vin_ver}")
+        mc(f"Vehicle: {_vehicle}")
+        mc(f"Odometer: {_odo}")
+        mc(f"Primary Impact: {_pri}")
+        mc(f"Secondary Impact: {_sec}")
+        mc(f"Redaction Status: {_red}")
 
         pdf.ln(2); mc("Report Selected")
         _summary_md = (result["summary_markdown"] or "N/A").strip()
@@ -2806,8 +2834,17 @@ async def vision_review(
         safe_file = _safe(file_number)
         pdf_filename = f"AI_Condition_Report_{safe_file}.pdf"
     else:
+        # Title (locked)
+        try:
+            pdf.set_font("Helvetica","B",18)
+        except Exception:
+            pdf.set_font("Arial","B",18)
         pdf.cell(0,10,"NSPXN.com Condition Report", ln=True, align="C")
-        pdf.set_font_size(10); pdf.ln(3)
+        try:
+            pdf.set_font("Helvetica","",11)
+        except Exception:
+            pdf.set_font("Arial","",11)
+        pdf.ln(3)
         mc(f"File Number: {file_number}")
         mc(f"Inspected For: {ia_company}")
         mc(f"Appraiser ID #: {appraiser_id}")
@@ -3034,3 +3071,4 @@ async def download_pdf(file_number: Optional[str] = None, filename: Optional[str
         return JSONResponse(status_code=404, content={"detail": "Not Found"})
     latest = max(candidates, key=lambda p: os.path.getmtime(p))
     return FileResponse(path=latest, media_type="application/pdf", filename=os.path.basename(latest))
+
