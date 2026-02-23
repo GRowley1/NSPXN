@@ -1964,174 +1964,50 @@ async def vision_review(
             return "${:,.2f}".format(float(x))
         except Exception:
             return "$0.00"
-    def section_bar(title: str) -> None:
-        """Draw a color-coded section header bar."""
-        title_clean = str(title or "").strip()
-        cmap = {
-            "REPORT SUMMARY": (176, 98, 16),
-            "APPROXIMATE REPAIR COST BREAKDOWN": (46, 125, 50),
-            "FRAUD & AUTHENTICITY CHECK": (93, 64, 140),
-            "CONCLUSION": (55, 55, 55),
-            "DISCLAIMER": (120, 120, 120),
-        }
-        rgb = cmap.get(title_clean.upper(), (60, 60, 60))
-        try:
-            pdf.ln(3)
-            pdf.set_fill_color(*rgb)
-            pdf.set_text_color(255, 255, 255)
-            pdf.set_font("Helvetica", "B", 12)
-        except Exception:
-            pdf.ln(3)
-            pdf.set_fill_color(*rgb)
-            pdf.set_text_color(255, 255, 255)
-            pdf.set_font("Arial", "B", 12)
-        pdf.cell(0, 8, _pdf_sanitize(title_clean), ln=True, fill=True)
-        pdf.set_text_color(0, 0, 0)
-        try:
-            pdf.set_font("Helvetica", "", 11)
-        except Exception:
-            pdf.set_font("Arial", "", 11)
-
 
     def _compute_cost_total_from_md(md_text: str) -> Optional[float]:
-
-
-        """Compute a photos-only approximate total from the model's cost markdown (best-effort).
-
-
-        Priority:
-
-
-          1) If 'Subtotal' + 'Tax' are present, return Subtotal + Tax.
-
-
-          2) If an explicit 'Approximate Repair Cost Total' (or 'Total') is present, return it.
-
-
-          3) Otherwise, sum the main component totals when they can be parsed (labor totals, parts subtotal, paint materials, tax).
-
-
-        This function is used ONLY to create a single clean 'Approximate Repair Cost Total' line for the PDF.
-
-
+        """Compute a photo-only approximate total from the model's cost markdown.
+        We intentionally sum the *section totals* (labor totals, paint materials, parts subtotal, tax)
+        to avoid double-counting per-part lines.
         """
-
-
         if not md_text:
-
-
             return None
-
-
         t = str(md_text).replace("\r\n", "\n").replace("\r", "\n")
 
-
-        t_clean = re.sub(r"\*\*", "", t)
-
-
-
-        def _amt(pat: str) -> Optional[float]:
-
-
-            m = re.search(pat, t_clean, flags=re.IGNORECASE | re.MULTILINE)
-
-
+        def _grab_amount(pat: str) -> Optional[float]:
+            m = re.search(pat, t, flags=re.IGNORECASE | re.MULTILINE)
             if not m:
-
-
                 return None
-
-
             try:
-
-
                 return float(m.group(1).replace(",", ""))
-
-
             except Exception:
-
-
                 return None
 
+        # Prefer explicit totals (bold amounts) from the model output
+        body_labor = _grab_amount(r"^\s*[-*]?\s*Body\s+labor\s*:\s*.*?(?:\*\*)?\$\s*([0-9][0-9,]*(?:\.[0-9]{2})?)(?:\*\*)?")
+        paint_labor = _grab_amount(r"^\s*[-*]?\s*Paint\s+labor\s*:\s*.*?(?:\*\*)?\$\s*([0-9][0-9,]*(?:\.[0-9]{2})?)(?:\*\*)?")
+        mech_labor = _grab_amount(r"^\s*[-*]?\s*Mechanical[^:]*:\s*.*?(?:\*\*)?\$\s*([0-9][0-9,]*(?:\.[0-9]{2})?)(?:\*\*)?")
+        frame_labor = _grab_amount(r"^\s*[-*]?\s*Frame\s+labor\s*:\s*.*?(?:\*\*)?\$\s*([0-9][0-9,]*(?:\.[0-9]{2})?)(?:\*\*)?")
 
-
-        # 1) Subtotal + Tax (most common in your photos-only markdown)
-
-
-        subtotal = _amt(r"^\s*[-*]?\s*Subtotal\b.*?\$\s*([0-9][0-9,]*(?:\.[0-9]{2})?)")
-
-
-        tax = _amt(r"^\s*[-*]?\s*(?:Sales\s+tax|Estimated\s+tax|Tax)\b.*?\$\s*([0-9][0-9,]*(?:\.[0-9]{2})?)")
-
-
-        if subtotal is not None and tax is not None:
-
-
-            return round(subtotal + tax, 2)
-
-
-
-        # 2) Explicit total lines (accept a few variants)
-
-
-        explicit_total = _amt(r"^\s*[-*]?\s*(?:Approximate\s+Repair\s+Cost\s+Total|Approximate\s+Repair\s+Total|Approximate\s+Total\s+Repair\s+Cost|Total)\b\s*[:\-]?\s*\$\s*([0-9][0-9,]*(?:\.[0-9]{2})?)")
-
-
-        if explicit_total is not None:
-
-
-            return round(explicit_total, 2)
-
-
-
-        # 3) Sum key components when they are printed as line totals (e.g., '= $1,530.00')
-
-
-        body_labor = _amt(r"^\s*[-*]?\s*Body\s+labor\b.*?=\s*\$\s*([0-9][0-9,]*(?:\.[0-9]{2})?)")
-
-
-        paint_labor = _amt(r"^\s*[-*]?\s*Paint\s+labor\b.*?=\s*\$\s*([0-9][0-9,]*(?:\.[0-9]{2})?)")
-
-
-        frame_labor = _amt(r"^\s*[-*]?\s*Frame\b.*?=\s*\$\s*([0-9][0-9,]*(?:\.[0-9]{2})?)")
-
-
-        mech_labor = _amt(r"^\s*[-*]?\s*Mechanical\b.*?=\s*\$\s*([0-9][0-9,]*(?:\.[0-9]{2})?)")
-
-
-        paint_mat = _amt(r"^\s*[-*]?\s*Paint\s*&\s*Materials\b.*?=\s*\$\s*([0-9][0-9,]*(?:\.[0-9]{2})?)")
-
-
-
-        # Parts subtotal variants (if the model prints it)
-
-
-        parts_sub = _amt(r"^\s*[-*]?\s*Parts\s+subtotal\b.*?\$\s*([0-9][0-9,]*(?:\.[0-9]{2})?)")
-
-
+        paint_mat = _grab_amount(r"^\s*[-*]?\s*Paint\s*&\s*materials\s*:\s*.*?(?:\*\*)?\$\s*([0-9][0-9,]*(?:\.[0-9]{2})?)(?:\*\*)?")
+        parts_sub = _grab_amount(r"^\s*\*\*\s*Estimated\s+parts\s+subtotal\s*:\s*\$\s*([0-9][0-9,]*(?:\.[0-9]{2})?)")
         if parts_sub is None:
+            parts_sub = _grab_amount(r"^\s*[-*]?\s*Parts\s+subtotal\s*:\s*(?:\*\*)?\$\s*([0-9][0-9,]*(?:\.[0-9]{2})?)(?:\*\*)?")
 
+        tax_amt = _grab_amount(r"^\s*[-*]?\s*(?:Sales\s+tax|Estimated\s+tax)\b.*?(?:\*\*)?\$\s*([0-9][0-9,]*(?:\.[0-9]{2})?)(?:\*\*)?")
 
-            parts_sub = _amt(r"^\s*[-*]?\s*-\s*Parts\s+subtotal\s*=\s*\$\s*([0-9][0-9,]*(?:\.[0-9]{2})?)")
+        # If the model failed to provide the key components, do not guess a total here.
+        components = [body_labor, paint_labor, mech_labor, frame_labor, paint_mat, parts_sub, tax_amt]
+        have_any = any(v is not None for v in components)
+        have_core = (parts_sub is not None) and (tax_amt is not None) and (paint_mat is not None)
+        if not (have_any and have_core):
+            return None
 
-
-
-        # If we have at least some meaningful components + tax, sum them (avoid guessing if we have almost nothing)
-
-
-        comps = [v for v in (body_labor, paint_labor, frame_labor, mech_labor, paint_mat, parts_sub, tax) if isinstance(v, (int, float))]
-
-
-        if len(comps) >= 3:
-
-
-            return round(sum(comps), 2)
-
-
-
-        return None
-
-
+        total = 0.0
+        for v in (body_labor, paint_labor, mech_labor, frame_labor, paint_mat, parts_sub, tax_amt):
+            if isinstance(v, (int, float)):
+                total += float(v)
+        return round(total, 2)
 
     def _inject_clean_total_line(md_text: str, total_val: Optional[float]) -> str:
         """Remove any existing total lines and insert a single clean total line."""
@@ -2142,13 +2018,9 @@ async def vision_review(
         lines = []
         for ln in t.splitlines():
             s = (ln or "").strip()
-
-            # Remove model-emitted subtotal lines (we render one clean total line only)
-            if re.search(r"(?i)^\s*[-*]?\s*Subtotal\b", s):
+            if re.search(r"(?i)^\s*Approximate\s+Repair\s+Cost\s+Total\s*:", s):
                 continue
-            if re.search(r"(?i)^\s*[-*]?\s*Approximate\s+Repair\s+Cost\s+Total\s*:", s):
-                continue
-            if re.search(r"(?i)^\s*[-*]?\s*Approximate\s+Total\s+Repair\s+Cost\s*:", s):
+            if re.search(r"(?i)^\s*Approximate\s+Total\s+Repair\s+Cost\s*:", s):
                 continue
             # Also remove any standalone 'Approximate Repair Cost Total: $10,000' variants the model may emit
             if re.search(r"(?i)^\s*Approximate\s+Repair\s+Cost\s+Total\b", s) and "$" in s:
@@ -2163,7 +2035,7 @@ async def vision_review(
         out_lines = []
         inserted = False
         for ln in base.splitlines():
-            if (not inserted) and re.search(r"(?i)^\s*(?:#{1,6}\s*)?Severity\s+Tier\b", ln.strip()):
+            if (not inserted) and re.search(r"(?i)^\s*#{1,6}\s*Severity\s+Tier\b", ln.strip()):
                 out_lines.append(f"Approximate Repair Cost Total: {_money2(total_val)}")
                 inserted = True
             out_lines.append(ln)
@@ -2173,267 +2045,105 @@ async def vision_review(
 
 
     def _parse_approx_total(md_text: str) -> Optional[float]:
-        """Parse the approximate repair total from estimated_costs_markdown (best-effort).
-        Accepts common label variants including 'Subtotal' emitted by some models.
-        """
-        if not md_text:
-            return None
-        t = str(md_text).replace("\r\n","\n").replace("\r","\n")
-
-        label_patterns = [
-            r"(?im)^\s*\*\*?\s*Approximate\s+Repair\s+Cost\s+Total\s*[:\-]?\s*\*\*?\s*\$\s*([0-9][0-9,]*(?:\.[0-9]{1,2})?)",
-            r"(?im)^\s*\*\*?\s*Approximate\s+Total\s+Repair\s+Cost\s*[:\-]?\s*\*\*?\s*\$\s*([0-9][0-9,]*(?:\.[0-9]{1,2})?)",
-            r"(?im)^\s*\*\*?\s*Approximate\s+Repair\s+Total\s*[:\-]?\s*\*\*?\s*\$\s*([0-9][0-9,]*(?:\.[0-9]{1,2})?)",
-            r"(?im)^\s*\*\*?\s*Total\s*[:\-]?\s*\*\*?\s*\$\s*([0-9][0-9,]*(?:\.[0-9]{1,2})?)",
-            r"(?im)^\s*\*\*?\s*Subtotal\s*[:\-]?\s*\*\*?\s*\$\s*([0-9][0-9,]*(?:\.[0-9]{1,2})?)",
-            r"(?im)^\s*Subtotal\s*[:\-]?\s*\$\s*([0-9][0-9,]*(?:\.[0-9]{1,2})?)",
-        ]
-        for pat in label_patterns:
-            m = re.search(pat, t)
-            if m:
-                try:
-                    return float(m.group(1).replace(",", ""))
-                except Exception:
-                    pass
-
-        standalone = []
-        for ln in t.splitlines():
-            s = (ln or "").strip()
-            s2 = re.sub(r"^[*_]+|[*_]+$", "", s).strip()
-            m = re.fullmatch(r"\$\s*([0-9][0-9,]*(?:\.[0-9]{1,2})?)", s2)
-            if m:
-                try:
-                    standalone.append(float(m.group(1).replace(",", "")))
-                except Exception:
-                    pass
-        if standalone:
-            return standalone[-1]
-
-        try:
-            ms = re.search(r"(?im)^\s*Subtotal\s*[:\-]?\s*\$\s*([0-9][0-9,]*(?:\.[0-9]{1,2})?)", t)
-            mt = re.search(r"(?im)^\s*(?:Sales\s+tax|Estimated\s+tax|Tax)\b.*?\$\s*([0-9][0-9,]*(?:\.[0-9]{1,2})?)", t)
-            sub = float(ms.group(1).replace(",", "")) if ms else None
-            tax = float(mt.group(1).replace(",", "")) if mt else None
-            if sub is not None and tax is not None:
-                return round(sub + tax, 2)
-            if sub is not None:
-                return round(sub, 2)
-        except Exception:
-            pass
-
-        monies = re.findall(r"\$\s*([0-9][0-9,]*(?:\.[0-9]{1,2})?)", t)
-        if monies:
-            try:
-                return float(monies[-1].replace(",", ""))
-            except Exception:
+            """Parse the approximate repair total from estimated_costs_markdown (best-effort).
+            Prefers a standalone/bold total near the end of the cost section.
+            """
+            if not md_text:
                 return None
-        return None
+            t = str(md_text).replace("\r\n","\n").replace("\r","\n")
 
+            # 1) Prefer explicit label variants
+            label_patterns = [
+                r"(?im)^\s*\*\*?\s*Approximate\s+Repair\s+Cost\s+Total\s*[:\-]?\s*\*\*?\s*\$\s*([0-9][0-9,]*(?:\.[0-9]{1,2})?)",
+                r"(?im)^\s*\*\*?\s*Approximate\s+Total\s+Repair\s+Cost\s*[:\-]?\s*\*\*?\s*\$\s*([0-9][0-9,]*(?:\.[0-9]{1,2})?)",
+            ]
+            for pat in label_patterns:
+                m = re.search(pat, t)
+                if m:
+                    try:
+                        return float(m.group(1).replace(",", ""))
+                    except Exception:
+                        pass
+
+            # 2) Prefer a standalone line that is just $X,XXX (often bolded)
+            standalone = []
+            for ln in t.splitlines():
+                s = ln.strip()
+                # strip markdown bold
+                s2 = re.sub(r"^[*_]+|[*_]+$", "", s).strip()
+                m = re.fullmatch(r"\$\s*([0-9][0-9,]*(?:\.[0-9]{1,2})?)", s2)
+                if m:
+                    try:
+                        standalone.append(float(m.group(1).replace(",", "")))
+                    except Exception:
+                        pass
+            if standalone:
+                return standalone[-1]
+
+            # 3) Otherwise: take the last dollar amount after a 'Tax' section (common structure)
+            tail = t
+            m_tax = re.search(r"(?is)\bTax\b.*", t)
+            if m_tax:
+                tail = t[m_tax.start():]
+            monies = re.findall(r"\$\s*([0-9][0-9,]*(?:\.[0-9]{1,2})?)", tail)
+            if monies:
+                # choose the last amount in the tail
+                try:
+                    return float(monies[-1].replace(",", ""))
+                except Exception:
+                    return None
+            return None
 
     def _enforce_severity_tier_checkmarks(md_text: str) -> str:
-
-
-        """Ensure the Severity Tier block appears exactly once and has consistent checkmarks.
-
-
-        This also removes any duplicated severity tiers emitted by the model.
-
-
-        """
-
-
+        """Rewrite the Severity Tier block to ensure exactly one box is checked based on parsed total."""
         if not md_text:
-
-
             return md_text or ""
-
-
-
-        t = str(md_text).replace("\r\n", "\n").replace("\r", "\n")
-
-
-        t = t.replace("Likely Total Loss Threshold Approaching", "Possible Total Loss Threshold Approaching")
-
-
-
-        # Remove any existing Severity Tier sections (heading + following checkbox lines)
-
-
-        lines = t.splitlines()
-
-
-        cleaned = []
-
-
-        i = 0
-
-
-        while i < len(lines):
-
-
-            ln = lines[i]
-
-
-            s = (ln or "").strip()
-
-
-            if re.search(r"(?i)^\s*#{0,6}\s*Severity\s+Tier\b", s):
-
-
-                i += 1
-
-
-                # skip until next markdown heading OR blank gap after checkbox block
-
-
-                while i < len(lines):
-
-
-                    nxt = lines[i]
-
-
-                    ns = (nxt or "").strip()
-
-
-                    if re.search(r"^\s*#{1,6}\s+\S", ns):
-
-
-                        break
-
-
-                    if re.search(r"(?i)\bMinor\s*\(|\bModerate\s*\(|\bMajor\s*\(|Total\s+Loss\s+Threshold", ns):
-
-
-                        i += 1
-
-
-                        continue
-
-
-                    # If we hit a clearly different section label, stop skipping
-
-
-                    if ns and not re.search(r"(?i)^\s*[\[☐☑xX\]]", ns):
-
-
-                        # keep this line; it's not part of the tier list
-
-
-                        break
-
-
-                    i += 1
-
-
-                continue
-
-
-
-            # Also drop stray checkbox-only tier lines even if heading is missing/duplicated
-
-
-            if re.search(r"(?i)\bMinor\s*\(|\bModerate\s*\(|\bMajor\s*\(|Possible\s+Total\s+Loss\s+Threshold\s+Approaching", s):
-
-
-                i += 1
-
-
-                continue
-
-
-
-            cleaned.append(ln)
-
-
-            i += 1
-
-
-
-        base = "\n".join(cleaned).rstrip()
-
-
-
-        total_val = _parse_approx_total(base)
-
-
+        t = str(md_text).replace("Likely Total Loss Threshold Approaching", "Possible Total Loss Threshold Approaching")
+        total_val = _parse_approx_total(t)
+        # thresholds
         tier = None
-
-
         if isinstance(total_val, (int, float)):
-
-
             if total_val < 3500:
-
-
                 tier = "minor"
-
-
             elif total_val < 10000:
-
-
                 tier = "moderate"
-
-
             elif total_val < 25000:
-
-
                 tier = "major"
-
-
             else:
-
-
                 tier = "possible_tl"
 
+        # Remove any existing Severity Tier block (best-effort)
+        lines_in = t.splitlines()
+        out = []
+        i = 0
+        while i < len(lines_in):
+            ln = lines_in[i]
+            if re.search(r"(?i)^\s*#{1,6}\s*Severity\s+Tier\b", ln):
+                # skip until next heading or blank-run end
+                i += 1
+                while i < len(lines_in) and not re.search(r"^\s*#{1,6}\s+\w", lines_in[i]):
+                    i += 1
+                continue
+            out.append(ln)
+            i += 1
+        t2 = "\n".join(out).rstrip()
 
-
+        # Append normalized Severity Tier block at end of cost section (or end of markdown)
         boxes = {
-
-
             "minor": ("☑","☐","☐","☐"),
-
-
             "moderate": ("☐","☑","☐","☐"),
-
-
             "major": ("☐","☐","☑","☐"),
-
-
             "possible_tl": ("☐","☐","☐","☑"),
-
-
             None: ("☐","☐","☐","☐"),
-
-
         }[tier]
-
-
-
         sev_block = (
-
-
             "\n### Severity Tier\n"
-
-
             f"{boxes[0]} Minor (< $3,500)\n"
-
-
             f"{boxes[1]} Moderate ($3,500–$10,000)\n"
-
-
             f"{boxes[2]} Major ($10,000+)\n"
-
-
             f"{boxes[3]} Possible Total Loss Threshold Approaching\n"
-
-
         )
-
-
-
-        return (base + "\n" + sev_block).strip() + "\n"
-
-
+        return (t2 + "\n" + sev_block).strip() + "\n"
 
     def _strip_unwanted_cost_lines_for_pdf(md_text: str) -> str:
         """Remove known unwanted lines in cost markdown before PDF render.
@@ -2480,9 +2190,9 @@ async def vision_review(
                 continue
 
             # Remove any existing total line; we will compute/insert a clean one
-            if re.search(r"(?i)^\s*[-*]?\s*Approximate\s+Repair\s+Cost\s+Total\s*:", s):
+            if re.search(r"(?i)^\s*Approximate\s+Repair\s+Cost\s+Total\s*:", s):
                 continue
-            if re.search(r"(?i)^\s*[-*]?\s*Approximate\s+Total\s+Repair\s+Cost\s*:", s):
+            if re.search(r"(?i)^\s*Approximate\s+Total\s+Repair\s+Cost\s*:", s):
                 continue
 
             cleaned.append(ln)
@@ -2567,7 +2277,11 @@ async def vision_review(
             if ("+" in ln and "=" in ln and re.search(r"\$\s*[0-9]", ln)):
                 continue
 
-            # Collect severity tier lines (checkbox list)
+                        # Never print a model-provided "Severity Tier" heading (we render our own once)
+            if re.search(r"(?i)^\s*#{1,6}\s*Severity\s+Tier\b", s) or s.lower() == "severity tier":
+                continue
+
+# Collect severity tier lines (checkbox list)
             if re.search(r"(?i)(minor\s*\(|moderate\s*\(|major\s*\(|total\s+loss\s+threshold)", ln):
                 severity_lines.append(ln.replace("Likely Total Loss Threshold Approaching","Possible Total Loss Threshold Approaching"))
                 continue
@@ -2580,10 +2294,6 @@ async def vision_review(
             if re.search(r"(?i)inspection\s+location\s*:", ln):
                 continue
 
-            # Never print 'Subtotal' lines; we compute/print one clean total line
-            if re.search(r"(?i)^\s*[-*]?\s*Subtotal\b", s):
-                continue
-
             cleaned.append(ln)
 
         # Compute total from remaining markdown (use existing parser)
@@ -2591,12 +2301,6 @@ async def vision_review(
             total_val = _parse_approx_total(md)
         except Exception:
             total_val = None
-
-        if total_val is None:
-            try:
-                total_val = _compute_cost_total_from_md(md)
-            except Exception:
-                total_val = None
 
         # Print body (excluding tier + disclaimer) in a readable, structured way
         if cleaned:
@@ -2640,6 +2344,31 @@ async def vision_review(
             mc("Severity Tier")
             for ln in severity_lines:
                 mc(ln.replace("☐","[ ]").replace("☑","[x]"))
+
+        # Repair Cost Disclaimer styled like main disclaimer block
+        if disclaimer_text:
+            try:
+                pdf_obj.ln(4)
+                x_left = pdf_obj.l_margin
+                x_right = pdf_obj.w - pdf_obj.r_margin
+                y_line = pdf_obj.get_y()
+                pdf_obj.set_draw_color(180, 180, 180)
+                pdf_obj.line(x_left, y_line, x_right, y_line)
+                pdf_obj.ln(3)
+
+                pdf_obj.set_text_color(90, 90, 90)
+                pdf_obj.set_font("Helvetica", "B", 9)
+                pdf_obj.cell(0, 5, "Repair Cost Disclaimer:", ln=True)
+                pdf_obj.set_font("Helvetica", "", 8)
+                pdf_obj.multi_cell(0, 4, _pdf_sanitize(disclaimer_text))
+                pdf_obj.set_text_color(0, 0, 0)
+                try:
+                    pdf_obj.set_font("Helvetica", "", 11)
+                except Exception:
+                    pdf_obj.set_font("Arial", "", 11)
+            except Exception:
+                # fail-open: don't break PDF rendering
+                pass
 
 
     def add_thumbnail_page(pdf_obj: FPDF, image_paths: List[str]) -> None:
@@ -2708,78 +2437,107 @@ async def vision_review(
         poi15_hit = False
 
     if ai_intent == "damage_report_from_photos":
-        pdf.cell(0,10,"NSPXN.com Condition Report", ln=True, align="C")
-        pdf.set_font_size(10); pdf.ln(3)
-
-        # Vehicle Identification (format aligned to the approved 2zip layout)
+        # Title (larger + bold)
         try:
-            pdf.set_font("Helvetica","B",12)
+            pdf.set_font("Helvetica", "B", 16)
         except Exception:
-            pdf.set_font("Arial","B",12)
-        mc("VEHICLE IDENTIFICATION")
+            pdf.set_font("Arial", "B", 16)
+        pdf.cell(0, 10, "NSPXN.com Condition Report", ln=True, align="C")
         try:
-            pdf.set_font("Helvetica","",11)
+            pdf.set_font("Helvetica", "", 10)
         except Exception:
-            pdf.set_font("Arial","",11)
+            pdf.set_font("Arial", "", 10)
+        pdf.ln(2)
 
-        _claim_no = result.get("claim_number") or "N/A"
-        _file_no = file_number or "N/A"
-        _vin = result.get("vin") or "N/A"
-        _vin_ver = result.get("vin_verification") or "N/A"
-        _vehicle = result.get("vehicle") or "N/A"
-        _odo = result.get("odometer_estimate_only") or result.get("odometer") or "N/A"
-        _pri = result.get("primary_impact") or "N/A"
-        _sec = result.get("secondary_impact") or "N/A"
-        _red = (result.get("redaction_status") or "").replace("✅", "OK") or "Redacted PII: N/A"
+        # Vehicle Identification (boxed + color-coded)
+        section_bar("VEHICLE IDENTIFICATION")
 
-        mc(f"File # {_file_no}")
-        mc(f"Claim # {_claim_no}")
-        mc(f"Inspected For {ia_company}")
-        mc(f"VIN {_vin}")
-        mc(f"VIN Verification {_vin_ver}")
-        mc(f"Vehicle {_vehicle}")
-        mc(f"Odometer {_odo}")
-        mc(f"Primary Impact {_pri}")
-        mc(f"Secondary Impact {_sec}")
-        mc(f"Redaction Status {_red}")
+        def _mc_fill(line: str) -> None:
+            try:
+                effective_w = pdf.w - pdf.l_margin - pdf.r_margin
+                if effective_w <= 5:
+                    effective_w = 180
+                safe = _pdf_sanitize(line)
+                if not safe.strip():
+                    safe = "-"
+                pdf.set_x(pdf.l_margin)
+                pdf.set_fill_color(245, 245, 245)
+                pdf.multi_cell(effective_w, 6, safe, fill=True)
+            except Exception:
+                # fail-open
+                mc(line)
 
-        pdf.ln(2); mc("Report Selected")
-        _summary_md = (result["summary_markdown"] or "N/A").strip()
+        _claim_no = (result.get("claim_number") or "N/A").strip() or "N/A"
+        _file_no = (file_number or "N/A").strip() or "N/A"
+        _vin = (result.get("vin") or "N/A").strip() or "N/A"
+        _vin_ver = (result.get("vin_verification") or "N/A").strip() or "N/A"
+        _vehicle = (result.get("vehicle") or "N/A").strip() or "N/A"
+        _odo = (result.get("odometer_estimate_only") or result.get("odometer") or "N/A").strip() or "N/A"
+        _pri = (result.get("primary_impact") or "N/A").strip() or "N/A"
+        _sec = (result.get("secondary_impact") or "N/A").strip() or "N/A"
+        _red = (result.get("redaction_status") or "").replace("✅", "OK").strip() or "Redacted PII: N/A"
+
+        _mc_fill(f"File #: {_file_no}")
+        _mc_fill(f"Claim #: {_claim_no}")
+        _mc_fill(f"Inspected For: {ia_company or 'N/A'}")
+        _mc_fill(f"VIN: {_vin}")
+        _mc_fill(f"VIN Verification: {_vin_ver}")
+        _mc_fill(f"Vehicle: {_vehicle}")
+        _mc_fill(f"Odometer: {_odo}")
+        _mc_fill(f"Primary Impact: {_pri}")
+        _mc_fill(f"Secondary Impact: {_sec}")
+        _mc_fill(f"Redaction Status: {_red}")
+
+        # Report Summary
+        _summary_md = (result.get("summary_markdown") or "").strip()
+
         # Hard scrub: never allow a generic 'Vehicle Damage Report' heading to appear in the PDF
         _summary_md = re.sub(r"(?im)^\s*VEHICLE\s+DAMAGE\s+REPORT\s*$", "", _summary_md).strip()
         _summary_md = re.sub(r"\n{3,}", "\n\n", _summary_md).strip()
+
         if ai_intent == "damage_report_from_photos":
             _summary_md = _scrub_photo_only_narrative_cost_headers(_summary_md)
+
+        # Odometer consistency scrub (PDF-only): if the narrative contains a different mileage, replace it with the Vehicle ID mileage.
+        try:
+            if _odo and _odo != "N/A":
+                def _odo_norm(sv: str) -> str:
+                    return re.sub(r"\s+", " ", (sv or "").strip().lower())
+                _odo_n = _odo_norm(_odo)
+                def _sub_odo(m):
+                    seen = f"{m.group(1)} {m.group(2)}"
+                    if _odo_norm(seen) == _odo_n:
+                        return m.group(0)
+                    return _odo
+                _summary_md = re.sub(r"(?i)\b(\d{1,3}(?:,\d{3})+|\d{4,7})\s*(mi|miles|km)\b", _sub_odo, _summary_md)
+        except Exception:
+            pass
+
         section_bar("REPORT SUMMARY")
-        mc(_summary_md)
+        mc(_summary_md if _summary_md else "-")
         pdf.ln(2)
-        # Controlled Repair Cost section rendering (prevents duplicate headings, Totals blocks, duplicate tiers, and bad totals)
+
+        # Controlled Repair Cost section rendering
         _raw_costs_md = result.get("estimated_costs_markdown") or ""
         costs_md = _strip_unwanted_cost_lines_for_pdf(_raw_costs_md)
 
-        # Compute a clean approximate total from the model's section totals (prevents bad/rounded totals like "$10,000")
+        # Compute + inject one clean total line (prevents bad totals like "$10,000" from tier ranges)
         _computed_total = _compute_cost_total_from_md(_raw_costs_md) or _compute_cost_total_from_md(costs_md)
         costs_md = _inject_clean_total_line(costs_md, _computed_total)
 
-        # Normalize/force Severity Tier checkmarks from the (clean) total line
+        # Normalize/force Severity Tier checkmarks and ensure the block appears only once
         costs_md = _enforce_severity_tier_checkmarks(costs_md)
 
-        try:
-            pdf.set_font("Helvetica","B",12)
-        except Exception:
-            pdf.set_font("Arial","B",12)
         section_bar("APPROXIMATE REPAIR COST BREAKDOWN")
-        try:
-            pdf.set_font("Helvetica","",11)
-        except Exception:
-            pdf.set_font("Arial","",11)
         render_repair_cost_section(pdf, costs_md)
-        section_bar("FRAUD & AUTHENTICITY CHECK")
-        mc((result["fraud_markdown"] or 'N/A').strip())
-        section_bar("CONCLUSION")
-        mc((result["conclusion"] or 'N/A').strip())
 
-        # --- AI Disclaimer (after Conclusion) ---
+        section_bar("FRAUD & AUTHENTICITY CHECK")
+        mc((result.get("fraud_markdown") or "").strip() or "-")
+
+        section_bar("CONCLUSION")
+        mc((result.get("conclusion") or "").strip() or "-")
+
+        # --- Combined Disclaimer (end of report) ---
         try:
             pdf.ln(4)
             x_left = pdf.l_margin
@@ -2795,16 +2553,24 @@ async def vision_review(
             pdf.set_font("Helvetica", "", 8)
 
             disclaimer_body = (
-                "This report is based solely on photographic evidence and is intended as a preliminary visual damage assessment only. It does not constitute a formal appraisal, repair estimate, or safety certification. Hidden structural, mechanical, or electronic damage may exist beyond what is visible in the photographs. All findings should be verified by a qualified collision repair technician, appraiser, and/or insurance adjuster performing a physical inspection. This report was generated using artificial intelligence. AI systems may make errors or misinterpret visual information. All photos, damage descriptions, conclusions, and findings must be independently reviewed and verified by a qualified appraiser before preparing or finalizing any repair estimate. This repair cost is an approximation derived from the visible conditions in the provided photos only. Actual repair scope and cost may change after teardown, measurement, and confirmation of hidden damage, glass bonding requirements, and any sensor/trim replacement needs."
+                "This report is based solely on photographic evidence and is intended as a preliminary visual damage assessment only. "
+                "It does not constitute a formal appraisal, repair estimate, or safety certification. Hidden structural, mechanical, or "
+                "electronic damage may exist beyond what is visible in the photographs. All findings should be verified by a qualified "
+                "collision repair technician, appraiser, and/or insurance adjuster performing a physical inspection. This report was generated "
+                "using artificial intelligence. AI systems may make errors or misinterpret visual information. All photos, damage descriptions, "
+                "conclusions, and findings must be independently reviewed and verified by a qualified appraiser before preparing or finalizing any "
+                "repair estimate. This repair cost is an approximation derived from the visible conditions in the provided photos only. Actual repair "
+                "scope and cost may change after teardown, measurement, and confirmation of hidden damage, glass bonding requirements, and any sensor/"
+                "trim replacement needs."
             )
             pdf.multi_cell(0, 4, disclaimer_body)
             pdf.set_text_color(0, 0, 0)
         except Exception:
             pass
 
-
         safe_file = _safe(file_number)
         pdf_filename = f"AI_Condition_Report_{safe_file}.pdf"
+
     else:
         pdf.cell(0,10,"NSPXN.com Condition Report", ln=True, align="C")
         pdf.set_font_size(10); pdf.ln(3)
@@ -2884,7 +2650,9 @@ async def vision_review(
             pdf.set_font("Helvetica", "", 8)
 
             disclaimer_body = (
-                "This report is based solely on photographic evidence and is intended as a preliminary visual damage assessment only. It does not constitute a formal appraisal, repair estimate, or safety certification. Hidden structural, mechanical, or electronic damage may exist beyond what is visible in the photographs. All findings should be verified by a qualified collision repair technician, appraiser, and/or insurance adjuster performing a physical inspection. This report was generated using artificial intelligence. AI systems may make errors or misinterpret visual information. All photos, damage descriptions, conclusions, and findings must be independently reviewed and verified by a qualified appraiser before preparing or finalizing any repair estimate. This repair cost is an approximation derived from the visible conditions in the provided photos only. Actual repair scope and cost may change after teardown, measurement, and confirmation of hidden damage, glass bonding requirements, and any sensor/trim replacement needs."
+                "This report was generated using artificial intelligence. AI systems may make errors or misinterpret "
+                "visual information. All photos, damage descriptions, conclusions, and findings must be independently "
+                "reviewed and verified by a qualified appraiser before preparing or finalizing any repair estimate."
             )
             pdf.multi_cell(0, 4, disclaimer_body)
             pdf.set_text_color(0, 0, 0)
