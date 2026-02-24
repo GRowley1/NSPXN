@@ -755,7 +755,7 @@ def _add_bytes(parts: List[Dict[str,Any]], files_seen: List[str], photo_index: O
             ocr_collected = []
             for idx, im in enumerate(pages[:max_images - used]):
                 b = io.BytesIO()
-                im.save(b, format="JPEG", quality=65, optimize=True)
+                im.save(b, format="JPEG", quality=75, optimize=True)
                 parts.append(_image_part_from_bytes(b.getvalue()))
                 used += 1
                 if photo_index is not None:
@@ -787,7 +787,7 @@ def _add_bytes(parts: List[Dict[str,Any]], files_seen: List[str], photo_index: O
                 scale = max_dim / float(max(im.size))
                 im = im.resize((int(im.width * scale), int(im.height * scale)))
             b = io.BytesIO()
-            im.save(b, format="JPEG", quality=65, optimize=True)
+            im.save(b, format="JPEG", quality=75, optimize=True)
             raw = b.getvalue()
         except Exception:
             im_ref = None
@@ -2470,7 +2470,7 @@ async def vision_review(
             if not text:
                 return out
             rx = re.compile(
-                rf"(?im)^\\s*[-*]?\\s*{re.escape(label)}\\s*:\\s*([0-9]+(?:\\.[0-9]+)?)\\s*h(?:r|rs|ours)?\\b\\s*@\\s*\\$\\s*([0-9]+(?:\\.[0-9]+)?)\\s*/?hr\\b.*?=\\s*\\$\\s*([0-9][0-9,]*(?:\\.[0-9]{{2}})?)",
+                rf"(?im)^\\s*[-*]?\\s*{re.escape(label)}\\s*:\\s*([0-9]+(?:\\.[0-9]+)?)\\s*h(?:r|rs|ours)?\\b\\s*(?:@|×|x)\\s*\\$\\s*([0-9]+(?:\\.[0-9]+)?)\\s*/?hr\\b.*?=\\s*\\$\\s*([0-9][0-9,]*(?:\\.[0-9]{{2}})?)",
             )
             m = rx.search(text)
             if m:
@@ -2481,7 +2481,7 @@ async def vision_review(
 
             # If the model omitted the trailing total, parse hrs + rate and compute.
             rx2 = re.compile(
-                rf"(?im)^\\s*[-*]?\\s*{re.escape(label)}\\s*:\\s*([0-9]+(?:\\.[0-9]+)?)\\s*h(?:r|rs|ours)?\\b.*?@\\s*\\$\\s*([0-9]+(?:\\.[0-9]+)?)\\s*/?hr\\b",
+                rf"(?im)^\\s*[-*]?\\s*{re.escape(label)}\\s*:\\s*([0-9]+(?:\\.[0-9]+)?)\\s*h(?:r|rs|ours)?\\b.*?(?:@|×|x)\\s*\\$\\s*([0-9]+(?:\\.[0-9]+)?)\\s*/?hr\\b",
             )
             m2 = rx2.search(text)
             if m2:
@@ -2502,7 +2502,7 @@ async def vision_review(
             if m:
                 return _parse_money(m.group(1))
             m2 = re.search(
-                r"(?im)^\s*[-*]?\s*Paint\s*&\s*materials\s*:\s*\$\s*([0-9][0-9,]*(?:\.[0-9]{2})?)",
+                r"(?im)^\s*[-*]?\s*Paint\s*&\s*materials\s*:\s*\$\s*([0-9][0-9,]*(?:\.[0-9]{2})?)(?!\s*(?:/ ?hr|/?hr|per))",
                 text,
             )
             if m2:
@@ -2537,6 +2537,9 @@ async def vision_review(
         body = _parse_labor_line("Body labor")
         paint = _parse_labor_line("Paint labor")
         mech = _parse_labor_line("Mechanical/ADAS")
+        if not isinstance(mech.get("total"), (int, float)):
+            mech = _parse_labor_line("Mechanical/diagnostic")
+
         paint_mat_amt = _parse_paint_materials_amount()
         parts_sub = _parse_parts_subtotal()
 
@@ -2553,10 +2556,26 @@ async def vision_review(
             elif parts_sub is not None and paint_mat_amt is None:
                 tax_basis = round(float(parts_sub), 2)
 
-        tax_amt = _parse_tax_amount()
-        if tax_amt is None and tax_basis is not None and isinstance(tax_rate, (int, float)):
+        # Prefer an explicitly stated assumed tax rate in the model text (e.g., "assumed 8.75%")
+        def _parse_tax_rate_from_text() -> Optional[float]:
+            if not text:
+                return None
+            m = re.search(r"(?i)assumed\s*([0-9]+(?:\.[0-9]+)?)\s*%\b", text)
+            if not m:
+                return None
             try:
-                tax_amt = round(float(tax_basis) * float(tax_rate), 2)
+                return float(m.group(1)) / 100.0
+            except Exception:
+                return None
+
+        tax_rate_eff = _parse_tax_rate_from_text()
+        if tax_rate_eff is None:
+            tax_rate_eff = tax_rate
+
+        tax_amt = _parse_tax_amount()
+        if tax_amt is None and tax_basis is not None and isinstance(tax_rate_eff, (int, float)):
+            try:
+                tax_amt = round(float(tax_basis) * float(tax_rate_eff), 2)
             except Exception:
                 tax_amt = None
 
@@ -2715,8 +2734,8 @@ async def vision_review(
                 mc(f"Parts subtotal: {_money_line(parts_sub)}")
 
             # Tax display (basis + rate + amount)
-            if isinstance(tax_rate, (int, float)):
-                mc(f"Tax rate: {float(tax_rate)*100:.3f}%")
+            if isinstance(tax_rate_eff, (int, float)):
+                mc(f"Tax rate: {float(tax_rate_eff)*100:.3f}%")
             if tax_basis is not None:
                 mc(f"Tax basis (parts + paint materials): {_money_line(tax_basis)}")
             if tax_amt is not None:
@@ -2918,9 +2937,9 @@ async def vision_review(
 
         def _labor_total_from_md(blob: str) -> float:
             total = 0.0
-            for lbl in ("Body labor", "Paint labor", "Mechanical/ADAS"):
+            for lbl in ("Body labor", "Paint labor", "Mechanical/ADAS", "Mechanical/diagnostic"):
                 m = re.search(
-                    rf"^\\s*[-*]?\\s*{re.escape(lbl)}\\s*:\\s*[0-9]+(?:\\.[0-9]+)?\\s*h\\w*.*?@\\s*\\$\\s*[0-9]+(?:\\.[0-9]+)?\\s*/?hr\\b.*?=\\s*\\$\\s*([0-9][0-9,]*(?:\\.[0-9]{{2}})?)",
+                    rf"^\\s*[-*]?\\s*{re.escape(lbl)}\\s*:\\s*[0-9]+(?:\\.[0-9]+)?\\s*h\\w*.*?(?:@|×|x)\\s*\\$\\s*[0-9]+(?:\\.[0-9]+)?\\s*/?hr\\b.*?=\\s*\\$\\s*([0-9][0-9,]*(?:\\.[0-9]{{2}})?)",
                     blob,
                     flags=re.IGNORECASE | re.MULTILINE,
                 )
@@ -3230,6 +3249,11 @@ async def download_pdf(file_number: Optional[str] = None, filename: Optional[str
         return JSONResponse(status_code=404, content={"detail": "Not Found"})
     latest = max(candidates, key=lambda p: os.path.getmtime(p))
     return FileResponse(path=latest, media_type="application/pdf", filename=os.path.basename(latest))
+
+
+
+
+
 
 
 
