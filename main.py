@@ -1957,6 +1957,44 @@ async def vision_review(
 
 
     
+
+    # -----------------------
+    # PDF section helpers (local to vision_review to avoid NameError / scope issues)
+    # -----------------------
+    def _render_section_header(pdf_obj: FPDF, title: str) -> None:
+        """Render a colored section header bar (FPDF)."""
+        try:
+            pdf_obj.set_fill_color(30, 58, 95)
+            pdf_obj.set_text_color(255, 255, 255)
+            try:
+                pdf_obj.set_font("Helvetica", "B", 12)
+            except Exception:
+                pdf_obj.set_font("Arial", "B", 12)
+            pdf_obj.cell(0, 8, _pdf_sanitize(title or ""), ln=True, fill=True)
+        finally:
+            # reset for body text
+            pdf_obj.set_text_color(0, 0, 0)
+            try:
+                pdf_obj.set_font("Helvetica", "", 11)
+            except Exception:
+                pdf_obj.set_font("Arial", "", 11)
+            pdf_obj.ln(1)
+
+    # Backwards-compatible alias (some earlier patches used section_bar)
+    def section_bar(title: str) -> None:
+        _render_section_header(pdf, title)
+
+    def _render_kv_table(pdf_obj: FPDF, rows) -> None:
+        """Render simple key/value rows as 'Label: Value' lines."""
+        if not rows:
+            return
+        for (k, v) in rows:
+            k = (k or "").strip()
+            vv = ("" if v is None else str(v)).strip()
+            mc(f"{k}: {vv}")
+        pdf_obj.ln(1)
+
+
     def _money2(x: Optional[float]) -> str:
         try:
             if x is None:
@@ -2450,7 +2488,7 @@ async def vision_review(
             ("VIN", (result.get("vin") or "N/A")),
             ("VIN Verification", (result.get("vin_verification") or "N/A")),
             ("Vehicle", (result.get("vehicle") or "N/A")),
-            ("Odometer", (result.get("odometer") or "N/A")),
+            ("Odometer", (result.get("odometer_estimate_only") or "N/A")),
             ("Primary Impact", (result.get("primary_impact") or "N/A")),
             ("Secondary Impact", (result.get("secondary_impact") or "N/A")),
             ("Redaction Status", pdf_status),
@@ -2759,8 +2797,3 @@ async def download_pdf(file_number: Optional[str] = None, filename: Optional[str
         return JSONResponse(status_code=404, content={"detail": "Not Found"})
     latest = max(candidates, key=lambda p: os.path.getmtime(p))
     return FileResponse(path=latest, media_type="application/pdf", filename=os.path.basename(latest))
-
-
-
-
-
