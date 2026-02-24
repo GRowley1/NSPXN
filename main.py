@@ -1168,19 +1168,70 @@ async def vision_review(
             _seen_v.add(_v); _tmp_v.append(_v)
     vin_candidates = _tmp_v
 
-    # --- ODOMETER OCR LOCK (extract mileage from OCR text if visible) ---
-    # This makes it impossible for the narrative to claim the odometer is not visible when OCR captured a mileage value.
+        # --- ODOMETER OCR PRIORITY (photo-odometer wins; never conflict) ---
+    # Priority:
+    # 1) Photo-confirmed odometer extracted from per-photo OCR (instrument/cluster photo)
+    # 2) Fallback to any mileage value found in combined extracted text (last resort)
     odometer_value = None
+
+    def _extract_photo_odometer(_ocr_pairs: List[Dict[str, Any]]) -> Optional[str]:
+        try:
+            rx = re.compile(r"(?i)\b(\d{1,3}(?:,\d{3})+|\d{4,7})\s*(mi|miles|km)\b")
+            cands = []
+            for idx, rec in enumerate(_ocr_pairs or []):
+                if not isinstance(rec, dict):
+                    continue
+                txt = (rec.get("text") or "")
+                if not isinstance(txt, str) or not txt.strip():
+                    continue
+                name = str(rec.get("name") or "")
+                for m in rx.finditer(txt):
+                    digits = (m.group(1) or "").replace(",", "")
+                    unit = (m.group(2) or "").lower()
+                    if unit == "miles":
+                        unit = "mi"
+                    try:
+                        val = int(digits)
+                    except Exception:
+                        continue
+
+                    score = 0.0
+                    if re.search(r"(?i)\bodometer\b|\bodo\b", txt):
+                        score += 3.0
+                    if re.search(r"(?i)\bmi\b|\bmiles\b|\bkm\b", txt):
+                        score += 1.0
+                    if re.search(r"(?i)odo|odometer|cluster|dash", name):
+                        score += 2.5
+
+                    if 10000 <= val <= 999999:
+                        score += 1.5
+                    elif 1000 <= val < 10000:
+                        score -= 0.5
+
+                    score += (idx / 1000.0)
+                    cands.append((score, val, unit))
+
+            if not cands:
+                return None
+
+            cands.sort(key=lambda x: (x[0], x[1]), reverse=True)
+            _, best_val, best_unit = cands[0]
+            return f"{best_val:,} {best_unit}"
+        except Exception:
+            return None
+
     try:
-        _odo_txt = uploaded_text_all or ""
-        # Common mileage patterns from digital clusters: "72,261 mi", "72261 mi", "72261 miles", "116000 km"
-        _m = re.search(r"(?i)\b(\d{1,3}(?:,\d{3})+|\d{4,7})\s*(mi|miles|km)\b", _odo_txt)
-        if _m:
-            _digits = _m.group(1).replace(",", "")
-            _unit = _m.group(2).lower()
-            if _unit == "miles":
-                _unit = "mi"
-            odometer_value = f"{int(_digits):,} {_unit}"
+        odometer_value = _extract_photo_odometer(ocr_pairs)
+
+        if not odometer_value:
+            _odo_txt = uploaded_text_all or ""
+            _m = re.search(r"(?i)\b(\d{1,3}(?:,\d{3})+|\d{4,7})\s*(mi|miles|km)\b", _odo_txt)
+            if _m:
+                _digits = _m.group(1).replace(",", "")
+                _unit = _m.group(2).lower()
+                if _unit == "miles":
+                    _unit = "mi"
+                odometer_value = f"{int(_digits):,} {_unit}"
     except Exception:
         odometer_value = None
 
@@ -2095,6 +2146,44 @@ async def vision_review(
                 total += float(v)
         return round(total, 2)
 
+    def _compute_cost_total_simple(md_text: str) -> Optional[float]:
+        """Compute Approximate Repair Cost Total from common labeled subtotals.
+
+        Expected (photos-only) pattern variants:
+        - Parts Subtotal: $X
+        - Labor subtotal: $Y (non-taxable)
+        - Paint materials: $Z (optional)
+        - Tax: $T
+
+        Total = parts + labor + (paint materials if present) + tax
+        """
+        if not md_text:
+            return None
+        t = str(md_text).replace("\r\n", "\n").replace("\r", "\n")
+
+        def _grab(pat: str) -> Optional[float]:
+            m = re.search(pat, t, flags=re.IGNORECASE | re.MULTILINE)
+            if not m:
+                return None
+            try:
+                return float(m.group(1).replace(",", ""))
+            except Exception:
+                return None
+
+        parts = _grab(r"^\s*[-*]?\s*(?:\*\*\s*)?(?:Estimated\s+)?Parts\s+Subtotal(?:\s*\*\*)?\s*[:\-]?\s*\$\s*([0-9][0-9,]*(?:\.[0-9]{2})?)")
+        labor = _grab(r"^\s*[-*]?\s*Labor\s+subtotal\b.*?\$\s*([0-9][0-9,]*(?:\.[0-9]{2})?)")
+        paint_mat = _grab(r"^\s*[-*]?\s*Paint\s*(?:&|and)?\s*materials\b.*?\$\s*([0-9][0-9,]*(?:\.[0-9]{2})?)")
+        tax = _grab(r"^\s*[-*]?\s*(?:Sales\s+tax|Tax)\b.*?\$\s*([0-9][0-9,]*(?:\.[0-9]{2})?)")
+
+        if parts is None or labor is None or tax is None:
+            return None
+
+        total = float(parts) + float(labor) + float(tax)
+        if paint_mat is not None:
+            total += float(paint_mat)
+        return round(total, 2)
+
+
     def _inject_clean_total_line(md_text: str, total_val: Optional[float]) -> str:
         """Remove any existing total lines and insert a single clean total line."""
         if not md_text:
@@ -2521,8 +2610,9 @@ async def vision_review(
         # Push content below any header/logo region
         pdf.ln(2)
         try:
-            if pdf.get_y() < 28:
-                pdf.set_y(28)
+            SAFE_TOP_Y = 48
+            if pdf.get_y() < SAFE_TOP_Y:
+                pdf.set_y(SAFE_TOP_Y)
         except Exception:
             pass
 
@@ -2563,7 +2653,7 @@ async def vision_review(
         costs_md = _strip_unwanted_cost_lines_for_pdf(_raw_costs_md)
 
         # Compute a clean approximate total from the model's section totals (prevents bad/rounded totals like "$10,000")
-        _computed_total = _compute_cost_total_from_md(_raw_costs_md) or _compute_cost_total_from_md(costs_md)
+        _computed_total = (_compute_cost_total_from_md(_raw_costs_md) or _compute_cost_total_from_md(costs_md) or _compute_cost_total_simple(_raw_costs_md) or _compute_cost_total_simple(costs_md))
         costs_md = _inject_clean_total_line(costs_md, _computed_total)
 
         # Normalize/force Severity Tier checkmarks from the (clean) total line
@@ -2571,7 +2661,7 @@ async def vision_review(
 
         _render_section_header(pdf, "APPROXIMATE REPAIR COST BREAKDOWN")
         # No duplicate body line under the colored bar header.
-        render_repair_cost_section(pdf, costs_md)
+        render_repair_cost_section(pdf, costs_md, total_override=_computed_total)
         pdf.ln(2)
         _render_section_header(pdf, "FRAUD & AUTHENTICITY CHECK")
         mc((result["fraud_markdown"] or 'N/A').strip())
@@ -2844,6 +2934,11 @@ async def download_pdf(file_number: Optional[str] = None, filename: Optional[str
         return JSONResponse(status_code=404, content={"detail": "Not Found"})
     latest = max(candidates, key=lambda p: os.path.getmtime(p))
     return FileResponse(path=latest, media_type="application/pdf", filename=os.path.basename(latest))
+
+
+
+
+
 
 
 
