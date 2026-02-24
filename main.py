@@ -2632,10 +2632,17 @@ async def vision_review(
 
 
             if candidates:
+                best = max(candidates)
 
-                return max(candidates)
+                # If we only found a tiny number (e.g., 4 from "$4,400"), try a computed refinish "= $270" fallback.
+                if best < 20:
+                    m2 = re.search(r"(?i)refinish[^\n]{0,120}=\s*\$\s*" + money_pat + r"\b", text)
+                    if m2:
+                       v2 = _norm_money(m2.group(1))
+                       if isinstance(v2, (int, float)) and float(v2) >= 20:
+                           best = float(v2)
 
-
+                return best
             return None
 
         def _parse_tax_amount() -> Optional[float]:
@@ -2650,12 +2657,14 @@ async def vision_review(
         mech = _parse_labor_line("Mechanical/ADAS")
         if not isinstance(mech.get("total"), (int, float)):
             mech = _parse_labor_line("Mechanical/diagnostic")
-
+        frame = _parse_labor_line("Frame labor")
+        if not isinstance(frame.get("total"), (int, float)):
+            frame = _parse_labor_line("Frame/structural")
         paint_mat_amt = _parse_paint_materials_amount()
         parts_sub = _parse_parts_subtotal()
 
         labor_total = 0.0
-        for item in (body, paint, mech):
+        for item in (body, paint, mech, frame):
             if isinstance(item.get("total"), (int, float)):
                 labor_total += float(item["total"])  # type: ignore[index]
         labor_total = round(labor_total, 2)
@@ -2671,7 +2680,7 @@ async def vision_review(
         def _parse_tax_rate_from_text() -> Optional[float]:
             if not text:
                 return None
-            m = re.search(r"(?i)assumed\s*([0-9]+(?:\.[0-9]+)?)\s*%\b", text)
+            m = re.search(r"(?i)assumed\)?\s*[:\-]?\s*([0-9]+(?:\.[0-9]+)?)\s*%\b", text)
             if not m:
                 return None
             try:
@@ -2839,7 +2848,8 @@ async def vision_review(
             if mech.get("hrs") is not None and mech.get("rate") is not None:
                 # Keep consistent 'hrs' label even if model used 'hr'
                 mc(f"Mechanical/ADAS: {mech['hrs']} hrs @ ${mech['rate']}/hr = {_money_line(mech.get('total'))}")
-
+            if frame.get("hrs") is not None and frame.get("rate") is not None:
+                mc(f"Frame/structural: {frame['hrs']} hrs @ ${frame['rate']}/hr = {_money_line(frame.get('total'))}")
             if paint_mat_amt is not None:
                 mc(f"Paint & materials: {_money_line(paint_mat_amt)}")
             if parts_sub is not None:
@@ -3026,7 +3036,14 @@ async def vision_review(
             ia_company,
             uploaded_text_all,
         )
-        tax_rate_for_pdf = _lookup_tax_rate(inspection_location)
+        m_tr = re.search(r"(?i)tax\s*rate[^0-9%]{0,20}([0-9]+(?:\.[0-9]+)?)\s*%\b", costs_md or "")
+        if m_tr:
+            try:
+                tax_rate_for_pdf = float(m_tr.group(1)) / 100.0
+            except Exception:
+                tax_rate_for_pdf = _lookup_tax_rate(inspection_location)
+        else:
+            tax_rate_for_pdf = _lookup_tax_rate(inspection_location)
 
         # Compute a deterministic total using the strict tax rule.
         # If we cannot parse components, fail-open to existing helpers.
