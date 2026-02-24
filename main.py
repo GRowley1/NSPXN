@@ -2430,7 +2430,13 @@ async def vision_review(
             out.append(ln)
         return "\n".join(out).strip()
 
-    def render_repair_cost_section(pdf_obj: FPDF, md: str, total_override: Optional[float] = None) -> None:
+    def render_repair_cost_section(
+        pdf_obj: FPDF,
+        md: str,
+        total_override: Optional[float] = None,
+        tax_rate: Optional[float] = None,
+        force_tax_parts_plus_paint_materials_only: bool = True,
+    ) -> None:
         """Render the Approximate Repair Cost Breakdown in a controlled PDF format.
 
         Goals (Photos-Only):
@@ -2443,6 +2449,126 @@ async def vision_review(
         if not isinstance(md, str):
             md = str(md or "")
         text = md.replace("\r\n", "\n").replace("\r", "\n")
+
+        def _parse_money(s: str) -> Optional[float]:
+            try:
+                return float(str(s).replace(",", "").strip())
+            except Exception:
+                return None
+
+        def _money_line(v: Optional[float]) -> str:
+            return _money2(v)
+
+        def _parse_labor_line(label: str) -> Dict[str, Optional[float]]:
+            """Parse lines like:
+            - Body labor: 10.0 hrs @ $85/hr = $850
+            - Paint labor: 2.0 hrs @ $85/hr = $170
+            - Mechanical/ADAS: 1.0 hr @ $150/hr = $150
+            Returns hrs, rate, total.
+            """
+            out = {"hrs": None, "rate": None, "total": None}
+            if not text:
+                return out
+            rx = re.compile(
+                rf"(?im)^\\s*[-*]?\\s*{re.escape(label)}\\s*:\\s*([0-9]+(?:\\.[0-9]+)?)\\s*h(?:r|rs|ours)?\\b\\s*@\\s*\\$\\s*([0-9]+(?:\\.[0-9]+)?)\\s*/?hr\\b.*?=\\s*\\$\\s*([0-9][0-9,]*(?:\\.[0-9]{{2}})?)",
+            )
+            m = rx.search(text)
+            if m:
+                out["hrs"] = _parse_money(m.group(1))
+                out["rate"] = _parse_money(m.group(2))
+                out["total"] = _parse_money(m.group(3))
+                return out
+
+            # If the model omitted the trailing total, parse hrs + rate and compute.
+            rx2 = re.compile(
+                rf"(?im)^\\s*[-*]?\\s*{re.escape(label)}\\s*:\\s*([0-9]+(?:\\.[0-9]+)?)\\s*h(?:r|rs|ours)?\\b.*?@\\s*\\$\\s*([0-9]+(?:\\.[0-9]+)?)\\s*/?hr\\b",
+            )
+            m2 = rx2.search(text)
+            if m2:
+                hrs = _parse_money(m2.group(1))
+                rate = _parse_money(m2.group(2))
+                if hrs is not None and rate is not None:
+                    out["hrs"] = hrs
+                    out["rate"] = rate
+                    out["total"] = round(float(hrs) * float(rate), 2)
+            return out
+
+        def _parse_paint_materials_amount() -> Optional[float]:
+            """Parse paint & materials dollar amount (not hours)."""
+            m = re.search(
+                r"(?im)^\s*[-*]?\s*Paint\s*&\s*materials\s*:\s*.*?=\s*\$\s*([0-9][0-9,]*(?:\.[0-9]{2})?)",
+                text,
+            )
+            if m:
+                return _parse_money(m.group(1))
+            m2 = re.search(
+                r"(?im)^\s*[-*]?\s*Paint\s*&\s*materials\s*:\s*\$\s*([0-9][0-9,]*(?:\.[0-9]{2})?)",
+                text,
+            )
+            if m2:
+                return _parse_money(m2.group(1))
+            m3 = re.search(
+                r"(?im)^\s*[-*]?\s*Paint\s+materials\s*:\s*\$\s*([0-9][0-9,]*(?:\.[0-9]{2})?)",
+                text,
+            )
+            if m3:
+                return _parse_money(m3.group(1))
+            return None
+
+        def _parse_parts_subtotal() -> Optional[float]:
+            m = re.search(r"(?im)^\s*\*\*\s*Estimated\s+Parts\s+Subtotal\s*:\s*\$\s*([0-9][0-9,]*(?:\.[0-9]{2})?)", text)
+            if m:
+                return _parse_money(m.group(1))
+            m2 = re.search(r"(?im)^\s*[-*]?\s*Parts\s+subtotal\s*:\s*\*\*?\$\s*([0-9][0-9,]*(?:\.[0-9]{2})?)\*\*?", text)
+            if m2:
+                return _parse_money(m2.group(1))
+            m3 = re.search(r"(?im)^\s*[-*]?\s*Parts\s+subtotal\s*:\s*\$\s*([0-9][0-9,]*(?:\.[0-9]{2})?)", text)
+            if m3:
+                return _parse_money(m3.group(1))
+            return None
+
+        def _parse_tax_amount() -> Optional[float]:
+            m = re.search(r"(?im)^\s*[-*]?\s*(?:Estimated\s+tax|Sales\s+tax|Tax)\b.*?\$\s*([0-9][0-9,]*(?:\.[0-9]{2})?)", text)
+            if m:
+                return _parse_money(m.group(1))
+            return None
+
+        # Deterministic summary values (computed)
+        body = _parse_labor_line("Body labor")
+        paint = _parse_labor_line("Paint labor")
+        mech = _parse_labor_line("Mechanical/ADAS")
+        paint_mat_amt = _parse_paint_materials_amount()
+        parts_sub = _parse_parts_subtotal()
+
+        labor_total = 0.0
+        for item in (body, paint, mech):
+            if isinstance(item.get("total"), (int, float)):
+                labor_total += float(item["total"])  # type: ignore[index]
+        labor_total = round(labor_total, 2)
+
+        tax_basis = None
+        if force_tax_parts_plus_paint_materials_only:
+            if parts_sub is not None and paint_mat_amt is not None:
+                tax_basis = round(float(parts_sub) + float(paint_mat_amt), 2)
+            elif parts_sub is not None and paint_mat_amt is None:
+                tax_basis = round(float(parts_sub), 2)
+
+        tax_amt = _parse_tax_amount()
+        if tax_amt is None and tax_basis is not None and isinstance(tax_rate, (int, float)):
+            try:
+                tax_amt = round(float(tax_basis) * float(tax_rate), 2)
+            except Exception:
+                tax_amt = None
+
+        computed_total = None
+        try:
+            if parts_sub is not None and tax_amt is not None:
+                computed_total = float(parts_sub) + float(labor_total) + float(tax_amt)
+                if paint_mat_amt is not None:
+                    computed_total += float(paint_mat_amt)
+                computed_total = round(computed_total, 2)
+        except Exception:
+            computed_total = None
 
         # --- Helper: normalize "Estimated" wording to "Approximate" (no estimate claims)
         def _normalize_estimated_language(s: str) -> str:
@@ -2491,6 +2617,11 @@ async def vision_review(
                 continue
             if re.search(r"(?i)^\s*Estimated\s+Total\b", s):
                 continue
+            # Strip any model-injected 'approximate total repair cost' lines (conflicts with deterministic total)
+            if re.search(r"(?i)^\s*Approximate\s+total\s+repair\s+cost\b", s):
+                continue
+            if re.search(r"(?i)^\s*Approximate\s+repair\s+total\b", s):
+                continue
             # Remove any '(rounded)' bullets/lines from PDF output
             if re.search(r"(?i)\brounded\b", s) and "$" in s:
                 continue
@@ -2537,8 +2668,63 @@ async def vision_review(
 
             mc(s)
 
+        # --- Deterministic cost summary (computed) so the total is explainable.
+        # NOTE: This is intentionally derived from parsed labor/parts/materials + tax rule
+        # (tax applies to parts + paint materials only; labor is never taxed).
+        have_any = any(
+            v is not None
+            for v in [
+                body.get("hrs"),
+                body.get("rate"),
+                body.get("total"),
+                paint.get("hrs"),
+                paint.get("rate"),
+                paint.get("total"),
+                mech.get("hrs"),
+                mech.get("rate"),
+                mech.get("total"),
+                paint_mat_amt,
+                parts_sub,
+                tax_amt,
+            ]
+        )
+
+        if have_any:
+            pdf_obj.ln(2)
+            try:
+                pdf_obj.set_font("Helvetica", "B", 11)
+            except Exception:
+                pdf_obj.set_font("Arial", "B", 11)
+            pdf_obj.cell(0, 6, "Cost Summary (Computed)", ln=True)
+            try:
+                pdf_obj.set_font("Helvetica", "", 11)
+            except Exception:
+                pdf_obj.set_font("Arial", "", 11)
+
+            if body.get("hrs") is not None and body.get("rate") is not None:
+                mc(f"Body labor: {body['hrs']} hrs @ ${body['rate']}/hr = {_money_line(body.get('total'))}")
+            if paint.get("hrs") is not None and paint.get("rate") is not None:
+                mc(f"Paint labor: {paint['hrs']} hrs @ ${paint['rate']}/hr = {_money_line(paint.get('total'))}")
+            if mech.get("hrs") is not None and mech.get("rate") is not None:
+                # Keep consistent 'hrs' label even if model used 'hr'
+                mc(f"Mechanical/ADAS: {mech['hrs']} hrs @ ${mech['rate']}/hr = {_money_line(mech.get('total'))}")
+
+            if paint_mat_amt is not None:
+                mc(f"Paint & materials: {_money_line(paint_mat_amt)}")
+            if parts_sub is not None:
+                mc(f"Parts subtotal: {_money_line(parts_sub)}")
+
+            # Tax display (basis + rate + amount)
+            if isinstance(tax_rate, (int, float)):
+                mc(f"Tax rate: {float(tax_rate)*100:.3f}%")
+            if tax_basis is not None:
+                mc(f"Tax basis (parts + paint materials): {_money_line(tax_basis)}")
+            if tax_amt is not None:
+                mc(f"Tax: {_money_line(tax_amt)}")
+
         # --- ONE computed total line
-        total_val = total_override
+        # Prefer our deterministic computed total (if available), then an explicit override, then fallbacks.
+        total_val = computed_total if computed_total is not None else total_override
         if total_val is None:
             try:
                 # Prefer labeled subtotals (parts + labor + tax [+ paint materials]) to avoid double-counting.
@@ -2702,16 +2888,76 @@ async def vision_review(
         _raw_costs_md = result.get("estimated_costs_markdown") or ""
         costs_md = _strip_unwanted_cost_lines_for_pdf(_raw_costs_md)
 
-        # Compute a clean approximate total from the model's section totals (prevents bad/rounded totals like "$10,000")
-        _computed_total = (_compute_cost_total_from_md(_raw_costs_md) or _compute_cost_total_from_md(costs_md) or _compute_cost_total_simple(_raw_costs_md) or _compute_cost_total_simple(costs_md))
-        costs_md = _inject_clean_total_line(costs_md, _computed_total)
+        # Deterministic tax-rate context for PDF math display.
+        # (Tax applies to parts + paint materials only; never tax labor.)
+        inspection_location = _normalize_location_with_zip(
+            _extract_inspection_location(uploaded_text_all or ""),
+            ia_company,
+            uploaded_text_all,
+        )
+        tax_rate_for_pdf = _lookup_tax_rate(inspection_location)
 
-        # Normalize/force Severity Tier checkmarks from the (clean) total line
-        costs_md = _enforce_severity_tier_checkmarks(costs_md)
+        # Compute a deterministic total using the strict tax rule.
+        # If we cannot parse components, fail-open to existing helpers.
+        def _parse_money_local(x: str) -> Optional[float]:
+            try:
+                return float(str(x).replace(",", "").strip())
+            except Exception:
+                return None
+
+        def _rx_money(pattern: str, blob: str) -> Optional[float]:
+            m = re.search(pattern, blob, flags=re.IGNORECASE | re.MULTILINE)
+            if not m:
+                return None
+            return _parse_money_local(m.group(1))
+
+        parts_sub = _rx_money(r"^\s*(?:\*\*\s*)?(?:Estimated\s+)?Parts\s+Subtotal\s*(?:\*\*\s*)?:\s*\$\s*([0-9][0-9,]*(?:\.[0-9]{2})?)", _raw_costs_md) \
+            or _rx_money(r"^\s*\*\*\s*Estimated\s+Parts\s+Subtotal\s*:\s*\$\s*([0-9][0-9,]*(?:\.[0-9]{2})?)", _raw_costs_md)
+        paint_mat = _rx_money(r"^\s*[-*]?\s*Paint\s*&\s*materials\s*:\s*.*?=\s*\$\s*([0-9][0-9,]*(?:\.[0-9]{2})?)", _raw_costs_md) \
+            or _rx_money(r"^\s*[-*]?\s*Paint\s*&\s*materials\s*:\s*\$\s*([0-9][0-9,]*(?:\.[0-9]{2})?)", _raw_costs_md)
+
+        def _labor_total_from_md(blob: str) -> float:
+            total = 0.0
+            for lbl in ("Body labor", "Paint labor", "Mechanical/ADAS"):
+                m = re.search(
+                    rf"^\\s*[-*]?\\s*{re.escape(lbl)}\\s*:\\s*[0-9]+(?:\\.[0-9]+)?\\s*h\\w*.*?@\\s*\\$\\s*[0-9]+(?:\\.[0-9]+)?\\s*/?hr\\b.*?=\\s*\\$\\s*([0-9][0-9,]*(?:\\.[0-9]{{2}})?)",
+                    blob,
+                    flags=re.IGNORECASE | re.MULTILINE,
+                )
+                if m:
+                    v = _parse_money_local(m.group(1))
+                    if v is not None:
+                        total += float(v)
+            return round(total, 2)
+
+        labor_total = _labor_total_from_md(_raw_costs_md)
+        _computed_total = None
+        try:
+            if parts_sub is not None:
+                tax_basis = float(parts_sub) + float(paint_mat or 0.0)
+                tax_amt = round(float(tax_basis) * float(tax_rate_for_pdf or 0.0), 2)
+                _computed_total = float(parts_sub) + float(labor_total) + float(paint_mat or 0.0) + float(tax_amt)
+                _computed_total = round(float(_computed_total), 2)
+        except Exception:
+            _computed_total = None
+
+        if _computed_total is None:
+            _computed_total = (
+                _compute_cost_total_from_md(_raw_costs_md)
+                or _compute_cost_total_from_md(costs_md)
+                or _compute_cost_total_simple(_raw_costs_md)
+                or _compute_cost_total_simple(costs_md)
+            )
 
         _render_section_header(pdf, "APPROXIMATE REPAIR COST BREAKDOWN")
         # No duplicate body line under the colored bar header.
-        render_repair_cost_section(pdf, costs_md, total_override=_computed_total)
+        render_repair_cost_section(
+            pdf,
+            costs_md,
+            total_override=_computed_total,
+            tax_rate=tax_rate_for_pdf,
+            force_tax_parts_plus_paint_materials_only=True,
+        )
         pdf.ln(2)
         _render_section_header(pdf, "FRAUD & AUTHENTICITY CHECK")
         mc((result["fraud_markdown"] or 'N/A').strip())
@@ -2984,3 +3230,8 @@ async def download_pdf(file_number: Optional[str] = None, filename: Optional[str
         return JSONResponse(status_code=404, content={"detail": "Not Found"})
     latest = max(candidates, key=lambda p: os.path.getmtime(p))
     return FileResponse(path=latest, media_type="application/pdf", filename=os.path.basename(latest))
+
+
+
+
+
