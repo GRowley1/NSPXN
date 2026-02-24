@@ -2494,37 +2494,148 @@ async def vision_review(
             return out
 
         def _parse_paint_materials_amount() -> Optional[float]:
-            """Parse paint & materials dollar amount (not hours)."""
-            m = re.search(
-                r"(?im)^\s*[-*]?\s*Paint\s*&\s*materials\s*:\s*.*?=\s*\$\s*([0-9][0-9,]*(?:\.[0-9]{2})?)",
-                text,
-            )
-            if m:
-                return _parse_money(m.group(1))
-            m2 = re.search(
-                r"(?im)^\s*[-*]?\s*Paint\s*&\s*materials\s*:\s*\$\s*([0-9][0-9,]*(?:\.[0-9]{2})?)(?!\s*(?:/ ?hr|/?hr|per))",
-                text,
-            )
-            if m2:
-                return _parse_money(m2.group(1))
-            m3 = re.search(
-                r"(?im)^\s*[-*]?\s*Paint\s+materials\s*:\s*\$\s*([0-9][0-9,]*(?:\.[0-9]{2})?)",
-                text,
-            )
-            if m3:
-                return _parse_money(m3.group(1))
+
+
+            """Parse paint & materials dollar amount (not hours).
+
+
+            Robustness goals:
+
+            - Prefer explicit dollar amounts on lines labeled Paint & materials / Paint materials.
+
+            - Support formats like:
+
+              * Paint & materials: 6.0 refinish hrs × $45/hr = $270
+
+              * Paint & materials: $270
+
+              * Paint materials: $270
+
+            - Avoid accidentally capturing numbers from unrelated lines (e.g., Parts: $4,400).
+
+            """
+
+            candidates: list[float] = []
+
+
+            # Money capture: supports 1,234.56 and also 1.234 (OCR thousand separator)
+
+            money_pat = r"([0-9]{1,3}(?:[.,][0-9]{3})*(?:\.[0-9]{2})?|[0-9]+(?:\.[0-9]{2})?)"
+
+
+            def _norm_money(s: str) -> Optional[float]:
+
+                s = (s or "").strip()
+
+                if not s:
+
+                    return None
+
+                # If OCR produced thousand separators with '.' and no decimals, normalize.
+
+                if "." in s and not re.search(r"\.[0-9]{2}$", s) and re.search(r"\.[0-9]{3}\b", s):
+
+                    s = s.replace(".", "")
+
+                return _parse_money(s)
+
+
+            patterns = [
+
+                # Explicit computed amount after '='
+
+                rf"(?im)^\s*[-*]?\s*Paint\s*&\s*materials\s*:\s*.*?=\s*\$\s*{money_pat}\b",
+
+                rf"(?im)^\s*[-*]?\s*Paint\s+materials\s*:\s*.*?=\s*\$\s*{money_pat}\b",
+
+                # Direct dollar amount after ':'
+
+                rf"(?im)^\s*[-*]?\s*Paint\s*&\s*materials\s*:\s*\$\s*{money_pat}\b(?!\s*(?:/ ?hr|/?hr|per))",
+
+                rf"(?im)^\s*[-*]?\s*Paint\s+materials\s*:\s*\$\s*{money_pat}\b(?!\s*(?:/ ?hr|/?hr|per))",
+
+            ]
+
+
+            for pat in patterns:
+
+                for m in re.finditer(pat, text):
+
+                    val = _norm_money(m.group(1))
+
+                    if isinstance(val, (int, float)):
+
+                        candidates.append(float(val))
+
+
+            if candidates:
+
+                # Choose the largest labeled paint-materials amount to avoid small stray matches
+
+                return max(candidates)
+
+
             return None
 
         def _parse_parts_subtotal() -> Optional[float]:
-            m = re.search(r"(?im)^\s*\*\*\s*Estimated\s+Parts\s+Subtotal\s*:\s*\$\s*([0-9][0-9,]*(?:\.[0-9]{2})?)", text)
-            if m:
-                return _parse_money(m.group(1))
-            m2 = re.search(r"(?im)^\s*[-*]?\s*Parts\s+subtotal\s*:\s*\*\*?\$\s*([0-9][0-9,]*(?:\.[0-9]{2})?)\*\*?", text)
-            if m2:
-                return _parse_money(m2.group(1))
-            m3 = re.search(r"(?im)^\s*[-*]?\s*Parts\s+subtotal\s*:\s*\$\s*([0-9][0-9,]*(?:\.[0-9]{2})?)", text)
-            if m3:
-                return _parse_money(m3.group(1))
+
+
+            candidates: list[float] = []
+
+
+            money_pat = r"([0-9]{1,3}(?:[.,][0-9]{3})*(?:\.[0-9]{2})?|[0-9]+(?:\.[0-9]{2})?)"
+
+
+            def _norm_money(s: str) -> Optional[float]:
+
+                s = (s or "").strip()
+
+                if not s:
+
+                    return None
+
+                if "." in s and not re.search(r"\.[0-9]{2}$", s) and re.search(r"\.[0-9]{3}\b", s):
+
+                    s = s.replace(".", "")
+
+                return _parse_money(s)
+
+
+            # Strongest labels first
+
+            pats = [
+
+                rf"(?im)^\s*\*\*\s*Estimated\s+Parts\s+Subtotal\s*:\s*\$\s*{money_pat}\b",
+
+                rf"(?im)^\s*[-*]?\s*Parts\s+subtotal\s*:\s*\$\s*{money_pat}\b",
+
+                rf"(?im)^\s*\*\*\s*Parts\s+subtotal\s*:\s*\$\s*{money_pat}\b",
+
+                # AI-derived summary sometimes uses: '- Parts: $4,400'
+
+                rf"(?im)^\s*[-*]?\s*Parts\s*:\s*\$\s*{money_pat}\b",
+
+                rf"(?im)^\s*\*\*\s*Parts\s*:\s*\$\s*{money_pat}\b",
+
+            ]
+
+
+            for pat in pats:
+
+                for m in re.finditer(pat, text):
+
+                    val = _norm_money(m.group(1))
+
+                    if isinstance(val, (int, float)):
+
+                        candidates.append(float(val))
+
+
+            if candidates:
+
+                return max(candidates)
+
+
             return None
 
         def _parse_tax_amount() -> Optional[float]:
@@ -2582,7 +2693,8 @@ async def vision_review(
         computed_total = None
         try:
             if parts_sub is not None and tax_amt is not None:
-                computed_total = float(parts_sub) + float(labor_total) + float(tax_amt)
+                pm = float(paint_mat_amt) if paint_mat_amt is not None else 0.0
+                computed_total = float(parts_sub) + float(labor_total) + pm + float(tax_amt)
                 if paint_mat_amt is not None:
                     computed_total += float(paint_mat_amt)
                 computed_total = round(computed_total, 2)
@@ -3249,13 +3361,3 @@ async def download_pdf(file_number: Optional[str] = None, filename: Optional[str
         return JSONResponse(status_code=404, content={"detail": "Not Found"})
     latest = max(candidates, key=lambda p: os.path.getmtime(p))
     return FileResponse(path=latest, media_type="application/pdf", filename=os.path.basename(latest))
-
-
-
-
-
-
-
-
-
-
