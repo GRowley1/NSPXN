@@ -1651,7 +1651,7 @@ async def vision_review(
         "vin": _get("vin"),
         "vin_verification": _get("vin_verification"),
         "vehicle": _get("vehicle"),
-"odometer_estimate_only": (odometer_value if odometer_value else _get("odometer_estimate_only")),
+        "odometer_estimate_only": _get("odometer_estimate_only"),
         "compliance_score": _get("compliance_score"),
         "summary_brief": _get("summary_brief"),
         "summary_markdown": _get("summary_markdown"),
@@ -1662,6 +1662,45 @@ async def vision_review(
         "conclusion": _get("conclusion"),
         "redaction_status": redaction_status,
     }
+
+    # --- ODOMETER SINGLE SOURCE OF TRUTH ---
+    # Bind Vehicle ID odometer to the same "photo-confirmed" odometer the model used in the narrative/table when present.
+    # Priority:
+    # 1) Odometer explicitly stated in summary_markdown (often "Odometer ... (Photo #)" or "Odometer visible: ...")
+    # 2) Photo OCR-derived odometer_value (from per-photo OCR)
+    # 3) Model JSON field odometer_estimate_only (last resort)
+    def _extract_odometer_from_summary_md(md: str) -> Optional[str]:
+        if not md:
+            return None
+        t = str(md).replace("\r\n", "\n").replace("\r", "\n")
+        # Common patterns in the narrative/table
+        pats = [
+            r"(?i)\bOdometer\b[^\d]{0,40}(\d{1,3}(?:,\d{3})+|\d{4,7})\s*(mi|miles|km)\b",
+            r"(?i)\bOdometer\s+visible\b[^\d]{0,40}(\d{1,3}(?:,\d{3})+|\d{4,7})\s*(mi|miles|km)\b",
+        ]
+        for pat in pats:
+            m = re.search(pat, t)
+            if m:
+                try:
+                    digits = m.group(1).replace(",", "")
+                    unit = (m.group(2) or "").lower()
+                    if unit == "miles":
+                        unit = "mi"
+                    return f"{int(digits):,} {unit}"
+                except Exception:
+                    continue
+        return None
+
+    try:
+        odo_from_md = _extract_odometer_from_summary_md(result.get("summary_markdown") or "")
+        if odo_from_md:
+            result["odometer_estimate_only"] = odo_from_md
+        elif odometer_value:
+            result["odometer_estimate_only"] = odometer_value
+    except Exception:
+        # Fail-open: keep whatever is already present
+        if odometer_value and not (result.get("odometer_estimate_only") or "").strip():
+            result["odometer_estimate_only"] = odometer_value
 
     # --- VIN DECODE (if VIN confirmed, populate Vehicle at least year + make) ---
     def _vin_decode_basic(vin: str) -> Optional[str]:
@@ -2452,6 +2491,11 @@ async def vision_review(
                 continue
             if re.search(r"(?i)^\s*Estimated\s+Total\b", s):
                 continue
+            # Remove any '(rounded)' bullets/lines from PDF output
+            if re.search(r"(?i)\brounded\b", s) and "$" in s:
+                continue
+            if re.fullmatch(r"(?i)\(?rounded\)?", s.replace("*","").strip()):
+                continue
             if re.search(r"(?i)^\s*Approximate\s+Repair\s+Cost\s+Total\s*:", s):
                 continue
 
@@ -2495,6 +2539,12 @@ async def vision_review(
 
         # --- ONE computed total line
         total_val = total_override
+        if total_val is None:
+            try:
+                # Prefer labeled subtotals (parts + labor + tax [+ paint materials]) to avoid double-counting.
+                total_val = _compute_cost_total_simple(text)
+            except Exception:
+                total_val = None
         if total_val is None:
             try:
                 total_val = _compute_cost_total_from_md(text)
@@ -2934,13 +2984,3 @@ async def download_pdf(file_number: Optional[str] = None, filename: Optional[str
         return JSONResponse(status_code=404, content={"detail": "Not Found"})
     latest = max(candidates, key=lambda p: os.path.getmtime(p))
     return FileResponse(path=latest, media_type="application/pdf", filename=os.path.basename(latest))
-
-
-
-
-
-
-
-
-
-
