@@ -1612,6 +1612,52 @@ async def vision_review(
         "redaction_status": redaction_status,
     }
 
+    # --- VIN DECODE (if VIN confirmed, populate Vehicle at least year + make) ---
+    def _vin_decode_basic(vin: str) -> Optional[str]:
+        v = (vin or "").strip().upper()
+        if not re.fullmatch(VIN_PATTERN, v):
+            return None
+
+        # Make (minimal; extend later if needed)
+        wmi = v[:3]
+        make = "Tesla" if wmi == "5YJ" else ""
+
+        # Model (minimal Tesla mapping)
+        model = ""
+        if make == "Tesla":
+            model_code = v[3:4]
+            model = {"S": "Model S", "3": "Model 3", "X": "Model X", "Y": "Model Y"}.get(model_code, "")
+
+        # Year from 10th character (covers 2010–2030; extend if needed)
+        ych = v[9:10]
+        year_map = {
+            "A": 2010, "B": 2011, "C": 2012, "D": 2013, "E": 2014,
+            "F": 2015, "G": 2016, "H": 2017, "J": 2018, "K": 2019,
+            "L": 2020, "M": 2021, "N": 2022, "P": 2023, "R": 2024,
+            "S": 2025, "T": 2026, "V": 2027, "W": 2028, "X": 2029,
+            "Y": 2030,
+        }
+        year = year_map.get(ych)
+
+        parts = []
+        if year:
+            parts.append(str(year))
+        if make:
+            parts.append(make)
+        if model:
+            parts.append(model)
+        if parts:
+            return " ".join(parts)
+        return None
+
+    try:
+        decoded_vehicle = _vin_decode_basic(result.get("vin") or "")
+        cur_vehicle = (result.get("vehicle") or "").strip()
+        if decoded_vehicle and (not cur_vehicle or cur_vehicle.upper().startswith("N/A")):
+            result["vehicle"] = decoded_vehicle
+    except Exception:
+        pass
+
     # ✅ FIX #2: Hard fallback so UI never gets an empty narrative ("No narrative generated")
     try:
         sm_tmp = (result.get("summary_markdown") or "").strip()
@@ -1926,12 +1972,14 @@ async def vision_review(
 
     pdf = FPDF(); pdf.add_page()
     # --- NSPXN Logo (Top Right, First Page Only) ---
+    # Draw later (after any filled section bars) so nothing can paint over it.
+    logo_path = None
     try:
-        logo_path = os.path.join(os.path.dirname(__file__), "ChatGPT logo100725.png")
-        if os.path.exists(logo_path):
-            pdf.image(logo_path, x=pdf.w - 45, y=8, w=35)  # small–medium size
+        _lp = os.path.join(os.path.dirname(__file__), "ChatGPT logo100725.png")
+        if os.path.exists(_lp):
+            logo_path = _lp
     except Exception:
-        pass
+        logo_path = None
     pdf.set_auto_page_break(auto=True, margin=10)
     pdf.set_left_margin(10); pdf.set_right_margin(10)
 
@@ -2478,6 +2526,13 @@ async def vision_review(
         except Exception:
             pass
 
+        # Header layout lock: draw logo after section fills so it cannot be covered.
+        try:
+            if logo_path:
+                pdf.image(logo_path, x=pdf.w - 45, y=8, w=35)
+        except Exception:
+            pass
+
         # VEHICLE IDENTIFICATION (color-coded box + colon formatting)
         pdf_status = (result["redaction_status"] or "").replace("✅", "OK").strip() or "N/A"
         _render_section_header(pdf, "VEHICLE IDENTIFICATION")
@@ -2515,15 +2570,7 @@ async def vision_review(
         costs_md = _enforce_severity_tier_checkmarks(costs_md)
 
         _render_section_header(pdf, "APPROXIMATE REPAIR COST BREAKDOWN")
-        try:
-            pdf.set_font("Helvetica","B",12)
-        except Exception:
-            pdf.set_font("Arial","B",12)
-        pdf.cell(0,8,"Approximate Repair Cost Breakdown", ln=True, align="C")
-        try:
-            pdf.set_font("Helvetica","",11)
-        except Exception:
-            pdf.set_font("Arial","",11)
+        # No duplicate body line under the colored bar header.
         render_repair_cost_section(pdf, costs_md)
         pdf.ln(2)
         _render_section_header(pdf, "FRAUD & AUTHENTICITY CHECK")
@@ -2797,3 +2844,8 @@ async def download_pdf(file_number: Optional[str] = None, filename: Optional[str
         return JSONResponse(status_code=404, content={"detail": "Not Found"})
     latest = max(candidates, key=lambda p: os.path.getmtime(p))
     return FileResponse(path=latest, media_type="application/pdf", filename=os.path.basename(latest))
+
+
+
+
+
