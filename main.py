@@ -755,7 +755,7 @@ def _add_bytes(parts: List[Dict[str,Any]], files_seen: List[str], photo_index: O
             ocr_collected = []
             for idx, im in enumerate(pages[:max_images - used]):
                 b = io.BytesIO()
-                im.save(b, format="JPEG", quality=65, optimize=True)
+                im.save(b, format="JPEG", quality=75, optimize=True)
                 parts.append(_image_part_from_bytes(b.getvalue()))
                 used += 1
                 if photo_index is not None:
@@ -787,7 +787,7 @@ def _add_bytes(parts: List[Dict[str,Any]], files_seen: List[str], photo_index: O
                 scale = max_dim / float(max(im.size))
                 im = im.resize((int(im.width * scale), int(im.height * scale)))
             b = io.BytesIO()
-            im.save(b, format="JPEG", quality=65, optimize=True)
+            im.save(b, format="JPEG", quality=75, optimize=True)
             raw = b.getvalue()
         except Exception:
             im_ref = None
@@ -2625,6 +2625,13 @@ async def vision_review(
     except Exception:
         poi15_hit = False
 
+
+    # Deterministic inspection location (used for tax-rate fallback in the PDF cost renderer).
+    # Defined here so it is always available even when estimated_costs_markdown already exists.
+    inspection_location = _normalize_location_with_zip(
+        _extract_inspection_location(uploaded_text_all or ""), ia_company, uploaded_text_all
+    )
+
     if ai_intent == "damage_report_from_photos":
         pdf.cell(0,10,"NSPXN.com Condition Report", ln=True, align="C")
         pdf.set_font_size(10); pdf.ln(3)
@@ -2916,6 +2923,11 @@ async def download_pdf(file_number: Optional[str] = None, filename: Optional[str
         return JSONResponse(status_code=404, content={"detail": "Not Found"})
     latest = max(candidates, key=lambda p: os.path.getmtime(p))
     return FileResponse(path=latest, media_type="application/pdf", filename=os.path.basename(latest))
+
+
+
+
+
 
 
 
