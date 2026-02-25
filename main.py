@@ -755,7 +755,7 @@ def _add_bytes(parts: List[Dict[str,Any]], files_seen: List[str], photo_index: O
             ocr_collected = []
             for idx, im in enumerate(pages[:max_images - used]):
                 b = io.BytesIO()
-                im.save(b, format="JPEG", quality=75, optimize=True)
+                im.save(b, format="JPEG", quality=65, optimize=True)
                 parts.append(_image_part_from_bytes(b.getvalue()))
                 used += 1
                 if photo_index is not None:
@@ -787,7 +787,7 @@ def _add_bytes(parts: List[Dict[str,Any]], files_seen: List[str], photo_index: O
                 scale = max_dim / float(max(im.size))
                 im = im.resize((int(im.width * scale), int(im.height * scale)))
             b = io.BytesIO()
-            im.save(b, format="JPEG", quality=75, optimize=True)
+            im.save(b, format="JPEG", quality=65, optimize=True)
             raw = b.getvalue()
         except Exception:
             im_ref = None
@@ -1956,7 +1956,103 @@ async def vision_review(
             pdf.multi_cell(effective_w, 6, (_pdf_sanitize(str(s))[:2000] + " …"))
 
 
-    
+
+    # --- PDF section helpers (layout lock + colored headers) ---
+    SAFE_TOP_Y = 30  # prevents any section box from encroaching on the top header/logo region (page 1)
+
+    def _ensure_header_safe_zone() -> None:
+        try:
+            if pdf.page_no() == 1 and pdf.get_y() < SAFE_TOP_Y:
+                pdf.set_y(SAFE_TOP_Y)
+        except Exception:
+            pass
+
+    def _render_section_header(title: str, fill_rgb=(225, 235, 245)) -> None:
+        """Draw a full-width colored section bar and set the cursor below it."""
+        _ensure_header_safe_zone()
+        try:
+            x = pdf.l_margin
+            w = pdf.w - pdf.l_margin - pdf.r_margin
+            y = pdf.get_y()
+            h = 8
+            pdf.set_draw_color(200, 200, 200)
+            pdf.set_fill_color(*fill_rgb)
+            pdf.rect(x, y, w, h, style="F")
+            pdf.set_xy(x + 1.5, y + 1.5)
+            try:
+                pdf.set_font("Helvetica", "B", 11)
+            except Exception:
+                pdf.set_font("Arial", "B", 11)
+            pdf.cell(w - 3, 5, _pdf_sanitize(title), ln=True)
+            try:
+                pdf.set_font("Helvetica", "", 11)
+            except Exception:
+                pdf.set_font("Arial", "", 11)
+            pdf.ln(1)
+        except Exception:
+            # fallback: simple text header
+            try:
+                pdf.set_font("Helvetica", "B", 11)
+            except Exception:
+                pdf.set_font("Arial", "B", 11)
+            mc(title)
+            try:
+                pdf.set_font("Helvetica", "", 11)
+            except Exception:
+                pdf.set_font("Arial", "", 11)
+
+    def _extract_photo_odometer(summary_md: str) -> Optional[str]:
+        """Single source of truth: parse the photo-confirmed odometer from the summary/table narrative."""
+        try:
+            t = (summary_md or "")
+            # Common patterns from our model output
+            m = re.search(r"(?i)\bodometer\s*(?:reads|reading\s*(?:displayed\s*)?is)?\s*[: ]\s*([0-9][0-9,]{1,8})\s*(?:mi|miles)?\b", t)
+            if not m:
+                m = re.search(r"(?i)\bodometer\s*:\s*([0-9][0-9,]{1,8})\s*mi\b", t)
+            if m:
+                val = m.group(1).replace(",", "").strip()
+                if val.isdigit():
+                    return f"{int(val):,} mi"
+        except Exception:
+            pass
+        return None
+
+    def _vin_year_make(vin: str) -> Optional[str]:
+        """Very small VIN decode (year + make). Used only to avoid 'Vehicle: N/A' when VIN is confirmed."""
+        try:
+            v = (vin or "").strip().upper()
+            if len(v) < 10:
+                return None
+            # Year decode (10th character)
+            year_code = v[9]
+            year_map = {
+                "A": 2010, "B": 2011, "C": 2012, "D": 2013, "E": 2014, "F": 2015, "G": 2016, "H": 2017,
+                "J": 2018, "K": 2019, "L": 2020, "M": 2021, "N": 2022, "P": 2023, "R": 2024, "S": 2025,
+                "T": 2026, "V": 2027, "W": 2028, "X": 2029, "Y": 2030,
+                "1": 2001, "2": 2002, "3": 2003, "4": 2004, "5": 2005, "6": 2006, "7": 2007, "8": 2008, "9": 2009,
+            }
+            year = year_map.get(year_code)
+            # Make decode (WMI)
+            wmi = v[:3]
+            make = None
+            if wmi in {"5YJ", "7SA"}:
+                make = "Tesla"
+            elif wmi.startswith("1G") or wmi.startswith("2G") or wmi.startswith("3G"):
+                make = "Chevrolet/GM"
+            elif wmi.startswith("1H") or wmi.startswith("2H") or wmi.startswith("3H"):
+                make = "Honda"
+            elif wmi.startswith("1F") or wmi.startswith("2F") or wmi.startswith("3F"):
+                make = "Ford"
+            if year and make:
+                return f"{year} {make}"
+            if make:
+                return make
+            if year:
+                return str(year)
+        except Exception:
+            pass
+        return None
+
     def _money2(x: Optional[float]) -> str:
         try:
             if x is None:
@@ -2536,30 +2632,7 @@ async def vision_review(
                 mc(f"{boxes[1]} Moderate ($3,500–$10,000)")
                 mc(f"{boxes[2]} Major ($10,000+)")
                 mc(f"{boxes[3]} Possible Total Loss Threshold Approaching")
-
-            # --- Repair Cost Disclaimer styled like main disclaimer block (unchanged)
-            if disclaimer_text:
-                try:
-                    pdf_obj.ln(4)
-                    x_left = pdf_obj.l_margin
-                    x_right = pdf_obj.w - pdf_obj.r_margin
-                    y_line = pdf_obj.get_y()
-                    pdf_obj.set_draw_color(180, 180, 180)
-                    pdf_obj.line(x_left, y_line, x_right, y_line)
-                    pdf_obj.ln(3)
-
-                    pdf_obj.set_text_color(90, 90, 90)
-                    pdf_obj.set_font("Helvetica", "B", 9)
-                    pdf_obj.cell(0, 5, "Repair Cost Disclaimer:", ln=True)
-                    pdf_obj.set_font("Helvetica", "", 8)
-                    pdf_obj.multi_cell(0, 4, _pdf_sanitize(disclaimer_text))
-                    pdf_obj.set_text_color(0, 0, 0)
-                    try:
-                        pdf_obj.set_font("Helvetica", "", 11)
-                    except Exception:
-                        pdf_obj.set_font("Arial", "", 11)
-                except Exception:
-                    pass
+            # Repair Cost Disclaimer is rendered once at the end of the report (combined Disclaimer).
     def add_thumbnail_page(pdf_obj: FPDF, image_paths: List[str]) -> None:
         """Append exactly ONE page containing thumbnails of all uploaded photos (as space allows)."""
         if not image_paths:
@@ -2633,38 +2706,78 @@ async def vision_review(
     )
 
     if ai_intent == "damage_report_from_photos":
-        pdf.cell(0,10,"NSPXN.com Condition Report", ln=True, align="C")
-        pdf.set_font_size(10); pdf.ln(3)
+        # Title (larger + bold)
+        try:
+            pdf.set_font("Helvetica", "B", 18)
+        except Exception:
+            pdf.set_font("Arial", "B", 18)
+        pdf.cell(0, 10, "NSPXN.com Condition Report", ln=True, align="C")
+        try:
+            pdf.set_font("Helvetica", "", 11)
+        except Exception:
+            pdf.set_font("Arial", "", 11)
+        pdf.ln(2)
 
-        mc(f"Claim #: {result['claim_number'] or 'N/A'}    File #: {file_number or 'N/A'}")
+        # --- VEHICLE IDENTIFICATION (colored box; header-safe-zone locked) ---
+        _render_section_header("VEHICLE IDENTIFICATION", fill_rgb=(225, 235, 245))
+
+        vin_val = (result.get("vin") or "").strip() or "N/A"
+        vin_ver = (result.get("vin_verification") or "").strip() or "N/A"
+        vehicle_val = (result.get("vehicle") or "").strip()
+        if not vehicle_val or vehicle_val.strip().upper() in {"N/A", "NA", "-", "UNKNOWN"}:
+            decoded = _vin_year_make(vin_val if vin_val != "N/A" else "")
+            if decoded:
+                vehicle_val = decoded
+        if not vehicle_val:
+            vehicle_val = "N/A"
+
+        # Single source of truth odometer: prefer photo-confirmed odometer from summary/table; fallback to estimate-only
+        _summary_md_for_odo = (result.get("summary_markdown") or "")
+        odo_photo = _extract_photo_odometer(_summary_md_for_odo)
+        odo_val = odo_photo or (result.get("odometer_estimate_only") or "").strip() or "N/A"
+
+        mc(f"File #: {file_number or 'N/A'}")
+        mc(f"Claim #: {result.get('claim_number') or 'N/A'}")
         mc(f"Inspected For: {ia_company}")
-        pdf_status = result["redaction_status"].replace("✅", "OK")
-        pdf.ln(2); mc(pdf_status)
-        pdf.ln(2); mc("Report Selected")
-        _summary_md = (result["summary_markdown"] or "N/A").strip()
-        if ai_intent == "damage_report_from_photos":
-            _summary_md = _scrub_photo_only_narrative_cost_headers(_summary_md)
+        mc(f"VIN: {vin_val}")
+        mc(f"VIN Verification: {vin_ver}")
+        mc(f"Vehicle: {vehicle_val}")
+        mc(f"Odometer: {odo_val}")
+        mc(f"Primary Impact: {result.get('primary_impact') or 'N/A'}")
+        mc(f"Secondary Impact: {result.get('secondary_impact') or 'N/A'}")
+        pdf_status = (result.get("redaction_status") or "").replace("✅", "OK")
+        mc(f"Redaction Status: {pdf_status or 'N/A'}")
+
+        # --- REPORT SUMMARY ---
+        pdf.ln(2)
+        _render_section_header("REPORT SUMMARY", fill_rgb=(225, 235, 245))
+        mc("Report Selected")
+        _summary_md = (result.get("summary_markdown") or "N/A").strip()
+        _summary_md = _scrub_photo_only_narrative_cost_headers(_summary_md)
         mc(_summary_md)
         pdf.ln(2)
-        # Controlled Repair Cost section rendering (prevents duplicate headings, Totals blocks, duplicate tiers, and bad totals)
+
+        # --- APPROXIMATE REPAIR COST BREAKDOWN ---
         _raw_costs_md = result.get("estimated_costs_markdown") or ""
         costs_md = _strip_unwanted_cost_lines_for_pdf(_raw_costs_md)
+
         # Deterministic tax-rate fallback (renderer prefers an explicit assumed % in the markdown)
         _default_tax_rate = _lookup_tax_rate(inspection_location)
-        try:
-            pdf.set_font("Helvetica","B",12)
-        except Exception:
-            pdf.set_font("Arial","B",12)
-        pdf.cell(0,8,"Approximate Repair Cost Breakdown", ln=True, align="C")
-        try:
-            pdf.set_font("Helvetica","",11)
-        except Exception:
-            pdf.set_font("Arial","",11)
-        render_repair_cost_section(pdf, costs_md, default_tax_rate=_default_tax_rate)
-        pdf.ln(2); mc("Fraud & Authenticity Check"); mc((result["fraud_markdown"] or 'N/A').strip())
-        pdf.ln(2); mc("Conclusion"); mc((result["conclusion"] or 'N/A').strip())
 
-        # --- AI Disclaimer (after Conclusion) ---
+        _render_section_header("APPROXIMATE REPAIR COST BREAKDOWN", fill_rgb=(252, 235, 220))
+        render_repair_cost_section(pdf, costs_md, default_tax_rate=_default_tax_rate)
+        pdf.ln(2)
+
+        # --- FRAUD & AUTHENTICITY CHECK ---
+        _render_section_header("FRAUD & AUTHENTICITY CHECK", fill_rgb=(235, 235, 235))
+        mc((result.get("fraud_markdown") or "N/A").strip())
+        pdf.ln(2)
+
+        # --- CONCLUSION ---
+        _render_section_header("CONCLUSION", fill_rgb=(235, 235, 235))
+        mc((result.get("conclusion") or "N/A").strip())
+
+        # --- Combined Disclaimer (single block, end of report) ---
         try:
             pdf.ln(4)
             x_left = pdf.l_margin
@@ -2675,17 +2788,30 @@ async def vision_review(
             pdf.ln(3)
 
             pdf.set_text_color(90, 90, 90)
-            pdf.set_font("Helvetica", "B", 9)
+            try:
+                pdf.set_font("Helvetica", "B", 9)
+            except Exception:
+                pdf.set_font("Arial", "B", 9)
             pdf.cell(0, 5, "Disclaimer:", ln=True)
-            pdf.set_font("Helvetica", "", 8)
+            try:
+                pdf.set_font("Helvetica", "", 8)
+            except Exception:
+                pdf.set_font("Arial", "", 8)
 
             disclaimer_body = (
-                "This report was generated using artificial intelligence. AI systems may make errors or misinterpret "
-                "visual information. All photos, damage descriptions, conclusions, and findings must be independently "
-                "reviewed and verified by a qualified appraiser before preparing or finalizing any repair estimate."
+                "This report was generated using artificial intelligence. AI systems may make errors or misinterpret visual information. "
+                "All photos, damage descriptions, conclusions, and findings must be independently reviewed and verified by a qualified appraiser "
+                "before preparing or finalizing any repair estimate.\n\n"
+                "Repair cost figures (if included) are photo-based approximations only. Actual repair scope and cost may vary after teardown, "
+                "roof-aperture inspection, water-intrusion assessment, parts identification, and confirmation of any hidden damage or additional "
+                "broken trim/glass components."
             )
             pdf.multi_cell(0, 4, disclaimer_body)
             pdf.set_text_color(0, 0, 0)
+            try:
+                pdf.set_font("Helvetica", "", 11)
+            except Exception:
+                pdf.set_font("Arial", "", 11)
         except Exception:
             pass
 
@@ -2923,6 +3049,11 @@ async def download_pdf(file_number: Optional[str] = None, filename: Optional[str
         return JSONResponse(status_code=404, content={"detail": "Not Found"})
     latest = max(candidates, key=lambda p: os.path.getmtime(p))
     return FileResponse(path=latest, media_type="application/pdf", filename=os.path.basename(latest))
+
+
+
+
+
 
 
 
