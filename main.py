@@ -755,7 +755,7 @@ def _add_bytes(parts: List[Dict[str,Any]], files_seen: List[str], photo_index: O
             ocr_collected = []
             for idx, im in enumerate(pages[:max_images - used]):
                 b = io.BytesIO()
-                im.save(b, format="JPEG", quality=65, optimize=True)
+                im.save(b, format="JPEG", quality=75, optimize=True)
                 parts.append(_image_part_from_bytes(b.getvalue()))
                 used += 1
                 if photo_index is not None:
@@ -787,7 +787,7 @@ def _add_bytes(parts: List[Dict[str,Any]], files_seen: List[str], photo_index: O
                 scale = max_dim / float(max(im.size))
                 im = im.resize((int(im.width * scale), int(im.height * scale)))
             b = io.BytesIO()
-            im.save(b, format="JPEG", quality=65, optimize=True)
+            im.save(b, format="JPEG", quality=75, optimize=True)
             raw = b.getvalue()
         except Exception:
             im_ref = None
@@ -1958,7 +1958,7 @@ async def vision_review(
 
 
     # --- PDF section helpers (layout lock + colored headers) ---
-    SAFE_TOP_Y = 30  # prevents any section box from encroaching on the top header/logo region (page 1)
+    SAFE_TOP_Y = 52  # prevents any section box from encroaching on the top header/logo region (page 1)
 
     def _ensure_header_safe_zone() -> None:
         try:
@@ -2719,7 +2719,7 @@ async def vision_review(
         pdf.ln(2)
 
         # --- VEHICLE IDENTIFICATION (colored box; header-safe-zone locked) ---
-        _render_section_header("VEHICLE IDENTIFICATION", fill_rgb=(225, 235, 245))
+        _render_section_header("VEHICLE IDENTIFICATION", fill_rgb=(190, 225, 255))
 
         vin_val = (result.get("vin") or "").strip() or "N/A"
         vin_ver = (result.get("vin_verification") or "").strip() or "N/A"
@@ -2734,7 +2734,7 @@ async def vision_review(
         # Single source of truth odometer: prefer photo-confirmed odometer from summary/table; fallback to estimate-only
         _summary_md_for_odo = (result.get("summary_markdown") or "")
         odo_photo = _extract_photo_odometer(_summary_md_for_odo)
-        odo_val = odo_photo or (result.get("odometer_estimate_only") or "").strip() or "N/A"
+        odo_val = (result.get("odometer_estimate_only") or "").strip() or odo_photo or "N/A"
 
         mc(f"File #: {file_number or 'N/A'}")
         mc(f"Claim #: {result.get('claim_number') or 'N/A'}")
@@ -2750,7 +2750,7 @@ async def vision_review(
 
         # --- REPORT SUMMARY ---
         pdf.ln(2)
-        _render_section_header("REPORT SUMMARY", fill_rgb=(225, 235, 245))
+        _render_section_header("REPORT SUMMARY", fill_rgb=(190, 225, 255))
         mc("Report Selected")
         _summary_md = (result.get("summary_markdown") or "N/A").strip()
         _summary_md = _scrub_photo_only_narrative_cost_headers(_summary_md)
@@ -2764,17 +2764,17 @@ async def vision_review(
         # Deterministic tax-rate fallback (renderer prefers an explicit assumed % in the markdown)
         _default_tax_rate = _lookup_tax_rate(inspection_location)
 
-        _render_section_header("APPROXIMATE REPAIR COST BREAKDOWN", fill_rgb=(252, 235, 220))
+        _render_section_header("APPROXIMATE REPAIR COST BREAKDOWN", fill_rgb=(255, 220, 180))
         render_repair_cost_section(pdf, costs_md, default_tax_rate=_default_tax_rate)
         pdf.ln(2)
 
         # --- FRAUD & AUTHENTICITY CHECK ---
-        _render_section_header("FRAUD & AUTHENTICITY CHECK", fill_rgb=(235, 235, 235))
+        _render_section_header("FRAUD & AUTHENTICITY CHECK", fill_rgb=(220, 220, 220))
         mc((result.get("fraud_markdown") or "N/A").strip())
         pdf.ln(2)
 
         # --- CONCLUSION ---
-        _render_section_header("CONCLUSION", fill_rgb=(235, 235, 235))
+        _render_section_header("CONCLUSION", fill_rgb=(220, 220, 220))
         mc((result.get("conclusion") or "N/A").strip())
 
         # --- Combined Disclaimer (single block, end of report) ---
@@ -2801,10 +2801,7 @@ async def vision_review(
             disclaimer_body = (
                 "This report was generated using artificial intelligence. AI systems may make errors or misinterpret visual information. "
                 "All photos, damage descriptions, conclusions, and findings must be independently reviewed and verified by a qualified appraiser "
-                "before preparing or finalizing any repair estimate.\n\n"
-                "Repair cost figures (if included) are photo-based approximations only. Actual repair scope and cost may vary after teardown, "
-                "roof-aperture inspection, water-intrusion assessment, parts identification, and confirmation of any hidden damage or additional "
-                "broken trim/glass components."
+                "before preparing or finalizing any repair estimate."
             )
             pdf.multi_cell(0, 4, disclaimer_body)
             pdf.set_text_color(0, 0, 0)
@@ -3049,18 +3046,3 @@ async def download_pdf(file_number: Optional[str] = None, filename: Optional[str
         return JSONResponse(status_code=404, content={"detail": "Not Found"})
     latest = max(candidates, key=lambda p: os.path.getmtime(p))
     return FileResponse(path=latest, media_type="application/pdf", filename=os.path.basename(latest))
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
