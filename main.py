@@ -2279,7 +2279,7 @@ async def vision_review(
             if re.search(r"(?i)repair\s+cost\s+disclaimer", s):
                 continue
             # track parts list values for fallback subtotal
-            if re.search(r"(?i)^\s*OEM\s+Replacement\s+Parts\s*\(approx\.?\)\s*:?"):
+            if re.search(r"(?i)^\s*OEM\s+Replacement\s+Parts\s*\(approx\.?\)\s*:? ", text, re.MULTILINE):
                 in_parts_block = True
                 body_lines.append(ln)
                 continue
