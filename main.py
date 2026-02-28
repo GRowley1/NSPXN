@@ -755,7 +755,7 @@ def _add_bytes(parts: List[Dict[str,Any]], files_seen: List[str], photo_index: O
             ocr_collected = []
             for idx, im in enumerate(pages[:max_images - used]):
                 b = io.BytesIO()
-                im.save(b, format="JPEG", quality=65, optimize=True)
+                im.save(b, format="JPEG", quality=75, optimize=True)
                 parts.append(_image_part_from_bytes(b.getvalue()))
                 used += 1
                 if photo_index is not None:
@@ -787,7 +787,7 @@ def _add_bytes(parts: List[Dict[str,Any]], files_seen: List[str], photo_index: O
                 scale = max_dim / float(max(im.size))
                 im = im.resize((int(im.width * scale), int(im.height * scale)))
             b = io.BytesIO()
-            im.save(b, format="JPEG", quality=65, optimize=True)
+            im.save(b, format="JPEG", quality=75, optimize=True)
             raw = b.getvalue()
         except Exception:
             im_ref = None
@@ -1987,6 +1987,8 @@ async def vision_review(
         body_labor = _grab_amount(r"^\s*[-*]?\s*Body\s+labor\s*:\s*.*?\*\*\$\s*([0-9][0-9,]*(?:\.[0-9]{2})?)\*\*")
         paint_labor = _grab_amount(r"^\s*[-*]?\s*Paint\s+labor\s*:\s*.*?\*\*\$\s*([0-9][0-9,]*(?:\.[0-9]{2})?)\*\*")
         mech_labor = _grab_amount(r"^\s*[-*]?\s*Mechanical[^:]*:\s*.*?\*\*\$\s*([0-9][0-9,]*(?:\.[0-9]{2})?)\*\*")
+        if mech_labor is None:
+            mech_labor = _grab_amount(r"^\s*[-*]?\s*Mechanical[^=\n]*=\s*\$?\s*([0-9][0-9,]*(?:\.[0-9]{2})?)\b")
         frame_labor = _grab_amount(r"^\s*[-*]?\s*Frame\s+labor\s*:\s*.*?\*\*\$\s*([0-9][0-9,]*(?:\.[0-9]{2})?)\*\*")
 
         paint_mat = _grab_amount(r"^\s*[-*]?\s*Paint\s*&\s*materials\s*:\s*.*?\*\*\$\s*([0-9][0-9,]*(?:\.[0-9]{2})?)\*\*")
@@ -2124,6 +2126,10 @@ async def vision_review(
                 while i < len(lines_in) and not re.search(r"^\s*#{1,6}\s+\w", lines_in[i]):
                     i += 1
                 continue
+            # Also remove any existing tier checkbox lines even if the heading was stripped upstream
+            if re.search(r"(?i)^\s*(?:\[\s*[xX ]\s*\]|[☐☑])\s*(Minor|Moderate|Major|Possible\s+Total\s+Loss)\b", ln):
+                i += 1
+                continue
             out.append(ln)
             i += 1
         t2 = "\n".join(out).rstrip()
@@ -2174,6 +2180,16 @@ async def vision_review(
                 continue
             if re.search(r"(?i)^\s*[-*]\s*Estimated\s+total\b", s):
                 continue
+            # Strip model totals/arithmetic phrasing variants (we print ONE locked total line)
+            if re.search(r"(?i)\bEstimated\s+Repair\s+Total\b", s):
+                continue
+            if re.search(r"(?i)\bPre-?tax\s+total\b", s):
+                continue
+            if re.search(r"(?i)\bApproximate\s+total\s+repair\s+cost\b", s):
+                continue
+            if re.search(r"(?i)\bRounded\b", s) and re.search(r"\$\s*\d", ln):
+                continue
+
 
             # Remove Severity headings/labels here (we render a normalized block later)
             if re.search(r"(?i)^\s*###\s*Severity\s+Tier\b", s):
@@ -2341,8 +2357,8 @@ async def vision_review(
             for ln in severity_lines:
                 mc(ln.replace("☐","[ ]").replace("☑","[x]"))
 
-        # Repair Cost Disclaimer styled like main disclaimer block
-        if disclaimer_text:
+        # Repair Cost Disclaimer intentionally not rendered here (only final combined disclaimer at end)
+        if False and disclaimer_text:
             try:
                 pdf_obj.ln(4)
                 x_left = pdf_obj.l_margin
@@ -2436,7 +2452,7 @@ async def vision_review(
         # -----------------------------
         # NSPXN.com Condition Report PDF
         # -----------------------------
-        SAFE_TOP_Y = 22  # prevent any header/section content from encroaching on the logo area
+        SAFE_TOP_Y = 50  # prevent any header/section content from encroaching on the logo area
     
         def _ensure_safe_top() -> None:
             try:
