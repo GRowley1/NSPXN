@@ -1778,6 +1778,7 @@ async def vision_review(
     # - Prefer model-provided `estimated_costs_markdown` (especially for Photos-Only).
     # - Fail-open: never break the run if cost math cannot be produced.
     # -----------------------
+    tax_rate = None  # default; set later if we compute/lookup tax
     try:
         _existing_costs = (result.get("estimated_costs_markdown") or "").strip()
 
@@ -2247,6 +2248,9 @@ async def vision_review(
             if re.search(r"(?i)^\s*cost\s+summary\b", s):
                 continue
             if re.search(r"(?i)\bApprox\.?\s*Repair\s*Total\b", s):
+                # Also drop any other repair-total style lines that include a dollar amount
+                if re.search(r"(?i)\brepair\s*total\b", s) and "$" in s:
+                    continue
                 continue
             if re.search(r"(?i)^\s*[-*]?\s*tax\s+rate\s+assumption\b", s):
                 continue
@@ -2382,6 +2386,9 @@ async def vision_review(
             if re.search(r"(?i)^\s*cost\s+summary\b", s):
                 continue
             if re.search(r"(?i)\bApprox\.?\s*Repair\s*Total\b", ln):
+                # Catch-all: drop any line that looks like a model-provided repair total
+                if re.search(r"(?i)\brepair\s*total\b", ln) and "$" in ln:
+                    continue
                 continue
 
             cleaned.append(ln)
@@ -3066,6 +3073,9 @@ async def download_pdf(file_number: Optional[str] = None, filename: Optional[str
         return JSONResponse(status_code=404, content={"detail": "Not Found"})
     latest = max(candidates, key=lambda p: os.path.getmtime(p))
     return FileResponse(path=latest, media_type="application/pdf", filename=os.path.basename(latest))
+
+
+
 
 
 
