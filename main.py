@@ -8,6 +8,46 @@ import smtplib  # email transport
 from email.message import EmailMessage
 
 from fpdf import FPDF
+
+# --- PDF text sanitization (FPDF core fonts are not Unicode-safe) ---
+def _pdf_sanitize_text(s: Any) -> str:
+    """Return ASCII/Latin-1 safe text for FPDF core fonts like Helvetica.
+    Replaces common Unicode punctuation that triggers FPDFUnicodeEncodingException.
+    """
+    if s is None:
+        return ""
+    if not isinstance(s, str):
+        s = str(s)
+
+    # Normalize common problematic Unicode characters
+    replacements = {
+        "—": "-",  # em dash
+        "–": "-",  # en dash
+        "−": "-",  # minus sign
+        "•": "-",  # bullet
+        "…": "...",
+        "“": '"',
+        "”": '"',
+        "‘": "'",
+        "’": "'",
+        "\u00A0": " ",  # non-breaking space
+    }
+    for k, v in replacements.items():
+        s = s.replace(k, v)
+
+    # Drop any remaining characters outside latin-1 range (FPDF core fonts limitation)
+    # This is a last-resort guard to prevent runtime crashes.
+    try:
+        s.encode("latin-1")
+        return s
+    except Exception:
+        return s.encode("latin-1", errors="replace").decode("latin-1")
+
+class SafeFPDF(FPDF):
+    """FPDF subclass that sanitizes text before normalization."""
+    def normalize_text(self, text: str) -> str:
+        return super().normalize_text(_pdf_sanitize_text(text))
+
 from docx import Document
 from pdf2image import convert_from_bytes
 from PIL import Image
@@ -2149,7 +2189,7 @@ async def vision_review(
         s = " ".join(_break(t) for t in s.split(" "))
         return s
 
-    pdf = FPDF(); pdf.add_page()
+    pdf = SafeFPDF(); pdf.add_page()
     # --- NSPXN Logo (Top Right, First Page Only) ---
     try:
         logo_path = os.path.join(os.path.dirname(__file__), "ChatGPT logo100725.png")
@@ -3195,6 +3235,10 @@ async def download_pdf(file_number: Optional[str] = None, filename: Optional[str
         return JSONResponse(status_code=404, content={"detail": "Not Found"})
     latest = max(candidates, key=lambda p: os.path.getmtime(p))
     return FileResponse(path=latest, media_type="application/pdf", filename=os.path.basename(latest))
+
+
+
+
 
 
 
