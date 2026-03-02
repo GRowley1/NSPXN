@@ -926,8 +926,6 @@ async def list_client_rules():
 # -----------------------
 # Vision Review
 # -----------------------
-@app.post("/vision-review")
-
 def render_repair_cost_section(pdf, costs_md: str, default_tax_rate: float = 0.0):
     """Render the photos-only repair cost breakdown in a deterministic, non-drifting way.
 
@@ -1153,7 +1151,7 @@ def render_repair_cost_section(pdf, costs_md: str, default_tax_rate: float = 0.0
     pdf.multi_cell(0, 5, f"{_box(tl)} Possible Total Loss Threshold Approaching")
 
 
-
+@app.post("/vision-review")
 async def vision_review(
     request: Request,
     files: Optional[List[UploadFile]] = File(None),
@@ -3197,6 +3195,10 @@ async def download_pdf(file_number: Optional[str] = None, filename: Optional[str
         return JSONResponse(status_code=404, content={"detail": "Not Found"})
     latest = max(candidates, key=lambda p: os.path.getmtime(p))
     return FileResponse(path=latest, media_type="application/pdf", filename=os.path.basename(latest))
+
+
+
+
 
 
 
