@@ -587,11 +587,11 @@ BILATERAL_DAMAGE_MANDATE = (
 )
 
 FRONT_CORNER_ORIENTATION_GUARD = (
-    "\n\nFRONT CORNER ORIENTATION (MANDATORY, MINIMAL):"
-    "\n- Do NOT label front damage as LF/RF (or 'left/right headlight/fender') unless the photo angle clearly establishes the vehicle orientation."
-    "\n- If you have a straight-on FRONT photo: viewer-right corresponds to vehicle-LEFT; viewer-left corresponds to vehicle-RIGHT."
-    "\n- If orientation is not clear, use neutral wording: 'front corner' / 'front headlamp area' instead of left/right."
-    "\n- You may NOT state 'left front fender/headlight intact' or 'right front fender/headlight intact' unless orientation is established; otherwise say 'not clearly shown from this angle.'"
+    "\n\nFRONT / SIDE LABELING (LOCKED):"
+    "\n- For primary_impact and secondary_impact fields: if the damage is at the front end and left/right cannot be proven from the photos, set the value to exactly 'Front' (no qualifiers)."
+    "\n- Do NOT label front damage as LF/RF or Driver/Passenger unless orientation is clearly established by unmistakable cues within the same photo set (e.g., readable badge/plate position combined with a full-front view)."
+    "\n- If orientation is not clearly established, use neutral wording only (e.g., 'front end', 'front headlamp area', 'front corner') and DO NOT assign left/right."
+    "\n- Do not state that a left/right front component is undamaged/intact unless that specific component is clearly shown and its condition is confirmable."
 )
 
 # --- Parts Source Guard (prompt-only; prevents OEM vs Aftermarket drift) ---
@@ -2260,6 +2260,10 @@ async def vision_review(
                 continue
             if re.search(r"(?i)^\s*tax\s*\(apply\b", s):
                 continue
+            if re.search(r"(?i)^\s*[-*]?\s*sales\s+tax\b", s):
+                continue
+            if re.search(r"(?i)\bassumed\b.*\btax\b", s):
+                continue
 
             # Remove Severity headings/labels here (we render a normalized block later)
             if re.search(r"(?i)^\s*###\s*Severity\s+Tier\b", s):
@@ -2482,6 +2486,13 @@ async def vision_review(
             total_val = None
 
 
+        # Fallback: compute a deterministic total from the parsed markdown when components are incomplete
+        if total_val is None:
+            try:
+                total_val = _compute_cost_total_from_md(md)
+            except Exception:
+                total_val = None
+
         # Print body (excluding tier + disclaimer) in a readable, structured way
         if cleaned:
             for ln in cleaned:
@@ -2511,13 +2522,11 @@ async def vision_review(
             pdf_obj.set_font("Helvetica", "", 11)
         except Exception:
             pdf_obj.set_font("Arial", "", 11)
-        mc(f"Tax rate: {float(tax_rate)*100:.3f}%")
-        if isinstance(tax_basis, (int, float)) and isinstance(tax_amt, (int, float)):
+        # Tax lines: only print when we can compute a deterministic numeric basis + tax
+        if isinstance(tax_basis, (int, float)) and isinstance(tax_amt, (int, float)) and tax_rate is not None:
+            mc(f"Tax rate: {float(tax_rate)*100:.3f}%")
             mc(f"Tax basis (parts + paint materials): {_money2(tax_basis)}")
             mc(f"Tax: {_money2(tax_amt)}")
-        else:
-            mc("Tax basis (parts + paint materials): Unable to compute")
-            mc("Tax: Unable to compute")
 
 # Locked total label (always)
         pdf_obj.ln(1)
@@ -2526,7 +2535,7 @@ async def vision_review(
         except Exception:
             pdf_obj.set_font("Arial", "B", 11)
         if total_val is None:
-            pdf_obj.cell(0, 6, "Approximate Repair Cost Total: Unable to compute total from parsed components", ln=True)
+            pdf_obj.cell(0, 6, "Approximate Repair Cost Total: Not available from photo-only components", ln=True)
         else:
             pdf_obj.cell(0, 6, f"Approximate Repair Cost Total: {_money2(total_val)}", ln=True)
         try:
@@ -3073,30 +3082,3 @@ async def download_pdf(file_number: Optional[str] = None, filename: Optional[str
         return JSONResponse(status_code=404, content={"detail": "Not Found"})
     latest = max(candidates, key=lambda p: os.path.getmtime(p))
     return FileResponse(path=latest, media_type="application/pdf", filename=os.path.basename(latest))
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
