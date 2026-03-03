@@ -1612,6 +1612,44 @@ async def vision_review(
         "redaction_status": redaction_status,
     }
 
+    # ---- Minimal Impact Sanitizer (no Left/Right/Driver/Passenger unless proven) ----
+    # Policy A: If any impact label implies left/right/driver/passenger, collapse to Front/Rear/Side.
+    def _sanitize_impact_label(v: Optional[str]) -> str:
+        if v is None:
+            return "N/A"
+        s = str(v).strip()
+        if not s:
+            return "N/A"
+        low = s.lower()
+
+        # Common abbreviations / synonyms
+        front_hit = bool(re.search(r"\bfront\b|\bfrt\b", low)) or bool(re.search(r"\b(?:lf|rf)\b", low))
+        rear_hit  = bool(re.search(r"\brear\b", low)) or bool(re.search(r"\b(?:lr|rr)\b", low))
+        side_hint = bool(re.search(r"\bleft\b|\bright\b|\bdriver\b|\bpassenger\b|\b(?:lf|rf|lr|rr)\b", low))
+
+        if front_hit and side_hint:
+            return "Front"
+        if rear_hit and side_hint:
+            return "Rear"
+        if side_hint:
+            return "Side"
+
+        # Normalize a few common exact values
+        if re.fullmatch(r"(?i)front", s):
+            return "Front"
+        if re.fullmatch(r"(?i)rear", s):
+            return "Rear"
+        if re.fullmatch(r"(?i)side", s):
+            return "Side"
+        return s
+
+    try:
+        result["primary_impact"] = _sanitize_impact_label(result.get("primary_impact"))
+        result["secondary_impact"] = _sanitize_impact_label(result.get("secondary_impact"))
+    except Exception:
+        pass
+
+
     # ✅ FIX #2: Hard fallback so UI never gets an empty narrative ("No narrative generated")
     try:
         sm_tmp = (result.get("summary_markdown") or "").strip()
@@ -2035,38 +2073,29 @@ async def vision_review(
         return round(total, 2)
 
     def _inject_clean_total_line(md_text: str, total_val: Optional[float]) -> str:
-        """Remove any existing total lines and insert a single clean total line."""
+        """Remove any existing 'Approximate Repair Cost Total' lines.
+        Option 1 mode: keep the model's 'Approximate Repair Total: $X' line untouched
+        and do NOT inject any additional total line.
+        """
         if not md_text:
             return md_text or ""
         t = str(md_text).replace("\r\n", "\n").replace("\r", "\n")
 
-        lines = []
+        lines: List[str] = []
         for ln in t.splitlines():
             s = (ln or "").strip()
+            # Remove any injected/legacy 'Repair Cost Total' lines (we will not re-add).
             if re.search(r"(?i)^\s*Approximate\s+Repair\s+Cost\s+Total\s*:", s):
                 continue
             if re.search(r"(?i)^\s*Approximate\s+Total\s+Repair\s+Cost\s*:", s):
                 continue
-            # Also remove any standalone 'Approximate Repair Cost Total: $10,000' variants the model may emit
+            # Also remove any standalone variants with $ on the line
             if re.search(r"(?i)^\s*Approximate\s+Repair\s+Cost\s+Total\b", s) and "$" in s:
                 continue
             lines.append(ln)
-        base = "\n".join(lines).strip()
 
-        if total_val is None:
-            return base
+        return "\n".join(lines).strip()
 
-        # Insert the total line immediately before the Severity Tier heading if present; otherwise append near the end.
-        out_lines = []
-        inserted = False
-        for ln in base.splitlines():
-            if (not inserted) and re.search(r"(?i)^\s*#{1,6}\s*Severity\s+Tier\b", ln.strip()):
-                out_lines.append(f"Approximate Repair Cost Total: {_money2(total_val)}")
-                inserted = True
-            out_lines.append(ln)
-        if not inserted:
-            out_lines.append(f"Approximate Repair Cost Total: {_money2(total_val)}")
-        return "\n".join(out_lines).strip()
 
 
     def _parse_approx_total(md_text: str) -> Optional[float]:
@@ -2080,6 +2109,7 @@ async def vision_review(
             # 1) Prefer explicit label variants
             label_patterns = [
                 r"(?im)^\s*\*\*?\s*Approximate\s+Repair\s+Cost\s+Total\s*[:\-]?\s*\*\*?\s*\$\s*([0-9][0-9,]*(?:\.[0-9]{1,2})?)",
+                r"(?im)^\s*\*\*?\s*Approximate\s+Repair\s+Total\s*[:\-]?\s*\*\*?\s*\$\s*([0-9][0-9,]*(?:\.[0-9]{1,2})?)",
                 r"(?im)^\s*\*\*?\s*Approximate\s+Total\s+Repair\s+Cost\s*[:\-]?\s*\*\*?\s*\$\s*([0-9][0-9,]*(?:\.[0-9]{1,2})?)",
             ]
             for pat in label_patterns:
@@ -2528,16 +2558,7 @@ async def vision_review(
             mc(f"Tax basis (parts + paint materials): {_money2(tax_basis)}")
             mc(f"Tax: {_money2(tax_amt)}")
 
-# Locked total label (always)
-        pdf_obj.ln(1)
-        try:
-            pdf_obj.set_font("Helvetica", "B", 11)
-        except Exception:
-            pdf_obj.set_font("Arial", "B", 11)
-        if total_val is None:
-            pdf_obj.cell(0, 6, "Approximate Repair Cost Total: Not available from photo-only components", ln=True)
-        else:
-            pdf_obj.cell(0, 6, f"Approximate Repair Cost Total: {_money2(total_val)}", ln=True)
+# (Option 1) Do not print a second total line here; keep the model's 'Approximate Repair Total: $X' line.
         try:
             pdf_obj.set_font("Helvetica", "", 11)
         except Exception:
