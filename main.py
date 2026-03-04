@@ -1351,7 +1351,12 @@ async def vision_review(
         "- Use the template below for narrative formatting.\n\n"
         + DETAIL_TEMPLATES.get(ai_intent, DETAIL_TEMPLATES['comprehensive'])
     )
-
+    if ai_intent == "damage_report_from_photos":
+        prompt_text += (
+            "\nNEUTRAL TERMINOLOGY RULE:\n"
+            "- Do not use left, right, driver-side, or passenger-side terminology.\n"
+            "- Use neutral terms only: Front, Rear, Side, one headlamp, one corner.\n"
+        )
 
 
     parts_payload: List[Dict[str,Any]] = []
@@ -1938,6 +1943,32 @@ async def vision_review(
                 "## Approximate Repair Cost Breakdown (Approximation Only)\n"
                 "Unable to generate cost approximation on this run."
             )
+        if ai_intent == "damage_report_from_photos":
+
+            def _neutralize_side_terms(text: str) -> str:
+                if not text:
+                    return text
+
+                replacements = [
+                    (r"(?i)\b(driver|passenger)[-\s]?side\s+headlamp\b", "one headlamp"),
+                    (r"(?i)\b(left|right)[-\s]?front\s+corner\b", "front corner"),
+                    (r"(?i)\b(left|right)[-\s]?rear\s+corner\b", "rear corner"),
+                    (r"(?i)\b(left|right)[-\s]?front\b", "front"),
+                    (r"(?i)\b(left|right)[-\s]?rear\b", "rear"),
+                    (r"(?i)\bdriver[-\s]?side\b", "one side"),
+                    (r"(?i)\bpassenger[-\s]?side\b", "one side"),
+                    (r"(?i)\bleft side\b", "one side"),
+                    (r"(?i)\bright side\b", "one side"),
+                ]
+
+                for pattern, repl in replacements:
+                    text = re.sub(pattern, repl, text)
+
+                return text
+
+            summary_markdown = _neutralize_side_terms(summary_markdown)
+            estimated_costs_markdown = _neutralize_side_terms(estimated_costs_markdown)
+            conclusion = _neutralize_side_terms(conclusion)
 # -----------------------
     # --- Normalize Photos-Only cost markdown for downstream PDF/UI ---
     try:
