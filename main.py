@@ -1970,12 +1970,142 @@ async def vision_review(
             estimated_costs_markdown = _neutralize_side_terms(estimated_costs_markdown)
             conclusion = _neutralize_side_terms(conclusion)
 # -----------------------
-    # --- Normalize Photos-Only cost markdown for downstream PDF/UI ---
+    
+    def _normalize_photos_only_cost_block(_cm: str) -> str:
+        """Deterministic completer for Photos-Only repair cost block.
+        Ensures:
+          - 'Approximate Repair Total: $X' exists (computed from parsed components if missing),
+          - 'Approximate Repair Cost Total ...' is removed,
+          - Severity Tier block exists and exactly one box is checked based on the Approximate Repair Total.
+        """
+        _cm = _cm or ""
+        # Remove any redundant/contradictory total lines
+        _cm = re.sub(r"(?im)^\s*Approximate\s+Repair\s+Cost\s+Total\s*:\s*.*$", "", _cm).strip()
+        _cm = re.sub(r"(?im)^\s*Approximate\s+Repair\s+Cost\s+Total\s+.*$", "", _cm).strip()
+
+        # Extract existing Approximate Repair Total
+        m = re.search(r"(?im)^\s*\*\*?\s*Approximate\s+Repair\s+Total\s*:\s*\$\s*([0-9][0-9,]*\.?[0-9]{0,2})", _cm)
+        approx_total = None
+        if m:
+            try:
+                approx_total = float(m.group(1).replace(",", ""))
+            except Exception:
+                approx_total = None
+
+        # If missing, compute from component lines (deterministic)
+        if approx_total is None:
+            def _money(s: str) -> float:
+                try:
+                    return float(s.replace(",", ""))
+                except Exception:
+                    return 0.0
+
+            parts = None
+            labor = None
+            pm = None
+            mech = 0.0
+            setup = 0.0
+            frame = 0.0
+            tax = None
+
+            # Prefer explicit subtotals if present
+            m_parts = re.search(r"(?im)^\s*Parts\s+Subtotal\s*:\s*\$\s*([0-9][0-9,]*\.?[0-9]{0,2})", _cm)
+            if m_parts:
+                parts = _money(m_parts.group(1))
+
+            m_labor = re.search(r"(?im)^\s*Labor\s+Subtotal\s*\(.*?\)\s*:\s*\$\s*([0-9][0-9,]*\.?[0-9]{0,2})", _cm)
+            if m_labor:
+                labor = _money(m_labor.group(1))
+
+            m_pm = re.search(r"(?im)^\s*-\s*Paint\s*&\s*materials\s*:\s*\$\s*([0-9][0-9,]*\.?[0-9]{0,2})", _cm)
+            if m_pm:
+                pm = _money(m_pm.group(1))
+
+            for label, varname in [
+                ("Mechanical/diagnostic", "mech"),
+                ("Setup\s*&\s*Measure", "setup"),
+                ("Frame/measure", "frame"),
+            ]:
+                mm = re.search(rf"(?im)^\s*-\s*{label}\s*:\s*\$\s*([0-9][0-9,]*\.?[0-9]{{0,2}})", _cm)
+                if mm:
+                    val = _money(mm.group(1))
+                    if varname == "mech":
+                        mech = val
+                    elif varname == "setup":
+                        setup = val
+                    elif varname == "frame":
+                        frame = val
+
+            m_tax = re.search(r"(?im)^\s*Tax\s*:\s*\$\s*([0-9][0-9,]*\.?[0-9]{0,2})", _cm)
+            if m_tax:
+                tax = _money(m_tax.group(1))
+
+            # Fallback: sum body + paint labor line items if labor subtotal not present
+            if labor is None:
+                body = 0.0
+                paint = 0.0
+                m_body = re.search(r"(?im)^\s*-\s*Body\s+labor\s*:\s*.*?=\s*\$\s*([0-9][0-9,]*\.?[0-9]{0,2})", _cm)
+                if m_body:
+                    body = _money(m_body.group(1))
+                m_paint = re.search(r"(?im)^\s*-\s*Paint\s+labor\s*:\s*.*?=\s*\$\s*([0-9][0-9,]*\.?[0-9]{0,2})", _cm)
+                if m_paint:
+                    paint = _money(m_paint.group(1))
+                labor = body + paint
+
+            # If parts subtotal missing but tax basis present, use tax basis as proxy parts+pm (deterministic)
+            if parts is None:
+                m_basis = re.search(r"(?im)^\s*Tax\s+basis\s*\(parts\s*\+\s*paint\s+materials\)\s*:\s*\$\s*([0-9][0-9,]*\.?[0-9]{0,2})", _cm)
+                if m_basis:
+                    parts = _money(m_basis.group(1))
+
+            # If still missing pieces, we can't compute deterministically
+            if parts is not None and labor is not None:
+                pm_val = pm if pm is not None else 0.0
+                tax_val = tax if tax is not None else 0.0
+                approx_total = float(parts + labor + pm_val + mech + setup + frame + tax_val)
+
+                # Insert Approximate Repair Total line immediately before Severity Tier if present, else append
+                total_line = f"**Approximate Repair Total: ${approx_total:,.2f}**"
+                if re.search(r"(?im)^\s*Severity\s+Tier\s*$", _cm):
+                    _cm = re.sub(r"(?im)^\s*Severity\s+Tier\s*$", total_line + "\nSeverity Tier", _cm)
+                else:
+                    _cm = (_cm + "\n\n" + total_line).strip()
+
+        # Remove any existing Severity Tier block and rebuild deterministically
+        _cm = re.sub(
+            r"(?is)\n\s*Severity\s+Tier\s*\n\s*\[[ xX]\]\s*Minor.*?(?:\n\s*\[[ xX]\]\s*Possible\s+Total\s+Loss.*)?\s*$",
+            "",
+            _cm,
+        ).strip()
+
+        # Build tier checkmarks based on approx_total (if still None, leave all unchecked but keep block)
+        checked_minor = checked_mod = checked_major = checked_tl = " "
+        if isinstance(approx_total, (int, float)):
+            if approx_total < 3500:
+                checked_minor = "x"
+            elif approx_total < 10000:
+                checked_mod = "x"
+            else:
+                checked_major = "x"
+                # Optional TL threshold approaching if very high (keep conservative)
+                if approx_total >= 20000:
+                    checked_tl = "x"
+
+        tier_block = (
+            "Severity Tier\n"
+            f"[{checked_minor}] Minor (< $3,500)\n"
+            f"[{checked_mod}] Moderate ($3,500-$10,000)\n"
+            f"[{checked_major}] Major ($10,000+)\n"
+            f"[{checked_tl}] Possible Total Loss Threshold Approaching"
+        )
+
+        return (_cm + "\n\n" + tier_block).strip()
+
+# --- Normalize Photos-Only cost markdown for downstream PDF/UI ---
     try:
         if ai_intent == "damage_report_from_photos":
             _cm = result.get("estimated_costs_markdown") or ""
-            _cm = _strip_unwanted_cost_lines_for_pdf(_cm)
-            _cm = _enforce_severity_tier_checkmarks(_cm)
+            _cm = _normalize_photos_only_cost_block(_cm)
             result["estimated_costs_markdown"] = _cm
     except Exception:
         pass
@@ -3134,3 +3264,4 @@ async def download_pdf(file_number: Optional[str] = None, filename: Optional[str
         return JSONResponse(status_code=404, content={"detail": "Not Found"})
     latest = max(candidates, key=lambda p: os.path.getmtime(p))
     return FileResponse(path=latest, media_type="application/pdf", filename=os.path.basename(latest))
+
