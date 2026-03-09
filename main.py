@@ -1970,115 +1970,92 @@ async def vision_review(
             estimated_costs_markdown = _neutralize_side_terms(estimated_costs_markdown)
             conclusion = _neutralize_side_terms(conclusion)
 # -----------------------
-    
     def _normalize_photos_only_cost_block(_cm: str) -> str:
-        """Deterministic completer for Photos-Only repair cost block.
-        Ensures:
-          - 'Approximate Repair Total: $X' exists (computed from parsed components if missing),
-          - 'Approximate Repair Cost Total ...' is removed,
-          - Severity Tier block exists and exactly one box is checked based on the Approximate Repair Total.
+        """Deterministic tail completer for Photos-Only cost markdown.
+        If tax/total are missing, compute and inject the canonical lines and
+        replace Severity Tier so exactly one box is checked from TOTAL.
         """
         _cm = _cm or ""
-        # Remove any redundant/contradictory total lines
-        _cm = re.sub(r"(?im)^\s*Approximate\s+Repair\s+Cost\s+Total\s*:\s*.*$", "", _cm).strip()
-        _cm = re.sub(r"(?im)^\s*Approximate\s+Repair\s+Cost\s+Total\s+.*$", "", _cm).strip()
+        _cm = re.sub(r"(?im)^\s*Approximate\s+Repair\s+Cost\s+Total\s*:.*$", "", _cm).strip()
+        _cm = re.sub(r"(?im)^\s*Approximate\s+Repair\s+Cost\s+Total.*$", "", _cm).strip()
 
-        # Extract existing Approximate Repair Total
-        m = re.search(r"(?im)^\s*\*\*?\s*Approximate\s+Repair\s+Total\s*:\s*\$\s*([0-9][0-9,]*\.?[0-9]{0,2})", _cm)
-        approx_total = None
-        if m:
+        def _moneyf(s: str) -> float:
             try:
-                approx_total = float(m.group(1).replace(",", ""))
+                return float(str(s).replace(",", "").strip())
             except Exception:
-                approx_total = None
+                return 0.0
 
-        # If missing, compute from component lines (deterministic)
-        if approx_total is None:
-            def _money(s: str) -> float:
-                try:
-                    return float(s.replace(",", ""))
-                except Exception:
-                    return 0.0
+        def _grab(pats: List[str]) -> Optional[float]:
+            for pat in pats:
+                m = re.search(pat, _cm, flags=re.IGNORECASE | re.MULTILINE)
+                if m:
+                    try:
+                        return _moneyf(m.group(1))
+                    except Exception:
+                        pass
+            return None
 
-            parts = None
-            labor = None
-            pm = None
-            mech = 0.0
-            setup = 0.0
-            frame = 0.0
-            tax = None
+        parts = _grab([
+            r"^\s*[-*]?\s*Estimated\s+parts\s+subtotal\s*:\s*\$\s*([0-9][0-9,]*(?:\.[0-9]{1,2})?)",
+            r"^\s*[-*]?\s*Parts\s+subtotal\s*\(approx\.?\)\s*=\s*\$\s*([0-9][0-9,]*(?:\.[0-9]{1,2})?)",
+            r"^\s*[-*]?\s*Parts\s+subtotal\s*\(approx\.?\)\s*:\s*\$\s*([0-9][0-9,]*(?:\.[0-9]{1,2})?)",
+            r"^\s*[-*]?\s*Parts\s+subtotal\s*=\s*\$\s*([0-9][0-9,]*(?:\.[0-9]{1,2})?)",
+            r"^\s*[-*]?\s*Parts\s+subtotal\s*:\s*\$\s*([0-9][0-9,]*(?:\.[0-9]{1,2})?)",
+        ])
+        labor = _grab([
+            r"^\s*[-*]?\s*Labor\s+subtotal\s*\([^\n]*?\)\s*:\s*\$\s*([0-9][0-9,]*(?:\.[0-9]{1,2})?)",
+            r"^\s*[-*]?\s*Labor\s+subtotal\s*=\s*\$\s*([0-9][0-9,]*(?:\.[0-9]{1,2})?)",
+            r"^\s*[-*]?\s*Labor\s+subtotal\s*:\s*\$\s*([0-9][0-9,]*(?:\.[0-9]{1,2})?)",
+        ])
+        paint_materials = _grab([
+            r"^\s*[-*]?\s*Paint\s*&\s*materials\s*=\s*\$\s*([0-9][0-9,]*(?:\.[0-9]{1,2})?)",
+            r"^\s*[-*]?\s*Paint\s*&\s*materials\s*:\s*\$\s*([0-9][0-9,]*(?:\.[0-9]{1,2})?)",
+            r"^\s*[-*]?\s*Paint\s+materials\s*=\s*\$\s*([0-9][0-9,]*(?:\.[0-9]{1,2})?)",
+            r"^\s*[-*]?\s*Paint\s+materials\s*:\s*\$\s*([0-9][0-9,]*(?:\.[0-9]{1,2})?)",
+        ])
+        tax_amt = _grab([
+            r"^\s*[-*]?\s*Sales\s+tax\s*\(assumed\s*7%\s*for\s*approximation\)\s*=\s*\$\s*([0-9][0-9,]*(?:\.[0-9]{1,2})?)",
+            r"^\s*[-*]?\s*Tax\s*:\s*\$\s*([0-9][0-9,]*(?:\.[0-9]{1,2})?)",
+        ])
+        approx_total = _grab([
+            r"^\s*\*\*?\s*Approximate\s+Repair\s+Total\s*:\s*\$\s*([0-9][0-9,]*(?:\.[0-9]{1,2})?)",
+        ])
 
-            # Prefer explicit subtotals if present
-            m_parts = re.search(r"(?im)^\s*Parts\s+Subtotal\s*:\s*\$\s*([0-9][0-9,]*\.?[0-9]{0,2})", _cm)
-            if m_parts:
-                parts = _money(m_parts.group(1))
+        if labor is None:
+            body = _grab([r"^\s*[-*]?\s*Body(?:\s+labor)?\s*:\s*.*?=\s*\$\s*([0-9][0-9,]*(?:\.[0-9]{1,2})?)"]) or 0.0
+            paint = _grab([r"^\s*[-*]?\s*Paint\s+labor\s*:\s*.*?=\s*\$\s*([0-9][0-9,]*(?:\.[0-9]{1,2})?)"]) or 0.0
+            mechanical = _grab([r"^\s*[-*]?\s*Mechanical(?:/SRS/Glass|/diagnostic)?\s*:\s*.*?=\s*\$\s*([0-9][0-9,]*(?:\.[0-9]{1,2})?)"]) or 0.0
+            setup = _grab([r"^\s*[-*]?\s*Setup\s*&\s*Measure\s*:\s*\$\s*([0-9][0-9,]*(?:\.[0-9]{1,2})?)"]) or 0.0
+            frame = _grab([r"^\s*[-*]?\s*Frame/measure\s*:\s*\$\s*([0-9][0-9,]*(?:\.[0-9]{1,2})?)"]) or 0.0
+            calc_labor = body + paint + mechanical + setup + frame
+            if calc_labor > 0:
+                labor = calc_labor
 
-            m_labor = re.search(r"(?im)^\s*Labor\s+Subtotal\s*\(.*?\)\s*:\s*\$\s*([0-9][0-9,]*\.?[0-9]{0,2})", _cm)
-            if m_labor:
-                labor = _money(m_labor.group(1))
+        if tax_amt is None and parts is not None and paint_materials is not None:
+            tax_amt = round((parts + paint_materials) * 0.07, 2)
+        if approx_total is None and parts is not None and paint_materials is not None and labor is not None and tax_amt is not None:
+            approx_total = round(labor + parts + paint_materials + tax_amt, 2)
 
-            m_pm = re.search(r"(?im)^\s*-\s*Paint\s*&\s*materials\s*:\s*\$\s*([0-9][0-9,]*\.?[0-9]{0,2})", _cm)
-            if m_pm:
-                pm = _money(m_pm.group(1))
+        cleaned = []
+        for ln in _cm.splitlines():
+            s = (ln or "").strip()
+            if re.search(r"(?i)^\s*[-*]?\s*Sales\s+tax\s*\(assumed\s*7%\s*for\s*approximation\)", s):
+                continue
+            if re.search(r"(?i)^\s*\*{0,2}\s*Approximate\s+Repair\s+Total\s*:", s):
+                continue
+            if re.search(r"(?i)^\s*Severity\s+Tier\s*$", s):
+                continue
+            if re.search(r"(?i)^\s*\[[ xX]\]\s*(Minor|Moderate|Major|Possible\s+Total\s+Loss)", s):
+                continue
+            cleaned.append(ln)
+        _cm = "\n".join(cleaned).rstrip()
 
-            for label, varname in [
-                ("Mechanical/diagnostic", "mech"),
-                ("Setup\s*&\s*Measure", "setup"),
-                ("Frame/measure", "frame"),
-            ]:
-                mm = re.search(rf"(?im)^\s*-\s*{label}\s*:\s*\$\s*([0-9][0-9,]*\.?[0-9]{{0,2}})", _cm)
-                if mm:
-                    val = _money(mm.group(1))
-                    if varname == "mech":
-                        mech = val
-                    elif varname == "setup":
-                        setup = val
-                    elif varname == "frame":
-                        frame = val
+        tail = []
+        if tax_amt is not None:
+            tail.append(f"- Sales tax (assumed 7% for approximation) = ${tax_amt:,.2f}")
+        if approx_total is not None:
+            tail.append(f"**Approximate Repair Total: ${approx_total:,.2f}**")
 
-            m_tax = re.search(r"(?im)^\s*Tax\s*:\s*\$\s*([0-9][0-9,]*\.?[0-9]{0,2})", _cm)
-            if m_tax:
-                tax = _money(m_tax.group(1))
-
-            # Fallback: sum body + paint labor line items if labor subtotal not present
-            if labor is None:
-                body = 0.0
-                paint = 0.0
-                m_body = re.search(r"(?im)^\s*-\s*Body\s+labor\s*:\s*.*?=\s*\$\s*([0-9][0-9,]*\.?[0-9]{0,2})", _cm)
-                if m_body:
-                    body = _money(m_body.group(1))
-                m_paint = re.search(r"(?im)^\s*-\s*Paint\s+labor\s*:\s*.*?=\s*\$\s*([0-9][0-9,]*\.?[0-9]{0,2})", _cm)
-                if m_paint:
-                    paint = _money(m_paint.group(1))
-                labor = body + paint
-
-            # If parts subtotal missing but tax basis present, use tax basis as proxy parts+pm (deterministic)
-            if parts is None:
-                m_basis = re.search(r"(?im)^\s*Tax\s+basis\s*\(parts\s*\+\s*paint\s+materials\)\s*:\s*\$\s*([0-9][0-9,]*\.?[0-9]{0,2})", _cm)
-                if m_basis:
-                    parts = _money(m_basis.group(1))
-
-            # If still missing pieces, we can't compute deterministically
-            if parts is not None and labor is not None:
-                pm_val = pm if pm is not None else 0.0
-                tax_val = tax if tax is not None else 0.0
-                approx_total = float(parts + labor + pm_val + mech + setup + frame + tax_val)
-
-                # Insert Approximate Repair Total line immediately before Severity Tier if present, else append
-                total_line = f"**Approximate Repair Total: ${approx_total:,.2f}**"
-                if re.search(r"(?im)^\s*Severity\s+Tier\s*$", _cm):
-                    _cm = re.sub(r"(?im)^\s*Severity\s+Tier\s*$", total_line + "\nSeverity Tier", _cm)
-                else:
-                    _cm = (_cm + "\n\n" + total_line).strip()
-
-        # Remove any existing Severity Tier block and rebuild deterministically
-        _cm = re.sub(
-            r"(?is)\n\s*Severity\s+Tier\s*\n\s*\[[ xX]\]\s*Minor.*?(?:\n\s*\[[ xX]\]\s*Possible\s+Total\s+Loss.*)?\s*$",
-            "",
-            _cm,
-        ).strip()
-
-        # Build tier checkmarks based on approx_total (if still None, leave all unchecked but keep block)
         checked_minor = checked_mod = checked_major = checked_tl = " "
         if isinstance(approx_total, (int, float)):
             if approx_total < 3500:
@@ -2087,21 +2064,18 @@ async def vision_review(
                 checked_mod = "x"
             else:
                 checked_major = "x"
-                # Optional TL threshold approaching if very high (keep conservative)
-                if approx_total >= 20000:
-                    checked_tl = "x"
 
-        tier_block = (
-            "Severity Tier\n"
-            f"[{checked_minor}] Minor (< $3,500)\n"
-            f"[{checked_mod}] Moderate ($3,500-$10,000)\n"
-            f"[{checked_major}] Major ($10,000+)\n"
-            f"[{checked_tl}] Possible Total Loss Threshold Approaching"
-        )
+        tail.extend([
+            "Severity Tier",
+            f"[{checked_minor}] Minor (< $3,500)",
+            f"[{checked_mod}] Moderate ($3,500-$10,000)",
+            f"[{checked_major}] Major ($10,000+)",
+            f"[{checked_tl}] Possible Total Loss Threshold Approaching",
+        ])
+        return (_cm.rstrip() + "\n\n" + "\n".join(tail)).strip()
 
-        return (_cm + "\n\n" + tier_block).strip()
-
-# --- Normalize Photos-Only cost markdown for downstream PDF/UI ---
+# -----------------------
+    # --- Normalize Photos-Only cost markdown for downstream PDF/UI ---
     try:
         if ai_intent == "damage_report_from_photos":
             _cm = result.get("estimated_costs_markdown") or ""
@@ -2591,7 +2565,7 @@ async def vision_review(
         # Deterministic total + tax lines (locked; never allow tier boundary dollars like $10,000 to become a total)
         # NOTE: We compute tax from (parts + paint materials) only; labor is never taxed.
         if tax_rate is None or not isinstance(tax_rate, (int, float)) or tax_rate <= 0:
-            tax_rate = 0.08  # safe fallback if lookup fails
+            tax_rate = 0.07  # locked photos-only approximation fallback if lookup fails
 
         def _grab_money_line(pats: List[str]) -> Optional[float]:
             for pat in pats:
@@ -2622,6 +2596,9 @@ async def vision_review(
 
         # Parts subtotal dollars (explicit if present)
         parts_sub = _grab_money_line([
+            r"^\s*[-*]?\s*Estimated\s+parts\s+subtotal\s*:\s*\$\s*([0-9][0-9,]*(?:\.[0-9]{2})?)\b",
+            r"^\s*[-*]?\s*Parts\s+subtotal\s*\(approx\.?\)\s*=\s*\$\s*([0-9][0-9,]*(?:\.[0-9]{2})?)\b",
+            r"^\s*[-*]?\s*Parts\s+subtotal\s*\(approx\.?\)\s*:\s*\$\s*([0-9][0-9,]*(?:\.[0-9]{2})?)\b",
             r"^\s*[-*]?\s*Parts\s+subtotal\s*:\s*\*\*\$\s*([0-9][0-9,]*(?:\.[0-9]{2})?)\*\*",
             r"^\s*[-*]?\s*Parts\s+subtotal\s*:\s*\$\s*([0-9][0-9,]*(?:\.[0-9]{2})?)\b",
             r"^\s*[-*]?\s*Parts\s*:\s*\*\*\$\s*([0-9][0-9,]*(?:\.[0-9]{2})?)\*\*",
@@ -3264,4 +3241,5 @@ async def download_pdf(file_number: Optional[str] = None, filename: Optional[str
         return JSONResponse(status_code=404, content={"detail": "Not Found"})
     latest = max(candidates, key=lambda p: os.path.getmtime(p))
     return FileResponse(path=latest, media_type="application/pdf", filename=os.path.basename(latest))
+
 
