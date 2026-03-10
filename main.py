@@ -1977,7 +1977,7 @@ async def vision_review(
         """
         _cm = _cm or ""
         _cm = re.sub(r"(?im)^\s*Approximate\s+Repair\s+Cost\s+Total\s*:.*$", "", _cm).strip()
-        _cm = re.sub(r"(?im)^\s*Approximate\s+Repair\s+Cost\s+Total.*$", "", _cm).strip()
+        _cm = re.sub(r"(?im)^\s*Approximate\s+Repair\s+Cost\s+Total\b.*$", "", _cm).strip()
 
         def _moneyf(s: str) -> float:
             try:
@@ -2010,6 +2010,8 @@ async def vision_review(
         paint_materials = _grab([
             r"^\s*[-*]?\s*Paint\s*&\s*materials\s*=\s*\$\s*([0-9][0-9,]*(?:\.[0-9]{1,2})?)",
             r"^\s*[-*]?\s*Paint\s*&\s*materials\s*:\s*\$\s*([0-9][0-9,]*(?:\.[0-9]{1,2})?)",
+            r"^\s*[-*]?\s*Paint\s+materials\s+subtotal\s*=\s*\$\s*([0-9][0-9,]*(?:\.[0-9]{1,2})?)",
+            r"^\s*[-*]?\s*Paint\s+materials\s+subtotal\s*:\s*\$\s*([0-9][0-9,]*(?:\.[0-9]{1,2})?)",
             r"^\s*[-*]?\s*Paint\s+materials\s*=\s*\$\s*([0-9][0-9,]*(?:\.[0-9]{1,2})?)",
             r"^\s*[-*]?\s*Paint\s+materials\s*:\s*\$\s*([0-9][0-9,]*(?:\.[0-9]{1,2})?)",
         ])
@@ -2022,11 +2024,26 @@ async def vision_review(
         ])
 
         if labor is None:
-            body = _grab([r"^\s*[-*]?\s*Body(?:\s+labor)?\s*:\s*.*?=\s*\$\s*([0-9][0-9,]*(?:\.[0-9]{1,2})?)"]) or 0.0
-            paint = _grab([r"^\s*[-*]?\s*Paint\s+labor\s*:\s*.*?=\s*\$\s*([0-9][0-9,]*(?:\.[0-9]{1,2})?)"]) or 0.0
-            mechanical = _grab([r"^\s*[-*]?\s*Mechanical(?:/SRS/Glass|/diagnostic)?\s*:\s*.*?=\s*\$\s*([0-9][0-9,]*(?:\.[0-9]{1,2})?)"]) or 0.0
-            setup = _grab([r"^\s*[-*]?\s*Setup\s*&\s*Measure\s*:\s*\$\s*([0-9][0-9,]*(?:\.[0-9]{1,2})?)"]) or 0.0
-            frame = _grab([r"^\s*[-*]?\s*Frame/measure\s*:\s*\$\s*([0-9][0-9,]*(?:\.[0-9]{1,2})?)"]) or 0.0
+            body = _grab([
+                r"^\s*[-*]?\s*Body(?:\s+labor)?\s*:\s*.*?=\s*\$\s*([0-9][0-9,]*(?:\.[0-9]{1,2})?)",
+                r"^\s*[-*]?\s*Body(?:\s+labor)?\s*:\s*\$\s*([0-9][0-9,]*(?:\.[0-9]{1,2})?)",
+            ]) or 0.0
+            paint = _grab([
+                r"^\s*[-*]?\s*Paint\s+labor\s*:\s*.*?=\s*\$\s*([0-9][0-9,]*(?:\.[0-9]{1,2})?)",
+                r"^\s*[-*]?\s*Paint\s+labor\s*:\s*\$\s*([0-9][0-9,]*(?:\.[0-9]{1,2})?)",
+            ]) or 0.0
+            mechanical = _grab([
+                r"^\s*[-*]?\s*Mechanical(?:/SRS/Glass|/diagnostic)?\s*:\s*.*?=\s*\$\s*([0-9][0-9,]*(?:\.[0-9]{1,2})?)",
+                r"^\s*[-*]?\s*Mechanical(?:/SRS/Glass|/diagnostic)?\s*:\s*\$\s*([0-9][0-9,]*(?:\.[0-9]{1,2})?)",
+            ]) or 0.0
+            setup = _grab([
+                r"^\s*[-*]?\s*Setup\s*&\s*Measure\s*:\s*.*?=\s*\$\s*([0-9][0-9,]*(?:\.[0-9]{1,2})?)",
+                r"^\s*[-*]?\s*Setup\s*&\s*Measure\s*:\s*\$\s*([0-9][0-9,]*(?:\.[0-9]{1,2})?)",
+            ]) or 0.0
+            frame = _grab([
+                r"^\s*[-*]?\s*Frame/measure\s*:\s*.*?=\s*\$\s*([0-9][0-9,]*(?:\.[0-9]{1,2})?)",
+                r"^\s*[-*]?\s*Frame/measure\s*:\s*\$\s*([0-9][0-9,]*(?:\.[0-9]{1,2})?)",
+            ]) or 0.0
             calc_labor = body + paint + mechanical + setup + frame
             if calc_labor > 0:
                 labor = calc_labor
@@ -2073,7 +2090,6 @@ async def vision_review(
             f"[{checked_tl}] Possible Total Loss Threshold Approaching",
         ])
         return (_cm.rstrip() + "\n\n" + "\n".join(tail)).strip()
-
 # -----------------------
     # --- Normalize Photos-Only cost markdown for downstream PDF/UI ---
     try:
@@ -2412,7 +2428,7 @@ async def vision_review(
             # Strip additional model cost-summary headings and totals (we print our own deterministic tax/total lines)
             if re.search(r"(?i)^\s*cost\s+summary\b", s):
                 continue
-            if re.search(r"(?i)\bApprox\.?\s*Repair\s*Total\b", s):
+            if re.search(r"(?i)\bApprox\.?\s*Repair\s*Total\b", s) and not re.search(r"(?i)^\s*\*{0,2}\s*Approximate\s+Repair\s+Total\s*:\s*\$\s*[0-9]", s):
                 # Also drop any other repair-total style lines that include a dollar amount
                 if re.search(r"(?i)\brepair\s*total\b", s) and "$" in s:
                     continue
@@ -2425,9 +2441,9 @@ async def vision_review(
                 continue
             if re.search(r"(?i)^\s*tax\s*\(apply\b", s):
                 continue
-            if re.search(r"(?i)^\s*[-*]?\s*sales\s+tax\b", s):
+            if re.search(r"(?i)^\s*[-*]?\s*sales\s+tax\b", s) and not re.search(r"(?i)^\s*[-*]?\s*sales\s+tax\s*\(assumed\s*7%\s*for\s*approximation\)", s):
                 continue
-            if re.search(r"(?i)\bassumed\b.*\btax\b", s):
+            if re.search(r"(?i)\bassumed\b.*\btax\b", s) and not re.search(r"(?i)^\s*[-*]?\s*sales\s+tax\s*\(assumed\s*7%\s*for\s*approximation\)", s):
                 continue
 
             # Remove Severity headings/labels here (we render a normalized block later)
@@ -2554,7 +2570,7 @@ async def vision_review(
             # Strip model-provided Cost Summary headings and any model total lines
             if re.search(r"(?i)^\s*cost\s+summary\b", s):
                 continue
-            if re.search(r"(?i)\bApprox\.?\s*Repair\s*Total\b", ln):
+            if re.search(r"(?i)\bApprox\.?\s*Repair\s*Total\b", ln) and not re.search(r"(?i)^\s*\*{0,2}\s*Approximate\s+Repair\s+Total\s*:\s*\$\s*[0-9]", s):
                 # Catch-all: drop any line that looks like a model-provided repair total
                 if re.search(r"(?i)\brepair\s*total\b", ln) and "$" in ln:
                     continue
@@ -2590,6 +2606,8 @@ async def vision_review(
         # Paint materials dollars (STRICT: only from the paint materials line)
         paint_mat = _grab_money_line([
             r"^\s*[-*]?\s*Paint\s*(?:&\s*|and\s*)?materials\s*:\s*.*?\*\*\$\s*([0-9][0-9,]*(?:\.[0-9]{2})?)\*\*",
+            r"^\s*[-*]?\s*Paint\s+materials\s+subtotal\s*:\s*\$\s*([0-9][0-9,]*(?:\.[0-9]{2})?)\b",
+            r"^\s*[-*]?\s*Paint\s+materials\s+subtotal\s*=\s*\$\s*([0-9][0-9,]*(?:\.[0-9]{2})?)\b",
             r"^\s*[-*]?\s*Paint\s*(?:&\s*|and\s*)?materials\s*:\s*\$\s*([0-9][0-9,]*(?:\.[0-9]{2})?)\b",
             r"^\s*[-*]?\s*Paint\s*&\s*materials\s*:\s*\$\s*([0-9][0-9,]*(?:\.[0-9]{2})?)\b",
         ])
@@ -2599,6 +2617,7 @@ async def vision_review(
             r"^\s*[-*]?\s*Estimated\s+parts\s+subtotal\s*:\s*\$\s*([0-9][0-9,]*(?:\.[0-9]{2})?)\b",
             r"^\s*[-*]?\s*Parts\s+subtotal\s*\(approx\.?\)\s*=\s*\$\s*([0-9][0-9,]*(?:\.[0-9]{2})?)\b",
             r"^\s*[-*]?\s*Parts\s+subtotal\s*\(approx\.?\)\s*:\s*\$\s*([0-9][0-9,]*(?:\.[0-9]{2})?)\b",
+            r"^\s*[-*]?\s*Parts\s+subtotal\s*=\s*\$\s*([0-9][0-9,]*(?:\.[0-9]{2})?)\b",
             r"^\s*[-*]?\s*Parts\s+subtotal\s*:\s*\*\*\$\s*([0-9][0-9,]*(?:\.[0-9]{2})?)\*\*",
             r"^\s*[-*]?\s*Parts\s+subtotal\s*:\s*\$\s*([0-9][0-9,]*(?:\.[0-9]{2})?)\b",
             r"^\s*[-*]?\s*Parts\s*:\s*\*\*\$\s*([0-9][0-9,]*(?:\.[0-9]{2})?)\*\*",
@@ -3241,5 +3260,6 @@ async def download_pdf(file_number: Optional[str] = None, filename: Optional[str
         return JSONResponse(status_code=404, content={"detail": "Not Found"})
     latest = max(candidates, key=lambda p: os.path.getmtime(p))
     return FileResponse(path=latest, media_type="application/pdf", filename=os.path.basename(latest))
+
 
 
