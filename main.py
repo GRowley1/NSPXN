@@ -2181,10 +2181,16 @@ async def vision_review(
             mech_labor = _grab_amount(r"^\s*[-*]?\s*Mechanical[^=\n]*=\s*\$?\s*([0-9][0-9,]*(?:\.[0-9]{2})?)\b")
         frame_labor = _grab_amount(r"^\s*[-*]?\s*Frame\s+labor\s*:\s*.*?\*\*\$\s*([0-9][0-9,]*(?:\.[0-9]{2})?)\*\*")
 
-        # Paint materials / refinish materials dollars (strictly from the paint-materials line)
-        paint_mat = _grab_amount(r"^\s*[-*]?\s*Paint\s*(?:&\s*|and\s*)?materials\s*:\s*.*?\*\*\$\s*([0-9][0-9,]*(?:\.[0-9]{2})?)\*\*")
-        if paint_mat is None:
-            paint_mat = _grab_amount(r"^\s*[-*]?\s*Paint\s*&\s*materials\s*:\s*.*?\*\*\$\s*([0-9][0-9,]*(?:\.[0-9]{2})?)\*\*")
+        # Paint materials dollars (prefer subtotal/extended amount lines; never the $/hr rate)
+        paint_mat = None
+        for _pat in [
+            r"^\s*[-*]?\s*Paint\s+materials\s+subtotal\s*[:=]\s*\$\s*([0-9][0-9,]*(?:\.[0-9]{2})?)",
+            r"^\s*[-*]?\s*Paint\s*(?:&\s*|and\s*)?materials\s*[:=]\s*\*\*\$\s*([0-9][0-9,]*(?:\.[0-9]{2})?)\*\*",
+            r"^\s*[-*]?\s*Paint\s*(?:&\s*|and\s*)?materials\s*[:=]\s*\$\s*([0-9][0-9,]*(?:\.[0-9]{2})?)",
+        ]:
+            paint_mat = _grab_amount(_pat)
+            if paint_mat is not None:
+                break
 
         # Parts subtotal dollars
         parts_sub = _grab_amount(r"^\s*\*\*\s*Estimated\s+parts\s+subtotal\s*:\s*\$\s*([0-9][0-9,]*(?:\.[0-9]{2})?)")
@@ -2603,13 +2609,11 @@ async def vision_review(
         frame_labor = _grab_money_line([r"^\s*[-*]?\s*Frame\s+labor\s*:\s*.*?\*\*\$\s*([0-9][0-9,]*(?:\.[0-9]{2})?)\*\*",
                                        r"^\s*[-*]?\s*Frame\s+labor\s*:\s*.*?=\s*\$\s*([0-9][0-9,]*(?:\.[0-9]{2})?)\b"])
 
-        # Paint materials dollars (STRICT: only from the paint materials line)
+        # Paint materials dollars (STRICT: use subtotal/extended amount lines only; never the $/hr rate)
         paint_mat = _grab_money_line([
-            r"^\s*[-*]?\s*Paint\s*(?:&\s*|and\s*)?materials\s*:\s*.*?\*\*\$\s*([0-9][0-9,]*(?:\.[0-9]{2})?)\*\*",
-            r"^\s*[-*]?\s*Paint\s+materials\s+subtotal\s*:\s*\$\s*([0-9][0-9,]*(?:\.[0-9]{2})?)\b",
-            r"^\s*[-*]?\s*Paint\s+materials\s+subtotal\s*=\s*\$\s*([0-9][0-9,]*(?:\.[0-9]{2})?)\b",
-            r"^\s*[-*]?\s*Paint\s*(?:&\s*|and\s*)?materials\s*:\s*\$\s*([0-9][0-9,]*(?:\.[0-9]{2})?)\b",
-            r"^\s*[-*]?\s*Paint\s*&\s*materials\s*:\s*\$\s*([0-9][0-9,]*(?:\.[0-9]{2})?)\b",
+            r"^\s*[-*]?\s*Paint\s+materials\s+subtotal\s*[:=]\s*\$\s*([0-9][0-9,]*(?:\.[0-9]{2})?)",
+            r"^\s*[-*]?\s*Paint\s*(?:&\s*|and\s*)?materials\s*[:=]\s*\*\*\$\s*([0-9][0-9,]*(?:\.[0-9]{2})?)\*\*",
+            r"^\s*[-*]?\s*Paint\s*(?:&\s*|and\s*)?materials\s*[:=]\s*\$\s*([0-9][0-9,]*(?:\.[0-9]{2})?)",
         ])
 
         # Parts subtotal dollars (explicit if present)
@@ -2657,6 +2661,10 @@ async def vision_review(
         total_val: Optional[float] = None
         tax_basis: Optional[float] = None
         tax_amt: Optional[float] = None
+        total_val_from_text = _grab_money_line([
+            r"^\s*\*{0,2}\s*Approximate\s+Repair\s+Total\s*:\s*\$\s*([0-9][0-9,]*(?:\.[0-9]{2})?)",
+            r"^\s*\*{0,2}\s*Estimated\s+Total\s+Approximate\s+Repair\s+Cost\s*:\s*\$\s*([0-9][0-9,]*(?:\.[0-9]{2})?)",
+        ])
         try:
             if isinstance(parts_sub, (int, float)) and isinstance(paint_mat, (int, float)):
                 tax_basis = float(parts_sub) + float(paint_mat)
@@ -2673,7 +2681,9 @@ async def vision_review(
             total_val = None
 
 
-        # Fallback: compute a deterministic total from the parsed markdown when components are incomplete
+        # Fallbacks: prefer the final total line already present in markdown; otherwise compute from components.
+        if total_val is None and isinstance(total_val_from_text, (int, float)):
+            total_val = float(total_val_from_text)
         if total_val is None:
             try:
                 total_val = _compute_cost_total_from_md(md)
@@ -3260,6 +3270,7 @@ async def download_pdf(file_number: Optional[str] = None, filename: Optional[str
         return JSONResponse(status_code=404, content={"detail": "Not Found"})
     latest = max(candidates, key=lambda p: os.path.getmtime(p))
     return FileResponse(path=latest, media_type="application/pdf", filename=os.path.basename(latest))
+
 
 
 
