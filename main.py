@@ -2577,11 +2577,11 @@ async def vision_review(
 
             cleaned.append(ln)
 
-         if tax_rate is None or not isinstance(tax_rate, (int, float)) or tax_rate <= 0:
-             tax_rate = 0.07  # locked photos-only approximation fallback
+        if tax_rate is None or not isinstance(tax_rate, (int, float)) or tax_rate <= 0:
+            tax_rate = 0.07  # locked photos-only approximation fallback
 
-         def _grab_money_line(pats: List[str]) -> Optional[float]:
-             for pat in pats:
+        def _grab_money_line(pats: List[str]) -> Optional[float]:
+            for pat in pats:
                 mm = re.search(pat, text, flags=re.IGNORECASE | re.MULTILINE)
                 if mm:
                     try:
@@ -2621,135 +2621,135 @@ async def vision_review(
             r"^\s*[-*]?\s*Labor\s+subtotal\s*:\s*\$\s*([0-9][0-9,]*(?:\.[0-9]{2})?)\b",
         ])
 
-         # If labor subtotal is absent, sum labor line items
-         if labor_sub is None:
-             calc_labor = 0.0
-             have_labor_piece = False
-             for v in (body_labor, paint_labor, mech_labor, frame_labor, setup_measure):
-                 if isinstance(v, (int, float)):
-                     calc_labor += float(v)
-                     have_labor_piece = True
-             if have_labor_piece:
-                 labor_sub = round(calc_labor, 2)
+        # If labor subtotal is absent, sum labor line items
+        if labor_sub is None:
+            calc_labor = 0.0
+            have_labor_piece = False
+            for v in (body_labor, paint_labor, mech_labor, frame_labor, setup_measure):
+                if isinstance(v, (int, float)):
+                    calc_labor += float(v)
+                    have_labor_piece = True
+            if have_labor_piece:
+                labor_sub = round(calc_labor, 2)
 
-         # Parts subtotal
-         parts_sub = _grab_money_line([
-             r"^\s*[-*]?\s*Estimated\s+parts\s+subtotal\s*:\s*\$\s*([0-9][0-9,]*(?:\.[0-9]{2})?)\b",
-             r"^\s*[-*]?\s*Parts\s+subtotal\s*\(approx\.?\)\s*=\s*\$\s*([0-9][0-9,]*(?:\.[0-9]{2})?)\b",
-             r"^\s*[-*]?\s*Parts\s+subtotal\s*\(approx\.?\)\s*:\s*\$\s*([0-9][0-9,]*(?:\.[0-9]{2})?)\b",
-             r"^\s*[-*]?\s*Parts\s+subtotal\s*=\s*\$\s*([0-9][0-9,]*(?:\.[0-9]{2})?)\b",
-             r"^\s*[-*]?\s*Parts\s+subtotal\s*:\s*\$\s*([0-9][0-9,]*(?:\.[0-9]{2})?)\b",
-             r"^\s*[-*]?\s*Parts\s*:\s*\$\s*([0-9][0-9,]*(?:\.[0-9]{2})?)\b",
-         ])
+        # Parts subtotal
+        parts_sub = _grab_money_line([
+            r"^\s*[-*]?\s*Estimated\s+parts\s+subtotal\s*:\s*\$\s*([0-9][0-9,]*(?:\.[0-9]{2})?)\b",
+            r"^\s*[-*]?\s*Parts\s+subtotal\s*\(approx\.?\)\s*=\s*\$\s*([0-9][0-9,]*(?:\.[0-9]{2})?)\b",
+            r"^\s*[-*]?\s*Parts\s+subtotal\s*\(approx\.?\)\s*:\s*\$\s*([0-9][0-9,]*(?:\.[0-9]{2})?)\b",
+            r"^\s*[-*]?\s*Parts\s+subtotal\s*=\s*\$\s*([0-9][0-9,]*(?:\.[0-9]{2})?)\b",
+            r"^\s*[-*]?\s*Parts\s+subtotal\s*:\s*\$\s*([0-9][0-9,]*(?:\.[0-9]{2})?)\b",
+            r"^\s*[-*]?\s*Parts\s*:\s*\$\s*([0-9][0-9,]*(?:\.[0-9]{2})?)\b",
+        ])
 
-         # Paint materials subtotal ONLY — never the $/hr rate
-         paint_mat = _grab_money_line([
-             r"^\s*[-*]?\s*Paint\s+materials\s+subtotal\s*=\s*\$\s*([0-9][0-9,]*(?:\.[0-9]{2})?)\b",
-             r"^\s*[-*]?\s*Paint\s+materials\s+subtotal\s*:\s*\$\s*([0-9][0-9,]*(?:\.[0-9]{2})?)\b",
-             r"^\s*[-*]?\s*Paint\s*(?:&\s*|and\s*)?materials\s*=\s*\$\s*([0-9][0-9,]*(?:\.[0-9]{2})?)\b",
-             r"^\s*[-*]?\s*Paint\s*(?:&\s*|and\s*)?materials\s*:\s*\$\s*([0-9][0-9,]*(?:\.[0-9]{2})?)\b",
-         ])
+        # Paint materials subtotal ONLY — never the $/hr rate
+        paint_mat = _grab_money_line([
+            r"^\s*[-*]?\s*Paint\s+materials\s+subtotal\s*=\s*\$\s*([0-9][0-9,]*(?:\.[0-9]{2})?)\b",
+            r"^\s*[-*]?\s*Paint\s+materials\s+subtotal\s*:\s*\$\s*([0-9][0-9,]*(?:\.[0-9]{2})?)\b",
+            r"^\s*[-*]?\s*Paint\s*(?:&\s*|and\s*)?materials\s*=\s*\$\s*([0-9][0-9,]*(?:\.[0-9]{2})?)\b",
+            r"^\s*[-*]?\s*Paint\s*(?:&\s*|and\s*)?materials\s*:\s*\$\s*([0-9][0-9,]*(?:\.[0-9]{2})?)\b",
+        ])
 
-         # Existing tax / total if already present
-         tax_amt = _grab_money_line([
-             r"^\s*[-*]?\s*Sales\s+tax\s*\(assumed\s*7%\s*for\s*approximation\)\s*=\s*\$\s*([0-9][0-9,]*(?:\.[0-9]{2})?)\b",
-             r"^\s*[-*]?\s*Tax\s*:\s*\$\s*([0-9][0-9,]*(?:\.[0-9]{2})?)\b",
-         ])
-         total_val = _grab_money_line([
-             r"^\s*\*{0,2}\s*Approximate\s+Repair\s+Total\s*:\s*\$\s*([0-9][0-9,]*(?:\.[0-9]{2})?)\b",
-             r"^\s*\*{0,2}\s*Estimated\s+Total\s+Approximate\s+Repair\s+Cost\s*:\s*\$\s*([0-9][0-9,]*(?:\.[0-9]{2})?)\b",
-         ])
+        # Existing tax / total if already present
+        tax_amt = _grab_money_line([
+            r"^\s*[-*]?\s*Sales\s+tax\s*\(assumed\s*7%\s*for\s*approximation\)\s*=\s*\$\s*([0-9][0-9,]*(?:\.[0-9]{2})?)\b",
+            r"^\s*[-*]?\s*Tax\s*:\s*\$\s*([0-9][0-9,]*(?:\.[0-9]{2})?)\b",
+        ])
+        total_val = _grab_money_line([
+            r"^\s*\*{0,2}\s*Approximate\s+Repair\s+Total\s*:\s*\$\s*([0-9][0-9,]*(?:\.[0-9]{2})?)\b",
+            r"^\s*\*{0,2}\s*Estimated\s+Total\s+Approximate\s+Repair\s+Cost\s*:\s*\$\s*([0-9][0-9,]*(?:\.[0-9]{2})?)\b",
+        ])
 
-         tax_basis: Optional[float] = None
+        tax_basis: Optional[float] = None
 
-         # If tax missing, compute it from parts + paint materials only
-         if tax_amt is None and isinstance(parts_sub, (int, float)) and isinstance(paint_mat, (int, float)):
-             tax_basis = round(float(parts_sub) + float(paint_mat), 2)
-             tax_amt = round(tax_basis * float(tax_rate), 2)
-         elif isinstance(parts_sub, (int, float)) and isinstance(paint_mat, (int, float)):
-             tax_basis = round(float(parts_sub) + float(paint_mat), 2)
+        # If tax missing, compute it from parts + paint materials only
+        if tax_amt is None and isinstance(parts_sub, (int, float)) and isinstance(paint_mat, (int, float)):
+            tax_basis = round(float(parts_sub) + float(paint_mat), 2)
+            tax_amt = round(tax_basis * float(tax_rate), 2)
+        elif isinstance(parts_sub, (int, float)) and isinstance(paint_mat, (int, float)):
+            tax_basis = round(float(parts_sub) + float(paint_mat), 2)
 
-         # If total missing, compute from existing subtotals + tax
-         if total_val is None:
-             if isinstance(labor_sub, (int, float)) and isinstance(parts_sub, (int, float)) and isinstance(paint_mat, (int, float)) and isinstance(tax_amt, (int, float)):
-                 total_val = round(float(labor_sub) + float(parts_sub) + float(paint_mat) + float(tax_amt), 2)
+        # If total missing, compute from existing subtotals + tax
+        if total_val is None:
+            if isinstance(labor_sub, (int, float)) and isinstance(parts_sub, (int, float)) and isinstance(paint_mat, (int, float)) and isinstance(tax_amt, (int, float)):
+                total_val = round(float(labor_sub) + float(parts_sub) + float(paint_mat) + float(tax_amt), 2)
 
-         # Print cleaned body first
-         if cleaned:
-             for ln in cleaned:
-                 s = (ln or "").strip()
-                 if not s:
-                     pdf_obj.ln(2)
-                     continue
-                 if re.match(r"^#{3,6}\s+\S", s):
-                     heading = re.sub(r"^#{3,6}\s*", "", s).strip()
-                     try:
-                         pdf_obj.set_font("Helvetica", "B", 11)
-                     except Exception:
-                         pdf_obj.set_font("Arial", "B", 11)
-                     pdf_obj.ln(1)
-                     pdf_obj.cell(0, 6, _pdf_sanitize(heading), ln=True)
-                     try:
-                         pdf_obj.set_font("Helvetica", "", 11)
-                     except Exception:
-                         pdf_obj.set_font("Arial", "", 11)
-                     continue
-                  mc(s)
+        # Print cleaned body first
+        if cleaned:
+            for ln in cleaned:
+                s = (ln or "").strip()
+                if not s:
+                    pdf_obj.ln(2)
+                    continue
+                if re.match(r"^#{3,6}\s+\S", s):
+                    heading = re.sub(r"^#{3,6}\s*", "", s).strip()
+                    try:
+                        pdf_obj.set_font("Helvetica", "B", 11)
+                    except Exception:
+                        pdf_obj.set_font("Arial", "B", 11)
+                    pdf_obj.ln(1)
+                    pdf_obj.cell(0, 6, _pdf_sanitize(heading), ln=True)
+                    try:
+                        pdf_obj.set_font("Helvetica", "", 11)
+                    except Exception:
+                        pdf_obj.set_font("Arial", "", 11)
+                    continue
+                mc(s)
 
-         # Deterministic tax lines
-         pdf_obj.ln(1)
-         try:
-             pdf_obj.set_font("Helvetica", "", 11)
-         except Exception:
-             pdf_obj.set_font("Arial", "", 11)
+        # Deterministic tax lines
+        pdf_obj.ln(1)
+        try:
+            pdf_obj.set_font("Helvetica", "", 11)
+        except Exception:
+            pdf_obj.set_font("Arial", "", 11)
 
-         if isinstance(tax_basis, (int, float)) and isinstance(tax_amt, (int, float)) and tax_rate is not None:
-             mc(f"Tax rate: {float(tax_rate)*100:.3f}%")
-             mc(f"Tax basis (parts + paint materials): {_money2(tax_basis)}")
-             mc(f"Tax: {_money2(tax_amt)}")
+        if isinstance(tax_basis, (int, float)) and isinstance(tax_amt, (int, float)) and isinstance(tax_rate, (int, float)):
+            mc(f"Tax rate: {float(tax_rate)*100:.3f}%")
+            mc(f"Tax basis (parts + paint materials): {_money2(tax_basis)}")
+            mc(f"Tax: {_money2(tax_amt)}")
 
-         # FIX 1: always inject/display the final total when available
-         if isinstance(total_val, (int, float)):
-             try:
-                 pdf_obj.set_font("Helvetica", "B", 11)
-             except Exception:
-                 pdf_obj.set_font("Arial", "B", 11)
-             mc(f"Approximate Repair Total: {_money2(total_val)}")
-             try:
-                 pdf_obj.set_font("Helvetica", "", 11)
-             except Exception:
-                 pdf_obj.set_font("Arial", "", 11)
+        # FIX 1: always inject/display the final total when available
+        if isinstance(total_val, (int, float)):
+            try:
+                pdf_obj.set_font("Helvetica", "B", 11)
+            except Exception:
+                pdf_obj.set_font("Arial", "B", 11)
+            mc(f"Approximate Repair Total: {_money2(total_val)}")
+            try:
+                pdf_obj.set_font("Helvetica", "", 11)
+            except Exception:
+                pdf_obj.set_font("Arial", "", 11)
 
-         # FIX 2: Severity Tier always keys off the final total
-         tier = None
-         if isinstance(total_val, (int, float)):
-             if total_val < 3500:
-                 tier = "minor"
-             elif total_val < 10000:
-                 tier = "moderate"
-             elif total_val < 25000:
-                 tier = "major"
-             else:
-                 tier = "possible_tl"
+        # FIX 2: Severity Tier always keys off the final total
+        tier = None
+        if isinstance(total_val, (int, float)):
+            if total_val < 3500:
+                tier = "minor"
+            elif total_val < 10000:
+                tier = "moderate"
+            elif total_val < 25000:
+                tier = "major"
+            else:
+                tier = "possible_tl"
 
-         boxes = {
-             "minor": ("[x]", "[ ]", "[ ]", "[ ]"),
-             "moderate": ("[ ]", "[x]", "[ ]", "[ ]"),
-             "major": ("[ ]", "[ ]", "[x]", "[ ]"),
-             "possible_tl": ("[ ]", "[ ]", "[ ]", "[x]"),
-             None: ("[ ]", "[ ]", "[ ]", "[ ]"),
-         }[tier]
+        boxes = {
+            "minor": ("[x]", "[ ]", "[ ]", "[ ]"),
+            "moderate": ("[ ]", "[x]", "[ ]", "[ ]"),
+            "major": ("[ ]", "[ ]", "[x]", "[ ]"),
+            "possible_tl": ("[ ]", "[ ]", "[ ]", "[x]"),
+            None: ("[ ]", "[ ]", "[ ]", "[ ]"),
+        }[tier]
 
-         pdf_obj.ln(1)
-         mc("Severity Tier")
-         mc(f"{boxes[0]} Minor (< $3,500)")
-         mc(f"{boxes[1]} Moderate ($3,500-$10,000)")
-         mc(f"{boxes[2]} Major ($10,000+)")
-         mc(f"{boxes[3]} Possible Total Loss Threshold Approaching")
+        pdf_obj.ln(1)
+        mc("Severity Tier")
+        mc(f"{boxes[0]} Minor (< $3,500)")
+        mc(f"{boxes[1]} Moderate ($3,500-$10,000)")
+        mc(f"{boxes[2]} Major ($10,000+)")
+        mc(f"{boxes[3]} Possible Total Loss Threshold Approaching")
 
-         # Repair Cost Disclaimer intentionally not rendered here (only final combined disclaimer at end)
-         if False and disclaimer_text:
-             try:
+        # Repair Cost Disclaimer intentionally not rendered here (only final combined disclaimer prints later)
+        if False and disclaimer_text:
+            try:
                 pdf_obj.ln(4)
                 x_left = pdf_obj.l_margin
                 x_right = pdf_obj.w - pdf_obj.r_margin
@@ -2771,7 +2771,6 @@ async def vision_review(
             except Exception:
                 # fail-open: don't break PDF rendering
                 pass
-
 
     def add_thumbnail_page(pdf_obj: FPDF, image_paths: List[str]) -> None:
         """Append exactly ONE page containing thumbnails of all uploaded photos (as space allows)."""
@@ -3261,6 +3260,11 @@ async def download_pdf(file_number: Optional[str] = None, filename: Optional[str
         return JSONResponse(status_code=404, content={"detail": "Not Found"})
     latest = max(candidates, key=lambda p: os.path.getmtime(p))
     return FileResponse(path=latest, media_type="application/pdf", filename=os.path.basename(latest))
+
+
+
+
+
 
 
 
