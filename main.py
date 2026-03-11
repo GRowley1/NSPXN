@@ -2503,10 +2503,10 @@ async def vision_review(
 
     def render_repair_cost_section(pdf_obj: FPDF, md: str, tax_rate: Optional[float] = None) -> None:
         """Render the Approximate Repair Cost Breakdown in a controlled PDF format.
-        - Never prints model headings like '## Approximate Repair Cost Breakdown (Photos Only)'
-        - Never prints '### Totals' blocks or arithmetic 'A + B = C' lines
-        - Prints ONE total line: 'Approximate Repair Cost Total: $X'
-        - Renders 'Repair Cost Disclaimer' in the same style as the main Disclaimer block
+        Locked behavior:
+        - If total is missing, compute it from existing subtotals + tax
+        - Always key Severity Tier off that final total
+        - Do not print a second/alternate total label
         """
         if not isinstance(md, str):
             md = str(md or "")
@@ -2521,13 +2521,11 @@ async def vision_review(
                 or re.search(r"(?i)^\s*\*\*\s*repair\s+cost\s+disclaimer\s*\*\*\s*:", ln)
                 or re.search(r"(?i)^\s*_?repair\s+cost\s+disclaimer\s*:", ln)):
                 in_disclaimer = True
-                # Capture inline disclaimer text after ":" if present
                 m_inline = re.search(r":\s*(.+)\s*$", ln)
                 if m_inline:
                     disclaimer_text += (m_inline.group(1).strip() + " ")
                 continue
             if in_disclaimer:
-                # Stop on next heading
                 if re.search(r"^\s*#{1,6}\s+\w", ln):
                     in_disclaimer = False
                 else:
@@ -2540,57 +2538,50 @@ async def vision_review(
 
         disclaimer_text = (disclaimer_text or "").strip()
 
-        # Remove headings + Totals blocks + arithmetic lines; we will print ONE normalized total + tier block.
+        # Remove headings + Totals blocks + arithmetic lines we never want printed directly
         cleaned = []
         skip_totals = False
         for ln in body_lines:
             s = ln.strip()
+
             if re.search(r"^\s*#{1,6}\s*approximate\s+repair\s+cost\s+breakdown\b", ln, flags=re.I):
                 continue
             if re.search(r"^\s*#{1,6}\s*totals\b", ln, flags=re.I):
                 skip_totals = True
                 continue
             if skip_totals:
-                if re.search(r"^\s*#{1,6}\s+\w", ln):  # next section
+                if re.search(r"^\s*#{1,6}\s+\w", ln):
                     skip_totals = False
                 else:
                     continue
-            # Drop explicit arithmetic totals
+
             if re.search(r"(?i)\bestimated\s+total\b\s*:", ln):
                 continue
             if ("+" in ln and "=" in ln and re.search(r"\$\s*[0-9]", ln)):
                 continue
 
-            # Never print any model-provided Severity Tier lines here
+            # Never print model-provided severity lines here; we render them deterministically below
             if re.search(r"(?i)severity\s+tier|minor\s*\(|moderate\s*\(|major\s*\(|total\s+loss\s+threshold", ln):
                 continue
 
-            # Remove any 'Estimated' wording in section titles
             if re.search(r"(?i)^\s*#{1,6}\s*approximate\s+total\s+repair\s+cost\b", ln):
                 continue
 
-            # Never print inspection location inside this section
             if re.search(r"(?i)inspection\s+location\s*:", ln):
                 continue
 
-            # Strip model-provided Cost Summary headings and any model total lines
-            if re.search(r"(?i)^\s*cost\s+summary\b", s):
-                continue
-            if re.search(r"(?i)\bApprox\.?\s*Repair\s*Total\b", ln) and not re.search(r"(?i)^\s*\*{0,2}\s*Approximate\s+Repair\s+Total\s*:\s*\$\s*[0-9]", s):
-                # Catch-all: drop any line that looks like a model-provided repair total
-                if re.search(r"(?i)\brepair\s*total\b", ln) and "$" in ln:
+            # Keep the canonical total line if it already exists; strip alternate total labels
+            if re.search(r"(?i)\bApprox\.?\s*Repair\s*Total\b", ln):
+                if not re.search(r"(?i)^\s*\*{0,2}\s*Approximate\s+Repair\s+Total\s*:\s*\$\s*[0-9]", s):
                     continue
-                continue
 
             cleaned.append(ln)
 
-        # Deterministic total + tax lines (locked; never allow tier boundary dollars like $10,000 to become a total)
-        # NOTE: We compute tax from (parts + paint materials) only; labor is never taxed.
-        if tax_rate is None or not isinstance(tax_rate, (int, float)) or tax_rate <= 0:
-            tax_rate = 0.07  # locked photos-only approximation fallback if lookup fails
+         if tax_rate is None or not isinstance(tax_rate, (int, float)) or tax_rate <= 0:
+             tax_rate = 0.07  # locked photos-only approximation fallback
 
-        def _grab_money_line(pats: List[str]) -> Optional[float]:
-            for pat in pats:
+         def _grab_money_line(pats: List[str]) -> Optional[float]:
+             for pat in pats:
                 mm = re.search(pat, text, flags=re.IGNORECASE | re.MULTILINE)
                 if mm:
                     try:
@@ -2599,166 +2590,166 @@ async def vision_review(
                         pass
             return None
 
-        # Labor dollars (already computed in markdown as dollars)
-        body_labor = _grab_money_line([r"^\s*[-*]?\s*Body\s+labor\s*:\s*.*?\*\*\$\s*([0-9][0-9,]*(?:\.[0-9]{2})?)\*\*",
-                                      r"^\s*[-*]?\s*Body\s+labor\s*:\s*.*?=\s*\$\s*([0-9][0-9,]*(?:\.[0-9]{2})?)\b"])
-        paint_labor = _grab_money_line([r"^\s*[-*]?\s*Paint\s+labor\s*:\s*.*?\*\*\$\s*([0-9][0-9,]*(?:\.[0-9]{2})?)\*\*",
-                                       r"^\s*[-*]?\s*Paint\s+labor\s*:\s*.*?=\s*\$\s*([0-9][0-9,]*(?:\.[0-9]{2})?)\b"])
-        mech_labor = _grab_money_line([r"^\s*[-*]?\s*Mechanical[^:]*:\s*.*?\*\*\$\s*([0-9][0-9,]*(?:\.[0-9]{2})?)\*\*",
-                                      r"^\s*[-*]?\s*Mechanical[^=\n]*=\s*\$\s*([0-9][0-9,]*(?:\.[0-9]{2})?)\b"])
-        frame_labor = _grab_money_line([r"^\s*[-*]?\s*Frame\s+labor\s*:\s*.*?\*\*\$\s*([0-9][0-9,]*(?:\.[0-9]{2})?)\*\*",
-                                       r"^\s*[-*]?\s*Frame\s+labor\s*:\s*.*?=\s*\$\s*([0-9][0-9,]*(?:\.[0-9]{2})?)\b"])
-
-        # Paint materials dollars (STRICT: use subtotal/extended amount lines only; never the $/hr rate)
-        paint_mat = _grab_money_line([
-            r"^\s*[-*]?\s*Paint\s+materials\s+subtotal\s*[:=]\s*\$\s*([0-9][0-9,]*(?:\.[0-9]{2})?)",
-            r"^\s*[-*]?\s*Paint\s*(?:&\s*|and\s*)?materials\s*[:=]\s*\*\*\$\s*([0-9][0-9,]*(?:\.[0-9]{2})?)\*\*",
-            r"^\s*[-*]?\s*Paint\s*(?:&\s*|and\s*)?materials\s*[:=]\s*\$\s*([0-9][0-9,]*(?:\.[0-9]{2})?)",
+        # Parse component dollars from the markdown/body
+        body_labor = _grab_money_line([
+            r"^\s*[-*]?\s*Body(?:\s+labor)?\s*:\s*.*?=\s*\$\s*([0-9][0-9,]*(?:\.[0-9]{2})?)\b",
+            r"^\s*[-*]?\s*Body(?:\s+labor)?\s*:\s*\$\s*([0-9][0-9,]*(?:\.[0-9]{2})?)\b",
+        ])
+        paint_labor = _grab_money_line([
+            r"^\s*[-*]?\s*Paint\s+labor\s*:\s*.*?=\s*\$\s*([0-9][0-9,]*(?:\.[0-9]{2})?)\b",
+            r"^\s*[-*]?\s*Paint\s+labor\s*:\s*\$\s*([0-9][0-9,]*(?:\.[0-9]{2})?)\b",
+            r"^\s*[-*]?\s*Refinish\s*:\s*.*?=\s*\$\s*([0-9][0-9,]*(?:\.[0-9]{2})?)\b",
+            r"^\s*[-*]?\s*Refinish\s*:\s*\$\s*([0-9][0-9,]*(?:\.[0-9]{2})?)\b",
+        ])
+        mech_labor = _grab_money_line([
+            r"^\s*[-*]?\s*Mechanical(?:/SRS/Glass|/diagnostic)?\s*:\s*.*?=\s*\$\s*([0-9][0-9,]*(?:\.[0-9]{2})?)\b",
+            r"^\s*[-*]?\s*Mechanical(?:/SRS/Glass|/diagnostic)?\s*:\s*\$\s*([0-9][0-9,]*(?:\.[0-9]{2})?)\b",
+            r"^\s*[-*]?\s*Mechanical[^=\n]*=\s*\$\s*([0-9][0-9,]*(?:\.[0-9]{2})?)\b",
+        ])
+        frame_labor = _grab_money_line([
+            r"^\s*[-*]?\s*Frame(?:/measure)?\s*:\s*.*?=\s*\$\s*([0-9][0-9,]*(?:\.[0-9]{2})?)\b",
+            r"^\s*[-*]?\s*Frame(?:/measure)?\s*:\s*\$\s*([0-9][0-9,]*(?:\.[0-9]{2})?)\b",
+        ])
+        setup_measure = _grab_money_line([
+            r"^\s*[-*]?\s*Setup\s*&\s*Measure\s*:\s*.*?=\s*\$\s*([0-9][0-9,]*(?:\.[0-9]{2})?)\b",
+            r"^\s*[-*]?\s*Setup\s*&\s*Measure\s*:\s*\$\s*([0-9][0-9,]*(?:\.[0-9]{2})?)\b",
         ])
 
-        # Parts subtotal dollars (explicit if present)
-        parts_sub = _grab_money_line([
-            r"^\s*[-*]?\s*Estimated\s+parts\s+subtotal\s*:\s*\$\s*([0-9][0-9,]*(?:\.[0-9]{2})?)\b",
-            r"^\s*[-*]?\s*Parts\s+subtotal\s*\(approx\.?\)\s*=\s*\$\s*([0-9][0-9,]*(?:\.[0-9]{2})?)\b",
-            r"^\s*[-*]?\s*Parts\s+subtotal\s*\(approx\.?\)\s*:\s*\$\s*([0-9][0-9,]*(?:\.[0-9]{2})?)\b",
-            r"^\s*[-*]?\s*Parts\s+subtotal\s*=\s*\$\s*([0-9][0-9,]*(?:\.[0-9]{2})?)\b",
-            r"^\s*[-*]?\s*Parts\s+subtotal\s*:\s*\*\*\$\s*([0-9][0-9,]*(?:\.[0-9]{2})?)\*\*",
-            r"^\s*[-*]?\s*Parts\s+subtotal\s*:\s*\$\s*([0-9][0-9,]*(?:\.[0-9]{2})?)\b",
-            r"^\s*[-*]?\s*Parts\s*:\s*\*\*\$\s*([0-9][0-9,]*(?:\.[0-9]{2})?)\*\*",
-            r"^\s*[-*]?\s*Parts\s*:\s*\$\s*([0-9][0-9,]*(?:\.[0-9]{2})?)\b",
+        labor_sub = _grab_money_line([
+            r"^\s*[-*]?\s*Labor\s+subtotal\s*\([^\n]*?\)\s*:\s*\$\s*([0-9][0-9,]*(?:\.[0-9]{2})?)\b",
+            r"^\s*[-*]?\s*Labor\s+subtotal\s*=\s*\$\s*([0-9][0-9,]*(?:\.[0-9]{2})?)\b",
+            r"^\s*[-*]?\s*Labor\s+subtotal\s*:\s*\$\s*([0-9][0-9,]*(?:\.[0-9]{2})?)\b",
         ])
 
-        # If parts subtotal line missing, sum $ entries under OEM Replacement Parts (approx.) list
-        if parts_sub is None:
-            try:
-                lines_local = text.splitlines()
-                in_parts = False
-                part_sum = 0.0
-                part_hits = 0
-                for ln in lines_local:
-                    s2 = (ln or "").strip()
-                    if re.search(r"(?i)^\s*OEM\s+Replacement\s+Parts\s*\(approx\.?\)\s*:?\s*$", s2):
-                        in_parts = True
-                        continue
-                    if in_parts:
-                        # Stop when we hit another heading-ish line
-                        if re.search(r"^\s*#{1,6}\s+\w", s2) or re.search(r"(?i)^\s*(Subtotals|Tax\b|Cost\s+Summary|Severity\s+Tier)\b", s2):
-                            break
-                        # Sum money amounts on bullet lines like "- Roof glass (OEM): $1,800"
-                        m_money = re.search(r"\$\s*([0-9][0-9,]*(?:\.[0-9]{2})?)\b", s2)
-                        if m_money and re.search(r"^\s*[-*]", s2):
-                            try:
-                                part_sum += float(m_money.group(1).replace(",", ""))
-                                part_hits += 1
-                            except Exception:
-                                pass
-                if part_hits > 0:
-                    parts_sub = round(part_sum, 2)
-            except Exception:
-                pass
+         # If labor subtotal is absent, sum labor line items
+         if labor_sub is None:
+             calc_labor = 0.0
+             have_labor_piece = False
+             for v in (body_labor, paint_labor, mech_labor, frame_labor, setup_measure):
+                 if isinstance(v, (int, float)):
+                     calc_labor += float(v)
+                     have_labor_piece = True
+             if have_labor_piece:
+                 labor_sub = round(calc_labor, 2)
 
-        # Compute tax + total (only if we have enough components)
-        total_val: Optional[float] = None
-        tax_basis: Optional[float] = None
-        tax_amt: Optional[float] = None
-        total_val_from_text = _grab_money_line([
-            r"^\s*\*{0,2}\s*Approximate\s+Repair\s+Total\s*:\s*\$\s*([0-9][0-9,]*(?:\.[0-9]{2})?)",
-            r"^\s*\*{0,2}\s*Estimated\s+Total\s+Approximate\s+Repair\s+Cost\s*:\s*\$\s*([0-9][0-9,]*(?:\.[0-9]{2})?)",
-        ])
-        try:
-            if isinstance(parts_sub, (int, float)) and isinstance(paint_mat, (int, float)):
-                tax_basis = float(parts_sub) + float(paint_mat)
-                tax_amt = round(tax_basis * float(tax_rate), 2)
-            labor_total = 0.0
-            have_labor = False
-            for v in (body_labor, paint_labor, mech_labor, frame_labor):
-                if isinstance(v, (int, float)):
-                    labor_total += float(v)
-                    have_labor = True
-            if have_labor and isinstance(parts_sub, (int, float)) and isinstance(paint_mat, (int, float)) and isinstance(tax_amt, (int, float)):
-                total_val = round(labor_total + float(parts_sub) + float(paint_mat) + float(tax_amt), 2)
-        except Exception:
-            total_val = None
+         # Parts subtotal
+         parts_sub = _grab_money_line([
+             r"^\s*[-*]?\s*Estimated\s+parts\s+subtotal\s*:\s*\$\s*([0-9][0-9,]*(?:\.[0-9]{2})?)\b",
+             r"^\s*[-*]?\s*Parts\s+subtotal\s*\(approx\.?\)\s*=\s*\$\s*([0-9][0-9,]*(?:\.[0-9]{2})?)\b",
+             r"^\s*[-*]?\s*Parts\s+subtotal\s*\(approx\.?\)\s*:\s*\$\s*([0-9][0-9,]*(?:\.[0-9]{2})?)\b",
+             r"^\s*[-*]?\s*Parts\s+subtotal\s*=\s*\$\s*([0-9][0-9,]*(?:\.[0-9]{2})?)\b",
+             r"^\s*[-*]?\s*Parts\s+subtotal\s*:\s*\$\s*([0-9][0-9,]*(?:\.[0-9]{2})?)\b",
+             r"^\s*[-*]?\s*Parts\s*:\s*\$\s*([0-9][0-9,]*(?:\.[0-9]{2})?)\b",
+         ])
 
+         # Paint materials subtotal ONLY — never the $/hr rate
+         paint_mat = _grab_money_line([
+             r"^\s*[-*]?\s*Paint\s+materials\s+subtotal\s*=\s*\$\s*([0-9][0-9,]*(?:\.[0-9]{2})?)\b",
+             r"^\s*[-*]?\s*Paint\s+materials\s+subtotal\s*:\s*\$\s*([0-9][0-9,]*(?:\.[0-9]{2})?)\b",
+             r"^\s*[-*]?\s*Paint\s*(?:&\s*|and\s*)?materials\s*=\s*\$\s*([0-9][0-9,]*(?:\.[0-9]{2})?)\b",
+             r"^\s*[-*]?\s*Paint\s*(?:&\s*|and\s*)?materials\s*:\s*\$\s*([0-9][0-9,]*(?:\.[0-9]{2})?)\b",
+         ])
 
-        # Fallbacks: prefer the final total line already present in markdown; otherwise compute from components.
-        if total_val is None and isinstance(total_val_from_text, (int, float)):
-            total_val = float(total_val_from_text)
-        if total_val is None:
-            try:
-                total_val = _compute_cost_total_from_md(md)
-            except Exception:
-                total_val = None
+         # Existing tax / total if already present
+         tax_amt = _grab_money_line([
+             r"^\s*[-*]?\s*Sales\s+tax\s*\(assumed\s*7%\s*for\s*approximation\)\s*=\s*\$\s*([0-9][0-9,]*(?:\.[0-9]{2})?)\b",
+             r"^\s*[-*]?\s*Tax\s*:\s*\$\s*([0-9][0-9,]*(?:\.[0-9]{2})?)\b",
+         ])
+         total_val = _grab_money_line([
+             r"^\s*\*{0,2}\s*Approximate\s+Repair\s+Total\s*:\s*\$\s*([0-9][0-9,]*(?:\.[0-9]{2})?)\b",
+             r"^\s*\*{0,2}\s*Estimated\s+Total\s+Approximate\s+Repair\s+Cost\s*:\s*\$\s*([0-9][0-9,]*(?:\.[0-9]{2})?)\b",
+         ])
 
-        # Print body (excluding tier + disclaimer) in a readable, structured way
-        if cleaned:
-            for ln in cleaned:
-                s = (ln or "").strip()
-                if not s:
-                    pdf_obj.ln(2)
-                    continue
-                # Render markdown sub-headings as bold lines
-                if re.match(r"^#{3,6}\s+\S", s):
-                    heading = re.sub(r"^#{3,6}\s*", "", s).strip()
-                    try:
-                        pdf_obj.set_font("Helvetica", "B", 11)
-                    except Exception:
-                        pdf_obj.set_font("Arial", "B", 11)
-                    pdf_obj.ln(1)
-                    pdf_obj.cell(0, 6, _pdf_sanitize(heading), ln=True)
-                    try:
-                        pdf_obj.set_font("Helvetica", "", 11)
-                    except Exception:
-                        pdf_obj.set_font("Arial", "", 11)
-                    continue
-                mc(s)
+         tax_basis: Optional[float] = None
 
-                # Deterministic tax lines (always printed so the total is explainable)
-        pdf_obj.ln(1)
-        try:
-            pdf_obj.set_font("Helvetica", "", 11)
-        except Exception:
-            pdf_obj.set_font("Arial", "", 11)
-        # Tax lines: only print when we can compute a deterministic numeric basis + tax
-        if isinstance(tax_basis, (int, float)) and isinstance(tax_amt, (int, float)) and tax_rate is not None:
-            mc(f"Tax rate: {float(tax_rate)*100:.3f}%")
-            mc(f"Tax basis (parts + paint materials): {_money2(tax_basis)}")
-            mc(f"Tax: {_money2(tax_amt)}")
+         # If tax missing, compute it from parts + paint materials only
+         if tax_amt is None and isinstance(parts_sub, (int, float)) and isinstance(paint_mat, (int, float)):
+             tax_basis = round(float(parts_sub) + float(paint_mat), 2)
+             tax_amt = round(tax_basis * float(tax_rate), 2)
+         elif isinstance(parts_sub, (int, float)) and isinstance(paint_mat, (int, float)):
+             tax_basis = round(float(parts_sub) + float(paint_mat), 2)
 
-# (Option 1) Do not print a second total line here; keep the model's 'Approximate Repair Total: $X' line.
-        try:
-            pdf_obj.set_font("Helvetica", "", 11)
-        except Exception:
-            pdf_obj.set_font("Arial", "", 11)
+         # If total missing, compute from existing subtotals + tax
+         if total_val is None:
+             if isinstance(labor_sub, (int, float)) and isinstance(parts_sub, (int, float)) and isinstance(paint_mat, (int, float)) and isinstance(tax_amt, (int, float)):
+                 total_val = round(float(labor_sub) + float(parts_sub) + float(paint_mat) + float(tax_amt), 2)
 
-        # Severity Tier (always print exactly once; derived strictly from the deterministic total)
-        tier = None
-        if isinstance(total_val, (int, float)):
-            if total_val < 3500:
-                tier = "minor"
-            elif total_val < 10000:
-                tier = "moderate"
-            elif total_val < 25000:
-                tier = "major"
-            else:
-                tier = "possible_tl"
-        boxes = {
-            "minor": ("[x]", "[ ]", "[ ]", "[ ]"),
-            "moderate": ("[ ]", "[x]", "[ ]", "[ ]"),
-            "major": ("[ ]", "[ ]", "[x]", "[ ]"),
-            "possible_tl": ("[ ]", "[ ]", "[ ]", "[x]"),
-            None: ("[ ]", "[ ]", "[ ]", "[ ]"),
-        }[tier]
-        pdf_obj.ln(1)
-        mc("Severity Tier")
-        mc(f"{boxes[0]} Minor (< $3,500)")
-        mc(f"{boxes[1]} Moderate ($3,500-$10,000)")
-        mc(f"{boxes[2]} Major ($10,000+)")
-        mc(f"{boxes[3]} Possible Total Loss Threshold Approaching")
+         # Print cleaned body first
+         if cleaned:
+             for ln in cleaned:
+                 s = (ln or "").strip()
+                 if not s:
+                     pdf_obj.ln(2)
+                     continue
+                 if re.match(r"^#{3,6}\s+\S", s):
+                     heading = re.sub(r"^#{3,6}\s*", "", s).strip()
+                     try:
+                         pdf_obj.set_font("Helvetica", "B", 11)
+                     except Exception:
+                         pdf_obj.set_font("Arial", "B", 11)
+                     pdf_obj.ln(1)
+                     pdf_obj.cell(0, 6, _pdf_sanitize(heading), ln=True)
+                     try:
+                         pdf_obj.set_font("Helvetica", "", 11)
+                     except Exception:
+                         pdf_obj.set_font("Arial", "", 11)
+                     continue
+                  mc(s)
 
-        # Repair Cost Disclaimer intentionally not rendered here (only final combined disclaimer at end)
-        if False and disclaimer_text:
-            try:
+         # Deterministic tax lines
+         pdf_obj.ln(1)
+         try:
+             pdf_obj.set_font("Helvetica", "", 11)
+         except Exception:
+             pdf_obj.set_font("Arial", "", 11)
+
+         if isinstance(tax_basis, (int, float)) and isinstance(tax_amt, (int, float)) and tax_rate is not None:
+             mc(f"Tax rate: {float(tax_rate)*100:.3f}%")
+             mc(f"Tax basis (parts + paint materials): {_money2(tax_basis)}")
+             mc(f"Tax: {_money2(tax_amt)}")
+
+         # FIX 1: always inject/display the final total when available
+         if isinstance(total_val, (int, float)):
+             try:
+                 pdf_obj.set_font("Helvetica", "B", 11)
+             except Exception:
+                 pdf_obj.set_font("Arial", "B", 11)
+             mc(f"Approximate Repair Total: {_money2(total_val)}")
+             try:
+                 pdf_obj.set_font("Helvetica", "", 11)
+             except Exception:
+                 pdf_obj.set_font("Arial", "", 11)
+
+         # FIX 2: Severity Tier always keys off the final total
+         tier = None
+         if isinstance(total_val, (int, float)):
+             if total_val < 3500:
+                 tier = "minor"
+             elif total_val < 10000:
+                 tier = "moderate"
+             elif total_val < 25000:
+                 tier = "major"
+             else:
+                 tier = "possible_tl"
+
+         boxes = {
+             "minor": ("[x]", "[ ]", "[ ]", "[ ]"),
+             "moderate": ("[ ]", "[x]", "[ ]", "[ ]"),
+             "major": ("[ ]", "[ ]", "[x]", "[ ]"),
+             "possible_tl": ("[ ]", "[ ]", "[ ]", "[x]"),
+             None: ("[ ]", "[ ]", "[ ]", "[ ]"),
+         }[tier]
+
+         pdf_obj.ln(1)
+         mc("Severity Tier")
+         mc(f"{boxes[0]} Minor (< $3,500)")
+         mc(f"{boxes[1]} Moderate ($3,500-$10,000)")
+         mc(f"{boxes[2]} Major ($10,000+)")
+         mc(f"{boxes[3]} Possible Total Loss Threshold Approaching")
+
+         # Repair Cost Disclaimer intentionally not rendered here (only final combined disclaimer at end)
+         if False and disclaimer_text:
+             try:
                 pdf_obj.ln(4)
                 x_left = pdf_obj.l_margin
                 x_right = pdf_obj.w - pdf_obj.r_margin
