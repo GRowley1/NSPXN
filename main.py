@@ -2114,6 +2114,24 @@ async def vision_review(
         s = " ".join(_break(t) for t in s.split(" "))
         return s
 
+    def _format_vehicle_value(v) -> str:
+        """Normalize the Vehicle field for PDF printing."""
+        try:
+            if isinstance(v, dict):
+                year = str(v.get("year") or "").strip()
+                make = str(v.get("make") or "").strip()
+                model = str(v.get("model") or "").strip()
+                trim = str(v.get("trim") or "").strip()
+                parts = [p for p in [year, make, model] if p and p.upper() != "N/A"]
+                base = " ".join(parts).strip()
+                if trim and trim.upper() != "N/A":
+                    return f"{base} ({trim})" if base else trim
+                return base or "N/A"
+        except Exception:
+            pass
+        s = str(v or "").strip()
+        return s if s else "N/A"
+
     pdf = FPDF(); pdf.add_page()
     # --- NSPXN Logo (Top Right, First Page Only) ---
     try:
@@ -2882,24 +2900,6 @@ async def vision_review(
             except Exception:
                 pdf.set_font("Arial", "", 11)
 
-        def _format_vehicle_value(v) -> str:
-            """Normalize the Vehicle field for PDF printing."""
-            try:
-                if isinstance(v, dict):
-                    year = str(v.get("year") or "").strip()
-                    make = str(v.get("make") or "").strip()
-                    model = str(v.get("model") or "").strip()
-                    trim = str(v.get("trim") or "").strip()
-                    parts = [p for p in [year, make, model] if p and p.upper() != "N/A"]
-                    base = " ".join(parts).strip()
-                    if trim and trim.upper() != "N/A":
-                        return f"{base} ({trim})" if base else trim
-                    return base or "N/A"
-            except Exception:
-                pass
-            s = str(v or "").strip()
-            return s if s else "N/A"
-    
         def _scrub_model_headings(md_text: str) -> str:
             """Remove model-emitted headings that duplicate PDF section headers."""
             if not md_text:
@@ -3260,6 +3260,11 @@ async def download_pdf(file_number: Optional[str] = None, filename: Optional[str
         return JSONResponse(status_code=404, content={"detail": "Not Found"})
     latest = max(candidates, key=lambda p: os.path.getmtime(p))
     return FileResponse(path=latest, media_type="application/pdf", filename=os.path.basename(latest))
+
+
+
+
+
 
 
 
