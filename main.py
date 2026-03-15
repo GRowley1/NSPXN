@@ -1486,6 +1486,10 @@ async def vision_review(
         log.error(f"LLM returned no content: {e}")
         return JSONResponse(status_code=500, content={"error":"Model returned no content."})
 
+    log.info("MODEL RAW RESPONSE START")
+    log.info((raw or "")[:4000])
+    log.info("MODEL RAW RESPONSE END")
+
     data = _try_parse_json(raw)
     # Prefer door-label VIN when present (OCR -> QR/barcode). Do NOT use filenames.
     # --- HARD VIN LOCK (door label wins; QR only confirms) ---
@@ -1543,7 +1547,7 @@ async def vision_review(
     except Exception:
         finish_reason = None
 
-    if data is None and (finish_reason == "length" or (raw and raw.strip().endswith("..."))):
+    if data is None:
         _text_parts_retry = [p for p in parts_payload if p.get("type") == "text"]
         _image_parts_retry = [p for p in parts_payload if p.get("type") != "text"]
         shrunk = _text_parts_retry[: max(3, len(_text_parts_retry)//2)] + _image_parts_retry
@@ -3261,22 +3265,3 @@ async def download_pdf(file_number: Optional[str] = None, filename: Optional[str
         return JSONResponse(status_code=404, content={"detail": "Not Found"})
     latest = max(candidates, key=lambda p: os.path.getmtime(p))
     return FileResponse(path=latest, media_type="application/pdf", filename=os.path.basename(latest))
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
