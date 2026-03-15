@@ -110,6 +110,25 @@ def _safe(s: str) -> str:
 
 
 
+
+def _format_vehicle_value(v) -> str:
+    """Normalize the Vehicle field for PDF printing."""
+    try:
+        if isinstance(v, dict):
+            year = str(v.get("year") or "").strip()
+            make = str(v.get("make") or "").strip()
+            model = str(v.get("model") or "").strip()
+            trim = str(v.get("trim") or "").strip()
+            parts = [p for p in [year, make, model] if p and p.upper() != "N/A"]
+            base = " ".join(parts).strip()
+            if trim and trim.upper() != "N/A":
+                return f"{base} ({trim})" if base else trim
+            return base or "N/A"
+    except Exception:
+        pass
+    s = str(v or "").strip()
+    return s if s else "N/A"
+
 def _normalize_ai_notes(raw: str, max_len: int = 800) -> str:
     """Normalize/sanitize Add'l Notes so they can't break JSON/structured prompting."""
     if raw is None:
@@ -2114,24 +2133,6 @@ async def vision_review(
         s = " ".join(_break(t) for t in s.split(" "))
         return s
 
-    def _format_vehicle_value(v) -> str:
-        """Normalize the Vehicle field for PDF printing."""
-        try:
-            if isinstance(v, dict):
-                year = str(v.get("year") or "").strip()
-                make = str(v.get("make") or "").strip()
-                model = str(v.get("model") or "").strip()
-                trim = str(v.get("trim") or "").strip()
-                parts = [p for p in [year, make, model] if p and p.upper() != "N/A"]
-                base = " ".join(parts).strip()
-                if trim and trim.upper() != "N/A":
-                    return f"{base} ({trim})" if base else trim
-                return base or "N/A"
-        except Exception:
-            pass
-        s = str(v or "").strip()
-        return s if s else "N/A"
-
     pdf = FPDF(); pdf.add_page()
     # --- NSPXN Logo (Top Right, First Page Only) ---
     try:
@@ -3260,6 +3261,11 @@ async def download_pdf(file_number: Optional[str] = None, filename: Optional[str
         return JSONResponse(status_code=404, content={"detail": "Not Found"})
     latest = max(candidates, key=lambda p: os.path.getmtime(p))
     return FileResponse(path=latest, media_type="application/pdf", filename=os.path.basename(latest))
+
+
+
+
+
 
 
 
