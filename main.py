@@ -1426,6 +1426,72 @@ async def vision_review(
     }
     max_tokens = MAX_TOKENS_BY_INTENT.get(ai_intent, 1500)
 
+    def _stage_blank(v: Any) -> bool:
+        s = str(v or "").strip()
+        return (not s) or (s.upper() in {"N/A", "NA", "NONE", "NULL", "UNKNOWN"})
+
+    def _extract_claim_from_uploaded_text(_txt: str) -> str:
+        if not _txt:
+            return "Not confirmed from provided evidence."
+        m = re.search(r"(?im)\bClaim\s*#?\s*[:\-]?\s*([A-Z0-9][A-Z0-9\-]{4,})\b", _txt)
+        if m:
+            return m.group(1).strip()
+        return "Not confirmed from provided evidence."
+
+    def _extract_vehicle_from_uploaded_text(_txt: str) -> str:
+        if not _txt:
+            return "Vehicle information not confirmed from provided evidence."
+        makes = r"Acura|Audi|BMW|Buick|Cadillac|Chevrolet|Chevy|Chrysler|Dodge|Ford|GMC|Honda|Hyundai|Infiniti|Jeep|Kia|Lexus|Lincoln|Mazda|Mercedes(?:-Benz)?|Mercury|Mini|Mitsubishi|Nissan|Pontiac|Porsche|Ram|Saturn|Scion|Subaru|Tesla|Toyota|Volkswagen|Volvo"
+        m = re.search(rf"(?i)\b(19\d{{2}}|20\d{{2}})\s+({makes})\s+([A-Z0-9][A-Z0-9\- ]{{1,40}})", _txt)
+        if m:
+            year = m.group(1).strip()
+            make = m.group(2).strip().replace('Chevy', 'Chevrolet')
+            model = re.split(r"\s{2,}|\n|\r", m.group(3).strip())[0].strip(" :-")
+            return f"{year} {make} {model}".strip()
+        return "Vehicle information not confirmed from provided evidence."
+
+    def _extract_vin_from_docs(_txt: str) -> str:
+        if not _txt:
+            return "Not confirmed from provided evidence."
+        m = re.search(VIN_PATTERN, (_txt or "").upper())
+        if m:
+            return m.group(0)
+        return "Not confirmed from provided evidence."
+
+    def _numeric_score_or_blank(v: Any) -> str:
+        s = str(v or "").strip()
+        if not s:
+            return ""
+        m = re.search(r"([0-9]{1,3})", s)
+        if not m:
+            return ""
+        try:
+            n = max(0, min(100, int(m.group(1))))
+            return str(n)
+        except Exception:
+            return ""
+
+    locked_fields = {
+        "claim_number": _extract_claim_from_uploaded_text(uploaded_text_all or ""),
+        "vin": vin_from_label or vin_from_qr or _extract_vin_from_docs(uploaded_text_all or ""),
+        "vin_verification": "",
+        "vehicle": _extract_vehicle_from_uploaded_text(uploaded_text_all or ""),
+        "odometer_estimate_only": odometer_value or "Not confirmed from provided evidence.",
+        "compliance_score": "",
+    }
+    if vin_from_label and vin_from_qr:
+        locked_fields["vin_verification"] = ("MATCH (door label + QR)" if vin_from_label == vin_from_qr else f"MISMATCH (door label: {vin_from_label}; QR: {vin_from_qr})")
+    elif vin_from_label:
+        locked_fields["vin_verification"] = "INCONCLUSIVE (door label extracted; no secondary confirmation)"
+    elif vin_from_qr:
+        locked_fields["vin_verification"] = "INCONCLUSIVE (QR extracted; door label not detected)"
+    elif locked_fields["vin"] and not _stage_blank(locked_fields["vin"]):
+        locked_fields["vin_verification"] = "INCONCLUSIVE (document/OCR VIN extracted)"
+    else:
+        locked_fields["vin_verification"] = "Not confirmed from provided evidence."
+
+    staged_guideline_markdown = ""
+
     # Call GPT and parse JSON (JSON hardened)
     # Prefer the canonical SDK path (client.chat.completions). Keep fallback for older SDKs.
     try:
@@ -1480,6 +1546,90 @@ async def vision_review(
         except Exception:
             return None
 
+    def _call_json_stage(stage_name: str, stage_system: str, stage_parts: List[Dict[str, Any]], stage_tokens: int) -> Any:
+        try:
+            _rsp = client.chat.completions.create(
+                model=MODEL,
+                messages=[{"role": "system", "content": stage_system}, {"role": "user", "content": stage_parts}],
+                max_completion_tokens=stage_tokens,
+                temperature=0,
+                top_p=1,
+                presence_penalty=0,
+                frequency_penalty=0,
+                response_format={"type": "json_object"},
+            )
+        except AttributeError:
+            _rsp = client.chat_completions.create(  # type: ignore[attr-defined]
+                model=MODEL,
+                messages=[{"role": "system", "content": stage_system}, {"role": "user", "content": stage_parts}],
+                max_completion_tokens=stage_tokens,
+                temperature=0,
+                top_p=1,
+                presence_penalty=0,
+                frequency_penalty=0,
+                response_format={"type": "json_object"},
+            )
+        _raw = (_rsp.choices[0].message.content or "")
+        log.info(f"{stage_name} RAW RESPONSE START")
+        log.info((_raw or "")[:4000])
+        log.info(f"{stage_name} RAW RESPONSE END")
+        return _try_parse_json(_raw)
+
+    if ai_intent in {"comprehensive", "guidelines_only"}:
+        _stage_text_parts = [p for p in parts_payload if p.get("type") == "text"]
+        _stage_image_parts = [p for p in parts_payload if p.get("type") != "text"]
+
+        stage1_prompt = (
+            "Return ONLY strict JSON with keys: claim_number, vin, vin_verification, vehicle, odometer_estimate_only, compliance_score. "
+            "Task: extract locked header facts from the uploaded estimate/photos/OCR. Do not write narrative. "
+            "Use direct visible/document evidence only. If a field cannot be confirmed, return 'Not confirmed from provided evidence.'."
+        )
+        stage1_parts = [{"type": "text", "text": stage1_prompt}] + _stage_text_parts[1:4] + _stage_image_parts[:8]
+        try:
+            stage1_data = _call_json_stage("STAGE1 EXTRACTION", "You extract locked appraisal header facts. Return JSON only.", stage1_parts, 900)
+        except Exception:
+            stage1_data = None
+        if isinstance(stage1_data, dict):
+            for _k in ("claim_number", "vin", "vin_verification", "vehicle", "odometer_estimate_only"):
+                _v = str(stage1_data.get(_k) or "").strip()
+                if _v and not _stage_blank(_v):
+                    locked_fields[_k] = _v
+            _score = _numeric_score_or_blank(stage1_data.get("compliance_score"))
+            if _score:
+                locked_fields["compliance_score"] = _score
+
+        if (client_rules or "").strip():
+            stage2_prompt = (
+                "Return ONLY strict JSON with keys: guideline_comparison_markdown, compliance_score, summary_brief. "
+                "Task: compare the provided client guidelines to the estimate/photos. "
+                "Write concise markdown bullets only for guideline_comparison_markdown. Each bullet must state the rule point, the evidence, and Aligned / Not Aligned / Not Evidenced. "
+                "Use uploaded evidence only and do not invent facts."
+            )
+            stage2_parts = [{"type": "text", "text": stage2_prompt}] + _stage_text_parts[1:5] + _stage_image_parts[:6]
+            try:
+                stage2_data = _call_json_stage("STAGE2 GUIDELINE COMPARISON", "You compare client guidelines against estimate and photo evidence. Return JSON only.", stage2_parts, 1100)
+            except Exception:
+                stage2_data = None
+            if isinstance(stage2_data, dict):
+                staged_guideline_markdown = str(stage2_data.get("guideline_comparison_markdown") or "").strip()
+                _score2 = _numeric_score_or_blank(stage2_data.get("compliance_score"))
+                if _score2:
+                    locked_fields["compliance_score"] = _score2
+
+        _locked_block = (
+            "\n\nLOCKED EXTRACTED FIELDS (use exactly; do not overwrite with weaker guesses):\n"
+            f"- Claim #: {locked_fields.get('claim_number', '')}\n"
+            f"- VIN: {locked_fields.get('vin', '')}\n"
+            f"- VIN verification: {locked_fields.get('vin_verification', '')}\n"
+            f"- Vehicle: {locked_fields.get('vehicle', '')}\n"
+            f"- Odometer: {locked_fields.get('odometer_estimate_only', '')}\n"
+            + (f"- Compliance Score seed: {locked_fields.get('compliance_score', '')}\n" if locked_fields.get('compliance_score') else "")
+        )
+        if staged_guideline_markdown:
+            _locked_block += "\nPRECOMPUTED CLIENT GUIDELINES COMPARISON (preserve substance in final narrative):\n" + staged_guideline_markdown[:5000] + "\n"
+        if parts_payload and isinstance(parts_payload[0], dict) and parts_payload[0].get("type") == "text":
+            parts_payload[0]["text"] = str(parts_payload[0].get("text") or "") + _locked_block
+
     try:
         raw = (rsp.choices[0].message.content or "")
     except Exception as e:
@@ -1491,6 +1641,19 @@ async def vision_review(
     log.info("MODEL RAW RESPONSE END")
 
     data = _try_parse_json(raw)
+    if isinstance(data, dict):
+        for _k in ("claim_number", "vin", "vin_verification", "vehicle", "odometer_estimate_only"):
+            _locked_v = str(locked_fields.get(_k) or "").strip()
+            if _locked_v and not _stage_blank(_locked_v):
+                data[_k] = _locked_v
+        if ai_intent != "damage_report_from_photos":
+            _locked_score = _numeric_score_or_blank(locked_fields.get("compliance_score"))
+            if _locked_score:
+                data["compliance_score"] = _locked_score
+        if staged_guideline_markdown:
+            _sm = str(data.get("summary_markdown") or "").strip()
+            if "Client Guidelines Comparison" not in _sm:
+                data["summary_markdown"] = (_sm + "\n\n## Client Guidelines Comparison\n" + staged_guideline_markdown).strip()
     # Prefer door-label VIN when present (OCR -> QR/barcode). Do NOT use filenames.
     # --- HARD VIN LOCK (door label wins; QR only confirms) ---
     try:
@@ -1605,16 +1768,31 @@ async def vision_review(
             log.error(f"Self-heal reformat failed: {e}")
 
     if data is None:
-        log.error(f"LLM failure or JSON parse error; first 500 chars:\n" + (raw or "")[:500])
-        skeleton = {k: "N/A" for k in KEYS}
+        TEMP
+        skeleton = {k: "" for k in KEYS}
         skeleton["file_number"] = file_number
         skeleton["request_type"] = req_label
-        skeleton["summary_brief"] = "N/A (model output could not be parsed; skeleton returned)."
+        skeleton["claim_number"] = locked_fields.get("claim_number", "Not confirmed from provided evidence.")
+        skeleton["vin"] = locked_fields.get("vin", "Not confirmed from provided evidence.")
+        skeleton["vin_verification"] = locked_fields.get("vin_verification", "Not confirmed from provided evidence.")
+        skeleton["vehicle"] = locked_fields.get("vehicle", "Vehicle information not confirmed from provided evidence.")
+        skeleton["odometer_estimate_only"] = locked_fields.get("odometer_estimate_only", "Not confirmed from provided evidence.")
+        skeleton["compliance_score"] = (locked_fields.get("compliance_score", "") if ai_intent != "damage_report_from_photos" else "N/A")
+        skeleton["summary_brief"] = "Deterministic extraction completed. Narrative JSON did not validate."
         skeleton["summary_markdown"] = (
             "## Detailed Condition Report\n"
-            "Model output could not be parsed into JSON on this run. Please resubmit."
+            f"Deterministic extraction completed for file {file_number}. "
+            f"Claim #: {locked_fields.get('claim_number', 'Not confirmed from provided evidence.')}. "
+            f"VIN: {locked_fields.get('vin', 'Not confirmed from provided evidence.')}. "
+            f"Vehicle: {locked_fields.get('vehicle', 'Vehicle information not confirmed from provided evidence.')}. "
+            f"Odometer: {locked_fields.get('odometer_estimate_only', 'Not confirmed from provided evidence.')}. "
+            "The final narrative model response did not validate as JSON, so this response preserves the extracted header facts instead of returning blank sections."
         )
+        if staged_guideline_markdown:
+            skeleton["summary_markdown"] = skeleton["summary_markdown"].rstrip() + "\n\n## Client Guidelines Comparison\n" + staged_guideline_markdown
         skeleton["fraud_markdown"] = "No material inconsistencies found."
+        skeleton["estimated_costs_markdown"] = "## Approximate Repair Cost Breakdown\nCost analysis requires a valid narrative JSON response to finalize."
+        skeleton["conclusion"] = "Deterministic extraction completed, but the final narrative JSON did not validate."
         return skeleton
 
     def _get(k):
@@ -1639,6 +1817,22 @@ async def vision_review(
         "conclusion": _get("conclusion"),
         "redaction_status": redaction_status,
     }
+    try:
+        for _k in ("claim_number", "vin", "vin_verification", "vehicle", "odometer_estimate_only"):
+            _locked_v = str(locked_fields.get(_k) or "").strip()
+            if _locked_v and not _stage_blank(_locked_v):
+                result[_k] = _locked_v
+        if ai_intent != "damage_report_from_photos":
+            _locked_score = _numeric_score_or_blank(locked_fields.get("compliance_score"))
+            if _locked_score:
+                result["compliance_score"] = _locked_score
+        if staged_guideline_markdown:
+            _sm = str(result.get("summary_markdown") or "").strip()
+            if "Client Guidelines Comparison" not in _sm:
+                result["summary_markdown"] = (_sm + "\n\n## Client Guidelines Comparison\n" + staged_guideline_markdown).strip()
+    except Exception:
+        pass
+
 
     def _naish(v: Any) -> bool:
         s = str(v or "").strip()
@@ -1648,15 +1842,15 @@ async def vision_review(
 
     def _extract_claim_from_text(_txt: str) -> str:
         if not _txt:
-            return "Unavailable on this run"
+            return "Not confirmed from provided evidence."
         m = re.search(r"(?im)\bClaim\s*#?\s*[:\-]?\s*([A-Z0-9][A-Z0-9\-]{4,})\b", _txt)
         if m:
             return m.group(1).strip()
-        return "Unavailable on this run"
+        return "Not confirmed from provided evidence."
 
     def _extract_vehicle_from_text(_txt: str) -> str:
         if not _txt:
-            return "Vehicle information unavailable on this run"
+            return "Vehicle information not confirmed from provided evidence."
         makes = r"Acura|Audi|BMW|Buick|Cadillac|Chevrolet|Chevy|Chrysler|Dodge|Ford|GMC|Honda|Hyundai|Infiniti|Jeep|Kia|Lexus|Lincoln|Mazda|Mercedes(?:-Benz)?|Mercury|Mini|Mitsubishi|Nissan|Pontiac|Porsche|Ram|Saturn|Scion|Subaru|Tesla|Toyota|Volkswagen|Volvo"
         m = re.search(rf"(?i)\b(19\d{{2}}|20\d{{2}})\s+({makes})\s+([A-Z0-9][A-Z0-9\- ]{{1,40}})", _txt)
         if m:
@@ -1664,13 +1858,13 @@ async def vision_review(
             make = m.group(2).strip().replace('Chevy', 'Chevrolet')
             model = re.split(r"\s{2,}|\n|\r", m.group(3).strip())[0].strip(" :-")
             return f"{year} {make} {model}".strip()
-        return "Vehicle information unavailable on this run"
+        return "Vehicle information not confirmed from provided evidence."
 
     def _build_non_na_summary() -> str:
         claim_txt = result.get("claim_number") if not _naish(result.get("claim_number")) else _extract_claim_from_text(uploaded_text_all or "")
-        vin_txt = result.get("vin") if not _naish(result.get("vin")) else (vin_from_label or vin_from_qr or "Unavailable on this run")
+        vin_txt = result.get("vin") if not _naish(result.get("vin")) else (vin_from_label or vin_from_qr or "Not confirmed from provided evidence.")
         veh_txt = _format_vehicle_value(result.get("vehicle")) if not _naish(result.get("vehicle")) else _extract_vehicle_from_text(uploaded_text_all or "")
-        odo_txt = result.get("odometer_estimate_only") if not _naish(result.get("odometer_estimate_only")) else (odometer_value or "Odometer could not be confirmed on this run")
+        odo_txt = result.get("odometer_estimate_only") if not _naish(result.get("odometer_estimate_only")) else (odometer_value or "Not confirmed from provided evidence.")
         photo_count = len(photo_index or [])
         files_count = len(files_seen or [])
         rules_state = "provided" if (client_rules or "").strip() else "not provided"
@@ -1678,7 +1872,7 @@ async def vision_review(
         return (
             "## Detailed Condition Report\n"
             f"This report used the exact files uploaded for file {file_number}. "
-            f"The current run produced incomplete structured AI output, so NSPXN applied a deterministic fallback summary instead of printing N/A fields. "
+            f"The structured narrative response did not fully validate, so NSPXN preserved deterministic extracted facts instead of printing blank fields. "
             f"Request type: {req_label}. "
             f"Claim number: {claim_txt}. VIN: {vin_txt}. Vehicle: {veh_txt}. Odometer: {odo_txt}. "
             f"Processed files: {files_count}. Photo references loaded: {photo_count}. Client rules were {rules_state}. "
@@ -1687,7 +1881,7 @@ async def vision_review(
         )
 
     def _build_non_na_fraud() -> str:
-        vin_txt = result.get("vin") if not _naish(result.get("vin")) else (vin_from_label or vin_from_qr or "Unavailable on this run")
+        vin_txt = result.get("vin") if not _naish(result.get("vin")) else (vin_from_label or vin_from_qr or "Not confirmed from provided evidence.")
         return (
             "No material inconsistencies found in the deterministic fallback review. "
             f"VIN evidence available on this run: {vin_txt}. "
@@ -1703,34 +1897,34 @@ async def vision_review(
             )
         return (
             "## Approximate Repair Cost Breakdown\n"
-            "Cost approximation was not reliably parsed from the model response on this run. "
-            "Uploaded estimate text and photos were still processed, but the breakdown requires a clean JSON response to finalize exact labor, parts, tax, and total values."
+            "Cost approximation was not finalized from the validated model response. "
+            "Uploaded estimate text and photos were still processed, but the breakdown requires a validated JSON response to finalize exact labor, parts, tax, and total values."
         )
 
     def _build_non_na_conclusion() -> str:
         return (
             "Structured AI output was incomplete on this run, but the uploaded files were processed successfully. "
-            "Use this fallback report to avoid blank output and re-run the same file set to regenerate the full narrative and cost analysis."
+            "This report preserves extracted evidence while the final narrative response is being stabilized."
         )
 
     try:
         if _naish(result.get("claim_number")):
             result["claim_number"] = _extract_claim_from_text(uploaded_text_all or "")
         if _naish(result.get("vin")):
-            result["vin"] = vin_from_label or vin_from_qr or "Unavailable on this run"
+            result["vin"] = vin_from_label or vin_from_qr or "Not confirmed from provided evidence."
         if _naish(result.get("vin_verification")):
             if vin_from_label and vin_from_qr:
                 result["vin_verification"] = ("MATCH (door label + QR)" if vin_from_label == vin_from_qr else f"MISMATCH (door label: {vin_from_label}; QR: {vin_from_qr})")
             elif vin_from_label or vin_from_qr:
                 result["vin_verification"] = "INCONCLUSIVE (single-source identifier recovered)"
             else:
-                result["vin_verification"] = "Unavailable on this run"
+                result["vin_verification"] = "Not confirmed from provided evidence."
         if _naish(result.get("vehicle")):
             result["vehicle"] = _extract_vehicle_from_text(uploaded_text_all or "")
         if _naish(result.get("odometer_estimate_only")):
-            result["odometer_estimate_only"] = odometer_value or "Odometer could not be confirmed on this run"
+            result["odometer_estimate_only"] = odometer_value or "Not confirmed from provided evidence."
         if _naish(result.get("compliance_score")) and ai_intent != "damage_report_from_photos":
-            result["compliance_score"] = "Pending re-run"
+            result["compliance_score"] = locked_fields.get("compliance_score") or "Not scored from validated evidence."
         if _naish(result.get("summary_brief")):
             result["summary_brief"] = "Deterministic fallback summary applied to prevent blank output."
         if _naish(result.get("summary_markdown")):
@@ -1742,7 +1936,7 @@ async def vision_review(
         if _naish(result.get("conclusion")):
             result["conclusion"] = _build_non_na_conclusion()
         if _naish(result.get("primary_impact")):
-            result["primary_impact"] = "Front" if photos_provided else "Unavailable on this run"
+            result["primary_impact"] = "Front" if photos_provided else "Not confirmed from provided evidence."
         if _naish(result.get("secondary_impact")):
             result["secondary_impact"] = "None identified on this run"
     except Exception:
@@ -3373,6 +3567,11 @@ async def download_pdf(file_number: Optional[str] = None, filename: Optional[str
         return JSONResponse(status_code=404, content={"detail": "Not Found"})
     latest = max(candidates, key=lambda p: os.path.getmtime(p))
     return FileResponse(path=latest, media_type="application/pdf", filename=os.path.basename(latest))
+
+
+
+
+
 
 
 
