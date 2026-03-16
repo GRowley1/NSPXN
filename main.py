@@ -911,6 +911,15 @@ def _find_rules_path(base_name: str, rules_dir: str) -> Optional[str]:
             return c
     return None
 
+
+def _read_rules_text_from_path(path: str) -> str:
+    try:
+        doc = Document(path)
+        return "\n".join([p.text for p in doc.paragraphs if p.text.strip()])
+    except Exception as e:
+        log.warning(f"Unable to read rules file {path}: {e}")
+        return ""
+
 @app.get("/client-rules/{client_name}")
 async def get_client_rules(client_name: str):
     path = _find_rules_path(client_name, CLIENT_RULES_DIR)
@@ -1033,6 +1042,60 @@ async def vision_review(
     # Normalize/sanitize notes so they cannot break structured prompting
     ai_notes_used = _normalize_ai_notes(ai_notes_used)
     ai_notes_block = _ai_notes_block(ai_notes_used)
+
+    # Hydrate selected client rules from CLIENT_RULES_DIR when the frontend sends only a selected rule name/file.
+    selected_rules_key = ""
+    resolved_rules_path = None
+    resolved_rules_text = ""
+    client_rules_source = "inline_form_text" if (client_rules or "").strip() else "blank"
+    try:
+        _form = await request.form()
+        for _k in (
+            "client_rules_selected", "client_rule_selected", "selected_client_rules", "selected_client_rule",
+            "selectedGuideline", "selected_guideline", "client_guideline", "client_guidelines",
+            "client_guideline_name", "clientGuideline", "clientGuidelineName", "rules_file", "rules_filename",
+            "rules_name", "guideline_file", "guideline_filename", "guideline_name", "client_name"
+        ):
+            _v = str(_form.get(_k, "") or "").strip()
+            if _v:
+                selected_rules_key = _v
+                break
+
+        _client_rules_trim = str(client_rules or "").strip()
+        _looks_like_rules_name = bool(_client_rules_trim) and (
+            _client_rules_trim.lower().endswith(".docx")
+            or ("\n" not in _client_rules_trim and len(_client_rules_trim) <= 160 and not re.search(r"(?is)\bshall\b|\bmust\b|\brequired\b|\bguideline\b.{20,}", _client_rules_trim))
+        )
+
+        if _looks_like_rules_name and not selected_rules_key:
+            selected_rules_key = _client_rules_trim
+
+        if selected_rules_key:
+            resolved_rules_path = _find_rules_path(selected_rules_key, CLIENT_RULES_DIR)
+            if resolved_rules_path:
+                resolved_rules_text = _read_rules_text_from_path(resolved_rules_path)
+
+        if (not _client_rules_trim) and resolved_rules_text:
+            client_rules = resolved_rules_text
+            client_rules_source = f"resolved_from_selected:{os.path.basename(resolved_rules_path)}"
+        elif _looks_like_rules_name and resolved_rules_text:
+            client_rules = resolved_rules_text
+            client_rules_source = f"resolved_from_client_rules_name:{os.path.basename(resolved_rules_path)}"
+        elif _client_rules_trim:
+            client_rules_source = "inline_form_text"
+        elif selected_rules_key and not resolved_rules_text:
+            client_rules_source = f"selected_but_unresolved:{selected_rules_key}"
+
+        log.info(
+            "CLIENT RULES INPUT | source=%s | inline_len=%s | selected_key=%s | resolved_path=%s | resolved_len=%s",
+            client_rules_source,
+            len(_client_rules_trim),
+            selected_rules_key or "",
+            (os.path.basename(resolved_rules_path) if resolved_rules_path else ""),
+            len(resolved_rules_text or ""),
+        )
+    except Exception as e:
+        log.warning(f"Client rules hydration/logging failed: {e}")
 
     pdf_text_fulls: List[str] = []  # full PDF text for supplement detection
 
@@ -1627,6 +1690,12 @@ async def vision_review(
         )
         if staged_guideline_markdown:
             _locked_block += "\nPRECOMPUTED CLIENT GUIDELINES COMPARISON (preserve substance in final narrative):\n" + staged_guideline_markdown[:5000] + "\n"
+        elif selected_rules_key and resolved_rules_text:
+            _locked_block += (
+                "\nCLIENT GUIDELINES WERE RESOLVED LOCALLY FROM THE SELECTED FRONTEND RULE FILE. "
+                "Do NOT say that no separate client guideline document/rule list is present. "
+                f"Resolved guideline source: {os.path.basename(resolved_rules_path) if resolved_rules_path else selected_rules_key}.\n"
+            )
         if parts_payload and isinstance(parts_payload[0], dict) and parts_payload[0].get("type") == "text":
             parts_payload[0]["text"] = str(parts_payload[0].get("text") or "") + _locked_block
 
@@ -1654,6 +1723,12 @@ async def vision_review(
             _sm = str(data.get("summary_markdown") or "").strip()
             if "Client Guidelines Comparison" not in _sm:
                 data["summary_markdown"] = (_sm + "\n\n## Client Guidelines Comparison\n" + staged_guideline_markdown).strip()
+        elif selected_rules_key and resolved_rules_text:
+            data["summary_markdown"] = re.sub(
+                r"(?is)no\s+separate\s+client\s+guideline\s+document/rule\s+list\s+is\s+present[^.]*\.?",
+                "Client guidelines were provided and resolved from the selected frontend rule file.",
+                str(data.get("summary_markdown") or ""),
+            )
     # Prefer door-label VIN when present (OCR -> QR/barcode). Do NOT use filenames.
     # --- HARD VIN LOCK (door label wins; QR only confirms) ---
     try:
@@ -1768,7 +1843,6 @@ async def vision_review(
             log.error(f"Self-heal reformat failed: {e}")
 
     if data is None:
-        TEMP
         skeleton = {k: "" for k in KEYS}
         skeleton["file_number"] = file_number
         skeleton["request_type"] = req_label
@@ -1830,6 +1904,12 @@ async def vision_review(
             _sm = str(result.get("summary_markdown") or "").strip()
             if "Client Guidelines Comparison" not in _sm:
                 result["summary_markdown"] = (_sm + "\n\n## Client Guidelines Comparison\n" + staged_guideline_markdown).strip()
+        elif selected_rules_key and resolved_rules_text:
+            result["summary_markdown"] = re.sub(
+                r"(?is)no\s+separate\s+client\s+guideline\s+document/rule\s+list\s+is\s+present[^.]*\.?",
+                "Client guidelines were provided and resolved from the selected frontend rule file.",
+                str(result.get("summary_markdown") or ""),
+            )
     except Exception:
         pass
 
@@ -3567,6 +3647,11 @@ async def download_pdf(file_number: Optional[str] = None, filename: Optional[str
         return JSONResponse(status_code=404, content={"detail": "Not Found"})
     latest = max(candidates, key=lambda p: os.path.getmtime(p))
     return FileResponse(path=latest, media_type="application/pdf", filename=os.path.basename(latest))
+
+
+
+
+
 
 
 
