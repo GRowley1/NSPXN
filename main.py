@@ -2024,14 +2024,15 @@ async def vision_review(
             result["compliance_score"] = locked_fields.get("compliance_score") or "Not scored from validated evidence."
         if _naish(result.get("summary_brief")):
             result["summary_brief"] = "Deterministic fallback summary applied to prevent blank output."
-        if _naish(result.get("summary_markdown")):
-            result["summary_markdown"] = _build_non_na_summary()
-        if _naish(result.get("fraud_markdown")):
-            result["fraud_markdown"] = _build_non_na_fraud()
-        if _naish(result.get("estimated_costs_markdown")):
-            result["estimated_costs_markdown"] = _build_non_na_cost()
-        if _naish(result.get("conclusion")):
-            result["conclusion"] = _build_non_na_conclusion()
+        if ai_intent != "damage_report_from_photos":
+            if _naish(result.get("summary_markdown")):
+                result["summary_markdown"] = _build_non_na_summary()
+            if _naish(result.get("fraud_markdown")):
+                result["fraud_markdown"] = _build_non_na_fraud()
+            if _naish(result.get("estimated_costs_markdown")):
+                result["estimated_costs_markdown"] = _build_non_na_cost()
+            if _naish(result.get("conclusion")):
+                result["conclusion"] = _build_non_na_conclusion()
         if _naish(result.get("primary_impact")):
             result["primary_impact"] = "Front" if photos_provided else "Not confirmed from provided evidence."
         if _naish(result.get("secondary_impact")):
