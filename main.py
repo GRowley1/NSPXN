@@ -1420,11 +1420,14 @@ async def vision_review(
         f"REQUEST TYPE (use exactly in request_type): {req_label}\n"
         f"FILE #: {file_number}\n"
         f"CLIENT: {ia_company}\n\n"
+        "FILES SEEN (echo verbatim in Inputs Used):\n- "
+        + ("\n- ".join(files_seen) if files_seen else "none")
+        + "\n\n"
         "PHOTO INDEX (use Photo # citations exactly as listed):\n"
         + ("\n".join([f"Photo {i+1}: {name}" for i, name in enumerate(photo_index)]) if photo_index else "No photos provided.")
         + "\n\n"
         "CLIENT RULES (only if provided):\n"
-        + (client_rules[:1500] if client_rules else "")
+        + (client_rules[:6000] if client_rules else "")
         + ai_notes_block
         + "\n\n"
         "INSTRUCTIONS:\n"
@@ -1438,6 +1441,18 @@ async def vision_review(
             "\nNEUTRAL TERMINOLOGY RULE:\n"
             "- Do not use left, right, driver-side, or passenger-side terminology.\n"
             "- Use neutral terms only: Front, Rear, Side, one headlamp, one corner.\n"
+        )
+
+    if client_rules.strip() and ai_intent in {"comprehensive", "guidelines_only"}:
+        prompt_text += (
+            "\n\nWhen client_rules text is provided, you MUST include a section titled '## Client Guidelines Comparison' "
+            "with 3–8 concise bullets. For each, quote the relevant rule fragment and mark Aligned / Not Aligned / Not Evidenced, "
+            "citing evidence (p#/L#, Photo #). Also weave any material rule alignment/misalignment into the Detailed Condition Report narrative."
+        )
+        prompt_text += (
+            "\n\nWeave the following static audit questions naturally into the Detailed Condition Report narrative "
+            "(do NOT present them as a separate Q&A list; integrate answers inline and cite evidence with p#/L# and Photo # as applicable):\n"
+            + "\n".join(f"- {q}" for q in STATIC_AUDIT_QUESTIONS)
         )
 
 
@@ -1668,9 +1683,9 @@ async def vision_review(
                 "Write concise markdown bullets only for guideline_comparison_markdown. Each bullet must state the rule point, the evidence, and Aligned / Not Aligned / Not Evidenced. "
                 "Use uploaded evidence only and do not invent facts."
             )
-            stage2_parts = [{"type": "text", "text": stage2_prompt}] + _stage_text_parts[1:5] + _stage_image_parts[:6]
+            stage2_parts = [{"type": "text", "text": stage2_prompt}] + _stage_text_parts[1:6] + _stage_image_parts[:10]
             try:
-                stage2_data = _call_json_stage("STAGE2 GUIDELINE COMPARISON", "You compare client guidelines against estimate and photo evidence. Return JSON only.", stage2_parts, 1100)
+                stage2_data = _call_json_stage("STAGE2 GUIDELINE COMPARISON", "You compare client guidelines against estimate and photo evidence. Return JSON only.", stage2_parts, 2200)
             except Exception:
                 stage2_data = None
             if isinstance(stage2_data, dict):
@@ -1724,11 +1739,9 @@ async def vision_review(
             if "Client Guidelines Comparison" not in _sm:
                 data["summary_markdown"] = (_sm + "\n\n## Client Guidelines Comparison\n" + staged_guideline_markdown).strip()
         elif selected_rules_key and resolved_rules_text:
-            data["summary_markdown"] = re.sub(
-                r"(?is)no\s+separate\s+client\s+guideline\s+document/rule\s+list\s+is\s+present[^.]*\.?",
-                "Client guidelines were provided and resolved from the selected frontend rule file.",
-                str(data.get("summary_markdown") or ""),
-            )
+            _sm_resolved = str(data.get("summary_markdown") or "").strip()
+            if "Client Guidelines Comparison" not in _sm_resolved:
+                data["summary_markdown"] = (_sm_resolved + "\n\n## Client Guidelines Comparison\n- Client guidelines were provided and resolved from the selected frontend rule file.").strip()
     # Prefer door-label VIN when present (OCR -> QR/barcode). Do NOT use filenames.
     # --- HARD VIN LOCK (door label wins; QR only confirms) ---
     try:
@@ -1864,6 +1877,12 @@ async def vision_review(
         )
         if staged_guideline_markdown:
             skeleton["summary_markdown"] = skeleton["summary_markdown"].rstrip() + "\n\n## Client Guidelines Comparison\n" + staged_guideline_markdown
+        elif (client_rules or "").strip():
+            skeleton["summary_markdown"] = skeleton["summary_markdown"].rstrip() + (
+                "\n\n## Client Guidelines Comparison\n"
+                "- Client guidelines text was provided for this run and should be compared against the estimate/photos.\n"
+                "- The final model narrative did not validate cleanly, so the detailed rule-by-rule comparison was not finalized in this fallback body."
+            )
         skeleton["fraud_markdown"] = "No material inconsistencies found."
         skeleton["estimated_costs_markdown"] = "## Approximate Repair Cost Breakdown\nCost analysis requires a valid narrative JSON response to finalize."
         skeleton["conclusion"] = "Deterministic extraction completed, but the final narrative JSON did not validate."
@@ -1905,11 +1924,9 @@ async def vision_review(
             if "Client Guidelines Comparison" not in _sm:
                 result["summary_markdown"] = (_sm + "\n\n## Client Guidelines Comparison\n" + staged_guideline_markdown).strip()
         elif selected_rules_key and resolved_rules_text:
-            result["summary_markdown"] = re.sub(
-                r"(?is)no\s+separate\s+client\s+guideline\s+document/rule\s+list\s+is\s+present[^.]*\.?",
-                "Client guidelines were provided and resolved from the selected frontend rule file.",
-                str(result.get("summary_markdown") or ""),
-            )
+            _sm_resolved = str(result.get("summary_markdown") or "").strip()
+            if "Client Guidelines Comparison" not in _sm_resolved:
+                result["summary_markdown"] = (_sm_resolved + "\n\n## Client Guidelines Comparison\n- Client guidelines were provided and resolved from the selected frontend rule file.").strip()
     except Exception:
         pass
 
@@ -1947,7 +1964,7 @@ async def vision_review(
         odo_txt = result.get("odometer_estimate_only") if not _naish(result.get("odometer_estimate_only")) else (odometer_value or "Not confirmed from provided evidence.")
         photo_count = len(photo_index or [])
         files_count = len(files_seen or [])
-        rules_state = "provided" if (client_rules or "").strip() else "not provided"
+        rules_state = "provided" if (client_rules or "").strip() else "not resolved"
         supp_txt = (", ".join(supplement_versions) if supplement_versions else "No supplement tags detected")
         return (
             "## Detailed Condition Report\n"
@@ -3647,6 +3664,10 @@ async def download_pdf(file_number: Optional[str] = None, filename: Optional[str
         return JSONResponse(status_code=404, content={"detail": "Not Found"})
     latest = max(candidates, key=lambda p: os.path.getmtime(p))
     return FileResponse(path=latest, media_type="application/pdf", filename=os.path.basename(latest))
+
+
+
+
 
 
 
