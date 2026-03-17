@@ -3517,7 +3517,8 @@ async def vision_review(
         safe_file = _safe(file_number)
         pdf_filename = f"AI_Condition_Report_{safe_file}.pdf"
     else:
-        pdf.cell(0,10,"NSPXN.com Condition Report", ln=True, align="C")
+        _is_comprehensive_pdf = str(ai_intent or "").strip().lower() == "comprehensive"
+        pdf.cell(0,10,("NSPXN.com Audit Report" if _is_comprehensive_pdf else "NSPXN.com Condition Report"), ln=True, align="C")
         pdf.set_font_size(10); pdf.ln(3)
         mc(f"File Number: {file_number}")
         mc(f"Inspected For: {ia_company}")
