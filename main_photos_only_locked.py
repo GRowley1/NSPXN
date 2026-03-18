@@ -2014,13 +2014,16 @@ async def vision_review(
             r"^\s*[-*]?\s*Paint\s+materials\s*=\s*\$\s*([0-9][0-9,]*(?:\.[0-9]{1,2})?)",
             r"^\s*[-*]?\s*Paint\s+materials\s*:\s*\$\s*([0-9][0-9,]*(?:\.[0-9]{1,2})?)",
         ])
+        sublet = _grab([
+            r"^\s*[-*]?\s*Sublet\s*:\s*\$\s*([0-9][0-9,]*(?:\.[0-9]{1,2})?)",
+            r"^\s*[-*]?\s*Sublet/Other\s*\(approx\.?\)\s*:\s*\$\s*([0-9][0-9,]*(?:\.[0-9]{1,2})?)",
+            r"^\s*[-*]?\s*Rear\s+glass\s+install\s*\(sublet\s+allowance\)\s*:\s*\$\s*([0-9][0-9,]*(?:\.[0-9]{1,2})?)",
+        ])
         tax_amt = _grab([
             r"^\s*[-*]?\s*Sales\s+tax\s*\(assumed\s*7%\s*for\s*approximation\)\s*=\s*\$\s*([0-9][0-9,]*(?:\.[0-9]{1,2})?)",
             r"^\s*[-*]?\s*Tax\s*:\s*\$\s*([0-9][0-9,]*(?:\.[0-9]{1,2})?)",
         ])
-        approx_total = _grab([
-            r"^\s*\*\*?\s*Approximate\s+Repair\s+Total\s*:\s*\$\s*([0-9][0-9,]*(?:\.[0-9]{1,2})?)",
-        ])
+        approx_total = None
 
         if labor is None:
             body = _grab([
@@ -2049,13 +2052,19 @@ async def vision_review(
 
         if tax_amt is None and parts is not None and paint_materials is not None:
             tax_amt = round((parts + paint_materials) * 0.07, 2)
-        if approx_total is None and parts is not None and paint_materials is not None and labor is not None and tax_amt is not None:
-            approx_total = round(labor + parts + paint_materials + tax_amt, 2)
+        if parts is not None and paint_materials is not None and labor is not None and tax_amt is not None:
+            approx_total = round(labor + parts + paint_materials + (sublet or 0.0) + tax_amt, 2)
 
         cleaned = []
         for ln in _cm.splitlines():
             s = (ln or "").strip()
             if re.search(r"(?i)^\s*[-*]?\s*Sales\s+tax\s*\(assumed\s*7%\s*for\s*approximation\)", s):
+                continue
+            if re.search(r"(?i)^\s*[-*]?\s*Tax\s+rate\s*:", s):
+                continue
+            if re.search(r"(?i)^\s*[-*]?\s*Tax\s+basis\s*\(", s):
+                continue
+            if re.search(r"(?i)^\s*[-*]?\s*Tax\s*:\s*\$", s):
                 continue
             if re.search(r"(?i)^\s*\*{0,2}\s*Approximate\s+Repair\s+Total\s*:", s):
                 continue
@@ -2569,10 +2578,17 @@ async def vision_review(
             if re.search(r"(?i)inspection\s+location\s*:", ln):
                 continue
 
-            # Keep the canonical total line if it already exists; strip alternate total labels
-            if re.search(r"(?i)\bApprox\.?\s*Repair\s*Total\b", ln):
-                if not re.search(r"(?i)^\s*\*{0,2}\s*Approximate\s+Repair\s+Total\s*:\s*\$\s*[0-9]", s):
-                    continue
+            # Strip model-provided tax/total lines; render our own deterministic math below
+            if re.search(r"(?i)^\s*[-*]?\s*Sales\s+tax\s*\(assumed\s*7%\s*for\s*approximation\)", s):
+                continue
+            if re.search(r"(?i)^\s*[-*]?\s*Tax\s+rate\s*:", s):
+                continue
+            if re.search(r"(?i)^\s*[-*]?\s*Tax\s+basis\s*\(", s):
+                continue
+            if re.search(r"(?i)^\s*[-*]?\s*Tax\s*:\s*\$", s):
+                continue
+            if re.search(r"(?i)^\s*\*{0,2}\s*Approximate\s+Repair\s+Total\s*:", s):
+                continue
 
             cleaned.append(ln)
 
@@ -2649,6 +2665,11 @@ async def vision_review(
             r"^\s*[-*]?\s*Paint\s*(?:&\s*|and\s*)?materials\s*:\s*\$\s*([0-9][0-9,]*(?:\.[0-9]{2})?)\b",
         ])
 
+        sublet = _grab_money_line([
+            r"^\s*[-*]?\s*Sublet\s*:\s*\$\s*([0-9][0-9,]*(?:\.[0-9]{2})?)\b",
+            r"^\s*[-*]?\s*Rear\s+glass\s+install\s*\(sublet\s+allowance\)\s*:\s*\$\s*([0-9][0-9,]*(?:\.[0-9]{2})?)\b",
+        ])
+
         # Existing tax / total if already present
         tax_amt = _grab_money_line([
             r"^\s*[-*]?\s*Sales\s+tax\s*\(assumed\s*7%\s*for\s*approximation\)\s*=\s*\$\s*([0-9][0-9,]*(?:\.[0-9]{2})?)\b",
@@ -2668,10 +2689,10 @@ async def vision_review(
         elif isinstance(parts_sub, (int, float)) and isinstance(paint_mat, (int, float)):
             tax_basis = round(float(parts_sub) + float(paint_mat), 2)
 
-        # If total missing, compute from existing subtotals + tax
-        if total_val is None:
-            if isinstance(labor_sub, (int, float)) and isinstance(parts_sub, (int, float)) and isinstance(paint_mat, (int, float)) and isinstance(tax_amt, (int, float)):
-                total_val = round(float(labor_sub) + float(parts_sub) + float(paint_mat) + float(tax_amt), 2)
+        # Compute total deterministically from subtotals + tax.
+        # For photos-only, include sublet when present and do not trust a model-supplied total line.
+        if isinstance(labor_sub, (int, float)) and isinstance(parts_sub, (int, float)) and isinstance(paint_mat, (int, float)) and isinstance(tax_amt, (int, float)):
+            total_val = round(float(labor_sub) + float(parts_sub) + float(paint_mat) + float(sublet or 0.0) + float(tax_amt), 2)
 
         # Print cleaned body first
         if cleaned:
@@ -3259,7 +3280,3 @@ async def download_pdf(file_number: Optional[str] = None, filename: Optional[str
         return JSONResponse(status_code=404, content={"detail": "Not Found"})
     latest = max(candidates, key=lambda p: os.path.getmtime(p))
     return FileResponse(path=latest, media_type="application/pdf", filename=os.path.basename(latest))
-
-
-
-
