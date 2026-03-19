@@ -2849,6 +2849,28 @@ async def vision_review(
         s = " ".join(_break(t) for t in s.split(" "))
         return s
 
+
+def _render_est_timestamp_line(pdf_obj) -> None:
+    """Render a visible generated timestamp below the disclaimer."""
+    try:
+        try:
+            ts = datetime.now(ZoneInfo("America/New_York")).strftime("%m/%d/%Y %I:%M %p")
+            label = f"Generated: {ts} EST"
+        except Exception as e:
+            log.warning(f"Timestamp timezone conversion failed: {e}")
+            ts = datetime.now().strftime("%m/%d/%Y %I:%M %p")
+            label = f"Generated: {ts}"
+        try:
+            pdf_obj.set_font("Helvetica", "", 8)
+        except Exception:
+            pdf_obj.set_font("Arial", "", 8)
+        pdf_obj.set_text_color(90, 90, 90)
+        pdf_obj.cell(0, 4, _pdf_sanitize(label), ln=True)
+        pdf_obj.set_text_color(0, 0, 0)
+    except Exception as e:
+        log.warning(f"Timestamp render failed: {e}")
+
+
     pdf = FPDF(); pdf.add_page()
     # --- Locked first-page header assets (logo drawn by helper below) ---
     logo_path = os.path.join(os.path.dirname(__file__), "ChatGPT logo100725.png")
@@ -3766,12 +3788,7 @@ async def vision_review(
             pdf.ln(2)
             pdf.set_text_color(90, 90, 90)
             pdf.set_font("Helvetica", "", 8)
-            pdf.cell(
-    0,
-    4,
-    f"Generated: {datetime.now(ZoneInfo('America/New_York')).strftime('%m/%d/%Y %I:%M %p')} EST",
-    ln=True
-)
+            _render_est_timestamp_line(pdf)
             pdf.set_text_color(0, 0, 0)
         except Exception:
             pass
@@ -3899,12 +3916,7 @@ async def vision_review(
                 pdf.set_font("Helvetica", "", 8)
             except Exception:
                 pdf.set_font("Arial", "", 8)
-            pdf.cell(
-    0,
-    4,
-    f"Generated: {datetime.now(ZoneInfo('America/New_York')).strftime('%m/%d/%Y %I:%M %p')} EST",
-    ln=True
-)
+            _render_est_timestamp_line(pdf)
             pdf.set_text_color(0, 0, 0)
         except Exception:
             pass
