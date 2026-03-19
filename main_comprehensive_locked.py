@@ -1,3 +1,32 @@
+
+def _render_locked_header(pdf, logo_path=None, title="NSPXN.com Audit Report"):
+    from datetime import datetime
+    from zoneinfo import ZoneInfo
+
+    top_y = 10
+
+    if logo_path:
+        try:
+            pdf.image(logo_path, x=10, y=top_y, w=40)
+        except Exception:
+            pass
+
+    safe_y = top_y + 28
+    pdf.set_y(max(pdf.get_y(), safe_y))
+
+    pdf.set_font("Arial", "B", 16)
+    pdf.cell(0, 10, title, 0, 1, "R")
+
+    pdf.ln(2)
+
+    y = pdf.get_y()
+    pdf.set_draw_color(180, 180, 180)
+    pdf.set_line_width(0.6)
+    pdf.line(10, y, 200, y)
+
+    pdf.ln(6)
+
+
 from fastapi import FastAPI, File, UploadFile, Form, Request
 from fastapi.responses import JSONResponse, FileResponse
 from fastapi.middleware.cors import CORSMiddleware
@@ -3626,7 +3655,7 @@ async def vision_review(
             pdf.ln(2)
             pdf.set_text_color(90, 90, 90)
             pdf.set_font("Helvetica", "", 8)
-            pdf.cell(0, 4, f"Generated: {datetime.now().strftime('%m/%d/%Y %I:%M %p')}", ln=True)
+            pdf.cell(0, 4, f"Generated: {datetime.now(ZoneInfo("America/New_York")).strftime("%m/%d/%Y %I:%M %p")}", ln=True)
             pdf.set_text_color(0, 0, 0)
         except Exception:
             pass
@@ -3752,7 +3781,7 @@ async def vision_review(
                 pdf.set_font("Helvetica", "", 8)
             except Exception:
                 pdf.set_font("Arial", "", 8)
-            pdf.cell(0, 4, f"Generated: {datetime.now().strftime('%m/%d/%Y %I:%M %p')}", ln=True)
+            pdf.cell(0, 4, f"Generated: {datetime.now(ZoneInfo("America/New_York")).strftime("%m/%d/%Y %I:%M %p")}", ln=True)
             pdf.set_text_color(0, 0, 0)
         except Exception:
             pass
@@ -3900,3 +3929,8 @@ async def download_pdf(file_number: Optional[str] = None, filename: Optional[str
         return JSONResponse(status_code=404, content={"detail": "Not Found"})
     latest = max(candidates, key=lambda p: os.path.getmtime(p))
     return FileResponse(path=latest, media_type="application/pdf", filename=os.path.basename(latest))
+
+
+
+
+
