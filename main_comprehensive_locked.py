@@ -1566,15 +1566,19 @@ async def vision_review(
         return "Not confirmed from provided evidence."
 
     def _numeric_score_or_blank(v: Any) -> str:
-        s = str(v or "").strip()
-        if not s:
-            return ""
-        m = re.search(r"([0-9]{1,3})", s)
-        if not m:
-            return ""
         try:
-            n = max(0, min(100, int(m.group(1))))
-            return str(n)
+            if v is None:
+                return ""
+            if isinstance(v, float) and 0.0 <= v <= 1.0:
+                return str(max(0, min(100, int(round(v * 100)))))
+            s = str(v).strip()
+            if not s:
+                return ""
+            m = re.search(r"([0-9]{1,3}(?:\.[0-9]+)?)", s)
+            if not m:
+                return ""
+            n = int(round(float(m.group(1))))
+            return str(max(0, min(100, n)))
         except Exception:
             return ""
 
@@ -1600,31 +1604,33 @@ async def vision_review(
     staged_guideline_markdown = ""
 
     # Call GPT and parse JSON (JSON hardened)
-    # Prefer the canonical SDK path (client.chat.completions). Keep fallback for older SDKs.
-    try:
-        rsp = client.chat.completions.create(
-            model=MODEL,
-            messages=[{"role":"system","content": SYSTEM},
-                      {"role":"user","content": parts_payload}],
-            max_completion_tokens=max_tokens,
-            temperature=0,
-            top_p=1,
-            presence_penalty=0,
-            frequency_penalty=0,
-            response_format={"type":"json_object"},
-        )
-    except AttributeError:
-        rsp = client.chat_completions.create(  # type: ignore[attr-defined]
-            model=MODEL,
-            messages=[{"role":"system","content": SYSTEM},
-                      {"role":"user","content": parts_payload}],
-            max_completion_tokens=max_tokens,
-            temperature=0,
-            top_p=1,
-            presence_penalty=0,
-            frequency_penalty=0,
-            response_format={"type":"json_object"},
-        )
+    # For comprehensive/guidelines, defer the final narrative call until after Stage 1/2 so we can send a much smaller payload.
+    rsp = None
+    if ai_intent == "damage_report_from_photos":
+        try:
+            rsp = client.chat.completions.create(
+                model=MODEL,
+                messages=[{"role":"system","content": SYSTEM},
+                          {"role":"user","content": parts_payload}],
+                max_completion_tokens=max_tokens,
+                temperature=0,
+                top_p=1,
+                presence_penalty=0,
+                frequency_penalty=0,
+                response_format={"type":"json_object"},
+            )
+        except AttributeError:
+            rsp = client.chat_completions.create(  # type: ignore[attr-defined]
+                model=MODEL,
+                messages=[{"role":"system","content": SYSTEM},
+                          {"role":"user","content": parts_payload}],
+                max_completion_tokens=max_tokens,
+                temperature=0,
+                top_p=1,
+                presence_penalty=0,
+                frequency_penalty=0,
+                response_format={"type":"json_object"},
+            )
 
     # --- Hardened JSON parse helper
     def _try_parse_json(raw_text: str):
@@ -1743,11 +1749,64 @@ async def vision_review(
         if parts_payload and isinstance(parts_payload[0], dict) and parts_payload[0].get("type") == "text":
             parts_payload[0]["text"] = str(parts_payload[0].get("text") or "") + _locked_block
 
+    if rsp is None:
+        slim_final_prompt = (
+            "Return ONLY strict JSON with all required keys. "
+            "Write the final comprehensive/guidelines report using the locked extracted fields and any precomputed guideline comparison below. "
+            "Do not restate raw OCR blobs. Do not omit summary_markdown, fraud_markdown, estimated_costs_markdown, or conclusion. "
+            "If compliance_score is provided as a seed, keep the final score consistent with the rationale arithmetic."
+        )
+        slim_locked_text = (
+            f"FILE #: {file_number}\n"
+            f"REQUEST TYPE: {req_label}\n"
+            f"LOCKED CLAIM #: {locked_fields.get('claim_number','')}\n"
+            f"LOCKED VIN: {locked_fields.get('vin','')}\n"
+            f"LOCKED VIN VERIFICATION: {locked_fields.get('vin_verification','')}\n"
+            f"LOCKED VEHICLE: {locked_fields.get('vehicle','')}\n"
+            f"LOCKED ODOMETER: {locked_fields.get('odometer_estimate_only','')}\n"
+            f"LOCKED SCORE SEED: {locked_fields.get('compliance_score','')}\n"
+            + (f"PRECOMPUTED CLIENT GUIDELINES COMPARISON:\n{staged_guideline_markdown}\n" if staged_guideline_markdown else "")
+        )
+        _slim_text_parts = [p for p in parts_payload if p.get("type") == "text"]
+        _slim_image_parts = [p for p in parts_payload if p.get("type") != "text"]
+        slim_parts = [{"type": "text", "text": slim_final_prompt + "\n\n" + slim_locked_text}]
+        if _slim_text_parts:
+            slim_parts.extend(_slim_text_parts[-2:])
+        if _slim_image_parts:
+            slim_parts.extend(_slim_image_parts[:8])
+        try:
+            rsp = client.chat.completions.create(
+                model=MODEL,
+                messages=[{"role":"system","content": SYSTEM},
+                          {"role":"user","content": slim_parts}],
+                max_completion_tokens=max_tokens,
+                temperature=0,
+                top_p=1,
+                presence_penalty=0,
+                frequency_penalty=0,
+                response_format={"type":"json_object"},
+            )
+        except AttributeError:
+            rsp = client.chat_completions.create(  # type: ignore[attr-defined]
+                model=MODEL,
+                messages=[{"role":"system","content": SYSTEM},
+                          {"role":"user","content": slim_parts}],
+                max_completion_tokens=max_tokens,
+                temperature=0,
+                top_p=1,
+                presence_penalty=0,
+                frequency_penalty=0,
+                response_format={"type":"json_object"},
+            )
+
     try:
         raw = (rsp.choices[0].message.content or "")
+        if not str(raw or "").strip():
+            log.error("Final model response was empty.")
+            raw = ""
     except Exception as e:
         log.error(f"LLM returned no content: {e}")
-        return JSONResponse(status_code=500, content={"error":"Model returned no content."})
+        raw = ""
 
     log.info("MODEL RAW RESPONSE START")
     log.info((raw or "")[:4000])
@@ -4037,13 +4096,13 @@ def _render_est_timestamp_line(pdf_obj) -> None:
     except Exception as e:
         logging.error(f"Email error: {e}")
 
-    return {
+    return JSONResponse(content={
         **result,
         "web_summary": result["summary_brief"],
         "gpt_output": result["summary_markdown"],
         "pdf_url": pdf_url,
         "pdf_filename": pdf_filename
-    }
+    })
 
     # -----------------------
 # PDF download
@@ -4064,3 +4123,8 @@ async def download_pdf(file_number: Optional[str] = None, filename: Optional[str
         return JSONResponse(status_code=404, content={"detail": "Not Found"})
     latest = max(candidates, key=lambda p: os.path.getmtime(p))
     return FileResponse(path=latest, media_type="application/pdf", filename=os.path.basename(latest))
+
+
+
+
+
