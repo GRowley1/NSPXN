@@ -2710,13 +2710,8 @@ async def vision_review(
         return s
 
     pdf = FPDF(); pdf.add_page()
-    # --- NSPXN Logo (Top Right, First Page Only) ---
-    try:
-        logo_path = os.path.join(os.path.dirname(__file__), "ChatGPT logo100725.png")
-        if os.path.exists(logo_path):
-            pdf.image(logo_path, x=pdf.w - 45, y=8, w=35)  # small–medium size
-    except Exception:
-        pass
+    # --- Locked first-page header assets (logo drawn by helper below) ---
+    logo_path = os.path.join(os.path.dirname(__file__), "ChatGPT logo100725.png")
     pdf.set_auto_page_break(auto=True, margin=10)
     pdf.set_left_margin(10); pdf.set_right_margin(10)
 
@@ -2742,6 +2737,43 @@ async def vision_review(
 
 
     
+    def _render_locked_first_page_header(title_text: str) -> None:
+        """Draw a stable first-page header so the logo, title, and separator never overlap."""
+        logo_x = pdf.w - 45
+        logo_y = 8
+        logo_w = 35
+        logo_h = 16
+        title_top_y = 14
+        line_gap_below = 3
+        try:
+            if logo_path and os.path.exists(logo_path):
+                pdf.image(logo_path, x=logo_x, y=logo_y, w=logo_w)
+        except Exception:
+            pass
+
+        try:
+            pdf.set_xy(pdf.l_margin, title_top_y)
+            pdf.set_font("Helvetica", "B", 16)
+        except Exception:
+            pdf.set_xy(pdf.l_margin, title_top_y)
+            pdf.set_font("Arial", "B", 16)
+
+        usable_title_w = max(40, (logo_x - 4) - pdf.l_margin)
+        pdf.cell(usable_title_w, 10, _pdf_sanitize(title_text), ln=False, align="C")
+
+        title_bottom_y = title_top_y + 10
+        reserved_bottom_y = max(logo_y + logo_h, title_bottom_y) + line_gap_below
+
+        pdf.set_draw_color(180, 180, 180)
+        pdf.set_line_width(0.5)
+        pdf.line(pdf.l_margin, reserved_bottom_y, pdf.w - pdf.r_margin, reserved_bottom_y)
+
+        pdf.set_y(reserved_bottom_y + 4)
+        try:
+            pdf.set_font("Helvetica", "", 11)
+        except Exception:
+            pdf.set_font("Arial", "", 11)
+
     def _money2(x: Optional[float]) -> str:
         try:
             if x is None:
@@ -3520,17 +3552,8 @@ async def vision_review(
                 return m.group(1).replace(",", "") + " mi"
             return None
     
-        # Title (larger + bold)
-        try:
-            pdf.set_font("Helvetica", "B", 16)
-        except Exception:
-            pdf.set_font("Arial", "B", 16)
-        pdf.cell(0, 10, "NSPXN.com Condition Report", ln=True, align="C")
-        try:
-            pdf.set_font("Helvetica", "", 11)
-        except Exception:
-            pdf.set_font("Arial", "", 11)
-        pdf.ln(2)
+        # Locked first-page header
+        _render_locked_first_page_header("NSPXN.com Condition Report")
     
         # Vehicle Identification (fixed PDF block)
         _section_bar("VEHICLE IDENTIFICATION")
@@ -3639,8 +3662,7 @@ async def vision_review(
             except Exception:
                 pdf.set_font("Arial", "", 11)
 
-        pdf.cell(0,10,("NSPXN.com Audit Report" if _is_comprehensive_pdf else "NSPXN.com Condition Report"), ln=True, align="C")
-        pdf.set_font_size(10); pdf.ln(3)
+        _render_locked_first_page_header("NSPXN.com Audit Report" if _is_comprehensive_pdf else "NSPXN.com Condition Report")
         _section_bar_comp("VEHICLE IDENTIFICATION")
         mc(f"File Number: {file_number}")
         mc(f"Inspected For: {ia_company}")
@@ -3725,6 +3747,12 @@ async def vision_review(
                 "reviewed and verified by a qualified appraiser before preparing or finalizing any repair estimate."
             )
             pdf.multi_cell(0, 4, _pdf_sanitize(disclaimer_body))
+            pdf.ln(2)
+            try:
+                pdf.set_font("Helvetica", "", 8)
+            except Exception:
+                pdf.set_font("Arial", "", 8)
+            pdf.cell(0, 4, f"Generated: {datetime.now().strftime('%m/%d/%Y %I:%M %p')}", ln=True)
             pdf.set_text_color(0, 0, 0)
         except Exception:
             pass
@@ -3872,12 +3900,3 @@ async def download_pdf(file_number: Optional[str] = None, filename: Optional[str
         return JSONResponse(status_code=404, content={"detail": "Not Found"})
     latest = max(candidates, key=lambda p: os.path.getmtime(p))
     return FileResponse(path=latest, media_type="application/pdf", filename=os.path.basename(latest))
-
-
-
-
-
-
-
-
-
