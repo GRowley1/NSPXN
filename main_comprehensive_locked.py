@@ -3655,7 +3655,7 @@ async def vision_review(
             pdf.ln(2)
             pdf.set_text_color(90, 90, 90)
             pdf.set_font("Helvetica", "", 8)
-            pdf.cell(0, 4, f"Generated: {datetime.now(ZoneInfo("America/New_York")).strftime("%m/%d/%Y %I:%M %p")}", ln=True)
+            pdf.cell(0, 4, f"Generated: {datetime.now(ZoneInfo("America/New_York")).strftime("%m/%d/%Y %I:%M %p')} EST", ln=True)
             pdf.set_text_color(0, 0, 0)
         except Exception:
             pass
