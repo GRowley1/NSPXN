@@ -3616,6 +3616,7 @@ async def vision_review(
         except Exception:
             pdf.set_font("Arial", "", 10)
         pdf.ln(3)
+        pdf.ln(12)
 
         _comp_section_bar("Vehicle Identification")
         mc(f"File Number: {file_number}")
