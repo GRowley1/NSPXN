@@ -1870,27 +1870,9 @@ async def vision_review(
                 response_format={"type":"json_object"},
             )
 
-
-    raw = ""
-    data = None
-
-    if ai_intent in {"comprehensive", "guidelines_only"} and isinstance(locals().get("stage1_data"), dict) and isinstance(locals().get("stage2_data"), dict):
-        data = _build_deterministic_comprehensive_fallback(
-            file_number=file_number,
-            req_label=req_label,
-            locked_fields=locked_fields,
-            staged_guideline_markdown=staged_guideline_markdown,
-            selected_rules_key=selected_rules_key,
-            resolved_rules_text=resolved_rules_text,
-            result_summary_brief=(stage2_data.get("summary_brief") if isinstance(stage2_data, dict) else ""),
-            request_type_label=req_label,
-        )
-        raw = "__DETERMINISTIC_STAGE_FALLBACK__"
-        rsp = None
-
-    if raw == "__DETERMINISTIC_STAGE_FALLBACK__":
+    if isinstance(data, dict):
         log.info("MODEL RAW RESPONSE START")
-        log.info(raw)
+        log.info("__DIRECT_STAGE1_STAGE2_REPORT__")
         log.info("MODEL RAW RESPONSE END")
     else:
         try:
@@ -3029,17 +3011,15 @@ def _render_est_timestamp_line(pdf_obj) -> None:
             log.warning(f"Timestamp timezone conversion failed: {e}")
             ts = datetime.now().strftime("%m/%d/%Y %I:%M %p")
             label = f"Generated: {ts}"
-        safe_label = "".join(ch if ord(ch) < 256 else " " for ch in str(label))
         try:
             pdf_obj.set_font("Helvetica", "", 8)
         except Exception:
             pdf_obj.set_font("Arial", "", 8)
         pdf_obj.set_text_color(90, 90, 90)
-        pdf_obj.cell(0, 4, safe_label, ln=True)
+        pdf_obj.cell(0, 4, _pdf_sanitize(label), ln=True)
         pdf_obj.set_text_color(0, 0, 0)
     except Exception as e:
         log.warning(f"Timestamp render failed: {e}")
-
 
 
     pdf = FPDF(); pdf.add_page()
@@ -4235,3 +4215,51 @@ async def download_pdf(file_number: Optional[str] = None, filename: Optional[str
         return JSONResponse(status_code=404, content={"detail": "Not Found"})
     latest = max(candidates, key=lambda p: os.path.getmtime(p))
     return FileResponse(path=latest, media_type="application/pdf", filename=os.path.basename(latest))
+
+
+
+
+# Final narrative path
+# Immediate runtime/empty-response fix:
+# If Stage 1 + Stage 2 already succeeded for comprehensive/guidelines, build the report deterministically
+# and skip the expensive final narrative model call entirely.
+if ai_intent in {"comprehensive", "guidelines_only"} and isinstance(locals().get("stage1_data"), dict) and isinstance(locals().get("stage2_data"), dict):
+    data = _build_deterministic_comprehensive_fallback(
+        file_number=file_number,
+        req_label=req_label,
+        locked_fields=locked_fields,
+        staged_guideline_markdown=staged_guideline_markdown,
+        selected_rules_key=selected_rules_key,
+        resolved_rules_text=resolved_rules_text,
+        result_summary_brief=(stage2_data.get("summary_brief") if isinstance(stage2_data, dict) else ""),
+        request_type_label=req_label,
+    )
+    rsp = None
+else:
+    try:
+        rsp = client.chat.completions.create(
+            model=MODEL,
+            messages=[{"role":"system","content": SYSTEM},
+                      {"role":"user","content": parts_payload}],
+            max_completion_tokens=max_tokens,
+            temperature=0,
+            top_p=1,
+            presence_penalty=0,
+            frequency_penalty=0,
+            response_format={"type":"json_object"},
+        )
+    except AttributeError:
+        rsp = client.chat_completions.create(  # type: ignore[attr-defined]
+            model=MODEL,
+            messages=[{"role":"system","content": SYSTEM},
+                      {"role":"user","content": parts_payload}],
+            max_completion_tokens=max_tokens,
+            temperature=0,
+            top_p=1,
+            presence_penalty=0,
+            frequency_penalty=0,
+            response_format={"type":"json_object"},
+        )
+
+
+
