@@ -1,3 +1,5 @@
+from zoneinfo import ZoneInfo
+from datetime import datetime
 from fastapi import FastAPI, File, UploadFile, Form, Request
 from fastapi.responses import JSONResponse, FileResponse
 from fastapi.middleware.cors import CORSMiddleware
@@ -2639,6 +2641,33 @@ async def vision_review(
     except Exception:
         pass
 
+
+    def _scrub_comprehensive_rationale_text(md_text: str) -> str:
+        """Targeted comprehensive scrub:
+        - treat J.D. Power as acceptable valuation evidence
+        - remove false UPD/commingling deduction language
+        """
+        if not md_text:
+            return md_text or ""
+        t = str(md_text).replace("\r\n", "\n").replace("\r", "\n")
+        out = []
+        for ln in t.splitlines():
+            s = (ln or "").strip()
+            if re.search(r"(?i)required\s+valuation\s+printout.*j\.?d\.?\s*power", s):
+                continue
+            if re.search(r"(?i)only\s+j\.?d\.?\s*power", s):
+                continue
+            if re.search(r"(?i)commingl", s):
+                continue
+            if re.search(r"(?i)upd.*left\s*front", s) and re.search(r"(?i)major\s*\(-?20\)", s):
+                continue
+            out.append(ln)
+        t = "\n".join(out)
+        if re.search(r"(?i)j\.?d\.?\s*power", uploaded_text_all or ""):
+            t = re.sub(r"(?i)(NADA/Redbook/KBB)", "NADA/J.D. Power/Redbook/KBB", t)
+            t = re.sub(r"(?i)(NADA, Redbook, or KBB)", "NADA, J.D. Power, Redbook, or KBB", t)
+        return t.strip()
+
     # PDF helpers
     # -----------------------
     def _pdf_sanitize(text: str, max_token_len: int = 60) -> str:
@@ -3552,8 +3581,43 @@ async def vision_review(
         pdf_filename = f"AI_Condition_Report_{safe_file}.pdf"
     else:
         _is_comprehensive_pdf = str(ai_intent or "").strip().lower() == "comprehensive"
+
+        def _comp_section_bar(title: str) -> None:
+            t = str(title or "").strip()
+            cmap = {
+                "VEHICLE IDENTIFICATION": (0, 112, 192),
+                "NSPXN.COM CONDITION SUMMARY": (191, 112, 0),
+                "APPROXIMATE REPAIR COST BREAKDOWN": (0, 153, 76),
+                "FRAUD DETECTION": (112, 48, 160),
+                "DISCLAIMER": (96, 96, 96),
+            }
+            rgb = cmap.get(t.upper(), (0, 112, 192))
+            pdf.ln(3)
+            pdf.set_fill_color(*rgb)
+            pdf.set_text_color(255, 255, 255)
+            try:
+                pdf.set_font("Helvetica", "B", 12)
+            except Exception:
+                pdf.set_font("Arial", "B", 12)
+            pdf.cell(0, 8, _pdf_sanitize(t), ln=True, fill=True)
+            pdf.set_text_color(0, 0, 0)
+            try:
+                pdf.set_font("Helvetica", "", 11)
+            except Exception:
+                pdf.set_font("Arial", "", 11)
+
+        try:
+            pdf.set_font("Helvetica", "B", 16)
+        except Exception:
+            pdf.set_font("Arial", "B", 16)
         pdf.cell(0,10,("NSPXN.com Audit Report" if _is_comprehensive_pdf else "NSPXN.com Condition Report"), ln=True, align="C")
-        pdf.set_font_size(10); pdf.ln(3)
+        try:
+            pdf.set_font("Helvetica", "", 10)
+        except Exception:
+            pdf.set_font("Arial", "", 10)
+        pdf.ln(3)
+
+        _comp_section_bar("Vehicle Identification")
         mc(f"File Number: {file_number}")
         mc(f"Inspected For: {ia_company}")
         mc(f"Appraiser ID #: {appraiser_id}")
@@ -3610,9 +3674,9 @@ async def vision_review(
         mc(f"Compliance Score: {result['compliance_score']}")
         pdf_status = result["redaction_status"].replace("✅", "OK")
         mc(pdf_status)
-        pdf.ln(3); mc("NSPXN.com Condition Summary"); mc((smark or '').strip())
-        pdf.ln(3); mc("Approximate Repair Cost Breakdown"); mc((result.get("estimated_costs_markdown") or "").strip())
-        pdf.ln(3); mc("Fraud Detection"); mc((result["fraud_markdown"] or 'N/A').strip())
+        _comp_section_bar("NSPXN.com Condition Summary"); mc((smark or '').strip())
+        _comp_section_bar("Approximate Repair Cost Breakdown"); mc((result.get("estimated_costs_markdown") or "").strip())
+        _comp_section_bar("Fraud Detection"); mc((result["fraud_markdown"] or 'N/A').strip())
 
         # --- AI Disclaimer (after report content) ---
         try:
@@ -3635,6 +3699,17 @@ async def vision_review(
                 "reviewed and verified by a qualified appraiser before preparing or finalizing any repair estimate."
             )
             pdf.multi_cell(0, 4, _pdf_sanitize(disclaimer_body))
+            pdf.ln(2)
+            try:
+                ts_est = datetime.now(ZoneInfo("America/New_York")).strftime("%m/%d/%Y %I:%M %p")
+                ts_label = f"Generated: {ts_est} EST"
+            except Exception:
+                ts_label = f"Generated: {datetime.now().strftime('%m/%d/%Y %I:%M %p')}"
+            try:
+                pdf.set_font("Helvetica", "", 8)
+            except Exception:
+                pdf.set_font("Arial", "", 8)
+            pdf.cell(0, 4, _pdf_sanitize(ts_label), ln=True)
             pdf.set_text_color(0, 0, 0)
         except Exception:
             pass
@@ -3782,10 +3857,3 @@ async def download_pdf(file_number: Optional[str] = None, filename: Optional[str
         return JSONResponse(status_code=404, content={"detail": "Not Found"})
     latest = max(candidates, key=lambda p: os.path.getmtime(p))
     return FileResponse(path=latest, media_type="application/pdf", filename=os.path.basename(latest))
-
-
-
-
-
-
-
