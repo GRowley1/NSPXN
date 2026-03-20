@@ -1,38 +1,8 @@
-
-def _render_locked_header(pdf, logo_path=None, title="NSPXN.com Audit Report"):
-    from datetime import datetime
-    from zoneinfo import ZoneInfo
-
-    top_y = 10
-
-    if logo_path:
-        try:
-            pdf.image(logo_path, x=10, y=top_y, w=40)
-        except Exception:
-            pass
-
-    safe_y = top_y + 28
-    pdf.set_y(max(pdf.get_y(), safe_y))
-
-    pdf.set_font("Arial", "B", 16)
-    pdf.cell(0, 10, title, 0, 1, "R")
-
-    pdf.ln(2)
-
-    y = pdf.get_y()
-    pdf.set_draw_color(180, 180, 180)
-    pdf.set_line_width(0.6)
-    pdf.line(10, y, 200, y)
-
-    pdf.ln(6)
-
-
 from fastapi import FastAPI, File, UploadFile, Form, Request
 from fastapi.responses import JSONResponse, FileResponse
 from fastapi.middleware.cors import CORSMiddleware
 from typing import List, Dict, Any, Optional
 import os, io, re, json, base64, logging, zipfile, glob, uuid
-from datetime import datetime
 import urllib.parse, urllib.request
 import smtplib  # email transport
 from email.message import EmailMessage
@@ -797,15 +767,12 @@ def _add_bytes(parts: List[Dict[str,Any]], files_seen: List[str], photo_index: O
     low = fname.lower()
     if low.endswith(SUPPORTED_PDF_EXTS) and used < max_images:
         try:
-            # Performance lock: use extracted PDF text first, and only convert a limited number of leading pages.
+            pages = convert_from_bytes(raw, dpi=200)
+            files_seen.append(f"{fname} (pdf, {len(pages)} page(s))")
             _maybe_extract_pdf_text(raw, fname, parts, files_seen, pdf_text_fulls=pdf_text_fulls)
-            PDF_PAGE_IMAGE_CAP = 12
-            OCR_PAGE_CAP = 6
-            page_cap = max(1, min(max_images - used, PDF_PAGE_IMAGE_CAP))
-            pages = convert_from_bytes(raw, dpi=120, first_page=1, last_page=page_cap)
-            files_seen.append(f"{fname} (pdf, {len(pages)} page(s) converted; capped to first {page_cap} pages)")
+            OCR_PAGE_CAP = 100
             ocr_collected = []
-            for idx, im in enumerate(pages):
+            for idx, im in enumerate(pages[:max_images - used]):
                 b = io.BytesIO()
                 im.save(b, format="JPEG", quality=75, optimize=True)
                 parts.append(_image_part_from_bytes(b.getvalue()))
@@ -983,77 +950,6 @@ async def list_client_rules():
         return {"dir": CLIENT_RULES_DIR, "files": files}
     except Exception as e:
         return JSONResponse(status_code=500, content={"error": str(e), "dir": CLIENT_RULES_DIR})
-
-
-
-def _build_deterministic_comprehensive_fallback(
-    file_number,
-    req_label,
-    locked_fields,
-    staged_guideline_markdown,
-    selected_rules_key,
-    resolved_rules_text,
-    result_summary_brief="",
-    request_type_label="Comprehensive: Guidelines + Estimate + Photos (with VIN check)"
-):
-    claim_no = str(locked_fields.get("claim_number") or "Not confirmed from provided evidence.")
-    vin_val = str(locked_fields.get("vin") or "Not confirmed from provided evidence.")
-    vin_ver = str(locked_fields.get("vin_verification") or "Not confirmed from provided evidence.")
-    vehicle_val = str(locked_fields.get("vehicle") or "Vehicle information not confirmed from provided evidence.")
-    odo_val = str(locked_fields.get("odometer_estimate_only") or "Not confirmed from provided evidence.")
-    score_val = str(locked_fields.get("compliance_score") or "Not scored from validated evidence.")
-    brief = str(result_summary_brief or "").strip()
-
-    summary_parts = [
-        "## Detailed Condition Report",
-        (
-            f"This {request_type_label.lower()} was completed using deterministic extraction and guideline-comparison data "
-            f"for file {file_number}. Claim number {claim_no}, VIN {vin_val}, vehicle {vehicle_val}, and odometer "
-            f"{odo_val} were extracted from the uploaded materials. VIN verification status: {vin_ver}. "
-        ),
-    ]
-    if brief:
-        summary_parts.append(brief)
-    else:
-        summary_parts.append(
-            "The uploaded estimate and related documents were reviewed for identifier consistency, point of impact, "
-            "parts usage, supplement language, and supporting evidence."
-        )
-    summary_parts.append(
-        "This fallback was used because the final narrative model response returned empty content. "
-        "The report therefore preserves the verified extracted fields and guideline comparison instead of returning a null or blank output."
-    )
-
-    summary_md = "\n\n".join(summary_parts)
-
-    if staged_guideline_markdown:
-        summary_md += "\n\n## Client Guidelines Comparison\n" + staged_guideline_markdown
-    elif selected_rules_key and resolved_rules_text:
-        summary_md += "\n\n## Client Guidelines Comparison\n- Client guidelines were provided and resolved from the selected frontend rule file."
-
-    estimated_costs_md = (
-        "## Approximate Repair Cost Breakdown\n"
-        "Estimate review should confirm labor operations, parts usage, paint materials, tax treatment, scans/calibrations, "
-        "and any supporting documentation requirements."
-    )
-
-    return {
-        "file_number": file_number,
-        "request_type": req_label,
-        "claim_number": claim_no,
-        "vin": vin_val,
-        "vin_verification": vin_ver,
-        "vehicle": vehicle_val,
-        "odometer_estimate_only": odo_val,
-        "compliance_score": score_val,
-        "summary_brief": brief or "Deterministic fallback applied because the final narrative response was empty.",
-        "summary_markdown": summary_md,
-        "fraud_markdown": "No material inconsistencies found from the available review inputs.",
-        "primary_impact": "Not confirmed from provided evidence.",
-        "secondary_impact": "None identified on this run",
-        "estimated_costs_markdown": estimated_costs_md,
-        "conclusion": "The uploaded files were processed successfully and the extracted identifiers and guideline comparison were preserved for appraisal review."
-    }
 
 # -----------------------
 # Vision Review
@@ -1637,19 +1533,15 @@ async def vision_review(
         return "Not confirmed from provided evidence."
 
     def _numeric_score_or_blank(v: Any) -> str:
+        s = str(v or "").strip()
+        if not s:
+            return ""
+        m = re.search(r"([0-9]{1,3})", s)
+        if not m:
+            return ""
         try:
-            if v is None:
-                return ""
-            if isinstance(v, float) and 0.0 <= v <= 1.0:
-                return str(max(0, min(100, int(round(v * 100)))))
-            s = str(v).strip()
-            if not s:
-                return ""
-            m = re.search(r"([0-9]{1,3}(?:\.[0-9]+)?)", s)
-            if not m:
-                return ""
-            n = int(round(float(m.group(1))))
-            return str(max(0, min(100, n)))
+            n = max(0, min(100, int(m.group(1))))
+            return str(n)
         except Exception:
             return ""
 
@@ -1675,33 +1567,31 @@ async def vision_review(
     staged_guideline_markdown = ""
 
     # Call GPT and parse JSON (JSON hardened)
-    # For comprehensive/guidelines, defer the final narrative call until after Stage 1/2 so we can send a much smaller payload.
-    rsp = None
-    if ai_intent == "damage_report_from_photos":
-        try:
-            rsp = client.chat.completions.create(
-                model=MODEL,
-                messages=[{"role":"system","content": SYSTEM},
-                          {"role":"user","content": parts_payload}],
-                max_completion_tokens=max_tokens,
-                temperature=0,
-                top_p=1,
-                presence_penalty=0,
-                frequency_penalty=0,
-                response_format={"type":"json_object"},
-            )
-        except AttributeError:
-            rsp = client.chat_completions.create(  # type: ignore[attr-defined]
-                model=MODEL,
-                messages=[{"role":"system","content": SYSTEM},
-                          {"role":"user","content": parts_payload}],
-                max_completion_tokens=max_tokens,
-                temperature=0,
-                top_p=1,
-                presence_penalty=0,
-                frequency_penalty=0,
-                response_format={"type":"json_object"},
-            )
+    # Prefer the canonical SDK path (client.chat.completions). Keep fallback for older SDKs.
+    try:
+        rsp = client.chat.completions.create(
+            model=MODEL,
+            messages=[{"role":"system","content": SYSTEM},
+                      {"role":"user","content": parts_payload}],
+            max_completion_tokens=max_tokens,
+            temperature=0,
+            top_p=1,
+            presence_penalty=0,
+            frequency_penalty=0,
+            response_format={"type":"json_object"},
+        )
+    except AttributeError:
+        rsp = client.chat_completions.create(  # type: ignore[attr-defined]
+            model=MODEL,
+            messages=[{"role":"system","content": SYSTEM},
+                      {"role":"user","content": parts_payload}],
+            max_completion_tokens=max_tokens,
+            temperature=0,
+            top_p=1,
+            presence_penalty=0,
+            frequency_penalty=0,
+            response_format={"type":"json_object"},
+        )
 
     # --- Hardened JSON parse helper
     def _try_parse_json(raw_text: str):
@@ -1820,91 +1710,17 @@ async def vision_review(
         if parts_payload and isinstance(parts_payload[0], dict) and parts_payload[0].get("type") == "text":
             parts_payload[0]["text"] = str(parts_payload[0].get("text") or "") + _locked_block
 
-    if rsp is None:
-        slim_final_prompt = (
-            "Return ONLY strict JSON with all required keys. "
-            "Write the final comprehensive/guidelines report using the locked extracted fields and any precomputed guideline comparison below. "
-            "Do not restate raw OCR blobs. Do not omit summary_markdown, fraud_markdown, estimated_costs_markdown, or conclusion. "
-            "If compliance_score is provided as a seed, keep the final score consistent with the rationale arithmetic."
-        )
-        slim_locked_text = (
-            f"FILE #: {file_number}\n"
-            f"REQUEST TYPE: {req_label}\n"
-            f"LOCKED CLAIM #: {locked_fields.get('claim_number','')}\n"
-            f"LOCKED VIN: {locked_fields.get('vin','')}\n"
-            f"LOCKED VIN VERIFICATION: {locked_fields.get('vin_verification','')}\n"
-            f"LOCKED VEHICLE: {locked_fields.get('vehicle','')}\n"
-            f"LOCKED ODOMETER: {locked_fields.get('odometer_estimate_only','')}\n"
-            f"LOCKED SCORE SEED: {locked_fields.get('compliance_score','')}\n"
-            + (f"PRECOMPUTED CLIENT GUIDELINES COMPARISON:\n{staged_guideline_markdown}\n" if staged_guideline_markdown else "")
-        )
-        _slim_text_parts = [p for p in parts_payload if p.get("type") == "text"]
-        _slim_image_parts = [p for p in parts_payload if p.get("type") != "text"]
-        slim_parts = [{"type": "text", "text": slim_final_prompt + "\n\n" + slim_locked_text}]
-        if _slim_text_parts:
-            slim_parts.extend(_slim_text_parts[-2:])
-        if _slim_image_parts:
-            slim_parts.extend(_slim_image_parts[:8])
-        try:
-            rsp = client.chat.completions.create(
-                model=MODEL,
-                messages=[{"role":"system","content": SYSTEM},
-                          {"role":"user","content": slim_parts}],
-                max_completion_tokens=max_tokens,
-                temperature=0,
-                top_p=1,
-                presence_penalty=0,
-                frequency_penalty=0,
-                response_format={"type":"json_object"},
-            )
-        except AttributeError:
-            rsp = client.chat_completions.create(  # type: ignore[attr-defined]
-                model=MODEL,
-                messages=[{"role":"system","content": SYSTEM},
-                          {"role":"user","content": slim_parts}],
-                max_completion_tokens=max_tokens,
-                temperature=0,
-                top_p=1,
-                presence_penalty=0,
-                frequency_penalty=0,
-                response_format={"type":"json_object"},
-            )
+    try:
+        raw = (rsp.choices[0].message.content or "")
+    except Exception as e:
+        log.error(f"LLM returned no content: {e}")
+        return JSONResponse(status_code=500, content={"error":"Model returned no content."})
 
-    if isinstance(data, dict):
-        log.info("MODEL RAW RESPONSE START")
-        log.info("__DIRECT_STAGE1_STAGE2_REPORT__")
-        log.info("MODEL RAW RESPONSE END")
-    else:
-        try:
-            raw = (rsp.choices[0].message.content or "")
-            if not str(raw or "").strip():
-                log.error("Final model response was empty.")
-                raw = ""
-        except Exception as e:
-            log.error(f"LLM returned no content: {e}")
-            raw = ""
+    log.info("MODEL RAW RESPONSE START")
+    log.info((raw or "")[:4000])
+    log.info("MODEL RAW RESPONSE END")
 
-        log.info("MODEL RAW RESPONSE START")
-        log.info((raw or "")[:4000])
-        log.info("MODEL RAW RESPONSE END")
-
-        if not str(raw or "").strip():
-            log.error("Final model response was empty — forcing deterministic fallback.")
-            if ai_intent in {"comprehensive", "guidelines_only"}:
-                data = _build_deterministic_comprehensive_fallback(
-                    file_number=file_number,
-                    req_label=req_label,
-                    locked_fields=locked_fields,
-                    staged_guideline_markdown=staged_guideline_markdown,
-                    selected_rules_key=selected_rules_key,
-                    resolved_rules_text=resolved_rules_text,
-                    result_summary_brief=(stage2_data.get("summary_brief") if isinstance(locals().get("stage2_data"), dict) else ""),
-                    request_type_label=req_label,
-                )
-            else:
-                data = None
-        else:
-            data = _try_parse_json(raw)
+    data = _try_parse_json(raw)
     if isinstance(data, dict):
         for _k in ("claim_number", "vin", "vin_verification", "vehicle", "odometer_estimate_only"):
             _locked_v = str(locked_fields.get(_k) or "").strip()
@@ -2823,169 +2639,6 @@ async def vision_review(
     except Exception:
         pass
 
-
-    def _apply_jd_power_equivalency(summary_md: str, compliance_score: Any) -> tuple[str, Any]:
-        """Treat J.D. Power valuation printouts as satisfying NADA/clean retail requirements."""
-        sm = str(summary_md or "")
-        score_out = compliance_score
-        if not sm or not _clean_retail_present:
-            return sm, score_out
-
-        changed = False
-        lines = sm.replace("\r\n", "\n").replace("\r", "\n").split("\n")
-        new_lines = []
-        skip_next_arith = False
-        score_bonus = 0
-        for ln in lines:
-            s = ln.strip()
-            if skip_next_arith and re.search(r"^\s*\d+\s*-\s*\d+\s*=\s*\d+|^\s*Total\s+deductions\s*:", s, flags=re.IGNORECASE):
-                skip_next_arith = False
-                changed = True
-                continue
-            if re.search(r"(?i)(nada|redbook|kbb|clean\s+retail).*(j\.?d\.?\s*power|jd\s*power)", s):
-                if re.search(r"(?i)(not\s+evidenced|not\s+present|missing|required.*not|rather\s+than)", s):
-                    ln = "- NADA / J.D. Power / Redbook / KBB valuation requirement: A valuation printout is present, and J.D. Power is accepted as equivalent evidence for this requirement."
-                    changed = True
-            if re.search(r"(?i)required\s+clean\s+retail\s+valuation\s+printout.*j\.?d\.?\s*power", s):
-                changed = True
-                score_bonus = max(score_bonus, 20)
-                skip_next_arith = True
-                continue
-            new_lines.append(ln)
-
-        sm = "\n".join(new_lines)
-        if changed:
-            sm = re.sub(r"(?im)^\s*Final\s+score\s*:\s*100\s*-\s*30\s*=\s*70\s*$", '', sm)
-            sm = re.sub(r"(?im)^\s*Total\s+deductions\s*:\s*20\s*\+\s*10\s*=\s*30\s*$", '', sm)
-            sm = re.sub(r"(?im)^\s*Final\s+compliance\s+score\s*:\s*50\s*$", '', sm)
-            if isinstance(score_out, str):
-                m = re.search(r"(\d{1,3})", score_out)
-                if m and score_bonus:
-                    try:
-                        score_out = str(min(100, int(m.group(1)) + score_bonus))
-                    except Exception:
-                        pass
-        return sm.strip(), score_out
-
-    def _strip_production_date_penalty(summary_md: str) -> str:
-        if not _prod_evidenced:
-            return str(summary_md or "")
-        lines = []
-        for ln in str(summary_md or "").replace("\r\n", "\n").replace("\r", "\n").split("\n"):
-            s = ln.strip().lower()
-            if ("production date" in s or "date of mfr" in s or "date of manufacture" in s) and any(x in s for x in ["missing", "not readable", "not clearly readable", "not evidenced", "deduct", "not aligned"]):
-                continue
-            lines.append(ln)
-        return "\n".join(lines).strip()
-
-    def _strip_false_upd_penalty(summary_md: str) -> str:
-        lines = []
-        for ln in str(summary_md or "").replace("\r\n", "\n").replace("\r", "\n").split("\n"):
-            s = ln.strip().lower()
-            if ("upd" in s or "prior damage" in s or "unrelated prior damage" in s) and any(x in s for x in ["mismatch", "deduct", "not aligned", "non-compliant", "inconsisten"]):
-                continue
-            lines.append(ln)
-        return "\n".join(lines).strip()
-
-    def _lock_compliance_score(summary_md: str, compliance_score: Any) -> tuple[str, Any]:
-        sm = str(summary_md or "")
-        score_out = compliance_score
-        if not sm:
-            return sm, score_out
-
-        # Clean known false deductions first.
-        sm = _strip_production_date_penalty(sm)
-        sm = _strip_false_upd_penalty(sm)
-
-        m = re.search(r"(?is)(##\s*Compliance Score Rationale\b)(.*?)(?=\n##\s+|\Z)", sm)
-        if not m:
-            return sm, score_out
-
-        block = m.group(2).strip("\n")
-        kept = []
-        total_deductions = 0
-        for ln in block.split("\n"):
-            s = ln.strip()
-            if re.search(r"(?i)^\s*(total\s+deductions|final\s+score|adjusted\s+score|final\s+compliance\s+score)\b", s):
-                continue
-            ded = None
-            m1 = re.search(r"\(\s*[-–]?(\d{1,2})\s*\)", s)
-            if m1:
-                ded = int(m1.group(1))
-            else:
-                m2 = re.search(r"(?i)\bdeduction\s*[:\-]?\s*(\d{1,2})\b", s)
-                if m2:
-                    ded = int(m2.group(1))
-            if ded is not None:
-                total_deductions += ded
-            kept.append(ln)
-        final_score = max(0, min(100, 100 - total_deductions))
-        kept.append(f"Total deductions: {total_deductions}")
-        kept.append(f"Final score: 100 - {total_deductions} = {final_score}")
-        new_block = m.group(1) + "\n" + "\n".join(kept).strip() + "\n"
-        sm = sm[:m.start()] + new_block + sm[m.end():]
-        return sm.strip(), str(final_score)
-
-    try:
-        if ai_intent != "damage_report_from_photos":
-            _sm_tmp, _score_tmp = _apply_jd_power_equivalency(
-                result.get("summary_markdown") or "",
-                result.get("compliance_score") or "",
-            )
-            _sm_tmp = _strip_production_date_penalty(_sm_tmp)
-            _sm_tmp = _strip_false_upd_penalty(_sm_tmp)
-            _sm_tmp, _score_tmp = _lock_compliance_score(_sm_tmp, _score_tmp)
-            result["summary_markdown"] = _sm_tmp
-            result["compliance_score"] = _score_tmp
-    except Exception:
-        pass
-
-    def _apply_jd_power_equivalency(summary_md: str, compliance_score: Any) -> tuple[str, Any]:
-        """Treat J.D. Power valuation printouts as satisfying NADA/clean retail requirements."""
-        sm = str(summary_md or "")
-        score_out = compliance_score
-        if not sm or not _clean_retail_present:
-            return sm, score_out
-
-        changed = False
-        lines = sm.replace("\r\n", "\n").replace("\r", "\n").split("\n")
-        new_lines = []
-        skip_next_arith = False
-        score_bonus = 0
-        for ln in lines:
-            s = ln.strip()
-            if skip_next_arith and re.search(r"^\s*\d+\s*-\s*\d+\s*=\s*\d+|^\s*Total\s+deductions\s*:", s, flags=re.IGNORECASE):
-                skip_next_arith = False
-                changed = True
-                continue
-            if re.search(r"(?i)(nada|redbook|kbb|clean\s+retail).*(j\.?d\.?\s*power|jd\s*power)", s):
-                if re.search(r"(?i)(not\s+evidenced|not\s+present|missing|required.*not|rather\s+than)", s):
-                    if s.startswith('-'):
-                        ln = '- NADA / J.D. Power / Redbook / KBB valuation requirement: A valuation printout is present, and J.D. Power is accepted as equivalent evidence for this requirement.'
-                    else:
-                        ln = 'NADA / J.D. Power / Redbook / KBB valuation requirement: A valuation printout is present, and J.D. Power is accepted as equivalent evidence for this requirement.'
-                    changed = True
-            if re.search(r"(?i)required\s+clean\s+retail\s+valuation\s+printout.*j\.?d\.?\s*power", s):
-                changed = True
-                score_bonus = max(score_bonus, 20)
-                skip_next_arith = True
-                continue
-            new_lines.append(ln)
-
-        sm = "\n".join(new_lines)
-        if changed:
-            sm = re.sub(r"(?im)^\s*Final\s+score\s*:\s*100\s*-\s*30\s*=\s*70\s*$", '', sm)
-            sm = re.sub(r"(?im)^\s*Total\s+deductions\s*:\s*20\s*\+\s*10\s*=\s*30\s*$", '', sm)
-            sm = re.sub(r"(?im)^\s*Final\s+compliance\s+score\s*:\s*50\s*$", '', sm)
-            if isinstance(score_out, str):
-                m = re.search(r"(\d{1,3})", score_out)
-                if m and score_bonus:
-                    try:
-                        score_out = str(min(100, int(m.group(1)) + score_bonus))
-                    except Exception:
-                        pass
-        return sm.strip(), score_out
-
     # PDF helpers
     # -----------------------
     def _pdf_sanitize(text: str, max_token_len: int = 60) -> str:
@@ -3000,31 +2653,14 @@ async def vision_review(
         s = " ".join(_break(t) for t in s.split(" "))
         return s
 
-
-def _render_est_timestamp_line(pdf_obj) -> None:
-    """Render a visible generated timestamp below the disclaimer."""
-    try:
-        try:
-            ts = datetime.now(ZoneInfo("America/New_York")).strftime("%m/%d/%Y %I:%M %p")
-            label = f"Generated: {ts} EST"
-        except Exception as e:
-            log.warning(f"Timestamp timezone conversion failed: {e}")
-            ts = datetime.now().strftime("%m/%d/%Y %I:%M %p")
-            label = f"Generated: {ts}"
-        try:
-            pdf_obj.set_font("Helvetica", "", 8)
-        except Exception:
-            pdf_obj.set_font("Arial", "", 8)
-        pdf_obj.set_text_color(90, 90, 90)
-        pdf_obj.cell(0, 4, _pdf_sanitize(label), ln=True)
-        pdf_obj.set_text_color(0, 0, 0)
-    except Exception as e:
-        log.warning(f"Timestamp render failed: {e}")
-
-
     pdf = FPDF(); pdf.add_page()
-    # --- Locked first-page header assets (logo drawn by helper below) ---
-    logo_path = os.path.join(os.path.dirname(__file__), "ChatGPT logo100725.png")
+    # --- NSPXN Logo (Top Right, First Page Only) ---
+    try:
+        logo_path = os.path.join(os.path.dirname(__file__), "ChatGPT logo100725.png")
+        if os.path.exists(logo_path):
+            pdf.image(logo_path, x=pdf.w - 45, y=8, w=35)  # small–medium size
+    except Exception:
+        pass
     pdf.set_auto_page_break(auto=True, margin=10)
     pdf.set_left_margin(10); pdf.set_right_margin(10)
 
@@ -3050,43 +2686,6 @@ def _render_est_timestamp_line(pdf_obj) -> None:
 
 
     
-    def _render_locked_first_page_header(title_text: str) -> None:
-        """Draw a stable first-page header so the logo, title, and separator never overlap."""
-        logo_x = pdf.w - 46
-        logo_y = 8
-        logo_w = 32
-        logo_h = 15
-        title_top_y = 20
-        line_gap_below = 10
-        try:
-            if logo_path and os.path.exists(logo_path):
-                pdf.image(logo_path, x=logo_x, y=logo_y, w=logo_w)
-        except Exception:
-            pass
-
-        try:
-            pdf.set_xy(pdf.l_margin, title_top_y)
-            pdf.set_font("Helvetica", "B", 16)
-        except Exception:
-            pdf.set_xy(pdf.l_margin, title_top_y)
-            pdf.set_font("Arial", "B", 16)
-
-        usable_title_w = max(40, (logo_x - 4) - pdf.l_margin)
-        pdf.cell(usable_title_w, 10, _pdf_sanitize(title_text), ln=False, align="C")
-
-        title_bottom_y = title_top_y + 10
-        reserved_bottom_y = max(logo_y + logo_h, title_bottom_y) + line_gap_below
-
-        pdf.set_draw_color(180, 180, 180)
-        pdf.set_line_width(0.5)
-        pdf.line(pdf.l_margin, reserved_bottom_y, pdf.w - pdf.r_margin, reserved_bottom_y)
-
-        pdf.set_y(reserved_bottom_y + 8)
-        try:
-            pdf.set_font("Helvetica", "", 11)
-        except Exception:
-            pdf.set_font("Arial", "", 11)
-
     def _money2(x: Optional[float]) -> str:
         try:
             if x is None:
@@ -3865,8 +3464,17 @@ def _render_est_timestamp_line(pdf_obj) -> None:
                 return m.group(1).replace(",", "") + " mi"
             return None
     
-        # Locked first-page header
-        _render_locked_first_page_header("NSPXN.com Condition Report")
+        # Title (larger + bold)
+        try:
+            pdf.set_font("Helvetica", "B", 16)
+        except Exception:
+            pdf.set_font("Arial", "B", 16)
+        pdf.cell(0, 10, "NSPXN.com Condition Report", ln=True, align="C")
+        try:
+            pdf.set_font("Helvetica", "", 11)
+        except Exception:
+            pdf.set_font("Arial", "", 11)
+        pdf.ln(2)
     
         # Vehicle Identification (fixed PDF block)
         _section_bar("VEHICLE IDENTIFICATION")
@@ -3936,10 +3544,6 @@ def _render_est_timestamp_line(pdf_obj) -> None:
                 "confirmation of hidden damage, glass bonding requirements, and any sensor/trim replacement needs."
             )
             pdf.multi_cell(0, 4, _pdf_sanitize(disclaimer_body))
-            pdf.ln(2)
-            pdf.set_text_color(90, 90, 90)
-            pdf.set_font("Helvetica", "", 8)
-            _render_est_timestamp_line(pdf)
             pdf.set_text_color(0, 0, 0)
         except Exception:
             pass
@@ -3948,37 +3552,8 @@ def _render_est_timestamp_line(pdf_obj) -> None:
         pdf_filename = f"AI_Condition_Report_{safe_file}.pdf"
     else:
         _is_comprehensive_pdf = str(ai_intent or "").strip().lower() == "comprehensive"
-
-        def _section_bar_comp(title: str) -> None:
-            if pdf.get_y() < 48:
-                pdf.set_y(48)
-            t = str(title or "").strip()
-            cmap = {
-                "VEHICLE IDENTIFICATION": (0, 112, 192),
-                "REPORT SUMMARY": (191, 112, 0),
-                "APPROXIMATE REPAIR COST BREAKDOWN": (0, 153, 76),
-                "FRAUD DETECTION": (112, 48, 160),
-                "DISCLAIMER": (96, 96, 96),
-            }
-            rgb = cmap.get(t.upper(), (0, 112, 192))
-            pdf.ln(3)
-            try:
-                pdf.set_fill_color(*rgb)
-                pdf.set_text_color(255, 255, 255)
-                pdf.set_font("Helvetica", "B", 12)
-            except Exception:
-                pdf.set_fill_color(*rgb)
-                pdf.set_text_color(255, 255, 255)
-                pdf.set_font("Arial", "B", 12)
-            pdf.cell(0, 8, _pdf_sanitize(t), ln=True, fill=True)
-            pdf.set_text_color(0, 0, 0)
-            try:
-                pdf.set_font("Helvetica", "", 11)
-            except Exception:
-                pdf.set_font("Arial", "", 11)
-
-        _render_locked_first_page_header("NSPXN.com Audit Report" if _is_comprehensive_pdf else "NSPXN.com Condition Report")
-        _section_bar_comp("VEHICLE IDENTIFICATION")
+        pdf.cell(0,10,("NSPXN.com Audit Report" if _is_comprehensive_pdf else "NSPXN.com Condition Report"), ln=True, align="C")
+        pdf.set_font_size(10); pdf.ln(3)
         mc(f"File Number: {file_number}")
         mc(f"Inspected For: {ia_company}")
         mc(f"Appraiser ID #: {appraiser_id}")
@@ -4035,12 +3610,9 @@ def _render_est_timestamp_line(pdf_obj) -> None:
         mc(f"Compliance Score: {result['compliance_score']}")
         pdf_status = result["redaction_status"].replace("✅", "OK")
         mc(pdf_status)
-        _section_bar_comp("REPORT SUMMARY")
-        mc((smark or '').strip())
-        _section_bar_comp("APPROXIMATE REPAIR COST BREAKDOWN")
-        mc((result.get("estimated_costs_markdown") or "").strip())
-        _section_bar_comp("FRAUD DETECTION")
-        mc((result["fraud_markdown"] or 'N/A').strip())
+        pdf.ln(3); mc("NSPXN.com Condition Summary"); mc((smark or '').strip())
+        pdf.ln(3); mc("Approximate Repair Cost Breakdown"); mc((result.get("estimated_costs_markdown") or "").strip())
+        pdf.ln(3); mc("Fraud Detection"); mc((result["fraud_markdown"] or 'N/A').strip())
 
         # --- AI Disclaimer (after report content) ---
         try:
@@ -4052,8 +3624,9 @@ def _render_est_timestamp_line(pdf_obj) -> None:
             pdf.line(x_left, y_line, x_right, y_line)
             pdf.ln(3)
 
-            _section_bar_comp("DISCLAIMER")
             pdf.set_text_color(90, 90, 90)
+            pdf.set_font("Helvetica", "B", 9)
+            pdf.cell(0, 5, "Disclaimer:", ln=True)
             pdf.set_font("Helvetica", "", 8)
 
             disclaimer_body = (
@@ -4062,12 +3635,6 @@ def _render_est_timestamp_line(pdf_obj) -> None:
                 "reviewed and verified by a qualified appraiser before preparing or finalizing any repair estimate."
             )
             pdf.multi_cell(0, 4, _pdf_sanitize(disclaimer_body))
-            pdf.ln(2)
-            try:
-                pdf.set_font("Helvetica", "", 8)
-            except Exception:
-                pdf.set_font("Arial", "", 8)
-            _render_est_timestamp_line(pdf)
             pdf.set_text_color(0, 0, 0)
         except Exception:
             pass
@@ -4188,13 +3755,13 @@ def _render_est_timestamp_line(pdf_obj) -> None:
     except Exception as e:
         logging.error(f"Email error: {e}")
 
-    return JSONResponse(status_code=200, content={
+    return {
         **result,
         "web_summary": result["summary_brief"],
         "gpt_output": result["summary_markdown"],
         "pdf_url": pdf_url,
         "pdf_filename": pdf_filename
-    })
+    }
 
     # -----------------------
 # PDF download
@@ -4219,47 +3786,6 @@ async def download_pdf(file_number: Optional[str] = None, filename: Optional[str
 
 
 
-# Final narrative path
-# Immediate runtime/empty-response fix:
-# If Stage 1 + Stage 2 already succeeded for comprehensive/guidelines, build the report deterministically
-# and skip the expensive final narrative model call entirely.
-if ai_intent in {"comprehensive", "guidelines_only"} and isinstance(locals().get("stage1_data"), dict) and isinstance(locals().get("stage2_data"), dict):
-    data = _build_deterministic_comprehensive_fallback(
-        file_number=file_number,
-        req_label=req_label,
-        locked_fields=locked_fields,
-        staged_guideline_markdown=staged_guideline_markdown,
-        selected_rules_key=selected_rules_key,
-        resolved_rules_text=resolved_rules_text,
-        result_summary_brief=(stage2_data.get("summary_brief") if isinstance(stage2_data, dict) else ""),
-        request_type_label=req_label,
-    )
-    rsp = None
-else:
-    try:
-        rsp = client.chat.completions.create(
-            model=MODEL,
-            messages=[{"role":"system","content": SYSTEM},
-                      {"role":"user","content": parts_payload}],
-            max_completion_tokens=max_tokens,
-            temperature=0,
-            top_p=1,
-            presence_penalty=0,
-            frequency_penalty=0,
-            response_format={"type":"json_object"},
-        )
-    except AttributeError:
-        rsp = client.chat_completions.create(  # type: ignore[attr-defined]
-            model=MODEL,
-            messages=[{"role":"system","content": SYSTEM},
-                      {"role":"user","content": parts_payload}],
-            max_completion_tokens=max_tokens,
-            temperature=0,
-            top_p=1,
-            presence_penalty=0,
-            frequency_penalty=0,
-            response_format={"type":"json_object"},
-        )
 
 
 
