@@ -2644,29 +2644,107 @@ async def vision_review(
 
     def _scrub_comprehensive_rationale_text(md_text: str) -> str:
         """Targeted comprehensive scrub:
-        - treat J.D. Power as acceptable valuation evidence
+        - J.D. Power counts as acceptable valuation evidence (same family as NADA for this workflow)
+        - remove false valuation bullets/deductions tied only to J.D. Power
         - remove false UPD/commingling deduction language
+        - recalculate the rationale arithmetic from remaining deductions
         """
         if not md_text:
             return md_text or ""
         t = str(md_text).replace("\r\n", "\n").replace("\r", "\n")
+
+        jd_present = bool(re.search(r"(?i)j\.?d\.?\s*power|jdpower", uploaded_text_all or ""))
+
         out = []
+        in_score_section = False
+        score_lines = []
+
         for ln in t.splitlines():
             s = (ln or "").strip()
-            if re.search(r"(?i)required\s+valuation\s+printout.*j\.?d\.?\s*power", s):
+
+            if re.search(r"(?i)^##\s*Compliance\s+Score\s+Rationale\b", s):
+                in_score_section = True
+                score_lines.append(ln)
                 continue
-            if re.search(r"(?i)only\s+j\.?d\.?\s*power", s):
-                continue
+
+            if in_score_section and re.search(r"(?i)^##\s+", s):
+                in_score_section = False
+                # flush score section later
+                out.extend(score_lines)
+                score_lines = []
+
+            target = score_lines if in_score_section else out
+
+            # Remove JD Power / KBB-missing bullets or deductions when JD Power evidence exists
+            if jd_present:
+                if re.search(r"(?i)j\.?d\.?\s*power", s) and re.search(r"(?i)(not\s+nada|not\s+met|required\s+valuation\s+printout|only\s+j\.?d\.?\s*power|no\s+kbb|kbb\s+printout\s+is\s+required)", s):
+                    continue
+                if re.search(r"(?i)(required\s+valuation\s+printout|kbb\s+printout)", s) and re.search(r"(?i)major\s*\(-?20\)|moderate\s*\(-?10\)|minor\s*\(-?5\)", s):
+                    continue
+                if re.search(r"(?i)A valuation printout is present but it is J\.?D\.? Power", s):
+                    continue
+                if re.search(r"(?i)no\s+KBB\s+printout\s+is\s+evidenced", s):
+                    continue
+
             if re.search(r"(?i)commingl", s):
                 continue
             if re.search(r"(?i)upd.*left\s*front", s) and re.search(r"(?i)major\s*\(-?20\)", s):
                 continue
-            out.append(ln)
+
+            # Strip stale arithmetic line; we rebuild it
+            if in_score_section and re.search(r"(?i)^Total\s*=\s*100\s*-", s):
+                continue
+
+            target.append(ln)
+
+        if score_lines:
+            # rebuild arithmetic from remaining deduction lines
+            deductions = []
+            rebuilt = []
+            for ln in score_lines:
+                s = (ln or "").strip()
+                m = re.search(r"(?i)\((?:-|–)?(\d+)\)", s)
+                if m and re.search(r"(?i)^(?:-|\u2022)?\s*(Minor|Moderate|Major)\b", s):
+                    try:
+                        deductions.append(int(m.group(1)))
+                    except Exception:
+                        pass
+                rebuilt.append(ln)
+
+            total = max(0, 100 - sum(deductions))
+            # ensure Starting at 100 exists
+            if not any(re.search(r"(?i)^Starting\s+at\s+100\.?$", (x or "").strip()) for x in rebuilt):
+                rebuilt.insert(1 if rebuilt else 0, "Starting at 100.")
+            rebuilt.append(f"Total = 100{' ' + ' '.join(f'- {d}' for d in deductions) if deductions else ''} = {total}.")
+            out.extend(rebuilt)
+
         t = "\n".join(out)
-        if re.search(r"(?i)j\.?d\.?\s*power", uploaded_text_all or ""):
+
+        if jd_present:
             t = re.sub(r"(?i)(NADA/Redbook/KBB)", "NADA/J.D. Power/Redbook/KBB", t)
             t = re.sub(r"(?i)(NADA, Redbook, or KBB)", "NADA, J.D. Power, Redbook, or KBB", t)
+
         return t.strip()
+
+    def _score_after_jd_power_scrub(md_text: str, current_score: str) -> str:
+        t = str(md_text or "")
+        m = re.search(r"(?im)^Total\s*=\s*100(?:\s*-\s*\d+)*\s*=\s*(\d{1,3})\.?\s*$", t)
+        if m:
+            try:
+                n = max(0, min(100, int(m.group(1))))
+                return str(n)
+            except Exception:
+                pass
+        return str(current_score or "")
+
+    try:
+        if ai_intent != "damage_report_from_photos":
+            result["summary_markdown"] = _scrub_comprehensive_rationale_text(result.get("summary_markdown") or "")
+            _rescored = _score_after_jd_power_scrub(result.get("summary_markdown") or "", result.get("compliance_score") or "")
+            if str(_rescored).strip():
+                result["compliance_score"] = str(_rescored).strip()
+    except Exception:
+        pass
 
     # PDF helpers
     # -----------------------
