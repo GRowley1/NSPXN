@@ -2644,10 +2644,10 @@ async def vision_review(
 
     def _scrub_comprehensive_rationale_text(md_text: str) -> str:
         """Targeted comprehensive scrub:
-        - J.D. Power counts as acceptable valuation evidence (same family as NADA for this workflow)
-        - remove false valuation bullets/deductions tied only to J.D. Power
+        - J.D. Power Pricing & Values satisfies the valuation requirement for this workflow
+        - remove any valuation deduction/rationale tied to J.D. Power / NADA / Redbook / KBB clean-retail wording
         - remove false UPD/commingling deduction language
-        - recalculate the rationale arithmetic from remaining deductions
+        - rebuild the score arithmetic from the remaining deduction bullets only
         """
         if not md_text:
             return md_text or ""
@@ -2658,6 +2658,20 @@ async def vision_review(
         out = []
         in_score_section = False
         score_lines = []
+        skip_wrapped_valuation_tail = False
+
+        def _is_jd_valuation_line(s: str) -> bool:
+            if not s:
+                return False
+            return bool(
+                re.search(r"(?i)j\.?d\.?\s*power|jdpower", s) and
+                re.search(r"(?i)valuation|clean\s+retail|required\s+clean\s+retail|required\s+valuation|nada|redbook|kbb|pricing\s*&\s*values", s)
+            )
+
+        def _is_wrapped_tail_line(s: str) -> bool:
+            if not s:
+                return False
+            return bool(re.search(r"(?i)^\s*\(photo\s*\d+.*client\s+rule\s+text.*clean\s+retail", s))
 
         for ln in t.splitlines():
             s = (ln or "").strip()
@@ -2669,36 +2683,36 @@ async def vision_review(
 
             if in_score_section and re.search(r"(?i)^##\s+", s):
                 in_score_section = False
-                # flush score section later
                 out.extend(score_lines)
                 score_lines = []
 
             target = score_lines if in_score_section else out
 
-            # Remove JD Power / KBB-missing bullets or deductions when JD Power evidence exists
-            if jd_present:
-                if re.search(r"(?i)j\.?d\.?\s*power", s) and re.search(r"(?i)(not\s+nada|not\s+met|required\s+valuation\s+printout|only\s+j\.?d\.?\s*power|no\s+kbb|kbb\s+printout\s+is\s+required)", s):
+            if jd_present and in_score_section:
+                if _is_jd_valuation_line(s):
+                    skip_wrapped_valuation_tail = True
                     continue
-                if re.search(r"(?i)(required\s+valuation\s+printout|kbb\s+printout)", s) and re.search(r"(?i)major\s*\(-?20\)|moderate\s*\(-?10\)|minor\s*\(-?5\)", s):
+                if skip_wrapped_valuation_tail and (_is_wrapped_tail_line(s) or s.startswith("(Photo ") or s.startswith("Photo ")):
                     continue
-                if re.search(r"(?i)A valuation printout is present but it is J\.?D\.? Power", s):
-                    continue
-                if re.search(r"(?i)no\s+KBB\s+printout\s+is\s+evidenced", s):
-                    continue
+                skip_wrapped_valuation_tail = False
 
             if re.search(r"(?i)commingl", s):
                 continue
-            if re.search(r"(?i)upd.*left\s*front", s) and re.search(r"(?i)major\s*\(-?20\)", s):
+            if re.search(r"(?i)upd.*left\s*front", s) and re.search(r"(?i)major\s*\(-?20\)|moderate\s*\(-?10\)|minor\s*\(-?5\)", s):
                 continue
 
-            # Strip stale arithmetic line; we rebuild it
-            if in_score_section and re.search(r"(?i)^Total\s*=\s*100\s*-", s):
+            # Strip stale arithmetic lines; we rebuild them
+            if in_score_section and (
+                re.search(r"(?i)^Total\s*=\s*100\s*-", s) or
+                re.search(r"(?i)^=\s*100\s*-", s) or
+                re.search(r"(?i)^Arithmetic\s*:\s*100\s*-", s) or
+                re.search(r"(?i)^Adjusted\s+compliance_score\s+reported\s*:", s)
+            ):
                 continue
 
             target.append(ln)
 
         if score_lines:
-            # rebuild arithmetic from remaining deduction lines
             deductions = []
             rebuilt = []
             for ln in score_lines:
@@ -2712,8 +2726,7 @@ async def vision_review(
                 rebuilt.append(ln)
 
             total = max(0, 100 - sum(deductions))
-            # ensure Starting at 100 exists
-            if not any(re.search(r"(?i)^Starting\s+at\s+100\.?$", (x or "").strip()) for x in rebuilt):
+            if not any(re.search(r"(?i)^Starting\s+(?:at|from)\s+100\.?$", (x or "").strip()) for x in rebuilt):
                 rebuilt.insert(1 if rebuilt else 0, "Starting at 100.")
             rebuilt.append(f"Total = 100{' ' + ' '.join(f'- {d}' for d in deductions) if deductions else ''} = {total}.")
             out.extend(rebuilt)
@@ -2723,6 +2736,7 @@ async def vision_review(
         if jd_present:
             t = re.sub(r"(?i)(NADA/Redbook/KBB)", "NADA/J.D. Power/Redbook/KBB", t)
             t = re.sub(r"(?i)(NADA, Redbook, or KBB)", "NADA, J.D. Power, Redbook, or KBB", t)
+            t = re.sub(r"(?i)J\.D\.\s*Power\s+Pricing\s*&\s*Values", "J.D. Power Pricing & Values", t)
 
         return t.strip()
 
@@ -3936,3 +3950,8 @@ async def download_pdf(file_number: Optional[str] = None, filename: Optional[str
         return JSONResponse(status_code=404, content={"detail": "Not Found"})
     latest = max(candidates, key=lambda p: os.path.getmtime(p))
     return FileResponse(path=latest, media_type="application/pdf", filename=os.path.basename(latest))
+
+
+
+
+
