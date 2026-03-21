@@ -2647,7 +2647,7 @@ async def vision_review(
         - J.D. Power Pricing & Values satisfies the valuation requirement for this workflow
         - remove any valuation deduction/rationale tied to J.D. Power / NADA / Redbook / KBB clean-retail wording
         - remove false UPD/commingling deduction language
-        - rebuild the score arithmetic from the remaining deduction bullets only
+        - rebuild BOTH the final score line and arithmetic from the remaining deduction bullets only
         """
         if not md_text:
             return md_text or ""
@@ -2701,12 +2701,13 @@ async def vision_review(
             if re.search(r"(?i)upd.*left\s*front", s) and re.search(r"(?i)major\s*\(-?20\)|moderate\s*\(-?10\)|minor\s*\(-?5\)", s):
                 continue
 
-            # Strip stale arithmetic lines; we rebuild them
+            # Strip stale score/arithmetic lines; we rebuild them
             if in_score_section and (
-                re.search(r"(?i)^Total\s*=\s*100\s*-", s) or
+                re.search(r"(?i)^Total\s*=\s*100", s) or
                 re.search(r"(?i)^=\s*100\s*-", s) or
-                re.search(r"(?i)^Arithmetic\s*:\s*100\s*-", s) or
-                re.search(r"(?i)^Adjusted\s+compliance_score\s+reported\s*:", s)
+                re.search(r"(?i)^Arithmetic\s*:\s*100", s) or
+                re.search(r"(?i)^Adjusted\s+compliance_score\s+reported\s*:", s) or
+                re.search(r"(?i)^Final\s+compliance\s+score\s*:", s)
             ):
                 continue
 
@@ -2726,8 +2727,12 @@ async def vision_review(
                 rebuilt.append(ln)
 
             total = max(0, 100 - sum(deductions))
+
             if not any(re.search(r"(?i)^Starting\s+(?:at|from)\s+100\.?$", (x or "").strip()) for x in rebuilt):
-                rebuilt.insert(1 if rebuilt else 0, "Starting at 100.")
+                insert_at = 1 if rebuilt else 0
+                rebuilt.insert(insert_at, "Starting at 100.")
+
+            rebuilt.append(f"Final compliance score: **{total}**.")
             rebuilt.append(f"Total = 100{' ' + ' '.join(f'- {d}' for d in deductions) if deductions else ''} = {total}.")
             out.extend(rebuilt)
 
@@ -3950,8 +3955,3 @@ async def download_pdf(file_number: Optional[str] = None, filename: Optional[str
         return JSONResponse(status_code=404, content={"detail": "Not Found"})
     latest = max(candidates, key=lambda p: os.path.getmtime(p))
     return FileResponse(path=latest, media_type="application/pdf", filename=os.path.basename(latest))
-
-
-
-
-
