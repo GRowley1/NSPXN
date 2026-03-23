@@ -2674,6 +2674,9 @@ async def vision_review(
             return bool(re.search(r"(?i)^\s*\(photo\s*\d+.*client\s+rule\s+text.*clean\s+retail", s))
 
         for ln in t.splitlines():
+            # VAL_PATCH: always remove valuation mismatch lines (J.D. Power = NADA)
+            if re.search(r"(?i)valuation printout|clean retail|nada/redbook/kbb|j\.d\. power pricing", (ln or "")):
+                continue
             s = (ln or "").strip()
 
             if re.search(r"(?i)^##\s*Compliance\s+Score\s+Rationale\b", s):
