@@ -3,6 +3,7 @@ from fastapi.responses import JSONResponse, FileResponse
 from fastapi.middleware.cors import CORSMiddleware
 from typing import List, Dict, Any, Optional
 import os, io, re, json, base64, logging, zipfile, glob, uuid
+from datetime import datetime
 import urllib.parse, urllib.request
 import smtplib  # email transport
 from email.message import EmailMessage
@@ -2138,6 +2139,8 @@ async def vision_review(
     except Exception:
         pdf.set_font("Arial", size=11)
 
+    report_generated_ts = datetime.now().strftime("%m/%d/%Y %I:%M:%S %p")
+
     def mc(s):
         try:
             effective_w = pdf.w - pdf.l_margin - pdf.r_margin
@@ -2437,7 +2440,12 @@ async def vision_review(
                 continue
             if re.search(r"(?i)^\s*[-*]?\s*tax\s*:\s*\$.*[×x\*].*=", s):
                 continue
-
+            if re.search(r"(?i)^\s*\*{0,2}\s*Tax\s*\(parts\s*\+\s*paint\s+materials\s+only\)\s*:\s*\*{0,2}\s*$", s):
+                continue
+            if re.search(r"(?i)^\s*[-*]?\s*taxable\s+subtotal\s*:", s):
+                continue
+            if re.search(r"(?i)^\s*[-*]?\s*(estimated\s+tax|sales\s+tax|tax)\s*:", s):
+                continue
 
             # Strip additional model cost-summary headings and totals (we print our own deterministic tax/total lines)
             if re.search(r"(?i)^\s*cost\s+summary\b", s):
@@ -2656,6 +2664,38 @@ async def vision_review(
             r"^\s*[-*]?\s*Parts\s+subtotal\s*:\s*\$\s*([0-9][0-9,]*(?:\.[0-9]{2})?)\b",
             r"^\s*[-*]?\s*Parts\s*:\s*\$\s*([0-9][0-9,]*(?:\.[0-9]{2})?)\b",
         ])
+
+        def _sum_itemized_part_amounts(src_text: str) -> Optional[float]:
+            total = 0.0
+            found = False
+            in_parts = False
+            for raw_ln in src_text.splitlines():
+                s = (raw_ln or "").strip()
+                if not s:
+                    continue
+                if re.search(r"(?i)^\*{0,2}\s*OEM\s+Parts\s+Needed", s):
+                    in_parts = True
+                    continue
+                if in_parts and re.search(r"^\s*\*{0,2}[A-Z][A-Z &/()'-]{2,}\*{0,2}\s*:\s*$", s):
+                    break
+                if in_parts:
+                    if re.search(r"(?i)parts\s+subtotal|taxable\s+subtotal|estimated\s+tax|sales\s+tax|approximate\s+repair\s+total|severity\s+tier", s):
+                        break
+                    monies = re.findall(r"\$\s*([0-9][0-9,]*(?:\.[0-9]{2})?)", s)
+                    if monies:
+                        try:
+                            total += float(monies[-1].replace(',', ''))
+                            found = True
+                        except Exception:
+                            pass
+            return round(total, 2) if found else None
+
+        itemized_parts_sub = _sum_itemized_part_amounts(text)
+        if isinstance(itemized_parts_sub, (int, float)):
+            if not isinstance(parts_sub, (int, float)):
+                parts_sub = itemized_parts_sub
+            else:
+                parts_sub = max(float(parts_sub), float(itemized_parts_sub))
 
         # Paint materials subtotal ONLY — never the $/hr rate
         paint_mat = _grab_money_line([
@@ -2984,6 +3024,7 @@ async def vision_review(
     
         # Use colon formatting (no double-odometer conflicts)
         mc(f"File #: {file_number or 'N/A'}")
+        mc(f"Generated: {report_generated_ts}")
         mc(f"Claim #: {result.get('claim_number') or 'N/A'}")
         mc(f"Inspected For: {ia_company or 'N/A'}")
         mc(f"VIN: {result.get('vin') or 'N/A'}")
@@ -3171,6 +3212,7 @@ async def vision_review(
             subj = f"NSPXN.com Condition Report: {file_number or ''} {result['claim_number'] or ''}".strip()
             body = (
                 "NSPXN.com Condition Report\n\n"
+                f"Generated: {report_generated_ts}\n"
                 f"Inspected For: {ia_company}\n"
                 f"Claim #: {result['claim_number'] or 'N/A'}    File #: {file_number or 'N/A'}\n"
                 f"Odometer: {result['odometer_estimate_only'] or 'N/A'}    Primary Impact: {result['primary_impact'] or 'N/A'}\n"
@@ -3280,3 +3322,4 @@ async def download_pdf(file_number: Optional[str] = None, filename: Optional[str
         return JSONResponse(status_code=404, content={"detail": "Not Found"})
     latest = max(candidates, key=lambda p: os.path.getmtime(p))
     return FileResponse(path=latest, media_type="application/pdf", filename=os.path.basename(latest))
+
