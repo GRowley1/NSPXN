@@ -1927,6 +1927,7 @@ async def vision_review(
         v = data.get(k)
         return "" if v is None else str(v)
 
+    # LOCKED FINAL FIELDS: claim/VIN/vehicle/odometer/compliance/cost/rationale are finalized by code-owned post-processing.
     result = {
         "file_number": file_number,
         "request_type": req_label,
@@ -2765,6 +2766,123 @@ async def vision_review(
             _rescored = _score_after_jd_power_scrub(result.get("summary_markdown") or "", result.get("compliance_score") or "")
             if str(_rescored).strip():
                 result["compliance_score"] = str(_rescored).strip()
+    except Exception:
+        pass
+
+
+    # -----------------------
+    # LOCKED FINAL POST-PROCESSOR
+    # Any changes here require explicit approval. This block is the final writer for:
+    # - compliance_score
+    # - score rationale
+    # - estimated_costs_markdown
+    # - fraud_markdown
+    # -----------------------
+    def _build_locked_compliance_score_rationale(md_text: str, current_score: str) -> str:
+        t = str(md_text or "").replace("\r\n", "\n").replace("\r", "\n")
+        lines = t.splitlines()
+        start_idx = None
+        end_idx = None
+        for i, ln in enumerate(lines):
+            if re.search(r"(?i)^##\s*Compliance\s+Score\s+Rationale\b", (ln or "").strip()):
+                start_idx = i
+                break
+        if start_idx is None:
+            return t.strip()
+        for j in range(start_idx + 1, len(lines)):
+            if re.search(r"(?i)^##\s+", (lines[j] or "").strip()):
+                end_idx = j
+                break
+        if end_idx is None:
+            end_idx = len(lines)
+
+        score_block = lines[start_idx:end_idx]
+        body_lines = []
+        deductions = []
+        for ln in score_block[1:]:
+            s = (ln or "").strip()
+            if not s:
+                continue
+            if re.search(r"(?i)^Starting\s+(?:at|from)\s+100\.?$", s):
+                continue
+            if re.search(r"(?i)^Final\s+compliance\s+score\s*:", s):
+                continue
+            if re.search(r"(?i)^Total\s*=\s*100", s):
+                continue
+            if re.search(r"(?i)^Adjustment\s*:", s):
+                continue
+            if re.search(r"(?i)provided\s+Compliance\s+Score\s+seed", s):
+                continue
+            m = re.search(r"(?i)Deduction\s*:\s*-\s*(\d+)|\((?:-|–)?(\d+)\)", s)
+            if m:
+                try:
+                    deductions.append(int(m.group(1) or m.group(2)))
+                except Exception:
+                    pass
+            body_lines.append(ln)
+
+        total = max(0, 100 - sum(deductions))
+        rebuilt = ["## Compliance Score Rationale", "Starting from 100."]
+        rebuilt.extend(body_lines)
+        rebuilt.append(f"Final compliance score: **{total}**.")
+        rebuilt.append(f"Total = 100{' ' + ' '.join(f'- {d}' for d in deductions) if deductions else ''} = {total}.")
+        new_lines = lines[:start_idx] + rebuilt + lines[end_idx:]
+        return "\n".join(new_lines).strip()
+
+    def _locked_score_from_rationale(md_text: str, current_score: str) -> str:
+        t = str(md_text or "")
+        m = re.search(r"(?im)^Final\s+compliance\s+score\s*:\s*\*\*(\d{1,3})\*\*\.?\s*$", t)
+        if m:
+            try:
+                return str(max(0, min(100, int(m.group(1)))))
+            except Exception:
+                pass
+        m2 = re.search(r"(?im)^Total\s*=\s*100(?:\s*-\s*\d+)*\s*=\s*(\d{1,3})\.?\s*$", t)
+        if m2:
+            try:
+                return str(max(0, min(100, int(m2.group(1)))))
+            except Exception:
+                pass
+        return str(current_score or "").strip()
+
+    def _build_locked_cost_block(existing_md: str) -> str:
+        t = str(existing_md or "").replace("\r\n", "\n").replace("\r", "\n").strip()
+        if not t:
+            return (
+                "## Approximate Repair Cost Breakdown\n"
+                "Approximate repair cost evaluation should reflect the estimate lines, visible damage support, labor operations, parts usage, paint materials, and applicable tax treatment. "
+                "Any final amount remains subject to estimate validation and appraiser review."
+            )
+        cleaned = []
+        for ln in t.splitlines():
+            s = (ln or "").strip()
+            if re.search(r"(?i)^Final\s+compliance\s+score\s*:", s):
+                continue
+            if re.search(r"(?i)^Total\s*=\s*100", s):
+                continue
+            cleaned.append(ln)
+        return "\n".join(cleaned).strip()
+
+    def _build_locked_fraud_block(existing_md: str) -> str:
+        t = str(existing_md or "").strip()
+        return t if t else "No material inconsistencies found."
+
+    def _apply_locked_final_postprocessor(result_obj: dict) -> dict:
+        if not isinstance(result_obj, dict):
+            return result_obj
+        sm = str(result_obj.get("summary_markdown") or "")
+        sm = _build_locked_compliance_score_rationale(sm, str(result_obj.get("compliance_score") or ""))
+        result_obj["summary_markdown"] = sm
+        locked_score = _locked_score_from_rationale(sm, str(result_obj.get("compliance_score") or ""))
+        if locked_score:
+            result_obj["compliance_score"] = locked_score
+        result_obj["estimated_costs_markdown"] = _build_locked_cost_block(result_obj.get("estimated_costs_markdown") or "")
+        result_obj["fraud_markdown"] = _build_locked_fraud_block(result_obj.get("fraud_markdown") or "")
+        return result_obj
+
+    try:
+        if ai_intent != "damage_report_from_photos":
+            result = _apply_locked_final_postprocessor(result)
     except Exception:
         pass
 
