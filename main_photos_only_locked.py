@@ -3,6 +3,7 @@ from fastapi.responses import JSONResponse, FileResponse
 from fastapi.middleware.cors import CORSMiddleware
 from typing import List, Dict, Any, Optional
 import os, io, re, json, base64, logging, zipfile, glob, uuid
+from zoneinfo import ZoneInfo
 from datetime import datetime
 import urllib.parse, urllib.request
 import smtplib  # email transport
@@ -2139,7 +2140,10 @@ async def vision_review(
     except Exception:
         pdf.set_font("Arial", size=11)
 
-    report_generated_ts = datetime.now().strftime("%m/%d/%Y %I:%M:%S %p")
+    try:
+        report_generated_ts = datetime.now(ZoneInfo("America/New_York")).strftime("%m/%d/%Y %I:%M %p") + " EST"
+    except Exception:
+        report_generated_ts = datetime.now().strftime("%m/%d/%Y %I:%M %p")
 
     def mc(s):
         try:
@@ -3094,7 +3098,7 @@ async def vision_review(
             pdf.ln(3)
             pdf.set_text_color(90, 90, 90)
             pdf.set_font("Helvetica", "", 8)
-            pdf.cell(0, 4, f"Report Generated: {report_generated_ts}", ln=True)
+            pdf.cell(0, 4, f"Generated: {report_generated_ts}", ln=True)
             pdf.set_text_color(0, 0, 0)
             pdf.set_font("Helvetica", "", 11)
         except Exception:
@@ -3334,4 +3338,6 @@ async def download_pdf(file_number: Optional[str] = None, filename: Optional[str
         return JSONResponse(status_code=404, content={"detail": "Not Found"})
     latest = max(candidates, key=lambda p: os.path.getmtime(p))
     return FileResponse(path=latest, media_type="application/pdf", filename=os.path.basename(latest))
+
+
 
