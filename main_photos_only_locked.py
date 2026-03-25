@@ -2110,6 +2110,36 @@ async def vision_review(
     except Exception:
         pass
 
+    def _extract_itemized_part_lines(md_text: str) -> List[str]:
+        """Extract itemized part lines only from the parts section of photos-only cost markdown."""
+        text_local = str(md_text or '').replace("\r\n", "\n").replace("\r", "\n")
+        out: List[str] = []
+        in_parts_section = False
+        for raw_ln in text_local.splitlines():
+            s = (raw_ln or '').strip()
+            if not s:
+                continue
+
+            if re.search(r'(?i)^\*{0,2}\s*(OEM\s+replacement\s+parts|OEM\s+parts\s+needed|replacement\s+parts|parts\s+needed)\b', s):
+                in_parts_section = True
+                continue
+
+            if not in_parts_section:
+                continue
+
+            if re.search(r'(?i)parts\s+subtotal|estimated\s+parts\s+subtotal|taxable\s+subtotal|estimated\s+tax|sales\s+tax|tax\s+rate|tax\s+basis|approximate\s+repair\s+total|severity\s+tier', s):
+                break
+            if re.search(r'(?i)^\*{0,2}\s*(labor|body\s+labor|paint\s+labor|paint\s*(?:&|and)\s*materials|setup\s*&\s*measure|frame\s+labor|mechanical|sublet)\b', s):
+                break
+
+            if re.search(r'(?i)body\s+labor|paint\s+labor|paint\s*(?:&|and)\s*materials|setup\s*&\s*measure|frame\s+labor|mechanical|tax|subtotal|total', s):
+                continue
+            if '$' not in s:
+                continue
+
+            out.append(s)
+        return out
+
     def _parse_locked_photos_only_costs(md_text: str, tax_rate_value: Optional[float] = None) -> Dict[str, Optional[float]]:
         """Single source of truth for photos-only cost math.
         This parser is intentionally strict:
@@ -3321,6 +3351,8 @@ async def download_pdf(file_number: Optional[str] = None, filename: Optional[str
         return JSONResponse(status_code=404, content={"detail": "Not Found"})
     latest = max(candidates, key=lambda p: os.path.getmtime(p))
     return FileResponse(path=latest, media_type="application/pdf", filename=os.path.basename(latest))
+
+
 
 
 
