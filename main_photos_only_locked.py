@@ -3085,6 +3085,10 @@ async def vision_review(
             )
             pdf.multi_cell(0, 4, _pdf_sanitize(disclaimer_body))
             pdf.set_text_color(0, 0, 0)
+
+        except Exception:
+            pass
+            
         # --- Timestamp (match Comprehensive placement) ---
         try:
             pdf.ln(3)
