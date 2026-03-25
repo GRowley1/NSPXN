@@ -2253,6 +2253,7 @@ async def vision_review(
             'frame_labor': frame_labor,
             'mech_labor': mech_labor,
             'labor_sub': labor_sub,
+            'parts_lines': _extract_itemized_part_lines(text_local),
             'parts_sub': parts_sub,
             'paint_mat': paint_mat,
             'sublet': sublet,
@@ -2271,8 +2272,13 @@ async def vision_review(
         if not isinstance(locked_total, (int, float)):
             return base
 
+        try:
+            _locked_total_str = "${:,.2f}".format(float(locked_total))
+        except Exception:
+            _locked_total_str = "$0.00"
+
         locked_sentence = (
-            f"The photo-based repair approximation is approximately {_money2(locked_total)} "
+            f"The photo-based repair cost approximation is approximately {_locked_total_str} "
             "based on the backend-locked cost calculation shown in this report."
         )
 
@@ -2717,9 +2723,9 @@ async def vision_review(
     def render_repair_cost_section(pdf_obj: FPDF, md: str, tax_rate: Optional[float] = None) -> None:
         """Render the Approximate Repair Cost Breakdown in a controlled PDF format.
         Locked behavior:
-        - No model-owned descriptive text is printed in the PDF cost section
-        - Cost lines printed here are backend-owned only and derived from parsed amounts
-        - Tax, final total, and severity are backend-owned only
+        - fixed printed structure every time
+        - no model-owned descriptive/rationale text is printed in the PDF cost section
+        - tax, total, and severity are backend-owned only
         """
         if tax_rate is None or not isinstance(tax_rate, (int, float)) or tax_rate <= 0:
             tax_rate = 0.07
@@ -2731,6 +2737,7 @@ async def vision_review(
         frame_labor = parsed.get('frame_labor')
         mech_labor = parsed.get('mech_labor')
         labor_sub = parsed.get('labor_sub')
+        parts_lines = parsed.get('parts_lines') or []
         parts_sub = parsed.get('parts_sub')
         paint_mat = parsed.get('paint_mat')
         sublet = parsed.get('sublet')
@@ -2744,31 +2751,33 @@ async def vision_review(
         except Exception:
             pdf_obj.set_font("Arial", "", 11)
 
-        deterministic_lines = []
+        # Fixed printed structure
         if isinstance(body_labor, (int, float)):
-            deterministic_lines.append(f"Body labor: {_money2(body_labor)}")
+            mc(f"Body labor: {_money2(body_labor)}")
         if isinstance(paint_labor, (int, float)):
-            deterministic_lines.append(f"Paint labor: {_money2(paint_labor)}")
+            mc(f"Paint labor: {_money2(paint_labor)}")
         if isinstance(setup_measure, (int, float)) and float(setup_measure) > 0:
-            deterministic_lines.append(f"Setup & Measure: {_money2(setup_measure)}")
+            mc(f"Setup & Measure: {_money2(setup_measure)}")
         if isinstance(frame_labor, (int, float)) and float(frame_labor) > 0:
-            deterministic_lines.append(f"Frame labor: {_money2(frame_labor)}")
+            mc(f"Frame labor: {_money2(frame_labor)}")
         if isinstance(mech_labor, (int, float)) and float(mech_labor) > 0:
-            deterministic_lines.append(f"Mechanical/diagnostic: {_money2(mech_labor)}")
+            mc(f"Mechanical labor: {_money2(mech_labor)}")
         if isinstance(labor_sub, (int, float)):
-            deterministic_lines.append(f"Labor subtotal: {_money2(labor_sub)}")
-        if isinstance(parts_sub, (int, float)):
-            deterministic_lines.append(f"Parts subtotal: {_money2(parts_sub)}")
-        if isinstance(paint_mat, (int, float)):
-            deterministic_lines.append(f"Paint & materials: {_money2(paint_mat)}")
-        if isinstance(sublet, (int, float)) and float(sublet) > 0:
-            deterministic_lines.append(f"Sublet: {_money2(sublet)}")
+            mc(f"Labor subtotal: {_money2(labor_sub)}")
 
-        if deterministic_lines:
-            for line in deterministic_lines:
-                mc(line)
+        mc("Itemized parts breakdown:")
+        if parts_lines:
+            for pl in parts_lines:
+                mc(f"- {re.sub(r'^[-*]\s*', '', str(pl).strip())}")
         else:
-            mc("Cost breakdown could not be normalized from the model output on this run.")
+            mc("- No itemized parts captured from the model output on this run.")
+
+        if isinstance(parts_sub, (int, float)):
+            mc(f"Parts subtotal: {_money2(parts_sub)}")
+        if isinstance(paint_mat, (int, float)):
+            mc(f"Paint & materials: {_money2(paint_mat)}")
+        if isinstance(sublet, (int, float)) and float(sublet) > 0:
+            mc(f"Sublet: {_money2(sublet)}")
 
         if isinstance(tax_basis, (int, float)) and isinstance(tax_amt, (int, float)):
             mc(f"Tax rate: {float(tax_rate)*100:.3f}%")
@@ -2792,16 +2801,13 @@ async def vision_review(
                 tier = "minor"
             elif total_val < 10000:
                 tier = "moderate"
-            elif total_val < 25000:
-                tier = "major"
             else:
-                tier = "possible_tl"
+                tier = "major"
 
         boxes = {
             "minor": ("[x]", "[ ]", "[ ]", "[ ]"),
             "moderate": ("[ ]", "[x]", "[ ]", "[ ]"),
             "major": ("[ ]", "[ ]", "[x]", "[ ]"),
-            "possible_tl": ("[ ]", "[ ]", "[ ]", "[x]"),
             None: ("[ ]", "[ ]", "[ ]", "[ ]"),
         }[tier]
 
@@ -3314,6 +3320,8 @@ async def download_pdf(file_number: Optional[str] = None, filename: Optional[str
         return JSONResponse(status_code=404, content={"detail": "Not Found"})
     latest = max(candidates, key=lambda p: os.path.getmtime(p))
     return FileResponse(path=latest, media_type="application/pdf", filename=os.path.basename(latest))
+
+
 
 
 
