@@ -2753,27 +2753,8 @@ async def vision_review(
         if isinstance(labor_sub, (int, float)) and isinstance(parts_sub, (int, float)) and isinstance(paint_mat, (int, float)) and isinstance(tax_amt, (int, float)):
             total_val = round(float(labor_sub) + float(parts_sub) + float(paint_mat) + float(sublet or 0.0) + float(tax_amt), 2)
 
-        # Print cleaned body first
-        if cleaned:
-            for ln in cleaned:
-                s = (ln or "").strip()
-                if not s:
-                    pdf_obj.ln(2)
-                    continue
-                if re.match(r"^#{3,6}\s+\S", s):
-                    heading = re.sub(r"^#{3,6}\s*", "", s).strip()
-                    try:
-                        pdf_obj.set_font("Helvetica", "B", 11)
-                    except Exception:
-                        pdf_obj.set_font("Arial", "B", 11)
-                    pdf_obj.ln(1)
-                    pdf_obj.cell(0, 6, _pdf_sanitize(heading), ln=True)
-                    try:
-                        pdf_obj.set_font("Helvetica", "", 11)
-                    except Exception:
-                        pdf_obj.set_font("Arial", "", 11)
-                    continue
-                mc(s)
+        # HARD LOCK: never print model-owned cost markdown lines in the PDF cost section.
+        # The PDF cost block is backend-owned only: tax rate, tax basis, tax, final total, severity tier.
 
         # Deterministic tax lines
         pdf_obj.ln(1)
@@ -3353,6 +3334,8 @@ async def download_pdf(file_number: Optional[str] = None, filename: Optional[str
         return JSONResponse(status_code=404, content={"detail": "Not Found"})
     latest = max(candidates, key=lambda p: os.path.getmtime(p))
     return FileResponse(path=latest, media_type="application/pdf", filename=os.path.basename(latest))
+
+
 
 
 
