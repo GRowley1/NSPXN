@@ -2768,7 +2768,8 @@ async def vision_review(
         mc("Itemized parts breakdown:")
         if parts_lines:
             for pl in parts_lines:
-                mc(f"- {re.sub(r'^[-*]\s*', '', str(pl).strip())}")
+            _clean_pl = re.sub(r'^[-*]\s*', '', str(pl).strip())
+            mc(f"- {_clean_pl}")
         else:
             mc("- No itemized parts captured from the model output on this run.")
 
