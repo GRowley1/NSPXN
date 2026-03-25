@@ -2767,7 +2767,7 @@ async def vision_review(
 
         mc("Itemized parts breakdown:")
         if parts_lines:
-            for pl in parts_lines:
+        for pl in parts_lines:
             _clean_pl = re.sub(r'^[-*]\s*', '', str(pl).strip())
             mc(f"- {_clean_pl}")
         else:
