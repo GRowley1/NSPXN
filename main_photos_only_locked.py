@@ -2558,7 +2558,8 @@ async def vision_review(
 
         disclaimer_text = (disclaimer_text or "").strip()
 
-        # Remove headings + Totals blocks + arithmetic lines we never want printed directly
+        # Remove headings + Totals blocks + arithmetic lines we never want printed directly.
+        # Keep descriptive line items, but make tax / total / severity entirely backend-owned.
         cleaned = []
         skip_totals = False
         for ln in body_lines:
@@ -2575,13 +2576,21 @@ async def vision_review(
                 else:
                     continue
 
+            # Drop model-owned cost section headings/summary labels that tend to drift.
+            if re.search(r"(?i)^\s*#{1,6}\s*(labor\s+assumptions|estimated\s+labor\s+hours|paint\s*(?:&|and)\s*materials|oem\s+replacement\s+parts|oem\s+parts\s+needed|cost\s+summary|severity\s+tier)\b", s):
+                continue
+            if re.search(r"(?i)^\s*\*{0,2}(labor\s+assumptions|estimated\s+labor\s+hours|paint\s*(?:&|and)\s*materials|oem\s+replacement\s+parts|oem\s+parts\s+needed|cost\s+summary|severity\s+tier)\*{0,2}\s*:?$", s):
+                continue
+
             if re.search(r"(?i)\bestimated\s+total\b\s*:", ln):
                 continue
             if ("+" in ln and "=" in ln and re.search(r"\$\s*[0-9]", ln)):
                 continue
 
-            # Never print model-provided severity lines here; we render them deterministically below
+            # Never print model-provided severity lines here; we render them deterministically below.
             if re.search(r"(?i)severity\s+tier|minor\s*\(|moderate\s*\(|major\s*\(|total\s+loss\s+threshold", ln):
+                continue
+            if re.search(r"(?i)^\s*[\[☐☑]", s) and re.search(r"(?i)minor|moderate|major|possible\s+total\s+loss", s):
                 continue
 
             if re.search(r"(?i)^\s*#{1,6}\s*approximate\s+total\s+repair\s+cost\b", ln):
@@ -2590,7 +2599,7 @@ async def vision_review(
             if re.search(r"(?i)inspection\s+location\s*:", ln):
                 continue
 
-            # Strip model-provided tax/total lines; render our own deterministic math below
+            # Strip model-provided tax / subtotal / total lines; render our own deterministic math below.
             if re.search(r"(?i)^\s*[-*]?\s*Sales\s+tax\s*\(assumed\s*7%\s*for\s*approximation\)", s):
                 continue
             if re.search(r"(?i)^\s*[-*]?\s*Tax\s+rate\s*:", s):
@@ -2599,7 +2608,13 @@ async def vision_review(
                 continue
             if re.search(r"(?i)^\s*[-*]?\s*Tax\s*:\s*\$", s):
                 continue
+            if re.search(r"(?i)^\s*[-*]?\s*Taxable\s+subtotal\s*:", s):
+                continue
+            if re.search(r"(?i)^\s*[-*]?\s*(Labor|Parts|Paint\s+materials)\s+subtotal\s*:", s):
+                continue
             if re.search(r"(?i)^\s*\*{0,2}\s*Approximate\s+Repair\s+Total\s*:", s):
+                continue
+            if re.search(r"(?i)^\s*\*{0,2}\s*Approximate\s+Repair\s+Cost\s+Total\s*:", s):
                 continue
 
             cleaned.append(ln)
@@ -3338,6 +3353,8 @@ async def download_pdf(file_number: Optional[str] = None, filename: Optional[str
         return JSONResponse(status_code=404, content={"detail": "Not Found"})
     latest = max(candidates, key=lambda p: os.path.getmtime(p))
     return FileResponse(path=latest, media_type="application/pdf", filename=os.path.basename(latest))
+
+
 
 
 
