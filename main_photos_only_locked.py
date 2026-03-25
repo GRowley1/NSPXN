@@ -3085,6 +3085,14 @@ async def vision_review(
             )
             pdf.multi_cell(0, 4, _pdf_sanitize(disclaimer_body))
             pdf.set_text_color(0, 0, 0)
+        # --- Timestamp (match Comprehensive placement) ---
+        try:
+            pdf.ln(3)
+            pdf.set_text_color(90, 90, 90)
+            pdf.set_font("Helvetica", "", 8)
+            pdf.cell(0, 4, f"Report Generated: {report_generated_ts}", ln=True)
+            pdf.set_text_color(0, 0, 0)
+            pdf.set_font("Helvetica", "", 11)
         except Exception:
             pass
     
