@@ -2110,6 +2110,158 @@ async def vision_review(
     except Exception:
         pass
 
+    def _locked_backend_total_from_cost_md(md_text: str, tax_rate_value: Optional[float] = None) -> Optional[float]:
+        """Compute the same backend-owned total used by the photos-only PDF cost renderer."""
+        if not md_text:
+            return None
+        text_local = str(md_text).replace("\r\n", "\n").replace("\r", "\n")
+        if tax_rate_value is None or not isinstance(tax_rate_value, (int, float)) or tax_rate_value <= 0:
+            tax_rate_value = 0.07
+
+        def _grab_money_line(pats: List[str]) -> Optional[float]:
+            for pat in pats:
+                mm = re.search(pat, text_local, flags=re.IGNORECASE | re.MULTILINE)
+                if mm:
+                    try:
+                        return float(mm.group(1).replace(",", ""))
+                    except Exception:
+                        pass
+            return None
+
+        body_labor = _grab_money_line([
+            r"^\s*[-*]?\s*Body(?:\s+labor)?\s*:\s*.*?=\s*\$\s*([0-9][0-9,]*(?:\.[0-9]{2})?)\b",
+            r"^\s*[-*]?\s*Body(?:\s+labor)?\s*:\s*\$\s*([0-9][0-9,]*(?:\.[0-9]{2})?)\b",
+        ])
+        paint_labor = _grab_money_line([
+            r"^\s*[-*]?\s*Paint\s+labor\s*:\s*.*?=\s*\$\s*([0-9][0-9,]*(?:\.[0-9]{2})?)\b",
+            r"^\s*[-*]?\s*Paint\s+labor\s*:\s*\$\s*([0-9][0-9,]*(?:\.[0-9]{2})?)\b",
+            r"^\s*[-*]?\s*Refinish\s*:\s*.*?=\s*\$\s*([0-9][0-9,]*(?:\.[0-9]{2})?)\b",
+            r"^\s*[-*]?\s*Refinish\s*:\s*\$\s*([0-9][0-9,]*(?:\.[0-9]{2})?)\b",
+        ])
+        mech_labor = _grab_money_line([
+            r"^\s*[-*]?\s*Mechanical(?:/SRS/Glass|/diagnostic)?\s*:\s*.*?=\s*\$\s*([0-9][0-9,]*(?:\.[0-9]{2})?)\b",
+            r"^\s*[-*]?\s*Mechanical(?:/SRS/Glass|/diagnostic)?\s*:\s*\$\s*([0-9][0-9,]*(?:\.[0-9]{2})?)\b",
+            r"^\s*[-*]?\s*Mechanical[^=\n]*=\s*\$\s*([0-9][0-9,]*(?:\.[0-9]{2})?)\b",
+        ])
+        frame_labor = _grab_money_line([
+            r"^\s*[-*]?\s*Frame(?:/measure)?\s*:\s*.*?=\s*\$\s*([0-9][0-9,]*(?:\.[0-9]{2})?)\b",
+            r"^\s*[-*]?\s*Frame(?:/measure)?\s*:\s*\$\s*([0-9][0-9,]*(?:\.[0-9]{2})?)\b",
+        ])
+        setup_measure = _grab_money_line([
+            r"^\s*[-*]?\s*Setup\s*&\s*Measure\s*:\s*.*?=\s*\$\s*([0-9][0-9,]*(?:\.[0-9]{2})?)\b",
+            r"^\s*[-*]?\s*Setup\s*&\s*Measure\s*:\s*\$\s*([0-9][0-9,]*(?:\.[0-9]{2})?)\b",
+        ])
+
+        labor_sub = _grab_money_line([
+            r"^\s*[-*]?\s*Labor\s+subtotal\s*\([^\n]*?\)\s*:\s*\$\s*([0-9][0-9,]*(?:\.[0-9]{2})?)\b",
+            r"^\s*[-*]?\s*Labor\s+subtotal\s*=\s*\$\s*([0-9][0-9,]*(?:\.[0-9]{2})?)\b",
+            r"^\s*[-*]?\s*Labor\s+subtotal\s*:\s*\$\s*([0-9][0-9,]*(?:\.[0-9]{2})?)\b",
+        ])
+        if labor_sub is None:
+            calc_labor = 0.0
+            have_labor_piece = False
+            for v in (body_labor, paint_labor, mech_labor, frame_labor, setup_measure):
+                if isinstance(v, (int, float)):
+                    calc_labor += float(v)
+                    have_labor_piece = True
+            if have_labor_piece:
+                labor_sub = round(calc_labor, 2)
+
+        parts_sub = _grab_money_line([
+            r"^\s*[-*]?\s*Estimated\s+parts\s+subtotal\s*:\s*\$\s*([0-9][0-9,]*(?:\.[0-9]{2})?)\b",
+            r"^\s*[-*]?\s*Parts\s+subtotal\s*\(approx\.?\)\s*=\s*\$\s*([0-9][0-9,]*(?:\.[0-9]{2})?)\b",
+            r"^\s*[-*]?\s*Parts\s+subtotal\s*\(approx\.?\)\s*:\s*\$\s*([0-9][0-9,]*(?:\.[0-9]{2})?)\b",
+            r"^\s*[-*]?\s*Parts\s+subtotal\s*=\s*\$\s*([0-9][0-9,]*(?:\.[0-9]{2})?)\b",
+            r"^\s*[-*]?\s*Parts\s+subtotal\s*:\s*\$\s*([0-9][0-9,]*(?:\.[0-9]{2})?)\b",
+            r"^\s*[-*]?\s*Parts\s*:\s*\$\s*([0-9][0-9,]*(?:\.[0-9]{2})?)\b",
+        ])
+
+        def _sum_itemized_part_amounts(src_text: str) -> Optional[float]:
+            total = 0.0
+            found = False
+            for raw_ln in src_text.splitlines():
+                s = (raw_ln or "").strip()
+                if not s:
+                    continue
+                if re.search(r"(?i)parts\s+subtotal|taxable\s+subtotal|estimated\s+tax|sales\s+tax|approximate\s+repair\s+total|severity\s+tier", s):
+                    continue
+                if re.search(r"(?i)body\s+labor|paint\s+labor|paint\s*(?:&|and)\s*materials|setup\s*&\s*measure|frame|mechanical", s):
+                    continue
+                monies = re.findall(r"\$\s*([0-9][0-9,]*(?:\.[0-9]{2})?)", s)
+                if monies:
+                    try:
+                        total += float(monies[-1].replace(',', ''))
+                        found = True
+                    except Exception:
+                        pass
+            return round(total, 2) if found else None
+
+        itemized_parts_sub = _sum_itemized_part_amounts(text_local)
+        if isinstance(itemized_parts_sub, (int, float)):
+            if not isinstance(parts_sub, (int, float)):
+                parts_sub = itemized_parts_sub
+            else:
+                parts_sub = max(float(parts_sub), float(itemized_parts_sub))
+
+        paint_mat = _grab_money_line([
+            r"^\s*[-*]?\s*Paint\s+materials\s+subtotal\s*=\s*\$\s*([0-9][0-9,]*(?:\.[0-9]{2})?)\b",
+            r"^\s*[-*]?\s*Paint\s+materials\s+subtotal\s*:\s*\$\s*([0-9][0-9,]*(?:\.[0-9]{2})?)\b",
+            r"^\s*[-*]?\s*Paint\s*(?:&\s*|and\s*)?materials\s*=\s*\$\s*([0-9][0-9,]*(?:\.[0-9]{2})?)\b",
+            r"^\s*[-*]?\s*Paint\s*(?:&\s*|and\s*)?materials\s*:\s*\$\s*([0-9][0-9,]*(?:\.[0-9]{2})?)\b",
+        ])
+        sublet = _grab_money_line([
+            r"^\s*[-*]?\s*Sublet\s*:\s*\$\s*([0-9][0-9,]*(?:\.[0-9]{2})?)\b",
+            r"^\s*[-*]?\s*Rear\s+glass\s+install\s*\(sublet\s+allowance\)\s*:\s*\$\s*([0-9][0-9,]*(?:\.[0-9]{2})?)\b",
+        ])
+        tax_amt = _grab_money_line([
+            r"^\s*[-*]?\s*Sales\s+tax\s*\(assumed\s*7%\s*for\s*approximation\)\s*=\s*\$\s*([0-9][0-9,]*(?:\.[0-9]{2})?)\b",
+            r"^\s*[-*]?\s*Tax\s*:\s*\$\s*([0-9][0-9,]*(?:\.[0-9]{2})?)\b",
+        ])
+
+        if isinstance(parts_sub, (int, float)) and isinstance(paint_mat, (int, float)) and not isinstance(tax_amt, (int, float)):
+            tax_amt = round((float(parts_sub) + float(paint_mat)) * float(tax_rate_value), 2)
+
+        if isinstance(labor_sub, (int, float)) and isinstance(parts_sub, (int, float)) and isinstance(paint_mat, (int, float)) and isinstance(tax_amt, (int, float)):
+            return round(float(labor_sub) + float(parts_sub) + float(paint_mat) + float(sublet or 0.0) + float(tax_amt), 2)
+        return None
+
+    def _force_conclusion_to_locked_total(conclusion_text: str, locked_total: Optional[float]) -> str:
+        """Force the conclusion to use the same backend-owned total as the PDF cost section."""
+        base = str(conclusion_text or "").replace("\r\n", "\n").replace("\r", "\n").strip()
+        if not isinstance(locked_total, (int, float)):
+            return base
+
+        locked_sentence = (
+            f"The photo-based repair approximation is approximately {_money2(locked_total)} "
+            "based on the backend-locked cost calculation shown in this report."
+        )
+
+        if not base:
+            return locked_sentence
+
+        lines = []
+        for raw_ln in base.splitlines():
+            s = (raw_ln or "").strip()
+            if not s:
+                continue
+            if "$" in s:
+                continue
+            if re.search(r"(?i)photo-based repair approximation|approximate repair|repair approximation|estimated repair|estimated total|approximate total|repair total|cost total", s):
+                continue
+            lines.append(raw_ln)
+
+        cleaned_base = "\n".join(lines).strip()
+        if cleaned_base:
+            return cleaned_base + "\n\n" + locked_sentence
+        return locked_sentence
+
+    try:
+        if ai_intent == "damage_report_from_photos":
+            _locked_total = _locked_backend_total_from_cost_md(result.get("estimated_costs_markdown") or "", tax_rate)
+            result["conclusion"] = _force_conclusion_to_locked_total(result.get("conclusion") or "", _locked_total)
+    except Exception:
+        pass
+
     # PDF helpers
     # -----------------------
     def _pdf_sanitize(text: str, max_token_len: int = 60) -> str:
@@ -3228,14 +3380,5 @@ async def download_pdf(file_number: Optional[str] = None, filename: Optional[str
         return JSONResponse(status_code=404, content={"detail": "Not Found"})
     latest = max(candidates, key=lambda p: os.path.getmtime(p))
     return FileResponse(path=latest, media_type="application/pdf", filename=os.path.basename(latest))
-
-
-
-
-
-
-
-
-
 
 
