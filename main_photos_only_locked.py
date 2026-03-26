@@ -2372,6 +2372,75 @@ async def vision_review(
         parsed = _parse_locked_photos_only_costs(md_text, tax_rate_value)
         return parsed.get('total_val')
 
+
+    def _canonical_locked_photos_only_cost_markdown(md_text: str, tax_rate_value: Optional[float] = None) -> str:
+        """Rebuild photos-only costs into one canonical backend-owned markdown block.
+        This forces ZIP and loose JPG runs through the same normalized sequence:
+        normalize inputs -> labor buckets -> itemized parts -> parts subtotal -> tax basis -> tax -> total -> severity.
+        """
+        parsed = _parse_locked_photos_only_costs(md_text, tax_rate_value)
+
+        def _m(v: Optional[float]) -> str:
+            try:
+                return "${:,.2f}".format(float(v) if v is not None else 0.0)
+            except Exception:
+                return "$0.00"
+
+        def _fmt(hours: Optional[float], rate: Optional[float], amount: Optional[float]) -> str:
+            try:
+                if isinstance(hours, (int, float)) and isinstance(rate, (int, float)):
+                    return f"{float(hours):.1f} hrs @ ${float(rate):,.2f}/hr = {_m(amount)}"
+            except Exception:
+                pass
+            return f"Not separately derived = {_m(amount)}"
+
+        total_val = float(parsed.get('total_val') or 0.0)
+        if total_val < 3500:
+            boxes = ("[x]", "[ ]", "[ ]", "[ ]")
+        elif total_val < 10000:
+            boxes = ("[ ]", "[x]", "[ ]", "[ ]")
+        else:
+            boxes = ("[ ]", "[ ]", "[x]", "[ ]")
+
+        lines = [
+            "## Approximate Repair Cost Breakdown",
+            f"Body labor: {_fmt(parsed.get('body_hours'), parsed.get('body_rate'), parsed.get('body_labor'))}",
+            f"Paint labor: {_fmt(parsed.get('paint_hours'), parsed.get('paint_rate'), parsed.get('paint_labor'))}",
+            f"Setup & Measure: {_fmt(parsed.get('setup_hours'), parsed.get('body_rate'), parsed.get('setup_measure'))}",
+            f"Frame labor: {_fmt(parsed.get('frame_hours'), parsed.get('frame_rate'), parsed.get('frame_labor'))}",
+            f"Mechanical labor: {_fmt(parsed.get('mech_hours'), parsed.get('mech_rate'), parsed.get('mech_labor'))}",
+            f"Labor subtotal: {_m(parsed.get('labor_sub'))}",
+            "Itemized parts breakdown:",
+        ]
+
+        parts_lines = parsed.get('parts_lines') or []
+        if parts_lines:
+            for pl in parts_lines:
+                clean_pl = re.sub(r'^[-*]\s*', '', str(pl).strip())
+                lines.append(f"- {clean_pl}")
+        else:
+            lines.append("- Not separately derived.")
+
+        lines.extend([
+            f"Parts subtotal: {_m(parsed.get('parts_sub'))}",
+            f"Paint & materials: {_m(parsed.get('paint_mat'))}",
+        ])
+        if float(parsed.get('sublet') or 0.0) > 0:
+            lines.append(f"Sublet: {_m(parsed.get('sublet'))}")
+        rate_val = tax_rate_value if isinstance(tax_rate_value, (int, float)) and tax_rate_value > 0 else 0.07
+        lines.extend([
+            f"Tax rate: {float(rate_val)*100:.3f}%",
+            f"Tax basis (parts + paint materials): {_m(parsed.get('tax_basis'))}",
+            f"Tax: {_m(parsed.get('tax_amt'))}",
+            f"Approximate Repair Total: {_m(parsed.get('total_val'))}",
+            "Severity Tier",
+            f"{boxes[0]} Minor (< $3,500)",
+            f"{boxes[1]} Moderate ($3,500-$10,000)",
+            f"{boxes[2]} Major ($10,000+)",
+            f"{boxes[3]} Possible Total Loss Threshold Approaching",
+        ])
+        return "\n".join(lines)
+
     def _force_conclusion_to_locked_total(conclusion_text: str, locked_total: Optional[float]) -> str:
         """Preserve the conclusion review text while replacing only the conflicting cost sentence."""
         base = str(conclusion_text or "").replace("\r\n", "\n").replace("\r", "\n").strip()
@@ -2434,6 +2503,9 @@ async def vision_review(
 
     try:
         if ai_intent == "damage_report_from_photos":
+            result["estimated_costs_markdown"] = _canonical_locked_photos_only_cost_markdown(
+                result.get("estimated_costs_markdown") or "", tax_rate
+            )
             _locked_total = _locked_backend_total_from_cost_md(result.get("estimated_costs_markdown") or "", tax_rate)
             result["conclusion"] = _force_conclusion_to_locked_total(result.get("conclusion") or "", _locked_total)
     except Exception:
@@ -3460,11 +3532,5 @@ async def download_pdf(file_number: Optional[str] = None, filename: Optional[str
         return JSONResponse(status_code=404, content={"detail": "Not Found"})
     latest = max(candidates, key=lambda p: os.path.getmtime(p))
     return FileResponse(path=latest, media_type="application/pdf", filename=os.path.basename(latest))
-
-
-
-
-
-
 
 
