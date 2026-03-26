@@ -2809,24 +2809,52 @@ async def vision_review(
         - fixed printed structure every time
         - no model-owned descriptive/rationale text is printed in the PDF cost section
         - tax, total, and severity are backend-owned only
+        - missing components print as $0.00 or Not separately derived instead of collapsing the section
         """
         if tax_rate is None or not isinstance(tax_rate, (int, float)) or tax_rate <= 0:
             tax_rate = 0.07
 
         parsed = _parse_locked_photos_only_costs(md, tax_rate)
-        body_labor = parsed.get('body_labor')
-        paint_labor = parsed.get('paint_labor')
-        setup_measure = parsed.get('setup_measure')
-        frame_labor = parsed.get('frame_labor')
-        mech_labor = parsed.get('mech_labor')
-        labor_sub = parsed.get('labor_sub')
+
+        def _nz_money(v: Optional[float]) -> float:
+            try:
+                return round(float(v), 2) if isinstance(v, (int, float)) else 0.0
+            except Exception:
+                return 0.0
+
+        body_labor = _nz_money(parsed.get('body_labor'))
+        paint_labor = _nz_money(parsed.get('paint_labor'))
+        setup_measure = _nz_money(parsed.get('setup_measure'))
+        frame_labor = _nz_money(parsed.get('frame_labor'))
+        mech_labor = _nz_money(parsed.get('mech_labor'))
         parts_lines = parsed.get('parts_lines') or []
-        parts_sub = parsed.get('parts_sub')
-        paint_mat = parsed.get('paint_mat')
-        sublet = parsed.get('sublet')
+        parts_sub = _nz_money(parsed.get('parts_sub'))
+        paint_mat = _nz_money(parsed.get('paint_mat'))
+        sublet = _nz_money(parsed.get('sublet'))
+
+        labor_sub = parsed.get('labor_sub')
+        if not isinstance(labor_sub, (int, float)):
+            labor_sub = round(body_labor + paint_labor + setup_measure + frame_labor + mech_labor, 2)
+        else:
+            labor_sub = round(float(labor_sub), 2)
+
         tax_basis = parsed.get('tax_basis')
+        if not isinstance(tax_basis, (int, float)):
+            tax_basis = round(parts_sub + paint_mat, 2)
+        else:
+            tax_basis = round(float(tax_basis), 2)
+
         tax_amt = parsed.get('tax_amt')
+        if not isinstance(tax_amt, (int, float)):
+            tax_amt = round(tax_basis * float(tax_rate), 2)
+        else:
+            tax_amt = round(float(tax_amt), 2)
+
         total_val = parsed.get('total_val')
+        if not isinstance(total_val, (int, float)):
+            total_val = round(labor_sub + parts_sub + paint_mat + sublet + tax_amt, 2)
+        else:
+            total_val = round(float(total_val), 2)
 
         pdf_obj.ln(1)
         try:
@@ -2834,63 +2862,51 @@ async def vision_review(
         except Exception:
             pdf_obj.set_font("Arial", "", 11)
 
-        # Fixed printed structure
-        if isinstance(body_labor, (int, float)):
-            mc(f"Body labor: {_money2(body_labor)}")
-        if isinstance(paint_labor, (int, float)):
-            mc(f"Paint labor: {_money2(paint_labor)}")
-        if isinstance(setup_measure, (int, float)) and float(setup_measure) > 0:
-            mc(f"Setup & Measure: {_money2(setup_measure)}")
-        if isinstance(frame_labor, (int, float)) and float(frame_labor) > 0:
-            mc(f"Frame labor: {_money2(frame_labor)}")
-        if isinstance(mech_labor, (int, float)) and float(mech_labor) > 0:
-            mc(f"Mechanical labor: {_money2(mech_labor)}")
-        if isinstance(labor_sub, (int, float)):
-            mc(f"Labor subtotal: {_money2(labor_sub)}")
+        mc(f"Body labor: {_money2(body_labor)}")
+        mc(f"Paint labor: {_money2(paint_labor)}")
+        mc(f"Setup & Measure: {_money2(setup_measure)}")
+        mc(f"Frame labor: {_money2(frame_labor)}")
+        mc(f"Mechanical labor: {_money2(mech_labor)}")
+        mc(f"Labor subtotal: {_money2(labor_sub)}")
 
+        mc("Itemized parts breakdown:")
         if parts_lines:
-            mc("Itemized parts breakdown:")
             for pl in parts_lines:
                 _clean_pl = re.sub(r'^[-*]\s*', '', str(pl).strip())
                 mc(f"- {_clean_pl}")
+        else:
+            mc("- Not separately derived.")
 
-        if isinstance(parts_sub, (int, float)):
-            mc(f"Parts subtotal: {_money2(parts_sub)}")
-        if isinstance(paint_mat, (int, float)):
-            mc(f"Paint & materials: {_money2(paint_mat)}")
-        if isinstance(sublet, (int, float)) and float(sublet) > 0:
+        mc(f"Parts subtotal: {_money2(parts_sub)}")
+        mc(f"Paint & materials: {_money2(paint_mat)}")
+        if sublet > 0:
             mc(f"Sublet: {_money2(sublet)}")
 
-        if isinstance(tax_basis, (int, float)) and isinstance(tax_amt, (int, float)):
-            mc(f"Tax rate: {float(tax_rate)*100:.3f}%")
-            mc(f"Tax basis (parts + paint materials): {_money2(tax_basis)}")
-            mc(f"Tax: {_money2(tax_amt)}")
+        mc(f"Tax rate: {float(tax_rate)*100:.3f}%")
+        mc(f"Tax basis (parts + paint materials): {_money2(tax_basis)}")
+        mc(f"Tax: {_money2(tax_amt)}")
 
-        if isinstance(total_val, (int, float)):
-            try:
-                pdf_obj.set_font("Helvetica", "B", 11)
-            except Exception:
-                pdf_obj.set_font("Arial", "B", 11)
-            mc(f"Approximate Repair Total: {_money2(total_val)}")
-            try:
-                pdf_obj.set_font("Helvetica", "", 11)
-            except Exception:
-                pdf_obj.set_font("Arial", "", 11)
+        try:
+            pdf_obj.set_font("Helvetica", "B", 11)
+        except Exception:
+            pdf_obj.set_font("Arial", "B", 11)
+        mc(f"Approximate Repair Total: {_money2(total_val)}")
+        try:
+            pdf_obj.set_font("Helvetica", "", 11)
+        except Exception:
+            pdf_obj.set_font("Arial", "", 11)
 
-        tier = None
-        if isinstance(total_val, (int, float)):
-            if total_val < 3500:
-                tier = "minor"
-            elif total_val < 10000:
-                tier = "moderate"
-            else:
-                tier = "major"
+        if total_val < 3500:
+            tier = "minor"
+        elif total_val < 10000:
+            tier = "moderate"
+        else:
+            tier = "major"
 
         boxes = {
             "minor": ("[x]", "[ ]", "[ ]", "[ ]"),
             "moderate": ("[ ]", "[x]", "[ ]", "[ ]"),
             "major": ("[ ]", "[ ]", "[x]", "[ ]"),
-            None: ("[ ]", "[ ]", "[ ]", "[ ]"),
         }[tier]
 
         pdf_obj.ln(1)
@@ -3402,5 +3418,7 @@ async def download_pdf(file_number: Optional[str] = None, filename: Optional[str
         return JSONResponse(status_code=404, content={"detail": "Not Found"})
     latest = max(candidates, key=lambda p: os.path.getmtime(p))
     return FileResponse(path=latest, media_type="application/pdf", filename=os.path.basename(latest))
+
+
 
 
