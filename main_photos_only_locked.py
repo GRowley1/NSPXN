@@ -2201,7 +2201,7 @@ async def vision_review(
                 if not s:
                     continue
 
-                if re.search(r'(?i)^\*{0,2}\s*(OEM\s+replacement\s+parts|OEM\s+parts\s+needed|replacement\s+parts|parts\s+needed)\b', s):
+                if re.search(r'(?i)^\*{0,2}\s*(OEM\s+replacement\s+parts|OEM\s+parts\s+needed|replacement\s+parts|parts\s+needed|itemized\s+parts\s+breakdown)\b', s):
                     in_parts_section = True
                     continue
 
@@ -2276,6 +2276,8 @@ async def vision_review(
                 parts_sub = itemized_parts_sub
             else:
                 parts_sub = max(float(parts_sub), float(itemized_parts_sub))
+                if float(parts_sub) <= 0 and float(itemized_parts_sub) > 0:
+                    parts_sub = float(itemized_parts_sub)
 
         paint_mat = _grab_money_line([
             r'^\s*[-*]?\s*Paint\s+materials\s+subtotal\s*=\s*\$\s*([0-9][0-9,]*(?:\.[0-9]{2})?)\b',
@@ -3418,6 +3420,8 @@ async def download_pdf(file_number: Optional[str] = None, filename: Optional[str
         return JSONResponse(status_code=404, content={"detail": "Not Found"})
     latest = max(candidates, key=lambda p: os.path.getmtime(p))
     return FileResponse(path=latest, media_type="application/pdf", filename=os.path.basename(latest))
+
+
 
 
 
