@@ -2111,33 +2111,61 @@ async def vision_review(
         pass
 
     def _extract_itemized_part_lines(md_text: str) -> List[str]:
-        """Extract itemized part lines only from the parts section of photos-only cost markdown."""
+        """Extract itemized part lines for the locked photos-only PDF cost block.
+
+        Primary path:
+        - read only lines inside a parts heading/section
+
+        Fallback path:
+        - if no explicit parts section is found, scan all lines for likely part/component
+          lines with dollar amounts while excluding labor, tax, totals, and rationale lines
+        """
         text_local = str(md_text or '').replace("\r\n", "\n").replace("\r", "\n")
         out: List[str] = []
+        seen = set()
         in_parts_section = False
+
+        def _keep_line(s: str) -> bool:
+            if not s or '$' not in s:
+                return False
+            if re.search(r'(?i)body\s+labor|paint\s+labor|paint\s*(?:&|and)\s*materials|setup\s*&\s*measure|frame\s+labor|mechanical|tax\s+rate|tax\s+basis|estimated\s+tax|sales\s+tax|labor\s+subtotal|parts\s+subtotal|subtotal|approximate\s+repair\s+total|severity\s+tier|rationale|hours?\b', s):
+                return False
+            if re.search(r'(?i)\b(rate|assumption|approximation only|cost calculation)\b', s):
+                return False
+            if not re.search(r'(?i)\b(assembly|bumper|reinforcement|impact\s+bar|absorber|lamp|light|glass|hatch|gate|liftgate|panel|closure|quarter|molding|trim|harness|connector|retainer|clips?|fasteners?|sealants?|sensor|camera|exhaust|wheel\-arch|aperture|spoiler|emblem|bracket|cover|grille|fender|door|mirror)\b', s):
+                return False
+            return True
+
         for raw_ln in text_local.splitlines():
             s = (raw_ln or '').strip()
             if not s:
                 continue
 
-            if re.search(r'(?i)^\*{0,2}\s*(OEM\s+replacement\s+parts|OEM\s+parts\s+needed|replacement\s+parts|parts\s+needed)\b', s):
+            if re.search(r'(?i)^\*{0,2}\s*(OEM\s+replacement\s+parts|OEM\s+parts\s+needed|replacement\s+parts|parts\s+needed|itemized\s+parts\s+breakdown)\b', s):
                 in_parts_section = True
                 continue
 
-            if not in_parts_section:
-                continue
-
-            if re.search(r'(?i)parts\s+subtotal|estimated\s+parts\s+subtotal|taxable\s+subtotal|estimated\s+tax|sales\s+tax|tax\s+rate|tax\s+basis|approximate\s+repair\s+total|severity\s+tier', s):
+            if in_parts_section and re.search(r'(?i)parts\s+subtotal|estimated\s+parts\s+subtotal|taxable\s+subtotal|estimated\s+tax|sales\s+tax|tax\s+rate|tax\s+basis|approximate\s+repair\s+total|severity\s+tier', s):
                 break
-            if re.search(r'(?i)^\*{0,2}\s*(labor|body\s+labor|paint\s+labor|paint\s*(?:&|and)\s*materials|setup\s*&\s*measure|frame\s+labor|mechanical|sublet)\b', s):
+            if in_parts_section and re.search(r'(?i)^\*{0,2}\s*(labor|body\s+labor|paint\s+labor|paint\s*(?:&|and)\s*materials|setup\s*&\s*measure|frame\s+labor|mechanical|sublet)\b', s):
                 break
 
-            if re.search(r'(?i)body\s+labor|paint\s+labor|paint\s*(?:&|and)\s*materials|setup\s*&\s*measure|frame\s+labor|mechanical|tax|subtotal|total', s):
-                continue
-            if '$' not in s:
-                continue
+            if in_parts_section and _keep_line(s):
+                if s not in seen:
+                    out.append(s)
+                    seen.add(s)
 
-            out.append(s)
+        if out:
+            return out
+
+        for raw_ln in text_local.splitlines():
+            s = (raw_ln or '').strip()
+            if not _keep_line(s):
+                continue
+            if s not in seen:
+                out.append(s)
+                seen.add(s)
+
         return out
 
     def _parse_locked_photos_only_costs(md_text: str, tax_rate_value: Optional[float] = None) -> Dict[str, Optional[float]]:
@@ -2297,7 +2325,7 @@ async def vision_review(
         return parsed.get('total_val')
 
     def _force_conclusion_to_locked_total(conclusion_text: str, locked_total: Optional[float]) -> str:
-        """Force the conclusion to use the same backend-owned total as the PDF cost section."""
+        """Preserve the conclusion review text while replacing only the conflicting cost sentence."""
         base = str(conclusion_text or "").replace("\r\n", "\n").replace("\r", "\n").strip()
         if not isinstance(locked_total, (int, float)):
             return base
@@ -2315,21 +2343,46 @@ async def vision_review(
         if not base:
             return locked_sentence
 
-        lines = []
-        for raw_ln in base.splitlines():
-            s = (raw_ln or "").strip()
+        def _is_conflicting_cost_sentence(sentence: str) -> bool:
+            s = (sentence or "").strip()
             if not s:
-                continue
-            if "$" in s:
-                continue
-            if re.search(r"(?i)photo-based repair approximation|approximate repair|repair approximation|estimated repair|estimated total|approximate total|repair total|cost total", s):
-                continue
-            lines.append(raw_ln)
+                return False
+            mentions_cost = bool(re.search(
+                r'(?i)photo-based repair cost approximation|photo-based repair approximation|approximate repair|repair approximation|estimated repair|estimated total|approximate total|repair total|cost total',
+                s,
+            ))
+            has_amount = ('$' in s) or bool(re.search(r'(?i)\b\d+(?:\.\d+)?k\b', s))
+            return mentions_cost and has_amount
 
-        cleaned_base = "\n".join(lines).strip()
-        if cleaned_base:
-            return cleaned_base + "\n\n" + locked_sentence
-        return locked_sentence
+        paragraphs_out: List[str] = []
+        replaced_any = False
+
+        for para in re.split(r'\n\s*\n', base):
+            p = para.strip()
+            if not p:
+                continue
+            sentences = re.split(r'(?<=[.!?])\s+', p)
+            kept_sentences: List[str] = []
+            for sent in sentences:
+                if _is_conflicting_cost_sentence(sent):
+                    replaced_any = True
+                    continue
+                kept_sentences.append(sent.strip())
+            rebuilt = ' '.join([s for s in kept_sentences if s]).strip()
+            if rebuilt:
+                paragraphs_out.append(rebuilt)
+
+        cleaned_base = '\n\n'.join(paragraphs_out).strip()
+
+        if replaced_any:
+            if cleaned_base:
+                return cleaned_base + "\n\n" + locked_sentence
+            return locked_sentence
+
+        if locked_sentence in cleaned_base:
+            return cleaned_base
+
+        return cleaned_base
 
     try:
         if ai_intent == "damage_report_from_photos":
@@ -2795,13 +2848,11 @@ async def vision_review(
         if isinstance(labor_sub, (int, float)):
             mc(f"Labor subtotal: {_money2(labor_sub)}")
 
-        mc("Itemized parts breakdown:")
         if parts_lines:
+            mc("Itemized parts breakdown:")
             for pl in parts_lines:
                 _clean_pl = re.sub(r'^[-*]\s*', '', str(pl).strip())
                 mc(f"- {_clean_pl}")
-        else:
-            mc("- No itemized parts captured from the model output on this run.")
 
         if isinstance(parts_sub, (int, float)):
             mc(f"Parts subtotal: {_money2(parts_sub)}")
@@ -3351,11 +3402,5 @@ async def download_pdf(file_number: Optional[str] = None, filename: Optional[str
         return JSONResponse(status_code=404, content={"detail": "Not Found"})
     latest = max(candidates, key=lambda p: os.path.getmtime(p))
     return FileResponse(path=latest, media_type="application/pdf", filename=os.path.basename(latest))
-
-
-
-
-
-
 
 
