@@ -2168,13 +2168,14 @@ async def vision_review(
 
         return out
 
-    def _parse_locked_photos_only_costs(md_text: str, tax_rate_value: Optional[float] = None) -> Dict[str, Optional[float]]:
+    def _parse_locked_photos_only_costs(md_text: str, tax_rate_value: Optional[float] = None) -> Dict[str, Any]:
         """Single source of truth for photos-only cost math.
-        This parser is intentionally strict:
-        - labor component dollars must be extended amounts, not hourly rates
-        - parts subtotal comes from an explicit subtotal or from itemized part lines only
-        - tax is always based on locked parts + paint materials
-        - total is always recomputed from locked components
+        Locked rules:
+        - labor subtotal is ALWAYS recomputed from the five printed labor buckets
+        - tax is ALWAYS recomputed from (parts subtotal + paint materials) * tax_rate
+        - total is ALWAYS recomputed from labor subtotal + parts subtotal + paint materials + sublet + tax
+        - if explicit parts subtotal is missing, itemized part lines are summed and become the single parts subtotal
+        - carry the actual hours/rates used so the PDF can show how each labor total was derived
         """
         if tax_rate_value is None or not isinstance(tax_rate_value, (int, float)) or tax_rate_value <= 0:
             tax_rate_value = 0.07
@@ -2182,6 +2183,16 @@ async def vision_review(
         text_local = str(md_text or '').replace("\r\n", "\n").replace("\r", "\n")
 
         def _grab_money_line(pats: List[str]) -> Optional[float]:
+            for pat in pats:
+                mm = re.search(pat, text_local, flags=re.IGNORECASE | re.MULTILINE)
+                if mm:
+                    try:
+                        return float(mm.group(1).replace(',', ''))
+                    except Exception:
+                        pass
+            return None
+
+        def _grab_float_line(pats: List[str]) -> Optional[float]:
             for pat in pats:
                 mm = re.search(pat, text_local, flags=re.IGNORECASE | re.MULTILINE)
                 if mm:
@@ -2225,43 +2236,78 @@ async def vision_review(
                         pass
             return round(total, 2) if found else None
 
-        body_labor = _grab_money_line([
+        body_rate = _grab_float_line([
+            r'(?im)^\s*[-*]?\s*Body\s+labor\s+rate\s*:\s*\$\s*([0-9][0-9,]*(?:\.[0-9]+)?)\s*/\s*hr',
+            r'(?im)^\s*[-*]?\s*Body(?:\s+labor)?\s*:\s*[0-9]+(?:\.[0-9]+)?\s*hrs?\s*@\s*\$\s*([0-9][0-9,]*(?:\.[0-9]+)?)\s*/\s*hr',
+        ])
+        paint_rate = _grab_float_line([
+            r'(?im)^\s*[-*]?\s*Paint\s+labor\s+rate\s*:\s*\$\s*([0-9][0-9,]*(?:\.[0-9]+)?)\s*/\s*hr',
+            r'(?im)^\s*[-*]?\s*Paint\s+labor\s*:\s*[0-9]+(?:\.[0-9]+)?\s*hrs?\s*@\s*\$\s*([0-9][0-9,]*(?:\.[0-9]+)?)\s*/\s*hr',
+            r'(?im)^\s*[-*]?\s*Refinish\s*:\s*[0-9]+(?:\.[0-9]+)?\s*hrs?\s*@\s*\$\s*([0-9][0-9,]*(?:\.[0-9]+)?)\s*/\s*hr',
+        ])
+        frame_rate = _grab_float_line([
+            r'(?im)^\s*[-*]?\s*Frame\s+labor\s+rate\s*:\s*\$\s*([0-9][0-9,]*(?:\.[0-9]+)?)\s*/\s*hr',
+            r'(?im)^\s*[-*]?\s*Frame(?:/measure|\s+labor)?\s*:\s*[0-9]+(?:\.[0-9]+)?\s*hrs?\s*@\s*\$\s*([0-9][0-9,]*(?:\.[0-9]+)?)\s*/\s*hr',
+        ])
+        mech_rate = _grab_float_line([
+            r'(?im)^\s*[-*]?\s*Mechanical(?:/diagnostic)?\s+rate\s*:\s*\$\s*([0-9][0-9,]*(?:\.[0-9]+)?)\s*/\s*hr',
+            r'(?im)^\s*[-*]?\s*Mechanical(?:/SRS/Glass|/diagnostic)?[^\n]*?:\s*[0-9]+(?:\.[0-9]+)?\s*hrs?\s*@\s*\$\s*([0-9][0-9,]*(?:\.[0-9]+)?)\s*/\s*hr',
+        ])
+
+        body_hours = _grab_float_line([
+            r'(?im)^\s*[-*]?\s*Body(?:\s+labor)?\s*:\s*([0-9]+(?:\.[0-9]+)?)\s*hrs?\b',
+        ])
+        paint_hours = _grab_float_line([
+            r'(?im)^\s*[-*]?\s*Paint\s+labor\s*\(?(?:refinish)?\)?\s*:\s*([0-9]+(?:\.[0-9]+)?)\s*hrs?\b',
+            r'(?im)^\s*[-*]?\s*Refinish\s*:\s*([0-9]+(?:\.[0-9]+)?)\s*hrs?\b',
+        ])
+        setup_hours = _grab_float_line([
+            r'(?im)^\s*[-*]?\s*Setup\s*&\s*Measure[^\n]*?:\s*([0-9]+(?:\.[0-9]+)?)\s*hrs?\b',
+        ])
+        frame_hours = _grab_float_line([
+            r'(?im)^\s*[-*]?\s*Frame(?:/measure|\s+labor)?\s*:\s*([0-9]+(?:\.[0-9]+)?)\s*hrs?\b',
+        ])
+        mech_hours = _grab_float_line([
+            r'(?im)^\s*[-*]?\s*Mechanical(?:/SRS/Glass|/diagnostic)?[^\n]*?:\s*([0-9]+(?:\.[0-9]+)?)\s*hrs?\b',
+        ])
+
+        body_labor_explicit = _grab_money_line([
             r'^\s*[-*]?\s*Body(?:\s+labor)?\s*:\s*.*?=\s*\$\s*([0-9][0-9,]*(?:\.[0-9]{2})?)\b',
             r'^\s*[-*]?\s*Body(?:\s+labor)?\s*:\s*.*?\*\*\$\s*([0-9][0-9,]*(?:\.[0-9]{2})?)\*\*\s*$',
         ])
-        paint_labor = _grab_money_line([
+        paint_labor_explicit = _grab_money_line([
             r'^\s*[-*]?\s*Paint\s+labor\s*:\s*.*?=\s*\$\s*([0-9][0-9,]*(?:\.[0-9]{2})?)\b',
             r'^\s*[-*]?\s*Paint\s+labor\s*:\s*.*?\*\*\$\s*([0-9][0-9,]*(?:\.[0-9]{2})?)\*\*\s*$',
             r'^\s*[-*]?\s*Refinish\s*:\s*.*?=\s*\$\s*([0-9][0-9,]*(?:\.[0-9]{2})?)\b',
             r'^\s*[-*]?\s*Refinish\s*:\s*.*?\*\*\$\s*([0-9][0-9,]*(?:\.[0-9]{2})?)\*\*\s*$',
         ])
-        setup_measure = _grab_money_line([
+        setup_measure_explicit = _grab_money_line([
             r'^\s*[-*]?\s*Setup\s*&\s*Measure\s*:\s*.*?=\s*\$\s*([0-9][0-9,]*(?:\.[0-9]{2})?)\b',
             r'^\s*[-*]?\s*Setup\s*&\s*Measure\s*:\s*.*?\*\*\$\s*([0-9][0-9,]*(?:\.[0-9]{2})?)\*\*\s*$',
         ])
-        frame_labor = _grab_money_line([
+        frame_labor_explicit = _grab_money_line([
             r'^\s*[-*]?\s*Frame(?:/measure|\s+labor)?\s*:\s*.*?=\s*\$\s*([0-9][0-9,]*(?:\.[0-9]{2})?)\b',
             r'^\s*[-*]?\s*Frame(?:/measure|\s+labor)?\s*:\s*.*?\*\*\$\s*([0-9][0-9,]*(?:\.[0-9]{2})?)\*\*\s*$',
         ])
-        mech_labor = _grab_money_line([
+        mech_labor_explicit = _grab_money_line([
             r'^\s*[-*]?\s*Mechanical(?:/SRS/Glass|/diagnostic)?\s*:\s*.*?=\s*\$\s*([0-9][0-9,]*(?:\.[0-9]{2})?)\b',
             r'^\s*[-*]?\s*Mechanical(?:/SRS/Glass|/diagnostic)?\s*:\s*.*?\*\*\$\s*([0-9][0-9,]*(?:\.[0-9]{2})?)\*\*\s*$',
         ])
 
-        labor_sub = _grab_money_line([
-            r'^\s*[-*]?\s*Labor\s+subtotal\s*\([^\n]*?\)\s*:\s*\$\s*([0-9][0-9,]*(?:\.[0-9]{2})?)\b',
-            r'^\s*[-*]?\s*Labor\s+subtotal\s*=\s*\$\s*([0-9][0-9,]*(?:\.[0-9]{2})?)\b',
-            r'^\s*[-*]?\s*Labor\s+subtotal\s*:\s*\$\s*([0-9][0-9,]*(?:\.[0-9]{2})?)\b',
-        ])
-        if labor_sub is None:
-            calc_labor = 0.0
-            have_labor_piece = False
-            for v in (body_labor, paint_labor, setup_measure, frame_labor, mech_labor):
-                if isinstance(v, (int, float)):
-                    calc_labor += float(v)
-                    have_labor_piece = True
-            if have_labor_piece:
-                labor_sub = round(calc_labor, 2)
+        def _derive_amount(hours: Optional[float], rate: Optional[float], explicit: Optional[float]) -> float:
+            if isinstance(hours, (int, float)) and isinstance(rate, (int, float)):
+                return round(float(hours) * float(rate), 2)
+            if isinstance(explicit, (int, float)):
+                return round(float(explicit), 2)
+            return 0.0
+
+        body_labor = _derive_amount(body_hours, body_rate, body_labor_explicit)
+        paint_labor = _derive_amount(paint_hours, paint_rate, paint_labor_explicit)
+        setup_measure = _derive_amount(setup_hours, body_rate, setup_measure_explicit)
+        frame_labor = _derive_amount(frame_hours, frame_rate, frame_labor_explicit)
+        mech_labor = _derive_amount(mech_hours, mech_rate, mech_labor_explicit)
+
+        labor_sub = round(body_labor + paint_labor + setup_measure + frame_labor + mech_labor, 2)
 
         parts_sub = _grab_money_line([
             r'^\s*[-*]?\s*Estimated\s+parts\s+subtotal\s*:\s*\$\s*([0-9][0-9,]*(?:\.[0-9]{2})?)\b',
@@ -2271,13 +2317,12 @@ async def vision_review(
             r'^\s*[-*]?\s*Parts\s+subtotal\s*:\s*\$\s*([0-9][0-9,]*(?:\.[0-9]{2})?)\b',
         ])
         itemized_parts_sub = _sum_itemized_part_amounts(text_local)
-        if isinstance(itemized_parts_sub, (int, float)):
-            if not isinstance(parts_sub, (int, float)):
-                parts_sub = itemized_parts_sub
-            else:
-                parts_sub = max(float(parts_sub), float(itemized_parts_sub))
-                if float(parts_sub) <= 0 and float(itemized_parts_sub) > 0:
-                    parts_sub = float(itemized_parts_sub)
+        if isinstance(parts_sub, (int, float)):
+            parts_sub = round(float(parts_sub), 2)
+        elif isinstance(itemized_parts_sub, (int, float)):
+            parts_sub = round(float(itemized_parts_sub), 2)
+        else:
+            parts_sub = 0.0
 
         paint_mat = _grab_money_line([
             r'^\s*[-*]?\s*Paint\s+materials\s+subtotal\s*=\s*\$\s*([0-9][0-9,]*(?:\.[0-9]{2})?)\b',
@@ -2286,27 +2331,28 @@ async def vision_review(
             r'^\s*[-*]?\s*Paint\s*(?:&\s*|and\s*)?materials\s*:\s*.*?\*\*\$\s*([0-9][0-9,]*(?:\.[0-9]{2})?)\*\*\s*$',
             r'^\s*[-*]?\s*Paint\s*(?:&\s*|and\s*)?materials\s*=\s*\$\s*([0-9][0-9,]*(?:\.[0-9]{2})?)\b',
         ])
+        paint_mat = round(float(paint_mat), 2) if isinstance(paint_mat, (int, float)) else 0.0
+
         sublet = _grab_money_line([
             r'^\s*[-*]?\s*Sublet\s*:\s*\$\s*([0-9][0-9,]*(?:\.[0-9]{2})?)\b',
             r'^\s*[-*]?\s*Rear\s+glass\s+install\s*\(sublet\s+allowance\)\s*:\s*\$\s*([0-9][0-9,]*(?:\.[0-9]{2})?)\b',
         ])
+        sublet = round(float(sublet), 2) if isinstance(sublet, (int, float)) else 0.0
 
-        tax_basis = None
-        if isinstance(parts_sub, (int, float)) and isinstance(paint_mat, (int, float)):
-            tax_basis = round(float(parts_sub) + float(paint_mat), 2)
-
-        tax_amt = _grab_money_line([
-            r'^\s*[-*]?\s*Sales\s+tax\s*\(assumed\s*7%\s*for\s*approximation\)\s*=\s*\$\s*([0-9][0-9,]*(?:\.[0-9]{2})?)\b',
-            r'^\s*[-*]?\s*Tax\s*:\s*\$\s*([0-9][0-9,]*(?:\.[0-9]{2})?)\b',
-        ])
-        if tax_amt is None and isinstance(tax_basis, (int, float)):
-            tax_amt = round(float(tax_basis) * float(tax_rate_value), 2)
-
-        total_val = None
-        if isinstance(labor_sub, (int, float)) and isinstance(parts_sub, (int, float)) and isinstance(paint_mat, (int, float)) and isinstance(tax_amt, (int, float)):
-            total_val = round(float(labor_sub) + float(parts_sub) + float(paint_mat) + float(sublet or 0.0) + float(tax_amt), 2)
+        tax_basis = round(parts_sub + paint_mat, 2)
+        tax_amt = round(tax_basis * float(tax_rate_value), 2)
+        total_val = round(labor_sub + parts_sub + paint_mat + sublet + tax_amt, 2)
 
         return {
+            'body_hours': body_hours,
+            'paint_hours': paint_hours,
+            'setup_hours': setup_hours,
+            'frame_hours': frame_hours,
+            'mech_hours': mech_hours,
+            'body_rate': body_rate,
+            'paint_rate': paint_rate,
+            'frame_rate': frame_rate,
+            'mech_rate': mech_rate,
             'body_labor': body_labor,
             'paint_labor': paint_labor,
             'setup_measure': setup_measure,
@@ -2809,9 +2855,8 @@ async def vision_review(
         """Render the Approximate Repair Cost Breakdown in a controlled PDF format.
         Locked behavior:
         - fixed printed structure every time
-        - no model-owned descriptive/rationale text is printed in the PDF cost section
-        - tax, total, and severity are backend-owned only
-        - missing components print as $0.00 or Not separately derived instead of collapsing the section
+        - print actual labor hours/rates used where available
+        - recompute labor subtotal, tax, and total from one backend-owned path only
         """
         if tax_rate is None or not isinstance(tax_rate, (int, float)) or tax_rate <= 0:
             tax_rate = 0.07
@@ -2824,6 +2869,21 @@ async def vision_review(
             except Exception:
                 return 0.0
 
+        def _fmt_hours_rate(hours: Optional[float], rate: Optional[float], amount: float) -> str:
+            if isinstance(hours, (int, float)) and isinstance(rate, (int, float)):
+                return f"{float(hours):.1f} hrs @ ${float(rate):,.2f}/hr = {_money2(amount)}"
+            return f"Not separately derived = {_money2(amount)}"
+
+        body_hours = parsed.get('body_hours')
+        paint_hours = parsed.get('paint_hours')
+        setup_hours = parsed.get('setup_hours')
+        frame_hours = parsed.get('frame_hours')
+        mech_hours = parsed.get('mech_hours')
+        body_rate = parsed.get('body_rate')
+        paint_rate = parsed.get('paint_rate')
+        frame_rate = parsed.get('frame_rate')
+        mech_rate = parsed.get('mech_rate')
+
         body_labor = _nz_money(parsed.get('body_labor'))
         paint_labor = _nz_money(parsed.get('paint_labor'))
         setup_measure = _nz_money(parsed.get('setup_measure'))
@@ -2833,30 +2893,10 @@ async def vision_review(
         parts_sub = _nz_money(parsed.get('parts_sub'))
         paint_mat = _nz_money(parsed.get('paint_mat'))
         sublet = _nz_money(parsed.get('sublet'))
-
-        labor_sub = parsed.get('labor_sub')
-        if not isinstance(labor_sub, (int, float)):
-            labor_sub = round(body_labor + paint_labor + setup_measure + frame_labor + mech_labor, 2)
-        else:
-            labor_sub = round(float(labor_sub), 2)
-
-        tax_basis = parsed.get('tax_basis')
-        if not isinstance(tax_basis, (int, float)):
-            tax_basis = round(parts_sub + paint_mat, 2)
-        else:
-            tax_basis = round(float(tax_basis), 2)
-
-        tax_amt = parsed.get('tax_amt')
-        if not isinstance(tax_amt, (int, float)):
-            tax_amt = round(tax_basis * float(tax_rate), 2)
-        else:
-            tax_amt = round(float(tax_amt), 2)
-
-        total_val = parsed.get('total_val')
-        if not isinstance(total_val, (int, float)):
-            total_val = round(labor_sub + parts_sub + paint_mat + sublet + tax_amt, 2)
-        else:
-            total_val = round(float(total_val), 2)
+        labor_sub = _nz_money(parsed.get('labor_sub'))
+        tax_basis = _nz_money(parsed.get('tax_basis'))
+        tax_amt = _nz_money(parsed.get('tax_amt'))
+        total_val = _nz_money(parsed.get('total_val'))
 
         pdf_obj.ln(1)
         try:
@@ -2864,11 +2904,11 @@ async def vision_review(
         except Exception:
             pdf_obj.set_font("Arial", "", 11)
 
-        mc(f"Body labor: {_money2(body_labor)}")
-        mc(f"Paint labor: {_money2(paint_labor)}")
-        mc(f"Setup & Measure: {_money2(setup_measure)}")
-        mc(f"Frame labor: {_money2(frame_labor)}")
-        mc(f"Mechanical labor: {_money2(mech_labor)}")
+        mc(f"Body labor: {_fmt_hours_rate(body_hours, body_rate, body_labor)}")
+        mc(f"Paint labor: {_fmt_hours_rate(paint_hours, paint_rate, paint_labor)}")
+        mc(f"Setup & Measure: {_fmt_hours_rate(setup_hours, body_rate, setup_measure)}")
+        mc(f"Frame labor: {_fmt_hours_rate(frame_hours, frame_rate, frame_labor)}")
+        mc(f"Mechanical labor: {_fmt_hours_rate(mech_hours, mech_rate, mech_labor)}")
         mc(f"Labor subtotal: {_money2(labor_sub)}")
 
         mc("Itemized parts breakdown:")
@@ -3420,6 +3460,8 @@ async def download_pdf(file_number: Optional[str] = None, filename: Optional[str
         return JSONResponse(status_code=404, content={"detail": "Not Found"})
     latest = max(candidates, key=lambda p: os.path.getmtime(p))
     return FileResponse(path=latest, media_type="application/pdf", filename=os.path.basename(latest))
+
+
 
 
 
