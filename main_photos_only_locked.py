@@ -2203,30 +2203,17 @@ async def vision_review(
             return None
 
         def _sum_itemized_part_amounts(src_text: str) -> Optional[float]:
-            lines = src_text.splitlines()
+            """Sum part dollars from the exact normalized itemized part lines.
+            This prevents ZIP/JPG divergence where lines can be extracted/printed,
+            but subtotal assignment fails because the raw-text heading wasn't recognized.
+            """
+            extracted_lines = _extract_itemized_part_lines(src_text)
             total = 0.0
             found = False
-            in_parts_section = False
-            for raw_ln in lines:
+            for raw_ln in extracted_lines:
                 s = (raw_ln or '').strip()
                 if not s:
                     continue
-
-                if re.search(r'(?i)^\*{0,2}\s*(OEM\s+replacement\s+parts|OEM\s+parts\s+needed|replacement\s+parts|parts\s+needed|itemized\s+parts\s+breakdown)\b', s):
-                    in_parts_section = True
-                    continue
-
-                if in_parts_section and re.search(r'(?i)parts\s+subtotal|estimated\s+parts\s+subtotal|taxable\s+subtotal|estimated\s+tax|sales\s+tax|tax\s+rate|tax\s+basis|approximate\s+repair\s+total|severity\s+tier', s):
-                    break
-                if in_parts_section and re.search(r'(?i)^\*{0,2}\s*(labor|body\s+labor|paint\s+labor|paint\s*(?:&|and)\s*materials|setup\s*&\s*measure|frame\s+labor|mechanical)', s):
-                    break
-
-                if not in_parts_section:
-                    continue
-
-                if re.search(r'(?i)body\s+labor|paint\s+labor|paint\s*(?:&|and)\s*materials|setup\s*&\s*measure|frame\s+labor|mechanical|tax|subtotal|total', s):
-                    continue
-
                 monies = re.findall(r'\$\s*([0-9][0-9,]*(?:\.[0-9]{2})?)', s)
                 if monies:
                     try:
@@ -3532,5 +3519,7 @@ async def download_pdf(file_number: Optional[str] = None, filename: Optional[str
         return JSONResponse(status_code=404, content={"detail": "Not Found"})
     latest = max(candidates, key=lambda p: os.path.getmtime(p))
     return FileResponse(path=latest, media_type="application/pdf", filename=os.path.basename(latest))
+
+
 
 
