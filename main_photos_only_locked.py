@@ -2233,12 +2233,21 @@ async def vision_review(
             r'(?im)^\s*[-*]?\s*Refinish\s*:\s*[0-9]+(?:\.[0-9]+)?\s*hrs?\s*@\s*\$\s*([0-9][0-9,]*(?:\.[0-9]+)?)\s*/\s*hr',
         ])
         frame_rate = _grab_float_line([
-            r'(?im)^\s*[-*]?\s*Frame\s+labor\s+rate\s*:\s*\$\s*([0-9][0-9,]*(?:\.[0-9]+)?)\s*/\s*hr',
+            r'(?im)^\s*[-*]?\s*(?:Frame|Structural)(?:\s+labor)?\s+rate\s*:\s*\$\s*([0-9][0-9,]*(?:\.[0-9]+)?)\s*/\s*hr',
             r'(?im)^\s*[-*]?\s*Frame(?:/measure|\s+labor)?\s*:\s*[0-9]+(?:\.[0-9]+)?\s*hrs?\s*@\s*\$\s*([0-9][0-9,]*(?:\.[0-9]+)?)\s*/\s*hr',
+            r'(?im)^\s*[-*]?\s*Structural(?:\s+labor)?\s*:\s*[0-9]+(?:\.[0-9]+)?\s*hrs?\s*@\s*\$\s*([0-9][0-9,]*(?:\.[0-9]+)?)\s*/\s*hr',
         ])
         mech_rate = _grab_float_line([
             r'(?im)^\s*[-*]?\s*Mechanical(?:/diagnostic)?\s+rate\s*:\s*\$\s*([0-9][0-9,]*(?:\.[0-9]+)?)\s*/\s*hr',
             r'(?im)^\s*[-*]?\s*Mechanical(?:/SRS/Glass|/diagnostic)?[^\n]*?:\s*[0-9]+(?:\.[0-9]+)?\s*hrs?\s*@\s*\$\s*([0-9][0-9,]*(?:\.[0-9]+)?)\s*/\s*hr',
+        ])
+
+        paint_mat_rate = _grab_float_line([
+            r'(?im)^\s*[-*]?\s*Paint\s*(?:&\s*|and\s*)?materials\s+rate\s*:\s*\$\s*([0-9][0-9,]*(?:\.[0-9]+)?)\b',
+            r'(?im)^\s*[-*]?\s*Paint\s+materials\s+rate\s*:\s*\$\s*([0-9][0-9,]*(?:\.[0-9]+)?)\b',
+            r'(?im)^\s*[-*]?\s*Paint\s+suppl(?:y|ies)\s+rate\s*:\s*\$\s*([0-9][0-9,]*(?:\.[0-9]+)?)\b',
+            r'(?im)^\s*[-*]?\s*Paint\s*(?:&\s*|and\s*)?materials\s+rate\s*:\s*\$\s*([0-9][0-9,]*(?:\.[0-9]+)?)\s*(?:per\s+refinish\s+hour|/\s*hr)',
+            r'(?im)^\s*[-*]?\s*Paint\s+materials\s+rate\s*:\s*\$\s*([0-9][0-9,]*(?:\.[0-9]+)?)\s*(?:per\s+refinish\s+hour|/\s*hr)',
         ])
 
         body_hours = _grab_float_line([
@@ -2318,7 +2327,12 @@ async def vision_review(
             r'^\s*[-*]?\s*Paint\s*(?:&\s*|and\s*)?materials\s*:\s*.*?\*\*\$\s*([0-9][0-9,]*(?:\.[0-9]{2})?)\*\*\s*$',
             r'^\s*[-*]?\s*Paint\s*(?:&\s*|and\s*)?materials\s*=\s*\$\s*([0-9][0-9,]*(?:\.[0-9]{2})?)\b',
         ])
-        paint_mat = round(float(paint_mat), 2) if isinstance(paint_mat, (int, float)) else 0.0
+        if isinstance(paint_mat, (int, float)):
+            paint_mat = round(float(paint_mat), 2)
+        elif isinstance(paint_hours, (int, float)) and isinstance(paint_mat_rate, (int, float)):
+            paint_mat = round(float(paint_hours) * float(paint_mat_rate), 2)
+        else:
+            paint_mat = 0.0
 
         sublet = _grab_money_line([
             r'^\s*[-*]?\s*Sublet\s*:\s*\$\s*([0-9][0-9,]*(?:\.[0-9]{2})?)\b',
@@ -2431,8 +2445,9 @@ async def vision_review(
 
         def _fmt(hours: Optional[float], rate: Optional[float], amount: Optional[float]) -> str:
             try:
-                if isinstance(hours, (int, float)) and isinstance(rate, (int, float)):
-                    return f"{float(hours):.1f} hrs @ ${float(rate):,.2f}/hr = {_m(amount)}"
+                if isinstance(rate, (int, float)):
+                    shown_hours = float(hours) if isinstance(hours, (int, float)) else 0.0
+                    return f"{shown_hours:.1f} hrs @ ${float(rate):,.2f}/hr = {_m(amount)}"
             except Exception:
                 pass
             return f"Not separately derived = {_m(amount)}"
@@ -2987,8 +3002,9 @@ async def vision_review(
                 return 0.0
 
         def _fmt_hours_rate(hours: Optional[float], rate: Optional[float], amount: float) -> str:
-            if isinstance(hours, (int, float)) and isinstance(rate, (int, float)):
-                return f"{float(hours):.1f} hrs @ ${float(rate):,.2f}/hr = {_money2(amount)}"
+            if isinstance(rate, (int, float)):
+                shown_hours = float(hours) if isinstance(hours, (int, float)) else 0.0
+                return f"{shown_hours:.1f} hrs @ ${float(rate):,.2f}/hr = {_money2(amount)}"
             return f"Not separately derived = {_money2(amount)}"
 
         body_hours = parsed.get('body_hours')
@@ -3577,6 +3593,8 @@ async def download_pdf(file_number: Optional[str] = None, filename: Optional[str
         return JSONResponse(status_code=404, content={"detail": "Not Found"})
     latest = max(candidates, key=lambda p: os.path.getmtime(p))
     return FileResponse(path=latest, media_type="application/pdf", filename=os.path.basename(latest))
+
+
 
 
 
