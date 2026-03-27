@@ -2399,7 +2399,14 @@ async def vision_review(
         return "Visible photo evidence supports a photo-based condition review, but final repair planning should be confirmed after in-person inspection and teardown."
 
     def _final_non_empty_output_lock() -> None:
-        """Last-line protection against blank/N/A photos-only outputs."""
+        """Last-line protection against blank/N/A photos-only outputs.
+
+        Surgical lock only:
+        - preserve any usable identifiers, cost text, labor buckets, and parts lines already present
+        - fill only truly empty narrative/fraud/conclusion text
+        - never replace estimated_costs_markdown with a zero scaffold here, because that can wipe
+          usable extracted evidence and force the locked math path to collapse to $0.00
+        """
         if ai_intent != "damage_report_from_photos":
             return
         if _bad_field(result.get("summary_markdown") or ""):
@@ -2408,27 +2415,6 @@ async def vision_review(
             result["fraud_markdown"] = _fallback_fraud_from_visible_evidence()
         if _bad_field(result.get("conclusion") or ""):
             result["conclusion"] = _fallback_conclusion_from_visible_evidence()
-        if _bad_field(result.get("estimated_costs_markdown") or ""):
-            result["estimated_costs_markdown"] = """## Approximate Repair Cost Breakdown
-Body labor: Not separately derived = $0.00
-Paint labor: Not separately derived = $0.00
-Setup & Measure: Not separately derived = $0.00
-Frame labor: Not separately derived = $0.00
-Mechanical labor: Not separately derived = $0.00
-Labor subtotal: $0.00
-Itemized parts breakdown:
-- Not separately derived.
-Parts subtotal: $0.00
-Paint & materials: $0.00
-Tax rate: 7.000%
-Tax basis (parts + paint materials): $0.00
-Tax: $0.00
-Approximate Repair Total: $0.00
-Severity Tier
-[x] Minor (< $3,500)
-[ ] Moderate ($3,500-$10,000)
-[ ] Major ($10,000+)
-[ ] Possible Total Loss Threshold Approaching"""
 
     def _canonical_locked_photos_only_cost_markdown(md_text: str, tax_rate_value: Optional[float] = None) -> str:
         """Rebuild photos-only costs into one canonical backend-owned markdown block.
@@ -3591,6 +3577,8 @@ async def download_pdf(file_number: Optional[str] = None, filename: Optional[str
         return JSONResponse(status_code=404, content={"detail": "Not Found"})
     latest = max(candidates, key=lambda p: os.path.getmtime(p))
     return FileResponse(path=latest, media_type="application/pdf", filename=os.path.basename(latest))
+
+
 
 
 
