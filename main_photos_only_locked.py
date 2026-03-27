@@ -2267,6 +2267,35 @@ async def vision_review(
             r'(?im)^\s*[-*]?\s*Mechanical(?:/SRS/Glass|/diagnostic)?[^\n]*?:\s*([0-9]+(?:\.[0-9]+)?)\s*hrs?\b',
         ])
 
+        # Hard-bind paint labor when refinish/blend scope is present but explicit paint hours were not emitted.
+        # This restores consistent paint labor + paint materials for both ZIP and loose JPG runs
+        # without changing any other cost-path behavior.
+        _refinish_scope_present = bool(re.search(
+            r'(?i)\b(refinish|blend|blending|repaint|paint\s+operations?|adjacent\s+panel\s+blend)\b',
+            text_local,
+        ))
+        if paint_hours is None:
+            _paint_labor_amount_for_hours = _grab_money_line([
+                r'^\s*[-*]?\s*Paint\s+labor\s*:\s*.*?=\s*\$\s*([0-9][0-9,]*(?:\.[0-9]{2})?)\b',
+                r'^\s*[-*]?\s*Paint\s+labor\s*:\s*.*?\*\*\$\s*([0-9][0-9,]*(?:\.[0-9]{2})?)\*\*\s*$',
+                r'^\s*[-*]?\s*Refinish\s*:\s*.*?=\s*\$\s*([0-9][0-9,]*(?:\.[0-9]{2})?)\b',
+                r'^\s*[-*]?\s*Refinish\s*:\s*.*?\*\*\$\s*([0-9][0-9,]*(?:\.[0-9]{2})?)\*\*\s*$',
+            ])
+            _paint_mat_amount_for_hours = _grab_money_line([
+                r'^\s*[-*]?\s*Paint\s+materials\s+subtotal\s*=\s*\$\s*([0-9][0-9,]*(?:\.[0-9]{2})?)\b',
+                r'^\s*[-*]?\s*Paint\s+materials\s+subtotal\s*:\s*\$\s*([0-9][0-9,]*(?:\.[0-9]{2})?)\b',
+                r'^\s*[-*]?\s*Paint\s*(?:&\s*|and\s*)?materials\s*:\s*.*?=\s*\$\s*([0-9][0-9,]*(?:\.[0-9]{2})?)\b',
+                r'^\s*[-*]?\s*Paint\s*(?:&\s*|and\s*)?materials\s*:\s*.*?\*\*\$\s*([0-9][0-9,]*(?:\.[0-9]{2})?)\*\*\s*$',
+                r'^\s*[-*]?\s*Paint\s*(?:&\s*|and\s*)?materials\s*=\s*\$\s*([0-9][0-9,]*(?:\.[0-9]{2})?)\b',
+            ])
+            if isinstance(_paint_labor_amount_for_hours, (int, float)) and isinstance(paint_rate, (int, float)) and float(paint_rate) > 0:
+                paint_hours = round(float(_paint_labor_amount_for_hours) / float(paint_rate), 1)
+            elif isinstance(_paint_mat_amount_for_hours, (int, float)) and isinstance(paint_mat_rate, (int, float)) and float(paint_mat_rate) > 0:
+                paint_hours = round(float(_paint_mat_amount_for_hours) / float(paint_mat_rate), 1)
+            elif _refinish_scope_present and isinstance(body_hours, (int, float)) and float(body_hours) > 0:
+                # Conservative, deterministic fallback for photo-based refinish scope.
+                paint_hours = round(max(1.0, float(body_hours) * 0.4), 1)
+
         body_labor_explicit = _grab_money_line([
             r'^\s*[-*]?\s*Body(?:\s+labor)?\s*:\s*.*?=\s*\$\s*([0-9][0-9,]*(?:\.[0-9]{2})?)\b',
             r'^\s*[-*]?\s*Body(?:\s+labor)?\s*:\s*.*?\*\*\$\s*([0-9][0-9,]*(?:\.[0-9]{2})?)\*\*\s*$',
@@ -3593,13 +3622,5 @@ async def download_pdf(file_number: Optional[str] = None, filename: Optional[str
         return JSONResponse(status_code=404, content={"detail": "Not Found"})
     latest = max(candidates, key=lambda p: os.path.getmtime(p))
     return FileResponse(path=latest, media_type="application/pdf", filename=os.path.basename(latest))
-
-
-
-
-
-
-
-
 
 
