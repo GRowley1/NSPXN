@@ -2356,10 +2356,10 @@ async def vision_review(
             r'^\s*[-*]?\s*Paint\s*(?:&\s*|and\s*)?materials\s*:\s*.*?\*\*\$\s*([0-9][0-9,]*(?:\.[0-9]{2})?)\*\*\s*$',
             r'^\s*[-*]?\s*Paint\s*(?:&\s*|and\s*)?materials\s*=\s*\$\s*([0-9][0-9,]*(?:\.[0-9]{2})?)\b',
         ])
-        if isinstance(paint_mat, (int, float)):
-            paint_mat = round(float(paint_mat), 2)
-        elif isinstance(paint_hours, (int, float)) and isinstance(paint_mat_rate, (int, float)):
+        if isinstance(paint_hours, (int, float)) and float(paint_hours) > 0 and isinstance(paint_mat_rate, (int, float)) and float(paint_mat_rate) > 0:
             paint_mat = round(float(paint_hours) * float(paint_mat_rate), 2)
+        elif isinstance(paint_mat, (int, float)):
+            paint_mat = round(float(paint_mat), 2)
         else:
             paint_mat = 0.0
 
@@ -2494,7 +2494,7 @@ async def vision_review(
             f"Body labor: {_fmt(parsed.get('body_hours'), parsed.get('body_rate'), parsed.get('body_labor'))}",
             f"Paint labor: {_fmt(parsed.get('paint_hours'), parsed.get('paint_rate'), parsed.get('paint_labor'))}",
             f"Setup & Measure: {_fmt(parsed.get('setup_hours'), parsed.get('body_rate'), parsed.get('setup_measure'))}",
-            f"Frame labor: {_fmt(parsed.get('frame_hours'), parsed.get('frame_rate'), parsed.get('frame_labor'))}",
+            f"Frame labor: {(float(parsed.get('frame_hours')) if isinstance(parsed.get('frame_hours'), (int, float)) else 0.0):.1f} hrs @ ${(float(parsed.get('frame_rate')) if isinstance(parsed.get('frame_rate'), (int, float)) else 0.0):,.2f}/hr = {_m(parsed.get('frame_labor'))}",
             f"Mechanical labor: {_fmt(parsed.get('mech_hours'), parsed.get('mech_rate'), parsed.get('mech_labor'))}",
             f"Labor subtotal: {_m(parsed.get('labor_sub'))}",
             "Itemized parts breakdown:",
@@ -3069,7 +3069,7 @@ async def vision_review(
         mc(f"Body labor: {_fmt_hours_rate(body_hours, body_rate, body_labor)}")
         mc(f"Paint labor: {_fmt_hours_rate(paint_hours, paint_rate, paint_labor)}")
         mc(f"Setup & Measure: {_fmt_hours_rate(setup_hours, body_rate, setup_measure)}")
-        mc(f"Frame labor: {_fmt_hours_rate(frame_hours, frame_rate, frame_labor)}")
+        mc(f"Frame labor: {(float(frame_hours) if isinstance(frame_hours, (int, float)) else 0.0):.1f} hrs @ ${(float(frame_rate) if isinstance(frame_rate, (int, float)) else 0.0):,.2f}/hr = {_money2(frame_labor)}")
         mc(f"Mechanical labor: {_fmt_hours_rate(mech_hours, mech_rate, mech_labor)}")
         mc(f"Labor subtotal: {_money2(labor_sub)}")
 
@@ -3622,5 +3622,7 @@ async def download_pdf(file_number: Optional[str] = None, filename: Optional[str
         return JSONResponse(status_code=404, content={"detail": "Not Found"})
     latest = max(candidates, key=lambda p: os.path.getmtime(p))
     return FileResponse(path=latest, media_type="application/pdf", filename=os.path.basename(latest))
+
+
 
 
