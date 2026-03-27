@@ -2250,6 +2250,16 @@ async def vision_review(
             r'(?im)^\s*[-*]?\s*Paint\s+materials\s+rate\s*:\s*\$\s*([0-9][0-9,]*(?:\.[0-9]+)?)\s*(?:per\s+refinish\s+hour|/\s*hr)',
         ])
 
+        def _derive_rate_from_amount(amount: Optional[float], hours: Optional[float], current_rate: Optional[float]) -> Optional[float]:
+            if isinstance(current_rate, (int, float)) and float(current_rate) > 0:
+                return float(current_rate)
+            if isinstance(amount, (int, float)) and isinstance(hours, (int, float)) and float(hours) > 0:
+                try:
+                    return round(float(amount) / float(hours), 2)
+                except Exception:
+                    return current_rate
+            return current_rate
+
         body_hours = _grab_float_line([
             r'(?im)^\s*[-*]?\s*Body(?:\s+labor)?\s*:\s*([0-9]+(?:\.[0-9]+)?)\s*hrs?\b',
         ])
@@ -2319,6 +2329,12 @@ async def vision_review(
             r'^\s*[-*]?\s*Mechanical(?:/SRS/Glass|/diagnostic)?\s*:\s*.*?\*\*\$\s*([0-9][0-9,]*(?:\.[0-9]{2})?)\*\*\s*$',
         ])
 
+        # Preserve hrs @ rate = total formatting by deriving missing rates from explicit dollars when possible.
+        body_rate = _derive_rate_from_amount(body_labor_explicit, body_hours, body_rate)
+        paint_rate = _derive_rate_from_amount(paint_labor_explicit, paint_hours, paint_rate)
+        frame_rate = _derive_rate_from_amount(frame_labor_explicit, frame_hours, frame_rate)
+        mech_rate = _derive_rate_from_amount(mech_labor_explicit, mech_hours, mech_rate)
+
         def _derive_amount(hours: Optional[float], rate: Optional[float], explicit: Optional[float]) -> float:
             if isinstance(hours, (int, float)) and isinstance(rate, (int, float)):
                 return round(float(hours) * float(rate), 2)
@@ -2355,7 +2371,13 @@ async def vision_review(
             r'^\s*[-*]?\s*Paint\s*(?:&\s*|and\s*)?materials\s*:\s*.*?=\s*\$\s*([0-9][0-9,]*(?:\.[0-9]{2})?)\b',
             r'^\s*[-*]?\s*Paint\s*(?:&\s*|and\s*)?materials\s*:\s*.*?\*\*\$\s*([0-9][0-9,]*(?:\.[0-9]{2})?)\*\*\s*$',
             r'^\s*[-*]?\s*Paint\s*(?:&\s*|and\s*)?materials\s*=\s*\$\s*([0-9][0-9,]*(?:\.[0-9]{2})?)\b',
+            r'^\s*[-*]?\s*Paint\s*(?:&\s*|and\s*)?materials\s*:\s*\$\s*([0-9][0-9,]*(?:\.[0-9]{2})?)\b',
         ])
+        if (not isinstance(paint_mat_rate, (int, float)) or float(paint_mat_rate) <= 0) and isinstance(paint_mat, (int, float)) and isinstance(paint_hours, (int, float)) and float(paint_hours) > 0:
+            try:
+                paint_mat_rate = round(float(paint_mat) / float(paint_hours), 2)
+            except Exception:
+                pass
         if isinstance(paint_hours, (int, float)) and float(paint_hours) > 0 and isinstance(paint_mat_rate, (int, float)) and float(paint_mat_rate) > 0:
             paint_mat = round(float(paint_hours) * float(paint_mat_rate), 2)
         elif isinstance(paint_mat, (int, float)):
@@ -3622,6 +3644,8 @@ async def download_pdf(file_number: Optional[str] = None, filename: Optional[str
         return JSONResponse(status_code=404, content={"detail": "Not Found"})
     latest = max(candidates, key=lambda p: os.path.getmtime(p))
     return FileResponse(path=latest, media_type="application/pdf", filename=os.path.basename(latest))
+
+
 
 
 
