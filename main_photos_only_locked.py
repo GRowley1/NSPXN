@@ -1618,6 +1618,8 @@ async def vision_review(
         "redaction_status": redaction_status,
     }
 
+    locked_costs_obj: Optional[Dict[str, Any]] = None
+
     # ---- Minimal Impact Sanitizer (no Left/Right/Driver/Passenger unless proven) ----
     # Policy A: If any impact label implies left/right/driver/passenger, collapse to Front/Rear/Side.
     def _sanitize_impact_label(v: Optional[str]) -> str:
@@ -2587,13 +2589,10 @@ async def vision_review(
         if _bad_field(result.get("conclusion") or ""):
             result["conclusion"] = _fallback_conclusion_from_visible_evidence()
 
-    def _canonical_locked_photos_only_cost_markdown(md_text: str, tax_rate_value: Optional[float] = None) -> str:
-        """Rebuild photos-only costs into one canonical backend-owned markdown block.
-        This forces ZIP and loose JPG runs through the same normalized sequence:
-        normalize inputs -> labor buckets -> itemized parts -> parts subtotal -> tax basis -> tax -> total -> severity.
+    def _canonical_locked_photos_only_cost_markdown_from_parsed(parsed: Dict[str, Any], tax_rate_value: Optional[float] = None) -> str:
+        """Rebuild photos-only costs from one already-locked backend object.
+        This avoids reparsing markdown after the final locked object has been computed.
         """
-        parsed = _parse_locked_photos_only_costs(md_text, tax_rate_value)
-
         def _m(v: Optional[float]) -> str:
             try:
                 return "${:,.2f}".format(float(v) if v is not None else 0.0)
@@ -2655,6 +2654,14 @@ async def vision_review(
             f"{boxes[3]} Possible Total Loss Threshold Approaching",
         ])
         return "\n".join(lines)
+
+    def _canonical_locked_photos_only_cost_markdown(md_text: str, tax_rate_value: Optional[float] = None) -> str:
+        """Rebuild photos-only costs into one canonical backend-owned markdown block.
+        This forces ZIP and loose JPG runs through the same normalized sequence:
+        normalize inputs -> labor buckets -> itemized parts -> parts subtotal -> tax basis -> tax -> total -> severity.
+        """
+        parsed = _parse_locked_photos_only_costs(md_text, tax_rate_value)
+        return _canonical_locked_photos_only_cost_markdown_from_parsed(parsed, tax_rate_value)
 
     def _force_conclusion_to_locked_total(conclusion_text: str, locked_total: Optional[float]) -> str:
         """Preserve the conclusion review text while replacing only the conflicting cost sentence."""
@@ -2719,10 +2726,12 @@ async def vision_review(
     try:
         _final_non_empty_output_lock()
         if ai_intent == "damage_report_from_photos":
-            result["estimated_costs_markdown"] = _canonical_locked_photos_only_cost_markdown(
-                result.get("estimated_costs_markdown") or "", tax_rate
+            _raw_locked_cost_source = result.get("estimated_costs_markdown") or ""
+            locked_costs_obj = _parse_locked_photos_only_costs(_raw_locked_cost_source, tax_rate)
+            result["estimated_costs_markdown"] = _canonical_locked_photos_only_cost_markdown_from_parsed(
+                locked_costs_obj, tax_rate
             )
-            _locked_total = _locked_backend_total_from_cost_md(result.get("estimated_costs_markdown") or "", tax_rate)
+            _locked_total = locked_costs_obj.get("total_val") if isinstance(locked_costs_obj, dict) else None
             result["conclusion"] = _force_conclusion_to_locked_total(result.get("conclusion") or "", _locked_total)
             _final_non_empty_output_lock()
     except Exception:
@@ -3140,7 +3149,7 @@ async def vision_review(
         return "\n".join(out).strip()
 
 
-    def render_repair_cost_section(pdf_obj: FPDF, md: str, tax_rate: Optional[float] = None) -> None:
+    def render_repair_cost_section(pdf_obj: FPDF, md: str, tax_rate: Optional[float] = None, parsed: Optional[Dict[str, Any]] = None) -> None:
         """Render the Approximate Repair Cost Breakdown in a controlled PDF format.
         Locked behavior:
         - fixed printed structure every time
@@ -3150,7 +3159,7 @@ async def vision_review(
         if tax_rate is None or not isinstance(tax_rate, (int, float)) or tax_rate <= 0:
             tax_rate = 0.07
 
-        parsed = _parse_locked_photos_only_costs(md, tax_rate)
+        parsed = parsed if isinstance(parsed, dict) else _parse_locked_photos_only_costs(md, tax_rate)
 
         def _nz_money(v: Optional[float]) -> float:
             try:
@@ -3466,7 +3475,7 @@ async def vision_review(
         # NOTE: Total + Severity Tier are rendered deterministically inside render_repair_cost_section.
     
         _section_bar("APPROXIMATE REPAIR COST BREAKDOWN")
-        render_repair_cost_section(pdf, costs_md, tax_rate=tax_rate)
+        render_repair_cost_section(pdf, costs_md, tax_rate=tax_rate, parsed=locked_costs_obj)
     
         _section_bar("FRAUD & AUTHENTICITY CHECK")
         mc((result.get("fraud_markdown") or "").strip() or "-")
