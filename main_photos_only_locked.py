@@ -2168,6 +2168,101 @@ async def vision_review(
 
         return out
 
+
+
+    def _apply_normalization_lock(parsed: Dict[str, Any]) -> Dict[str, Any]:
+        """Stabilize photos-only cost outputs without changing the underlying logic path.
+
+        This helper only normalizes the already-parsed cost object:
+        - rounds labor hours to 0.5-hour increments
+        - keeps rates stable to 2 decimals
+        - dedupes and sorts parts lines for deterministic printing
+        - recomputes extended labor amounts, subtotal, tax basis, tax, and total
+          from that single normalized object
+        """
+        out = dict(parsed or {})
+
+        def _round_half(v):
+            try:
+                return round(round(float(v) * 2.0) / 2.0, 1)
+            except Exception:
+                return None
+
+        def _round_rate(v):
+            try:
+                x = float(v)
+                return round(x, 2) if x > 0 else 0.0
+            except Exception:
+                return 0.0
+
+        def _money(v):
+            try:
+                return round(float(v), 2)
+            except Exception:
+                return 0.0
+
+        for hk in ('body_hours', 'paint_hours', 'setup_hours', 'frame_hours', 'mech_hours'):
+            if isinstance(out.get(hk), (int, float)):
+                out[hk] = _round_half(out.get(hk))
+
+        for rk in ('body_rate', 'paint_rate', 'frame_rate', 'mech_rate', 'tax_rate_value'):
+            out[rk] = _round_rate(out.get(rk))
+
+        if isinstance(out.get('paint_mat_rate'), (int, float)):
+            out['paint_mat_rate'] = _round_rate(out.get('paint_mat_rate'))
+
+        def _recalc(hours_key, rate_key, amount_key):
+            hrs = out.get(hours_key)
+            rate = out.get(rate_key)
+            if isinstance(hrs, (int, float)) and isinstance(rate, (int, float)) and rate > 0:
+                out[amount_key] = round(float(hrs) * float(rate), 2)
+            else:
+                out[amount_key] = _money(out.get(amount_key))
+
+        _recalc('body_hours', 'body_rate', 'body_labor')
+        _recalc('paint_hours', 'paint_rate', 'paint_labor')
+        _recalc('setup_hours', 'body_rate', 'setup_measure')
+        _recalc('frame_hours', 'frame_rate', 'frame_labor')
+        _recalc('mech_hours', 'mech_rate', 'mech_labor')
+
+        parts_lines = out.get('parts_lines') or []
+        if isinstance(parts_lines, list):
+            norm = []
+            seen = set()
+            for pl in parts_lines:
+                s = re.sub(r'^[-*]\s*', '', str(pl or '').strip())
+                if not s:
+                    continue
+                key = re.sub(r'\s+', ' ', s).strip().lower()
+                if key in seen:
+                    continue
+                seen.add(key)
+                norm.append(s)
+            norm.sort(key=lambda s: (s.lower(), s))
+            out['parts_lines'] = norm
+
+        out['parts_sub'] = _money(out.get('parts_sub'))
+        out['paint_mat'] = _money(out.get('paint_mat'))
+        out['sublet'] = _money(out.get('sublet'))
+        out['labor_sub'] = round(
+            _money(out.get('body_labor')) +
+            _money(out.get('paint_labor')) +
+            _money(out.get('setup_measure')) +
+            _money(out.get('frame_labor')) +
+            _money(out.get('mech_labor')), 2
+        )
+        out['tax_basis'] = round(_money(out.get('parts_sub')) + _money(out.get('paint_mat')), 2)
+        tax_rate_val = out.get('tax_rate_value') if isinstance(out.get('tax_rate_value'), (int, float)) and out.get('tax_rate_value') > 0 else 0.07
+        out['tax_amt'] = round(_money(out.get('tax_basis')) * float(tax_rate_val), 2)
+        out['total_val'] = round(
+            _money(out.get('labor_sub')) +
+            _money(out.get('parts_sub')) +
+            _money(out.get('paint_mat')) +
+            _money(out.get('sublet')) +
+            _money(out.get('tax_amt')), 2
+        )
+        return out
+
     def _parse_locked_photos_only_costs(md_text: str, tax_rate_value: Optional[float] = None) -> Dict[str, Any]:
         """Single source of truth for photos-only cost math.
         Locked rules:
