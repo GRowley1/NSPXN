@@ -2430,6 +2430,15 @@ async def vision_review(
         frame_rate = _derive_rate_from_amount(frame_labor_explicit, frame_hours, frame_rate)
         mech_rate = _derive_rate_from_amount(mech_labor_explicit, mech_hours, mech_rate)
 
+        # Surgical paint-rate lock:
+        # if paint labor hours exist but paint rate was not parsed/derived, do not let it fall to $0.00/hr.
+        # keep the existing file behavior everywhere else and use the locked body rate as the fallback,
+        # which preserves the expected hours @ rate = total format in the PDF cost block.
+        if isinstance(paint_hours, (int, float)) and float(paint_hours) > 0:
+            if not isinstance(paint_rate, (int, float)) or float(paint_rate) <= 0:
+                if isinstance(body_rate, (int, float)) and float(body_rate) > 0:
+                    paint_rate = float(body_rate)
+
         def _derive_amount(hours: Optional[float], rate: Optional[float], explicit: Optional[float]) -> float:
             if isinstance(hours, (int, float)) and isinstance(rate, (int, float)):
                 return round(float(hours) * float(rate), 2)
