@@ -2395,7 +2395,7 @@ async def vision_review(
         tax_amt = round(tax_basis * float(tax_rate_value), 2)
         total_val = round(labor_sub + parts_sub + paint_mat + sublet + tax_amt, 2)
 
-        return {
+        _parsed = {
             'body_hours': body_hours,
             'paint_hours': paint_hours,
             'setup_hours': setup_hours,
@@ -2418,7 +2418,9 @@ async def vision_review(
             'tax_basis': tax_basis,
             'tax_amt': tax_amt,
             'total_val': total_val,
+            'tax_rate_value': float(tax_rate_value),
         }
+        return _apply_normalization_lock(_parsed)
 
     def _locked_backend_total_from_cost_md(md_text: str, tax_rate_value: Optional[float] = None) -> Optional[float]:
         parsed = _parse_locked_photos_only_costs(md_text, tax_rate_value)
@@ -3644,9 +3646,3 @@ async def download_pdf(file_number: Optional[str] = None, filename: Optional[str
         return JSONResponse(status_code=404, content={"detail": "Not Found"})
     latest = max(candidates, key=lambda p: os.path.getmtime(p))
     return FileResponse(path=latest, media_type="application/pdf", filename=os.path.basename(latest))
-
-
-
-
-
-
