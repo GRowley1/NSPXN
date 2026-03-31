@@ -2547,6 +2547,14 @@ async def vision_review(
         frame_rate = _derive_rate_from_amount(frame_labor_explicit, frame_hours, frame_rate)
         mech_rate = _derive_rate_from_amount(mech_labor_explicit, mech_hours, mech_rate)
 
+        if (not isinstance(frame_rate, (int, float)) or float(frame_rate) <= 0) and isinstance(seed_rates, dict):
+            try:
+                _seed_frame_rate = float(seed_rates.get('frame_rate') or 0.0)
+                if _seed_frame_rate > 0:
+                    frame_rate = _seed_frame_rate
+            except Exception:
+                pass
+
         # Surgical paint-rate lock:
         # if paint labor hours exist but paint rate was not parsed/derived, do not let it fall to $0.00/hr.
         # keep the existing file behavior everywhere else and use the locked body rate as the fallback,
@@ -3497,14 +3505,37 @@ async def vision_review(
             except Exception:
                 pdf.set_font("Arial", "", 11)
 
-        def _format_vehicle_value(v) -> str:
-            """Normalize the Vehicle field for PDF printing."""
+        def _vin_model_year(vin_value: Optional[str]) -> str:
+            """Best-effort VIN 10th-character model year decode for PDF display fallback."""
+            try:
+                vv = str(vin_value or "").strip().upper()
+                if len(vv) != 17:
+                    return ""
+                code = vv[9]
+                year_map = {
+                    "A": 2010, "B": 2011, "C": 2012, "D": 2013, "E": 2014,
+                    "F": 2015, "G": 2016, "H": 2017, "J": 2018, "K": 2019,
+                    "L": 2020, "M": 2021, "N": 2022, "P": 2023, "R": 2024,
+                    "S": 2025, "T": 2026, "V": 2027, "W": 2028, "X": 2029,
+                    "Y": 2030,
+                    "1": 2031, "2": 2032, "3": 2033, "4": 2034, "5": 2035,
+                    "6": 2036, "7": 2037, "8": 2038, "9": 2039,
+                }
+                yy = year_map.get(code)
+                return str(yy) if yy else ""
+            except Exception:
+                return ""
+
+        def _format_vehicle_value(v, vin_value: Optional[str] = None) -> str:
+            """Normalize the Vehicle field for PDF printing and include year when missing."""
             try:
                 if isinstance(v, dict):
                     year = str(v.get("year") or "").strip()
                     make = str(v.get("make") or "").strip()
                     model = str(v.get("model") or "").strip()
                     trim = str(v.get("trim") or "").strip()
+                    if not year or year.upper() == "N/A":
+                        year = _vin_model_year(vin_value)
                     parts = [p for p in [year, make, model] if p and p.upper() != "N/A"]
                     base = " ".join(parts).strip()
                     if trim and trim.upper() != "N/A":
@@ -3513,6 +3544,13 @@ async def vision_review(
             except Exception:
                 pass
             s = str(v or "").strip()
+            vin_year = _vin_model_year(vin_value)
+            if vin_year and not re.search(r'\b(19|20)\d{2}\b', s):
+                mm = re.search(r'(?i)\b([A-Z][a-zA-Z0-9]+)\s+([A-Z][a-zA-Z0-9]+)\b', s)
+                if mm:
+                    prefix = f"{vin_year} {mm.group(1)} {mm.group(2)}"
+                    tail = s[mm.end():].strip()
+                    return f"{prefix} {tail}".strip()
             return s if s else "N/A"
     
         def _scrub_model_headings(md_text: str) -> str:
@@ -3534,6 +3572,9 @@ async def vision_review(
                     continue
                 # Drop helper artifacts the model sometimes emits
                 if re.search(r"(?i)estimated_costs_markdown", s):
+                    continue
+                # Drop the redundant front checklist bullets from the narrative summary.
+                if re.search(r"(?i)^-\s*(Hood|Front bumper cover|Grille|One headlamp|The other headlamp|One front fender|The other front fender)\s*:", s):
                     continue
                 out.append(ln)
             return "\n".join(out).strip()
@@ -3584,7 +3625,7 @@ async def vision_review(
         mc(f"Inspected For: {ia_company or 'N/A'}")
         mc(f"VIN: {result.get('vin') or 'N/A'}")
         mc(f"VIN Verification: {result.get('vin_verification') or 'N/A'}")
-        mc(f"Vehicle: {_format_vehicle_value(result.get('vehicle'))}")
+        mc(f"Vehicle: {_format_vehicle_value(result.get('vehicle'), result.get('vin'))}")
         mc(f"Odometer: {_odo_print}")
         mc(f"Primary Impact: {result.get('primary_impact') or 'N/A'}")
         mc(f"Secondary Impact: {result.get('secondary_impact') or 'N/A'}")
@@ -3711,7 +3752,7 @@ async def vision_review(
         mc(f"Claim #: {result['claim_number']}")
         mc(f"VIN (from estimate/photos): {result['vin']}")
         mc(f"VIN verification (estimate vs photo): {result['vin_verification']}")
-        mc(f"Vehicle: {_format_vehicle_value(result.get('vehicle'))}")
+        mc(f"Vehicle: {_format_vehicle_value(result.get('vehicle'), result.get('vin'))}")
         mc(f"Odometer (from estimate): {result['odometer_estimate_only']}")
         mc(f"Compliance Score: {result['compliance_score']}")
         pdf_status = result["redaction_status"].replace("✅", "OK")
