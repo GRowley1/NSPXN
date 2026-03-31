@@ -483,20 +483,11 @@ DETAIL_TEMPLATES = {
 - **Driver/Left Side**: <what is visible; cite Photo #; if not shown, say not shown>
 - **Passenger/Right Side**: <what is visible; cite Photo #; if not shown, say not shown>
 
-## Front-End Checklist
-- Hood: <condition or Not clearly shown> (Photo #)
-- Front bumper cover: <condition or Not clearly shown> (Photo #)
-- Grille: <condition or Not clearly shown> (Photo #)
-- Driver-side headlamp: <condition or Not clearly shown> (Photo #)
-- Passenger-side headlamp: <condition or Not clearly shown> (Photo #)
-- Driver-side front fender: <condition or Not clearly shown> (Photo #)
-- Passenger-side front fender: <condition or Not clearly shown> (Photo #)
-
 ## Detailed Condition Report
 - Write a continuous 10–15 sentence narrative summarizing visible damage, impact zones, misalignment/gaps, and repair implications (photo-based).
 - If VIN label or odometer are visible, state them with Photo #. If not visible or unreadable, say so.
 
-## Approximate Repair Cost Breakdown (Populate JSON field 'estimated_costs_markdown')
+## Approximate Repair Cost Breakdown
 - You MUST produce a cost approximation derived from the PHOTOS ONLY (do not reference estimates, documents, or 'not evidenced').
 - Provide AI-derived hours and assumptions:
   • Body labor hours
