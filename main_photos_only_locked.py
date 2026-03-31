@@ -2175,12 +2175,13 @@ async def vision_review(
     def _apply_normalization_lock(parsed: Dict[str, Any]) -> Dict[str, Any]:
         """Stabilize photos-only cost outputs without changing the underlying logic path.
 
-        This helper only normalizes the already-parsed cost object:
-        - rounds labor hours to 0.5-hour increments
-        - keeps rates stable to 2 decimals
-        - dedupes and sorts parts lines for deterministic printing
-        - recomputes extended labor amounts, subtotal, tax basis, tax, and total
-          from that single normalized object
+        This helper now enforces atomic labor bucket finalization so a bucket can never
+        print as a mixed hybrid like 0.0 hrs @ $0.00/hr = $2,890.00.
+        For each labor bucket, finalize exactly one consistent tuple:
+        - hours
+        - rate
+        - amount
+        Then recompute subtotal/tax/total from those finalized buckets only.
         """
         out = dict(parsed or {})
 
@@ -2203,9 +2204,33 @@ async def vision_review(
             except Exception:
                 return 0.0
 
-        for hk in ('body_hours', 'paint_hours', 'setup_hours', 'frame_hours', 'mech_hours'):
-            if isinstance(out.get(hk), (int, float)):
-                out[hk] = _round_half(out.get(hk))
+        def _finalize_labor_bucket(hours, rate, amount, fallback_rate=None):
+            hrs = _round_half(hours) if isinstance(hours, (int, float)) else None
+            rte = _round_rate(rate) if isinstance(rate, (int, float)) else 0.0
+            amt = _money(amount)
+            fb = _round_rate(fallback_rate) if isinstance(fallback_rate, (int, float)) else 0.0
+
+            # Prefer a locked fallback rate when the parsed rate dropped out.
+            if rte <= 0 and fb > 0:
+                rte = fb
+
+            # Case 1: hours + rate => compute amount
+            if isinstance(hrs, (int, float)) and rte > 0:
+                amt = round(float(hrs) * float(rte), 2)
+                return hrs, rte, amt
+
+            # Case 2: amount + hours => derive rate
+            if isinstance(hrs, (int, float)) and float(hrs) > 0 and amt > 0:
+                rte = round(float(amt) / float(hrs), 2)
+                return hrs, rte, amt
+
+            # Case 3: amount + rate => derive hours
+            if rte > 0 and amt > 0:
+                hrs = _round_half(float(amt) / float(rte))
+                return hrs, rte, amt
+
+            # Case 4: partial/empty bucket => zero the whole bucket consistently
+            return 0.0, rte if rte > 0 else 0.0, 0.0
 
         for rk in ('body_rate', 'paint_rate', 'frame_rate', 'mech_rate', 'tax_rate_value'):
             out[rk] = _round_rate(out.get(rk))
@@ -2213,19 +2238,18 @@ async def vision_review(
         if isinstance(out.get('paint_mat_rate'), (int, float)):
             out['paint_mat_rate'] = _round_rate(out.get('paint_mat_rate'))
 
-        def _recalc(hours_key, rate_key, amount_key):
-            hrs = out.get(hours_key)
-            rate = out.get(rate_key)
-            if isinstance(hrs, (int, float)) and isinstance(rate, (int, float)) and rate > 0:
-                out[amount_key] = round(float(hrs) * float(rate), 2)
-            else:
-                out[amount_key] = _money(out.get(amount_key))
+        # Finalize all labor buckets atomically.
+        bh, br, ba = _finalize_labor_bucket(out.get('body_hours'), out.get('body_rate'), out.get('body_labor'))
+        ph, pr, pa = _finalize_labor_bucket(out.get('paint_hours'), out.get('paint_rate'), out.get('paint_labor'), fallback_rate=br)
+        sh, sr, sa = _finalize_labor_bucket(out.get('setup_hours'), out.get('body_rate'), out.get('setup_measure'), fallback_rate=br)
+        fh, fr, fa = _finalize_labor_bucket(out.get('frame_hours'), out.get('frame_rate'), out.get('frame_labor'))
+        mh, mr, ma = _finalize_labor_bucket(out.get('mech_hours'), out.get('mech_rate'), out.get('mech_labor'))
 
-        _recalc('body_hours', 'body_rate', 'body_labor')
-        _recalc('paint_hours', 'paint_rate', 'paint_labor')
-        _recalc('setup_hours', 'body_rate', 'setup_measure')
-        _recalc('frame_hours', 'frame_rate', 'frame_labor')
-        _recalc('mech_hours', 'mech_rate', 'mech_labor')
+        out['body_hours'], out['body_rate'], out['body_labor'] = bh, br, ba
+        out['paint_hours'], out['paint_rate'], out['paint_labor'] = ph, pr, pa
+        out['setup_hours'], out['body_rate'], out['setup_measure'] = sh, sr if sr > 0 else br, sa
+        out['frame_hours'], out['frame_rate'], out['frame_labor'] = fh, fr, fa
+        out['mech_hours'], out['mech_rate'], out['mech_labor'] = mh, mr, ma
 
         parts_lines = out.get('parts_lines') or []
         if isinstance(parts_lines, list):
@@ -2246,13 +2270,7 @@ async def vision_review(
         out['parts_sub'] = _money(out.get('parts_sub'))
         out['paint_mat'] = _money(out.get('paint_mat'))
         out['sublet'] = _money(out.get('sublet'))
-        out['labor_sub'] = round(
-            _money(out.get('body_labor')) +
-            _money(out.get('paint_labor')) +
-            _money(out.get('setup_measure')) +
-            _money(out.get('frame_labor')) +
-            _money(out.get('mech_labor')), 2
-        )
+        out['labor_sub'] = round(ba + pa + sa + fa + ma, 2)
         out['tax_basis'] = round(_money(out.get('parts_sub')) + _money(out.get('paint_mat')), 2)
         tax_rate_val = out.get('tax_rate_value') if isinstance(out.get('tax_rate_value'), (int, float)) and out.get('tax_rate_value') > 0 else 0.07
         out['tax_amt'] = round(_money(out.get('tax_basis')) * float(tax_rate_val), 2)
