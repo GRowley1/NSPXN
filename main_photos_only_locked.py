@@ -2172,6 +2172,103 @@ async def vision_review(
 
 
 
+    def _seed_scope_labor_buckets(scope_text: str, parsed: Dict[str, Any], seed_rates: Optional[Dict[str, float]] = None) -> Dict[str, Any]:
+        """Deterministically seed labor buckets from visible repair scope when labor collapsed to empty.
+
+        This only runs when *all* labor buckets are effectively empty, but the narrative/parts scope
+        clearly supports body / paint / mechanical work. It preserves the existing atomic bucket lock
+        and simply ensures there is something real to finalize.
+        """
+        out = dict(parsed or {})
+        seed_rates = dict(seed_rates or {})
+
+        def _has_pos(v: Any) -> bool:
+            try:
+                return isinstance(v, (int, float)) and float(v) > 0
+            except Exception:
+                return False
+
+        labor_keys = (
+            'body_hours', 'paint_hours', 'setup_hours', 'frame_hours', 'mech_hours',
+            'body_labor', 'paint_labor', 'setup_measure', 'frame_labor', 'mech_labor',
+        )
+        if any(_has_pos(out.get(k)) for k in labor_keys):
+            return out
+
+        scope = str(scope_text or '').lower()
+        if not scope.strip():
+            return out
+
+        parts_lines = out.get('parts_lines') or []
+        parts_blob = " ".join(str(x).lower() for x in parts_lines)
+        scope_all = (scope + " " + parts_blob).strip()
+
+        def _has(rx: str) -> bool:
+            try:
+                return bool(re.search(rx, scope_all, flags=re.IGNORECASE))
+            except Exception:
+                return False
+
+        # Deterministic fallback rates. Prefer parsed rates, then seeded location rates, then conservative defaults.
+        body_rate = float(out.get('body_rate') or 0.0) or float(seed_rates.get('body_rate') or 0.0) or float(seed_rates.get('paint_rate') or 0.0) or 75.0
+        paint_rate = float(out.get('paint_rate') or 0.0) or float(seed_rates.get('paint_rate') or 0.0) or body_rate or 75.0
+        frame_rate = float(out.get('frame_rate') or 0.0) or float(seed_rates.get('frame_rate') or 0.0) or body_rate or 95.0
+        mech_rate = float(out.get('mech_rate') or 0.0) or float(seed_rates.get('mechanical_rate') or 0.0) or 95.0
+        paint_mat_rate = float(out.get('paint_mat_rate') or 0.0) or float(seed_rates.get('paint_supplies_rate') or 0.0) or 45.0
+
+        body_hours = 0.0
+        if _has(r'quarter'):
+            body_hours += 16.0
+        if _has(r'rear\s+door|door\s+shell|door'):
+            body_hours += 10.0
+        if _has(r'bumper\s+cover|bumper'):
+            body_hours += 4.0
+        if _has(r'tail\s+lamp|tail lamp|lamp'):
+            body_hours += 1.0
+        if _has(r'molding|trim|clips?|fasteners?|hardware'):
+            body_hours += 1.0
+        if _has(r'crush|crushing|crease|creased|tear|torn|scrap|scraping|misalign|deform|distortion'):
+            body_hours += 4.0
+        if body_hours <= 0 and (_has(r'panel|door|quarter|bumper|fender|hood|gate|liftgate|hatch') or parts_lines):
+            body_hours = 8.0
+
+        paint_hours = 0.0
+        if _has(r'paint|refinish|blend|blending|color\s+match'):
+            paint_hours += 4.0
+        if _has(r'quarter'):
+            paint_hours += 6.0
+        if _has(r'rear\s+door|door\s+shell|door'):
+            paint_hours += 5.0
+        if _has(r'bumper\s+cover|bumper'):
+            paint_hours += 4.0
+        if _has(r'adjacent\s+panel|blend'):
+            paint_hours += 2.0
+        if paint_hours <= 0 and _has_pos(out.get('paint_mat')) and paint_mat_rate > 0:
+            paint_hours = round(float(out.get('paint_mat') or 0.0) / float(paint_mat_rate), 1)
+        elif paint_hours <= 0 and body_hours > 0 and _has(r'white\s+finish|color\s+match|refinish|blend|paint'):
+            paint_hours = round(max(1.0, body_hours * 0.45), 1)
+
+        setup_hours = 2.0 if body_hours > 0 and _has(r'structural|aperture|setup\s*&\s*measure|measure|heavy\s+crushing|severe') else 0.0
+        frame_hours = 3.0 if _has(r'structural|aperture|pull|straighten|rail|frame|unibody|buckl|kink|twist') else 0.0
+        mech_hours = 4.0 if _has(r'wheel/?tire|wheel|tire|suspension|alignment|knuckle|control\s+arm|hub|mechanical|adas') else 0.0
+
+        out['body_hours'] = round(body_hours, 1) if body_hours > 0 else out.get('body_hours')
+        out['paint_hours'] = round(paint_hours, 1) if paint_hours > 0 else out.get('paint_hours')
+        out['setup_hours'] = round(setup_hours, 1) if setup_hours > 0 else out.get('setup_hours')
+        out['frame_hours'] = round(frame_hours, 1) if frame_hours > 0 else out.get('frame_hours')
+        out['mech_hours'] = round(mech_hours, 1) if mech_hours > 0 else out.get('mech_hours')
+        out['body_rate'] = body_rate
+        out['paint_rate'] = paint_rate
+        out['frame_rate'] = frame_rate
+        out['mech_rate'] = mech_rate
+        out['paint_mat_rate'] = paint_mat_rate
+
+        # Seed paint materials from seeded paint hours if the model left it empty.
+        if not _has_pos(out.get('paint_mat')) and _has_pos(out.get('paint_hours')) and paint_mat_rate > 0:
+            out['paint_mat'] = round(float(out.get('paint_hours') or 0.0) * float(paint_mat_rate), 2)
+
+        return out
+
     def _apply_normalization_lock(parsed: Dict[str, Any]) -> Dict[str, Any]:
         """Stabilize photos-only cost outputs without changing the underlying logic path.
 
@@ -2283,7 +2380,7 @@ async def vision_review(
         )
         return out
 
-    def _parse_locked_photos_only_costs(md_text: str, tax_rate_value: Optional[float] = None) -> Dict[str, Any]:
+    def _parse_locked_photos_only_costs(md_text: str, tax_rate_value: Optional[float] = None, seed_rates: Optional[Dict[str, float]] = None, scope_text: Optional[str] = None) -> Dict[str, Any]:
         """Single source of truth for photos-only cost math.
         Locked rules:
         - labor subtotal is ALWAYS recomputed from the five printed labor buckets
@@ -2529,6 +2626,7 @@ async def vision_review(
             'paint_rate': paint_rate,
             'frame_rate': frame_rate,
             'mech_rate': mech_rate,
+            'paint_mat_rate': paint_mat_rate,
             'body_labor': body_labor,
             'paint_labor': paint_labor,
             'setup_measure': setup_measure,
@@ -2544,6 +2642,7 @@ async def vision_review(
             'total_val': total_val,
             'tax_rate_value': float(tax_rate_value),
         }
+        _parsed = _seed_scope_labor_buckets(((scope_text or '') + '\n' + text_local).strip(), _parsed, seed_rates=seed_rates)
         return _apply_normalization_lock(_parsed)
 
     def _locked_backend_total_from_cost_md(md_text: str, tax_rate_value: Optional[float] = None) -> Optional[float]:
@@ -2745,7 +2844,20 @@ async def vision_review(
         _final_non_empty_output_lock()
         if ai_intent == "damage_report_from_photos":
             _raw_locked_cost_source = result.get("estimated_costs_markdown") or ""
-            locked_costs_obj = _parse_locked_photos_only_costs(_raw_locked_cost_source, tax_rate)
+            _scope_seed_text = "\n\n".join([
+                str(result.get("summary_markdown") or "").strip(),
+                str(result.get("conclusion") or "").strip(),
+            ]).strip()
+            _inspection_location_for_lock = _normalize_location_with_zip(_extract_inspection_location(uploaded_text_all or ""), ia_company, uploaded_text_all)
+            _seed_rates_for_lock = _lookup_rates(_inspection_location_for_lock)
+            if tax_rate is None or not isinstance(tax_rate, (int, float)) or tax_rate <= 0:
+                tax_rate = _lookup_tax_rate(_inspection_location_for_lock)
+            locked_costs_obj = _parse_locked_photos_only_costs(
+                _raw_locked_cost_source,
+                tax_rate,
+                seed_rates=_seed_rates_for_lock,
+                scope_text=_scope_seed_text,
+            )
             result["estimated_costs_markdown"] = _canonical_locked_photos_only_cost_markdown_from_parsed(
                 locked_costs_obj, tax_rate
             )
