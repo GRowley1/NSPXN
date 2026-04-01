@@ -1099,6 +1099,8 @@ async def vision_review(
     except Exception as e:
         log.warning(f"Client rules hydration/logging failed: {e}")
 
+    client_rules_supplied = bool(str(client_rules or "").strip() or str(resolved_rules_text or "").strip() or str(selected_rules_key or "").strip())
+
     pdf_text_fulls: List[str] = []  # full PDF text for supplement detection
 
     # Anti-zipbomb guardrails
@@ -1425,23 +1427,30 @@ async def vision_review(
         f"REQUEST TYPE (use exactly in request_type): {req_label}\n"
         f"FILE #: {file_number}\n"
         f"CLIENT: {ia_company}\n\n"
-        "FILES SEEN (echo verbatim in Inputs Used):\n- "
+        + (
+            "CLIENT RULES STATUS: CLIENT RULES WERE SUPPLIED IN THIS REQUEST.\n"
+            "HARD RULE: Do NOT say that client guidelines are missing, absent, not provided, or that no separate guideline document/rule text was included.\n"
+            "HARD RULE: Build the Client Guidelines Comparison from the supplied frontend dropdown/pasted client rules text below.\n\n"
+            if client_rules_supplied else
+            "CLIENT RULES STATUS: No client rules text was supplied in this request.\n\n"
+        )
+        + "FILES SEEN (echo verbatim in Inputs Used):\n- "
         + ("\n- ".join(files_seen) if files_seen else "none")
         + "\n\n"
-        "PHOTO INDEX (use Photo # citations exactly as listed):\n"
+        + "PHOTO INDEX (use Photo # citations exactly as listed):\n"
         + ("\n".join([f"Photo {i+1}: {name}" for i, name in enumerate(photo_index)]) if photo_index else "No photos provided.")
         + "\n\n"
-        "CLIENT RULES (only if provided):\n"
+        + "CLIENT RULES (only if provided):\n"
         + (client_rules[:6000] if client_rules else "")
         + ai_notes_block
         + "\n\n"
-        "INSTRUCTIONS:\n"
-        "- Return strict JSON only.\n"
-        "- REQUIRED: Populate 'estimated_costs_markdown' in the JSON.\n"
-        "- Use the template below for narrative formatting.\n\n"
+        + "INSTRUCTIONS:\n"
+        + "- Return strict JSON only.\n"
+        + "- REQUIRED: Populate 'estimated_costs_markdown' in the JSON.\n"
+        + "- Use the template below for narrative formatting.\n\n"
         + DETAIL_TEMPLATES.get(ai_intent, DETAIL_TEMPLATES['comprehensive'])
     )
-    if client_rules.strip() and ai_intent in {"comprehensive", "guidelines_only"}:
+    if client_rules_supplied and ai_intent in {"comprehensive", "guidelines_only"}:
         prompt_text += (
             "\n\nWhen client_rules text is provided, you MUST include a section titled '## Client Guidelines Comparison' "
             "with 3–8 concise bullets. For each, quote the relevant rule fragment and mark Aligned / Not Aligned / Not Evidenced, "
@@ -1467,6 +1476,16 @@ async def vision_review(
         red_prompt = prompt_text
 
     parts_payload.append({"type": "text", "text": red_prompt})
+    if client_rules_supplied and (client_rules or "").strip():
+        parts_payload.append({
+            "type": "text",
+            "text": (
+                "CLIENT RULES EVIDENCE BLOCK (UNREDACTED, AUTHORITATIVE):\n"
+                "These client rules were supplied from the frontend dropdown and/or pasted Client Rules box for this request.\n"
+                "Do NOT say they were missing or not provided. Quote and compare them directly in the Client Guidelines Comparison section.\n\n"
+                + str(client_rules or "")[:12000]
+            )
+        })
 
     if parts:
         for p in parts:
@@ -2587,7 +2606,7 @@ async def vision_review(
         veh_txt = _format_vehicle_value(result.get("vehicle")) if not _naish(result.get("vehicle")) else _extract_vehicle_from_text(uploaded_text_all or "")
         odo_txt = result.get("odometer_estimate_only") if not _naish(result.get("odometer_estimate_only")) else (odometer_value or "Not confirmed from provided evidence.")
         score_txt = result.get("compliance_score") if not _naish(result.get("compliance_score")) else "Not scored from available evidence."
-        rules_txt = "Client guidelines were included and considered in this review." if (client_rules or "").strip() else "No separate client guideline text was provided with this review."
+        rules_txt = "Client guidelines were included and considered in this review." if client_rules_supplied else "No separate client guideline text was provided with this review."
         supp_txt = (", ".join(supplement_versions) if supplement_versions else "No supplement tags detected in the uploaded documents")
         return (
             "## Detailed Condition Report\n"
@@ -2642,6 +2661,57 @@ async def vision_review(
     except Exception:
         pass
 
+    def _extract_client_rule_fragments(rules_text: str, limit: int = 4) -> List[str]:
+        fragments: List[str] = []
+        for raw_ln in str(rules_text or "").replace("\r\n", "\n").replace("\r", "\n").splitlines():
+            s = re.sub(r"\s+", " ", raw_ln).strip(" -\t")
+            if not s:
+                continue
+            if len(s) < 12:
+                continue
+            if s.lower() in {"client rules", "guidelines", "infinity insurance"}:
+                continue
+            fragments.append(s[:180])
+            if len(fragments) >= limit:
+                break
+        return fragments
+
+    def _scrub_false_missing_client_rules_claims(md_text: str) -> str:
+        if not md_text:
+            return md_text or ""
+        if not client_rules_supplied:
+            return md_text
+        bad_patterns = [
+            r"(?i)^.*no\s+separate\s+client\s+guideline\s+document.*$",
+            r"(?i)^.*no\s+explicit\s+client\s+guidelines?.*$",
+            r"(?i)^.*client\s+guidelines?/rules?\s+to\s+compare\s+against\s*.*$",
+            r"(?i)^.*client\s+guidelines?\s+(?:were\s+)?not\s+(?:provided|included|supplied).*$",
+            r"(?i)^.*rule\s+text\s+(?:was\s+)?not\s+(?:provided|included|supplied).*$",
+        ]
+        kept: List[str] = []
+        for ln in str(md_text).replace("\r\n", "\n").replace("\r", "\n").splitlines():
+            s = (ln or "").strip()
+            if any(re.search(p, s) for p in bad_patterns):
+                continue
+            kept.append(ln)
+        return "\n".join(kept).strip()
+
+    def _ensure_client_guidelines_section(md_text: str) -> str:
+        t = str(md_text or "").strip()
+        if not client_rules_supplied or ai_intent not in {"comprehensive", "guidelines_only"}:
+            return t
+        t = _scrub_false_missing_client_rules_claims(t)
+        if re.search(r"(?im)^##\s*Client\s+Guidelines\s+Comparison\b", t):
+            return t
+        fragments = _extract_client_rule_fragments(client_rules or resolved_rules_text or "")
+        bullets: List[str] = []
+        if fragments:
+            for frag in fragments:
+                bullets.append(f'- Rule supplied for review: "{frag}" — Compare against the uploaded estimate/photos and confirm Aligned / Not Aligned / Not Evidenced using document or photo citations.')
+        else:
+            bullets.append("- Client guidelines were supplied from the frontend selection/pasted Client Rules box and must be applied to this review.")
+        section = "## Client Guidelines Comparison\n" + "\n".join(bullets)
+        return (t + "\n\n" + section).strip() if t else section
 
     def _scrub_comprehensive_rationale_text(md_text: str) -> str:
         """Targeted comprehensive scrub:
@@ -2763,6 +2833,7 @@ async def vision_review(
     try:
         if ai_intent != "damage_report_from_photos":
             result["summary_markdown"] = _scrub_comprehensive_rationale_text(result.get("summary_markdown") or "")
+            result["summary_markdown"] = _ensure_client_guidelines_section(result.get("summary_markdown") or "")
             _rescored = _score_after_jd_power_scrub(result.get("summary_markdown") or "", result.get("compliance_score") or "")
             if str(_rescored).strip():
                 result["compliance_score"] = str(_rescored).strip()
@@ -2883,8 +2954,124 @@ async def vision_review(
     try:
         if ai_intent != "damage_report_from_photos":
             result = _apply_locked_final_postprocessor(result)
+            result["summary_markdown"] = _ensure_client_guidelines_section(result.get("summary_markdown") or "")
     except Exception:
         pass
+
+    # -----------------------
+    # FINAL-STAGE PII REDACTION LOCK (authoritative)
+    # - Redact final customer-facing fields after all model/post-processing logic
+    # - Protect against owner/insured leakage from OCR/docs/model text
+    # - Block report generation if final redaction fails or known names remain
+    # -----------------------
+    def _extract_name_candidates_for_redaction(source_text: str) -> List[str]:
+        candidates: List[str] = []
+        if not source_text:
+            return candidates
+        pats = [
+            r"(?im)Owner\s*(?:Name)?\s*[:\-]\s*([A-Z][A-Z'.,\- ]{2,80})",
+            r"(?im)Insured\s*(?:Name)?\s*[:\-]\s*([A-Z][A-Z'.,\- ]{2,80})",
+            r"(?im)Customer\s*(?:Name)?\s*[:\-]\s*([A-Z][A-Z'.,\- ]{2,80})",
+            r"(?im)Claimant\s*(?:Name)?\s*[:\-]\s*([A-Z][A-Z'.,\- ]{2,80})",
+        ]
+        for pat in pats:
+            for m in re.finditer(pat, source_text or ""):
+                raw_name = re.sub(r"\s+", " ", str(m.group(1) or "")).strip(" ,.-")
+                if not raw_name:
+                    continue
+                if len(raw_name) < 4 or len(raw_name) > 80:
+                    continue
+                if re.fullmatch(r"[A-HJ-NPR-Z0-9]{17}", raw_name.replace(" ", "")):
+                    continue
+                candidates.append(raw_name)
+        seen = set()
+        out: List[str] = []
+        for nm in candidates:
+            key = nm.lower()
+            if key not in seen:
+                seen.add(key)
+                out.append(nm)
+        return out[:12]
+
+    def _force_redact_known_names(text_value: str, names: List[str]) -> str:
+        s = str(text_value or "")
+        for nm in names:
+            if not nm:
+                continue
+            try:
+                s = re.sub(re.escape(nm), "[REDACTED]", s, flags=re.IGNORECASE)
+            except Exception:
+                pass
+            parts = [p for p in re.split(r"[\s,]+", nm) if len(p.strip()) >= 3]
+            if len(parts) >= 2:
+                joined = r"\s+".join(re.escape(p) for p in parts)
+                try:
+                    s = re.sub(joined, "[REDACTED]", s, flags=re.IGNORECASE)
+                except Exception:
+                    pass
+        return s
+
+    def _final_redact_customer_fields(result_obj: Dict[str, Any], known_names: List[str]) -> (Dict[str, Any], List[str]):
+        issues: List[str] = []
+        for key in ("summary_brief", "summary_markdown", "fraud_markdown", "estimated_costs_markdown", "conclusion"):
+            try:
+                original = str(result_obj.get(key) or "")
+                redacted = redact_text_preserve_vin_claim(original)
+                redacted = _force_redact_known_names(redacted, known_names)
+                result_obj[key] = redacted
+            except Exception as e:
+                issues.append(f"Final redaction failed for {key}: {e}")
+        return result_obj, issues
+
+    def _detect_remaining_name_leaks(result_obj: Dict[str, Any], known_names: List[str]) -> List[str]:
+        leaks: List[str] = []
+        blob = "\n".join([
+            str(result_obj.get("summary_brief") or ""),
+            str(result_obj.get("summary_markdown") or ""),
+            str(result_obj.get("fraud_markdown") or ""),
+            str(result_obj.get("estimated_costs_markdown") or ""),
+            str(result_obj.get("conclusion") or ""),
+        ])
+        for nm in known_names:
+            if not nm:
+                continue
+            try:
+                if re.search(re.escape(nm), blob, flags=re.IGNORECASE):
+                    leaks.append(f"PII leak remained after final redaction: {nm}")
+                    continue
+                parts = [p for p in re.split(r"[\s,]+", nm) if len(p.strip()) >= 3]
+                if len(parts) >= 2:
+                    joined = r"\s+".join(re.escape(p) for p in parts)
+                    if re.search(joined, blob, flags=re.IGNORECASE):
+                        leaks.append(f"PII leak remained after final redaction: {nm}")
+            except Exception:
+                pass
+        return leaks
+
+    _known_pii_names = _extract_name_candidates_for_redaction(uploaded_text_all or "")
+    _redaction_issues: List[str] = []
+    try:
+        result, _redaction_issues = _final_redact_customer_fields(result, _known_pii_names)
+    except Exception as e:
+        _redaction_issues = [f"Final-stage redaction lock failed: {e}"]
+
+    _remaining_pii_leaks = _detect_remaining_name_leaks(result, _known_pii_names)
+    if _redaction_issues or _remaining_pii_leaks:
+        _block_reasons = _redaction_issues + _remaining_pii_leaks
+        log.error("REPORT BLOCKED: final-stage PII redaction failure | reasons=%s", _block_reasons)
+        return JSONResponse(
+            status_code=200,
+            content={
+                "status": "blocked",
+                "error": "REPORT BLOCKED: PII redaction failed",
+                "reasons": _block_reasons,
+                "file_number": file_number,
+                "request_type": req_label,
+                "redaction_status": "Redacted PII: Blocked - final-stage enforcement failed",
+            },
+        )
+
+    result["redaction_status"] = "Redacted PII: Successful ✅"
 
     # PDF helpers
     # -----------------------
@@ -4076,3 +4263,4 @@ async def download_pdf(file_number: Optional[str] = None, filename: Optional[str
         return JSONResponse(status_code=404, content={"detail": "Not Found"})
     latest = max(candidates, key=lambda p: os.path.getmtime(p))
     return FileResponse(path=latest, media_type="application/pdf", filename=os.path.basename(latest))
+
