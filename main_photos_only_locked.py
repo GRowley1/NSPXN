@@ -2687,6 +2687,131 @@ async def vision_review(
             return "Visible photo evidence supports a higher-severity damage review and teardown/measurement confirmation before final repair planning."
         return "Visible photo evidence supports a photo-based condition review, but final repair planning should be confirmed after in-person inspection and teardown."
 
+    def _run_visual_sanity_check() -> Dict[str, Any]:
+        """Targeted low-token sanity pass used only when critical photos-only fields are missing.
+
+        This is intentionally narrow: it checks whether obvious evidence exists in the uploaded images
+        for VIN label, odometer, front-end damage, and loose removed front-end parts. It also returns
+        a conservative year/make/model guess when clearly visible.
+        """
+        out = {
+            "vin_label_visible": False,
+            "odometer_visible": False,
+            "obvious_front_damage": False,
+            "parts_pile_visible": False,
+            "year_make_model": "",
+        }
+        try:
+            image_parts = [p for p in parts if isinstance(p, dict) and p.get("type") != "text"][:12]
+            if not image_parts:
+                return out
+            sanity_prompt = (
+                "Return ONLY JSON with exactly these keys: "
+                "vin_label_visible, odometer_visible, obvious_front_damage, parts_pile_visible, year_make_model.\n"
+                "Rules:\n"
+                "- vin_label_visible: true only if a driver-door VIN/manufacturer label is visibly present.\n"
+                "- odometer_visible: true only if an instrument cluster odometer reading is visibly present.\n"
+                "- obvious_front_damage: true only if there is clear front-end collision damage, missing front bumper/headlamp/grille/core support, or exposed front structure.\n"
+                "- parts_pile_visible: true only if removed front-end parts/components are visibly laid out off-vehicle.\n"
+                "- year_make_model: provide only when clearly supported by visible badge/VIN-label text or unmistakable model cues; otherwise empty string.\n"
+            )
+            rsp_sanity = client.chat.completions.create(
+                model=MODEL,
+                messages=[
+                    {"role": "system", "content": "You perform narrow visual sanity checks for auto damage photos. JSON only."},
+                    {"role": "user", "content": [{"type": "text", "text": sanity_prompt}] + image_parts},
+                ],
+                max_completion_tokens=250,
+                temperature=0,
+                response_format={"type": "json_object"},
+            )
+            raw_sanity = (rsp_sanity.choices[0].message.content or "").strip()
+            data_sanity = _try_parse_json(raw_sanity)
+            if isinstance(data_sanity, dict):
+                out["vin_label_visible"] = bool(data_sanity.get("vin_label_visible"))
+                out["odometer_visible"] = bool(data_sanity.get("odometer_visible"))
+                out["obvious_front_damage"] = bool(data_sanity.get("obvious_front_damage"))
+                out["parts_pile_visible"] = bool(data_sanity.get("parts_pile_visible"))
+                ymm = data_sanity.get("year_make_model")
+                if isinstance(ymm, str):
+                    out["year_make_model"] = ymm.strip()
+        except Exception:
+            pass
+        return out
+
+    def _maybe_recover_critical_fields_from_sanity(sanity: Dict[str, Any]) -> None:
+        """Attempt one narrow recovery of missing critical fields before blocking the report."""
+        try:
+            if (not str(result.get("vehicle") or "").strip() or str(result.get("vehicle") or "").strip().upper() == "N/A") and str(sanity.get("year_make_model") or "").strip():
+                result["vehicle"] = str(sanity.get("year_make_model") or "").strip()
+        except Exception:
+            pass
+
+        try:
+            _impact_now = str(result.get("primary_impact") or "").strip().lower()
+            if sanity.get("obvious_front_damage") and (_impact_now in ("", "n/a", "none", "none observed") or "no obvious impact" in _impact_now):
+                result["primary_impact"] = "Front"
+        except Exception:
+            pass
+
+        try:
+            if sanity.get("parts_pile_visible") and isinstance(locked_costs_obj, dict):
+                _parts_lines = locked_costs_obj.get("parts_lines") or []
+                _parts_sub = float(locked_costs_obj.get("parts_sub") or 0.0)
+                if (not _parts_lines or all("not separately derived" in str(x).strip().lower() for x in _parts_lines)) and _parts_sub <= 0:
+                    raise ValueError("parts still missing")
+        except Exception:
+            # Deliberately do nothing here; blocker logic below will stop release.
+            pass
+
+    def _collect_report_blockers(sanity: Optional[Dict[str, Any]] = None) -> List[str]:
+        """Hard validation gate for client-facing photos-only reports.
+
+        The report may still be internally generated, but it must not be released when obvious
+        evidence exists and critical extracted fields remain blank or contradictory.
+        """
+        blockers: List[str] = []
+        if ai_intent != "damage_report_from_photos":
+            return blockers
+
+        sanity = sanity or {}
+        vin_visible = bool(vin_from_label) or bool(sanity.get("vin_label_visible"))
+        odo_visible = bool(odometer_value) or bool(sanity.get("odometer_visible"))
+        front_damage_visible = bool(sanity.get("obvious_front_damage"))
+        parts_pile_visible = bool(sanity.get("parts_pile_visible"))
+
+        _vin_now = str(result.get("vin") or "").strip()
+        if vin_visible and (not _vin_now or _vin_now.upper() == "N/A"):
+            blockers.append("REPORT BLOCKED: VIN label evidence exists but VIN is still blank.")
+
+        _odo_now = str(result.get("odometer_estimate_only") or "").strip()
+        if odo_visible and (not _odo_now or _odo_now.upper() == "N/A"):
+            blockers.append("REPORT BLOCKED: odometer evidence exists but odometer is still blank.")
+
+        _impact_now = str(result.get("primary_impact") or "").strip().lower()
+        if front_damage_visible and (_impact_now in ("", "n/a", "none", "none observed") or "no obvious impact" in _impact_now):
+            blockers.append("REPORT BLOCKED: obvious front-end damage exists but primary impact is still blank/minimized.")
+
+        _vehicle_now = str(result.get("vehicle") or "").strip()
+        _ymm_now = str(sanity.get("year_make_model") or "").strip()
+        if _ymm_now and (not _vehicle_now or _vehicle_now.upper() == "N/A"):
+            blockers.append("REPORT BLOCKED: year/make/model appears visually supported but vehicle field is blank.")
+
+        _cost_now = str(result.get("estimated_costs_markdown") or "").strip().lower()
+        _parts_bad = ("itemized parts breakdown:" in _cost_now and "not separately derived" in _cost_now)
+        try:
+            _parts_sub_bad = isinstance(locked_costs_obj, dict) and float(locked_costs_obj.get("parts_sub") or 0.0) <= 0.0
+        except Exception:
+            _parts_sub_bad = True
+        if parts_pile_visible and (_parts_bad or _parts_sub_bad):
+            blockers.append("REPORT BLOCKED: removed parts are visibly present but parts capture remained empty/not separately derived.")
+
+        _summary_now = str(result.get("summary_markdown") or "").strip().lower()
+        if "fallback narrative" in _summary_now and (vin_visible or odo_visible or front_damage_visible or parts_pile_visible):
+            blockers.append("REPORT BLOCKED: backend fallback narrative triggered despite visible core evidence in the photo set.")
+
+        return blockers
+
     def _final_non_empty_output_lock() -> None:
         """Last-line protection against blank/N/A photos-only outputs.
 
@@ -2863,6 +2988,45 @@ async def vision_review(
             _locked_total = locked_costs_obj.get("total_val") if isinstance(locked_costs_obj, dict) else None
             result["conclusion"] = _force_conclusion_to_locked_total(result.get("conclusion") or "", _locked_total)
             _final_non_empty_output_lock()
+    except Exception:
+        pass
+
+    try:
+        if ai_intent == "damage_report_from_photos":
+            _sanity_needed = False
+            if not str(result.get("vin") or "").strip() or str(result.get("vin") or "").strip().upper() == "N/A":
+                _sanity_needed = True
+            if not str(result.get("odometer_estimate_only") or "").strip() or str(result.get("odometer_estimate_only") or "").strip().upper() == "N/A":
+                _sanity_needed = True
+            _impact_check = str(result.get("primary_impact") or "").strip().lower()
+            if _impact_check in ("", "n/a", "none", "none observed") or "no obvious impact" in _impact_check:
+                _sanity_needed = True
+            _cost_check = str(result.get("estimated_costs_markdown") or "").lower()
+            if "itemized parts breakdown:" in _cost_check and "not separately derived" in _cost_check:
+                _sanity_needed = True
+            if "fallback narrative" in str(result.get("summary_markdown") or "").lower():
+                _sanity_needed = True
+
+            _sanity = _run_visual_sanity_check() if _sanity_needed else {}
+            if _sanity:
+                _maybe_recover_critical_fields_from_sanity(_sanity)
+            _blockers = _collect_report_blockers(_sanity)
+            if _blockers:
+                return JSONResponse(
+                    status_code=422,
+                    content={
+                        "error": "REPORT BLOCKED: core extraction mismatch",
+                        "blockers": _blockers,
+                        "sanity_check": _sanity,
+                        "draft": {
+                            "file_number": file_number,
+                            "vin": result.get("vin"),
+                            "vehicle": result.get("vehicle"),
+                            "odometer": result.get("odometer_estimate_only"),
+                            "primary_impact": result.get("primary_impact"),
+                        },
+                    },
+                )
     except Exception:
         pass
 
@@ -3940,4 +4104,5 @@ async def download_pdf(file_number: Optional[str] = None, filename: Optional[str
         return JSONResponse(status_code=404, content={"detail": "Not Found"})
     latest = max(candidates, key=lambda p: os.path.getmtime(p))
     return FileResponse(path=latest, media_type="application/pdf", filename=os.path.basename(latest))
+
 
