@@ -483,20 +483,11 @@ DETAIL_TEMPLATES = {
 - **Driver/Left Side**: <what is visible; cite Photo #; if not shown, say not shown>
 - **Passenger/Right Side**: <what is visible; cite Photo #; if not shown, say not shown>
 
-## Front-End Checklist
-- Hood: <condition or Not clearly shown> (Photo #)
-- Front bumper cover: <condition or Not clearly shown> (Photo #)
-- Grille: <condition or Not clearly shown> (Photo #)
-- Driver-side headlamp: <condition or Not clearly shown> (Photo #)
-- Passenger-side headlamp: <condition or Not clearly shown> (Photo #)
-- Driver-side front fender: <condition or Not clearly shown> (Photo #)
-- Passenger-side front fender: <condition or Not clearly shown> (Photo #)
-
 ## Detailed Condition Report
 - Write a continuous 10–15 sentence narrative summarizing visible damage, impact zones, misalignment/gaps, and repair implications (photo-based).
 - If VIN label or odometer are visible, state them with Photo #. If not visible or unreadable, say so.
 
-## Approximate Repair Cost Breakdown (Populate JSON field 'estimated_costs_markdown')
+## Approximate Repair Cost Breakdown
 - You MUST produce a cost approximation derived from the PHOTOS ONLY (do not reference estimates, documents, or 'not evidenced').
 - Provide AI-derived hours and assumptions:
   • Body labor hours
@@ -1618,6 +1609,8 @@ async def vision_review(
         "redaction_status": redaction_status,
     }
 
+    locked_costs_obj: Optional[Dict[str, Any]] = None
+
     # ---- Minimal Impact Sanitizer (no Left/Right/Driver/Passenger unless proven) ----
     # Policy A: If any impact label implies left/right/driver/passenger, collapse to Front/Rear/Side.
     def _sanitize_impact_label(v: Optional[str]) -> str:
@@ -2168,7 +2161,217 @@ async def vision_review(
 
         return out
 
-    def _parse_locked_photos_only_costs(md_text: str, tax_rate_value: Optional[float] = None) -> Dict[str, Any]:
+
+
+    def _seed_scope_labor_buckets(scope_text: str, parsed: Dict[str, Any], seed_rates: Optional[Dict[str, float]] = None) -> Dict[str, Any]:
+        """Deterministically seed labor buckets from visible repair scope when labor collapsed to empty.
+
+        This only runs when *all* labor buckets are effectively empty, but the narrative/parts scope
+        clearly supports body / paint / mechanical work. It preserves the existing atomic bucket lock
+        and simply ensures there is something real to finalize.
+        """
+        out = dict(parsed or {})
+        seed_rates = dict(seed_rates or {})
+
+        def _has_pos(v: Any) -> bool:
+            try:
+                return isinstance(v, (int, float)) and float(v) > 0
+            except Exception:
+                return False
+
+        labor_keys = (
+            'body_hours', 'paint_hours', 'setup_hours', 'frame_hours', 'mech_hours',
+            'body_labor', 'paint_labor', 'setup_measure', 'frame_labor', 'mech_labor',
+        )
+        if any(_has_pos(out.get(k)) for k in labor_keys):
+            return out
+
+        scope = str(scope_text or '').lower()
+        if not scope.strip():
+            return out
+
+        parts_lines = out.get('parts_lines') or []
+        parts_blob = " ".join(str(x).lower() for x in parts_lines)
+        scope_all = (scope + " " + parts_blob).strip()
+
+        def _has(rx: str) -> bool:
+            try:
+                return bool(re.search(rx, scope_all, flags=re.IGNORECASE))
+            except Exception:
+                return False
+
+        # Deterministic fallback rates. Prefer parsed rates, then seeded location rates, then conservative defaults.
+        body_rate = float(out.get('body_rate') or 0.0) or float(seed_rates.get('body_rate') or 0.0) or float(seed_rates.get('paint_rate') or 0.0) or 75.0
+        paint_rate = float(out.get('paint_rate') or 0.0) or float(seed_rates.get('paint_rate') or 0.0) or body_rate or 75.0
+        frame_rate = float(out.get('frame_rate') or 0.0) or float(seed_rates.get('frame_rate') or 0.0) or body_rate or 95.0
+        mech_rate = float(out.get('mech_rate') or 0.0) or float(seed_rates.get('mechanical_rate') or 0.0) or 95.0
+        paint_mat_rate = float(out.get('paint_mat_rate') or 0.0) or float(seed_rates.get('paint_supplies_rate') or 0.0) or 45.0
+
+        body_hours = 0.0
+        if _has(r'quarter'):
+            body_hours += 16.0
+        if _has(r'rear\s+door|door\s+shell|door'):
+            body_hours += 10.0
+        if _has(r'bumper\s+cover|bumper'):
+            body_hours += 4.0
+        if _has(r'tail\s+lamp|tail lamp|lamp'):
+            body_hours += 1.0
+        if _has(r'molding|trim|clips?|fasteners?|hardware'):
+            body_hours += 1.0
+        if _has(r'crush|crushing|crease|creased|tear|torn|scrap|scraping|misalign|deform|distortion'):
+            body_hours += 4.0
+        if body_hours <= 0 and (_has(r'panel|door|quarter|bumper|fender|hood|gate|liftgate|hatch') or parts_lines):
+            body_hours = 8.0
+
+        paint_hours = 0.0
+        if _has(r'paint|refinish|blend|blending|color\s+match'):
+            paint_hours += 4.0
+        if _has(r'quarter'):
+            paint_hours += 6.0
+        if _has(r'rear\s+door|door\s+shell|door'):
+            paint_hours += 5.0
+        if _has(r'bumper\s+cover|bumper'):
+            paint_hours += 4.0
+        if _has(r'adjacent\s+panel|blend'):
+            paint_hours += 2.0
+        if paint_hours <= 0 and _has_pos(out.get('paint_mat')) and paint_mat_rate > 0:
+            paint_hours = round(float(out.get('paint_mat') or 0.0) / float(paint_mat_rate), 1)
+        elif paint_hours <= 0 and body_hours > 0 and _has(r'white\s+finish|color\s+match|refinish|blend|paint'):
+            paint_hours = round(max(1.0, body_hours * 0.45), 1)
+
+        setup_hours = 2.0 if body_hours > 0 and _has(r'structural|aperture|setup\s*&\s*measure|measure|heavy\s+crushing|severe') else 0.0
+        frame_hours = 3.0 if _has(r'structural|aperture|pull|straighten|rail|frame|unibody|buckl|kink|twist') else 0.0
+        mech_hours = 4.0 if _has(r'wheel/?tire|wheel|tire|suspension|alignment|knuckle|control\s+arm|hub|mechanical|adas') else 0.0
+
+        out['body_hours'] = round(body_hours, 1) if body_hours > 0 else out.get('body_hours')
+        out['paint_hours'] = round(paint_hours, 1) if paint_hours > 0 else out.get('paint_hours')
+        out['setup_hours'] = round(setup_hours, 1) if setup_hours > 0 else out.get('setup_hours')
+        out['frame_hours'] = round(frame_hours, 1) if frame_hours > 0 else out.get('frame_hours')
+        out['mech_hours'] = round(mech_hours, 1) if mech_hours > 0 else out.get('mech_hours')
+        out['body_rate'] = body_rate
+        out['paint_rate'] = paint_rate
+        out['frame_rate'] = frame_rate
+        out['mech_rate'] = mech_rate
+        out['paint_mat_rate'] = paint_mat_rate
+
+        # Seed paint materials from seeded paint hours if the model left it empty.
+        if not _has_pos(out.get('paint_mat')) and _has_pos(out.get('paint_hours')) and paint_mat_rate > 0:
+            out['paint_mat'] = round(float(out.get('paint_hours') or 0.0) * float(paint_mat_rate), 2)
+
+        return out
+
+    def _apply_normalization_lock(parsed: Dict[str, Any]) -> Dict[str, Any]:
+        """Stabilize photos-only cost outputs without changing the underlying logic path.
+
+        This helper now enforces atomic labor bucket finalization so a bucket can never
+        print as a mixed hybrid like 0.0 hrs @ $0.00/hr = $2,890.00.
+        For each labor bucket, finalize exactly one consistent tuple:
+        - hours
+        - rate
+        - amount
+        Then recompute subtotal/tax/total from those finalized buckets only.
+        """
+        out = dict(parsed or {})
+
+        def _round_half(v):
+            try:
+                return round(round(float(v) * 2.0) / 2.0, 1)
+            except Exception:
+                return None
+
+        def _round_rate(v):
+            try:
+                x = float(v)
+                return round(x, 2) if x > 0 else 0.0
+            except Exception:
+                return 0.0
+
+        def _money(v):
+            try:
+                return round(float(v), 2)
+            except Exception:
+                return 0.0
+
+        def _finalize_labor_bucket(hours, rate, amount, fallback_rate=None):
+            hrs = _round_half(hours) if isinstance(hours, (int, float)) else None
+            rte = _round_rate(rate) if isinstance(rate, (int, float)) else 0.0
+            amt = _money(amount)
+            fb = _round_rate(fallback_rate) if isinstance(fallback_rate, (int, float)) else 0.0
+
+            # Prefer a locked fallback rate when the parsed rate dropped out.
+            if rte <= 0 and fb > 0:
+                rte = fb
+
+            # Case 1: hours + rate => compute amount
+            if isinstance(hrs, (int, float)) and rte > 0:
+                amt = round(float(hrs) * float(rte), 2)
+                return hrs, rte, amt
+
+            # Case 2: amount + hours => derive rate
+            if isinstance(hrs, (int, float)) and float(hrs) > 0 and amt > 0:
+                rte = round(float(amt) / float(hrs), 2)
+                return hrs, rte, amt
+
+            # Case 3: amount + rate => derive hours
+            if rte > 0 and amt > 0:
+                hrs = _round_half(float(amt) / float(rte))
+                return hrs, rte, amt
+
+            # Case 4: partial/empty bucket => zero the whole bucket consistently
+            return 0.0, rte if rte > 0 else 0.0, 0.0
+
+        for rk in ('body_rate', 'paint_rate', 'frame_rate', 'mech_rate', 'tax_rate_value'):
+            out[rk] = _round_rate(out.get(rk))
+
+        if isinstance(out.get('paint_mat_rate'), (int, float)):
+            out['paint_mat_rate'] = _round_rate(out.get('paint_mat_rate'))
+
+        # Finalize all labor buckets atomically.
+        bh, br, ba = _finalize_labor_bucket(out.get('body_hours'), out.get('body_rate'), out.get('body_labor'))
+        ph, pr, pa = _finalize_labor_bucket(out.get('paint_hours'), out.get('paint_rate'), out.get('paint_labor'), fallback_rate=br)
+        sh, sr, sa = _finalize_labor_bucket(out.get('setup_hours'), out.get('body_rate'), out.get('setup_measure'), fallback_rate=br)
+        fh, fr, fa = _finalize_labor_bucket(out.get('frame_hours'), out.get('frame_rate'), out.get('frame_labor'))
+        mh, mr, ma = _finalize_labor_bucket(out.get('mech_hours'), out.get('mech_rate'), out.get('mech_labor'))
+
+        out['body_hours'], out['body_rate'], out['body_labor'] = bh, br, ba
+        out['paint_hours'], out['paint_rate'], out['paint_labor'] = ph, pr, pa
+        out['setup_hours'], out['body_rate'], out['setup_measure'] = sh, sr if sr > 0 else br, sa
+        out['frame_hours'], out['frame_rate'], out['frame_labor'] = fh, fr, fa
+        out['mech_hours'], out['mech_rate'], out['mech_labor'] = mh, mr, ma
+
+        parts_lines = out.get('parts_lines') or []
+        if isinstance(parts_lines, list):
+            norm = []
+            seen = set()
+            for pl in parts_lines:
+                s = re.sub(r'^[-*]\s*', '', str(pl or '').strip())
+                if not s:
+                    continue
+                key = re.sub(r'\s+', ' ', s).strip().lower()
+                if key in seen:
+                    continue
+                seen.add(key)
+                norm.append(s)
+            norm.sort(key=lambda s: (s.lower(), s))
+            out['parts_lines'] = norm
+
+        out['parts_sub'] = _money(out.get('parts_sub'))
+        out['paint_mat'] = _money(out.get('paint_mat'))
+        out['sublet'] = _money(out.get('sublet'))
+        out['labor_sub'] = round(ba + pa + sa + fa + ma, 2)
+        out['tax_basis'] = round(_money(out.get('parts_sub')) + _money(out.get('paint_mat')), 2)
+        tax_rate_val = out.get('tax_rate_value') if isinstance(out.get('tax_rate_value'), (int, float)) and out.get('tax_rate_value') > 0 else 0.07
+        out['tax_amt'] = round(_money(out.get('tax_basis')) * float(tax_rate_val), 2)
+        out['total_val'] = round(
+            _money(out.get('labor_sub')) +
+            _money(out.get('parts_sub')) +
+            _money(out.get('paint_mat')) +
+            _money(out.get('sublet')) +
+            _money(out.get('tax_amt')), 2
+        )
+        return out
+
+    def _parse_locked_photos_only_costs(md_text: str, tax_rate_value: Optional[float] = None, seed_rates: Optional[Dict[str, float]] = None, scope_text: Optional[str] = None) -> Dict[str, Any]:
         """Single source of truth for photos-only cost math.
         Locked rules:
         - labor subtotal is ALWAYS recomputed from the five printed labor buckets
@@ -2335,6 +2538,23 @@ async def vision_review(
         frame_rate = _derive_rate_from_amount(frame_labor_explicit, frame_hours, frame_rate)
         mech_rate = _derive_rate_from_amount(mech_labor_explicit, mech_hours, mech_rate)
 
+        if (not isinstance(frame_rate, (int, float)) or float(frame_rate) <= 0) and isinstance(seed_rates, dict):
+            try:
+                _seed_frame_rate = float(seed_rates.get('frame_rate') or 0.0)
+                if _seed_frame_rate > 0:
+                    frame_rate = _seed_frame_rate
+            except Exception:
+                pass
+
+        # Surgical paint-rate lock:
+        # if paint labor hours exist but paint rate was not parsed/derived, do not let it fall to $0.00/hr.
+        # keep the existing file behavior everywhere else and use the locked body rate as the fallback,
+        # which preserves the expected hours @ rate = total format in the PDF cost block.
+        if isinstance(paint_hours, (int, float)) and float(paint_hours) > 0:
+            if not isinstance(paint_rate, (int, float)) or float(paint_rate) <= 0:
+                if isinstance(body_rate, (int, float)) and float(body_rate) > 0:
+                    paint_rate = float(body_rate)
+
         def _derive_amount(hours: Optional[float], rate: Optional[float], explicit: Optional[float]) -> float:
             if isinstance(hours, (int, float)) and isinstance(rate, (int, float)):
                 return round(float(hours) * float(rate), 2)
@@ -2395,7 +2615,7 @@ async def vision_review(
         tax_amt = round(tax_basis * float(tax_rate_value), 2)
         total_val = round(labor_sub + parts_sub + paint_mat + sublet + tax_amt, 2)
 
-        return {
+        _parsed = {
             'body_hours': body_hours,
             'paint_hours': paint_hours,
             'setup_hours': setup_hours,
@@ -2405,6 +2625,7 @@ async def vision_review(
             'paint_rate': paint_rate,
             'frame_rate': frame_rate,
             'mech_rate': mech_rate,
+            'paint_mat_rate': paint_mat_rate,
             'body_labor': body_labor,
             'paint_labor': paint_labor,
             'setup_measure': setup_measure,
@@ -2418,7 +2639,10 @@ async def vision_review(
             'tax_basis': tax_basis,
             'tax_amt': tax_amt,
             'total_val': total_val,
+            'tax_rate_value': float(tax_rate_value),
         }
+        _parsed = _seed_scope_labor_buckets(((scope_text or '') + '\n' + text_local).strip(), _parsed, seed_rates=seed_rates)
+        return _apply_normalization_lock(_parsed)
 
     def _locked_backend_total_from_cost_md(md_text: str, tax_rate_value: Optional[float] = None) -> Optional[float]:
         parsed = _parse_locked_photos_only_costs(md_text, tax_rate_value)
@@ -2481,13 +2705,10 @@ async def vision_review(
         if _bad_field(result.get("conclusion") or ""):
             result["conclusion"] = _fallback_conclusion_from_visible_evidence()
 
-    def _canonical_locked_photos_only_cost_markdown(md_text: str, tax_rate_value: Optional[float] = None) -> str:
-        """Rebuild photos-only costs into one canonical backend-owned markdown block.
-        This forces ZIP and loose JPG runs through the same normalized sequence:
-        normalize inputs -> labor buckets -> itemized parts -> parts subtotal -> tax basis -> tax -> total -> severity.
+    def _canonical_locked_photos_only_cost_markdown_from_parsed(parsed: Dict[str, Any], tax_rate_value: Optional[float] = None) -> str:
+        """Rebuild photos-only costs from one already-locked backend object.
+        This avoids reparsing markdown after the final locked object has been computed.
         """
-        parsed = _parse_locked_photos_only_costs(md_text, tax_rate_value)
-
         def _m(v: Optional[float]) -> str:
             try:
                 return "${:,.2f}".format(float(v) if v is not None else 0.0)
@@ -2549,6 +2770,14 @@ async def vision_review(
             f"{boxes[3]} Possible Total Loss Threshold Approaching",
         ])
         return "\n".join(lines)
+
+    def _canonical_locked_photos_only_cost_markdown(md_text: str, tax_rate_value: Optional[float] = None) -> str:
+        """Rebuild photos-only costs into one canonical backend-owned markdown block.
+        This forces ZIP and loose JPG runs through the same normalized sequence:
+        normalize inputs -> labor buckets -> itemized parts -> parts subtotal -> tax basis -> tax -> total -> severity.
+        """
+        parsed = _parse_locked_photos_only_costs(md_text, tax_rate_value)
+        return _canonical_locked_photos_only_cost_markdown_from_parsed(parsed, tax_rate_value)
 
     def _force_conclusion_to_locked_total(conclusion_text: str, locked_total: Optional[float]) -> str:
         """Preserve the conclusion review text while replacing only the conflicting cost sentence."""
@@ -2613,10 +2842,25 @@ async def vision_review(
     try:
         _final_non_empty_output_lock()
         if ai_intent == "damage_report_from_photos":
-            result["estimated_costs_markdown"] = _canonical_locked_photos_only_cost_markdown(
-                result.get("estimated_costs_markdown") or "", tax_rate
+            _raw_locked_cost_source = result.get("estimated_costs_markdown") or ""
+            _scope_seed_text = "\n\n".join([
+                str(result.get("summary_markdown") or "").strip(),
+                str(result.get("conclusion") or "").strip(),
+            ]).strip()
+            _inspection_location_for_lock = _normalize_location_with_zip(_extract_inspection_location(uploaded_text_all or ""), ia_company, uploaded_text_all)
+            _seed_rates_for_lock = _lookup_rates(_inspection_location_for_lock)
+            if tax_rate is None or not isinstance(tax_rate, (int, float)) or tax_rate <= 0:
+                tax_rate = _lookup_tax_rate(_inspection_location_for_lock)
+            locked_costs_obj = _parse_locked_photos_only_costs(
+                _raw_locked_cost_source,
+                tax_rate,
+                seed_rates=_seed_rates_for_lock,
+                scope_text=_scope_seed_text,
             )
-            _locked_total = _locked_backend_total_from_cost_md(result.get("estimated_costs_markdown") or "", tax_rate)
+            result["estimated_costs_markdown"] = _canonical_locked_photos_only_cost_markdown_from_parsed(
+                locked_costs_obj, tax_rate
+            )
+            _locked_total = locked_costs_obj.get("total_val") if isinstance(locked_costs_obj, dict) else None
             result["conclusion"] = _force_conclusion_to_locked_total(result.get("conclusion") or "", _locked_total)
             _final_non_empty_output_lock()
     except Exception:
@@ -3033,43 +3277,8 @@ async def vision_review(
             out.append(ln)
         return "\n".join(out).strip()
 
-    def _strip_photos_only_duplicate_cost_narrative(md_text: str) -> str:
-        """Strip model-written cost/tax/severity narrative from the report summary.
-        The controlled PDF cost section should print that information only once.
-        """
-        if not md_text:
-            return md_text or ""
-        lines = str(md_text).replace("\r\n", "\n").replace("\r", "\n").splitlines()
-        out: List[str] = []
-        in_cost_tail = False
-        start_markers = [
-            r"(?i)^\s*assumptions\s*\(photos-only\)\s*:",
-            r"(?i)^\s*labor\s+rates\s*\(assumed",
-            r"(?i)^\s*estimated\s+labor\s*\(approx",
-            r"(?i)^\s*oem\s+replacement\s+parts\s*\(approx",
-            r"(?i)^\s*other\s*:",
-            r"(?i)^\s*tax\s*\(apply\s+only\s+to\s+parts\s*\+\s*paint\s+materials\)\s*:",
-            r"(?i)^\s*repair\s+cost\s+disclaimer\s*:",
-            r"(?i)^\s*severity\s+tier\s*:",
-            r"(?i)^\s*\*\*approximate\s+total\s+repair\s+cost",
-            r"(?i)^\s*\*\*approximate\s+repair\s+total",
-            r"(?i)^\s*approximate\s+total\s+repair\s+cost",
-            r"(?i)^\s*approximate\s+repair\s+total",
-        ]
-        for ln in lines:
-            s = (ln or "").strip()
-            if not in_cost_tail:
-                if any(re.search(rx, s) for rx in start_markers):
-                    in_cost_tail = True
-                    continue
-                out.append(ln)
-                continue
-            continue
-        return "\n".join(out).strip()
 
-
-
-    def render_repair_cost_section(pdf_obj: FPDF, md: str, tax_rate: Optional[float] = None) -> None:
+    def render_repair_cost_section(pdf_obj: FPDF, md: str, tax_rate: Optional[float] = None, parsed: Optional[Dict[str, Any]] = None) -> None:
         """Render the Approximate Repair Cost Breakdown in a controlled PDF format.
         Locked behavior:
         - fixed printed structure every time
@@ -3079,7 +3288,7 @@ async def vision_review(
         if tax_rate is None or not isinstance(tax_rate, (int, float)) or tax_rate <= 0:
             tax_rate = 0.07
 
-        parsed = _parse_locked_photos_only_costs(md, tax_rate)
+        parsed = parsed if isinstance(parsed, dict) else _parse_locked_photos_only_costs(md, tax_rate)
 
         def _nz_money(v: Optional[float]) -> float:
             try:
@@ -3287,14 +3496,37 @@ async def vision_review(
             except Exception:
                 pdf.set_font("Arial", "", 11)
 
-        def _format_vehicle_value(v) -> str:
-            """Normalize the Vehicle field for PDF printing."""
+        def _vin_model_year(vin_value: Optional[str]) -> str:
+            """Best-effort VIN 10th-character model year decode for PDF display fallback."""
+            try:
+                vv = str(vin_value or "").strip().upper()
+                if len(vv) != 17:
+                    return ""
+                code = vv[9]
+                year_map = {
+                    "A": 2010, "B": 2011, "C": 2012, "D": 2013, "E": 2014,
+                    "F": 2015, "G": 2016, "H": 2017, "J": 2018, "K": 2019,
+                    "L": 2020, "M": 2021, "N": 2022, "P": 2023, "R": 2024,
+                    "S": 2025, "T": 2026, "V": 2027, "W": 2028, "X": 2029,
+                    "Y": 2030,
+                    "1": 2031, "2": 2032, "3": 2033, "4": 2034, "5": 2035,
+                    "6": 2036, "7": 2037, "8": 2038, "9": 2039,
+                }
+                yy = year_map.get(code)
+                return str(yy) if yy else ""
+            except Exception:
+                return ""
+
+        def _format_vehicle_value(v, vin_value: Optional[str] = None) -> str:
+            """Normalize the Vehicle field for PDF printing and include year when missing."""
             try:
                 if isinstance(v, dict):
                     year = str(v.get("year") or "").strip()
                     make = str(v.get("make") or "").strip()
                     model = str(v.get("model") or "").strip()
                     trim = str(v.get("trim") or "").strip()
+                    if not year or year.upper() == "N/A":
+                        year = _vin_model_year(vin_value)
                     parts = [p for p in [year, make, model] if p and p.upper() != "N/A"]
                     base = " ".join(parts).strip()
                     if trim and trim.upper() != "N/A":
@@ -3303,19 +3535,45 @@ async def vision_review(
             except Exception:
                 pass
             s = str(v or "").strip()
+            vin_year = _vin_model_year(vin_value)
+            if vin_year and not re.search(r'\b(19|20)\d{2}\b', s):
+                mm = re.search(r'(?i)\b([A-Z][a-zA-Z0-9]+)\s+([A-Z][a-zA-Z0-9]+)\b', s)
+                if mm:
+                    prefix = f"{vin_year} {mm.group(1)} {mm.group(2)}"
+                    tail = s[mm.end():].strip()
+                    return f"{prefix} {tail}".strip()
             return s if s else "N/A"
     
         def _scrub_model_headings(md_text: str) -> str:
-            """Remove model-emitted headings that duplicate PDF section headers."""
+            """Remove model-emitted headings and duplicate cost/checklist content from the narrative summary.
+
+            The PDF prints the locked cost section separately, so any model-emitted cost/tax/severity
+            lines inside summary_markdown must be stripped here to avoid duplicated cost output.
+            """
             if not md_text:
                 return md_text or ""
             lines = str(md_text).replace("\r\n","\n").replace("\r","\n").splitlines()
             out = []
+            in_cost_block = False
             for ln in lines:
                 s = (ln or "").strip()
                 if not s:
-                    out.append(ln)
+                    if not in_cost_block:
+                        out.append(ln)
                     continue
+                # Once the model starts a cost block inside the narrative, drop it entirely.
+                if re.search(r"(?i)^#{0,3}\s*APPROXIMATE\s+REPAIR\s+COST\s+BREAKDOWN\b", s):
+                    in_cost_block = True
+                    continue
+                if in_cost_block:
+                    # Resume only when the next real narrative section begins.
+                    if re.search(r"(?i)^#{0,3}\s*(FRAUD\s*&\s*AUTHENTICITY\s*CHECK|CONCLUSION|DISCLAIMER)\b", s):
+                        in_cost_block = False
+                    else:
+                        if re.search(r"(?i)^(Body labor|Paint labor|Setup\s*&\s*Measure|Frame labor|Mechanical labor|Labor subtotal|Itemized parts breakdown|Parts subtotal|Paint\s*&\s*materials|Tax rate|Tax basis|Tax|Approximate Repair Total|Severity Tier|\[[ xX]\]\s*(Minor|Moderate|Major|Possible\s+Total\s+Loss))\b", s):
+                            continue
+                        # swallow all other cost-block lines until a new real section starts
+                        continue
                 # Drop markdown headings like '# Condition Report (Photos Only)' or '## ...'
                 if re.match(r"^#+\s+", s):
                     continue
@@ -3324,6 +3582,9 @@ async def vision_review(
                     continue
                 # Drop helper artifacts the model sometimes emits
                 if re.search(r"(?i)estimated_costs_markdown", s):
+                    continue
+                # Drop the redundant front checklist bullets from the narrative summary.
+                if re.search(r"(?i)^-\s*(Hood|Front bumper cover|Grille|One headlamp|The other headlamp|One front fender|The other front fender)\s*:", s):
                     continue
                 out.append(ln)
             return "\n".join(out).strip()
@@ -3374,7 +3635,7 @@ async def vision_review(
         mc(f"Inspected For: {ia_company or 'N/A'}")
         mc(f"VIN: {result.get('vin') or 'N/A'}")
         mc(f"VIN Verification: {result.get('vin_verification') or 'N/A'}")
-        mc(f"Vehicle: {_format_vehicle_value(result.get('vehicle'))}")
+        mc(f"Vehicle: {_format_vehicle_value(result.get('vehicle'), result.get('vin'))}")
         mc(f"Odometer: {_odo_print}")
         mc(f"Primary Impact: {result.get('primary_impact') or 'N/A'}")
         mc(f"Secondary Impact: {result.get('secondary_impact') or 'N/A'}")
@@ -3385,7 +3646,6 @@ async def vision_review(
         _summary_md = _scrub_model_headings(_summary_md_raw)
         if ai_intent == "damage_report_from_photos":
             _summary_md = _scrub_photo_only_narrative_cost_headers(_summary_md)
-            _summary_md = _strip_photos_only_duplicate_cost_narrative(_summary_md)
         mc(_summary_md if _summary_md else "-")
         pdf.ln(2)
     
@@ -3396,7 +3656,7 @@ async def vision_review(
         # NOTE: Total + Severity Tier are rendered deterministically inside render_repair_cost_section.
     
         _section_bar("APPROXIMATE REPAIR COST BREAKDOWN")
-        render_repair_cost_section(pdf, costs_md, tax_rate=tax_rate)
+        render_repair_cost_section(pdf, costs_md, tax_rate=tax_rate, parsed=locked_costs_obj)
     
         _section_bar("FRAUD & AUTHENTICITY CHECK")
         mc((result.get("fraud_markdown") or "").strip() or "-")
@@ -3502,7 +3762,7 @@ async def vision_review(
         mc(f"Claim #: {result['claim_number']}")
         mc(f"VIN (from estimate/photos): {result['vin']}")
         mc(f"VIN verification (estimate vs photo): {result['vin_verification']}")
-        mc(f"Vehicle: {_format_vehicle_value(result.get('vehicle'))}")
+        mc(f"Vehicle: {_format_vehicle_value(result.get('vehicle'), result.get('vin'))}")
         mc(f"Odometer (from estimate): {result['odometer_estimate_only']}")
         mc(f"Compliance Score: {result['compliance_score']}")
         pdf_status = result["redaction_status"].replace("✅", "OK")
@@ -3680,3 +3940,4 @@ async def download_pdf(file_number: Optional[str] = None, filename: Optional[str
         return JSONResponse(status_code=404, content={"detail": "Not Found"})
     latest = max(candidates, key=lambda p: os.path.getmtime(p))
     return FileResponse(path=latest, media_type="application/pdf", filename=os.path.basename(latest))
+
