@@ -2876,21 +2876,31 @@ async def vision_review(
                 continue
             if re.search(r"(?i)^Starting\s+(?:at|from)\s+100\.?$", s):
                 continue
+            if re.search(r"(?i)^Starting\s+score\s*:\s*100\.?$", s):
+                continue
+            if re.search(r"(?i)^New\s+score\s*:", s):
+                continue
             if re.search(r"(?i)^Final\s+compliance\s+score\s*:", s):
                 continue
             if re.search(r"(?i)^Total\s*=\s*100", s):
                 continue
             if re.search(r"(?i)^Adjustment\s*:", s):
                 continue
-            if re.search(r"(?i)provided\s+Compliance\s+Score\s+seed", s):
+            if re.search(r"(?i)\bseed\b", s):
                 continue
-            m = re.search(r"(?i)Deduction\s*:\s*-\s*(\d+)|\((?:-|–)?(\d+)\)", s)
+            if re.search(r"(?i)provided\s+Compliance\s+Score", s):
+                continue
+            cleaned_ln = re.sub(r"(?i)\s*New\s+score\s*:\s*\d+\.?$", "", ln).rstrip()
+            cleaned_s = cleaned_ln.strip()
+            if not cleaned_s:
+                continue
+            m = re.search(r"(?i)Deduction\s*:\s*-\s*(\d+)|\((?:-|–)?(\d+)\)", cleaned_s)
             if m:
                 try:
                     deductions.append(int(m.group(1) or m.group(2)))
                 except Exception:
                     pass
-            body_lines.append(ln)
+            body_lines.append(cleaned_ln)
 
         total = max(0, 100 - sum(deductions))
         rebuilt = ["## Compliance Score Rationale", "Starting from 100."]
@@ -2959,20 +2969,20 @@ async def vision_review(
         pass
 
     # -----------------------
-    # FINAL-STAGE PII REDACTION LOCK (authoritative)
-    # - Redact final customer-facing fields after all model/post-processing logic
-    # - Protect against owner/insured leakage from OCR/docs/model text
-    # - Block report generation if final redaction fails or known names remain
+    # FINAL-STAGE TARGETED NAME SCRUB (authoritative)
+    # - Customer-facing output must NOT show owner/insured/customer/claimant names
+    # - Do NOT run Presidio over final estimate math / ops / labor / cost text
+    # - Use a targeted name scrubber only, then verify no known names remain
     # -----------------------
     def _extract_name_candidates_for_redaction(source_text: str) -> List[str]:
         candidates: List[str] = []
         if not source_text:
             return candidates
         pats = [
-            r"(?im)Owner\s*(?:Name)?\s*[:\-]\s*([A-Z][A-Z'.,\- ]{2,80})",
-            r"(?im)Insured\s*(?:Name)?\s*[:\-]\s*([A-Z][A-Z'.,\- ]{2,80})",
-            r"(?im)Customer\s*(?:Name)?\s*[:\-]\s*([A-Z][A-Z'.,\- ]{2,80})",
-            r"(?im)Claimant\s*(?:Name)?\s*[:\-]\s*([A-Z][A-Z'.,\- ]{2,80})",
+            r"(?im)\bOwner\s*(?:Name)?\s*[:\-]\s*([A-Z][A-Z'.,\- ]{2,80})",
+            r"(?im)\bInsured\s*(?:Name)?\s*[:\-]\s*([A-Z][A-Z'.,\- ]{2,80})",
+            r"(?im)\bCustomer\s*(?:Name)?\s*[:\-]\s*([A-Z][A-Z'.,\- ]{2,80})",
+            r"(?im)\bClaimant\s*(?:Name)?\s*[:\-]\s*([A-Z][A-Z'.,\- ]{2,80})",
         ]
         for pat in pats:
             for m in re.finditer(pat, source_text or ""):
@@ -2993,34 +3003,33 @@ async def vision_review(
                 out.append(nm)
         return out[:12]
 
-    def _force_redact_known_names(text_value: str, names: List[str]) -> str:
+    def _force_scrub_known_names(text_value: str, names: List[str], replacement: str = "Owner") -> str:
         s = str(text_value or "")
         for nm in names:
             if not nm:
                 continue
             try:
-                s = re.sub(re.escape(nm), "[REDACTED]", s, flags=re.IGNORECASE)
+                s = re.sub(re.escape(nm), replacement, s, flags=re.IGNORECASE)
             except Exception:
                 pass
             parts = [p for p in re.split(r"[\s,]+", nm) if len(p.strip()) >= 3]
             if len(parts) >= 2:
                 joined = r"\s+".join(re.escape(p) for p in parts)
                 try:
-                    s = re.sub(joined, "[REDACTED]", s, flags=re.IGNORECASE)
+                    s = re.sub(joined, replacement, s, flags=re.IGNORECASE)
                 except Exception:
                     pass
         return s
 
-    def _final_redact_customer_fields(result_obj: Dict[str, Any], known_names: List[str]) -> (Dict[str, Any], List[str]):
+    def _final_scrub_customer_fields(result_obj: Dict[str, Any], known_names: List[str]) -> (Dict[str, Any], List[str]):
         issues: List[str] = []
         for key in ("summary_brief", "summary_markdown", "fraud_markdown", "estimated_costs_markdown", "conclusion"):
             try:
                 original = str(result_obj.get(key) or "")
-                redacted = redact_text_preserve_vin_claim(original)
-                redacted = _force_redact_known_names(redacted, known_names)
-                result_obj[key] = redacted
+                scrubbed = _force_scrub_known_names(original, known_names, replacement="Owner")
+                result_obj[key] = scrubbed
             except Exception as e:
-                issues.append(f"Final redaction failed for {key}: {e}")
+                issues.append(f"Final name scrub failed for {key}: {e}")
         return result_obj, issues
 
     def _detect_remaining_name_leaks(result_obj: Dict[str, Any], known_names: List[str]) -> List[str]:
@@ -3037,13 +3046,13 @@ async def vision_review(
                 continue
             try:
                 if re.search(re.escape(nm), blob, flags=re.IGNORECASE):
-                    leaks.append(f"PII leak remained after final redaction: {nm}")
+                    leaks.append(f"PII leak remained after final name scrub: {nm}")
                     continue
                 parts = [p for p in re.split(r"[\s,]+", nm) if len(p.strip()) >= 3]
                 if len(parts) >= 2:
                     joined = r"\s+".join(re.escape(p) for p in parts)
                     if re.search(joined, blob, flags=re.IGNORECASE):
-                        leaks.append(f"PII leak remained after final redaction: {nm}")
+                        leaks.append(f"PII leak remained after final name scrub: {nm}")
             except Exception:
                 pass
         return leaks
@@ -3051,23 +3060,23 @@ async def vision_review(
     _known_pii_names = _extract_name_candidates_for_redaction(uploaded_text_all or "")
     _redaction_issues: List[str] = []
     try:
-        result, _redaction_issues = _final_redact_customer_fields(result, _known_pii_names)
+        result, _redaction_issues = _final_scrub_customer_fields(result, _known_pii_names)
     except Exception as e:
-        _redaction_issues = [f"Final-stage redaction lock failed: {e}"]
+        _redaction_issues = [f"Final-stage name scrub failed: {e}"]
 
     _remaining_pii_leaks = _detect_remaining_name_leaks(result, _known_pii_names)
     if _redaction_issues or _remaining_pii_leaks:
         _block_reasons = _redaction_issues + _remaining_pii_leaks
-        log.error("REPORT BLOCKED: final-stage PII redaction failure | reasons=%s", _block_reasons)
+        log.error("REPORT BLOCKED: final-stage name scrub failure | reasons=%s", _block_reasons)
         return JSONResponse(
             status_code=200,
             content={
                 "status": "blocked",
-                "error": "REPORT BLOCKED: PII redaction failed",
+                "error": "REPORT BLOCKED: PII name scrub failed",
                 "reasons": _block_reasons,
                 "file_number": file_number,
                 "request_type": req_label,
-                "redaction_status": "Redacted PII: Blocked - final-stage enforcement failed",
+                "redaction_status": "Redacted PII: Blocked - final-stage name scrub failed",
             },
         )
 
@@ -4263,4 +4272,5 @@ async def download_pdf(file_number: Optional[str] = None, filename: Optional[str
         return JSONResponse(status_code=404, content={"detail": "Not Found"})
     latest = max(candidates, key=lambda p: os.path.getmtime(p))
     return FileResponse(path=latest, media_type="application/pdf", filename=os.path.basename(latest))
+
 
