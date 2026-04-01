@@ -2648,15 +2648,123 @@ async def vision_review(
             "Final claim handling should be based on confirmation of estimate support, photo evidence, client guideline requirements, and qualified appraiser review."
         )
 
+    def _comprehensive_summary_is_missing(md_text: Any) -> bool:
+        s = str(md_text or "").strip()
+        if not s:
+            return True
+        compact = re.sub(r"\s+", " ", s).strip().lower()
+        if compact in {"n/a", "## detailed condition report n/a", "## detailed condition report -", "## detailed condition report none"}:
+            return True
+        lines = [ln.strip() for ln in s.splitlines() if ln.strip()]
+        if len(lines) <= 2 and any(ln.lower().startswith("## detailed condition report") for ln in lines):
+            tail = " ".join([ln for ln in lines if not ln.lower().startswith("## detailed condition report")]).strip().lower()
+            if tail in {"", "n/a", "none", "-"}:
+                return True
+        return False
+
+    def _build_comprehensive_estimate_cost_block(source_text: str) -> str:
+        txt = str(source_text or "")
+        rates = {}
+        body_rate = paint_rate = tax_pct = None
+        m = re.search(r"(?is)Body\s*:\s*([0-9]+(?:\.[0-9]{1,2})?)\s*Paint\s*:\s*([0-9]+(?:\.[0-9]{1,2})?)", txt)
+        if m:
+            body_rate = float(m.group(1))
+            paint_rate = float(m.group(2))
+        m_tax = re.search(r"(?i)Sales\s+Tax[^0-9]{0,20}([0-9]+(?:\.[0-9]{2,4})?)%", txt)
+        if m_tax:
+            tax_pct = float(m_tax.group(1))
+        parts_total = None
+        m_parts = re.search(r"(?i)Parts\s*[:\-]?\s*\$\s*([0-9,]+(?:\.[0-9]{2})?)", txt)
+        if m_parts:
+            parts_total = float(m_parts.group(1).replace(',', ''))
+        body_total = None
+        paint_total = None
+        paint_mat_total = None
+        tax_total = None
+        total_cost = None
+        m_body = re.search(r"(?i)Body\s+Labor\s+([0-9.]+)\s*Hrs\s*\$\s*([0-9,]+(?:\.[0-9]{2})?)", txt)
+        if m_body:
+            body_total = float(m_body.group(2).replace(',', ''))
+            if body_rate is None:
+                try:
+                    body_rate = round(body_total / float(m_body.group(1)), 2)
+                except Exception:
+                    pass
+        m_paint = re.search(r"(?i)Paint\s+Labor\s+([0-9.]+)\s*Hrs\s*\$\s*([0-9,]+(?:\.[0-9]{2})?)", txt)
+        if m_paint:
+            paint_total = float(m_paint.group(2).replace(',', ''))
+            if paint_rate is None:
+                try:
+                    paint_rate = round(paint_total / float(m_paint.group(1)), 2)
+                except Exception:
+                    pass
+        m_mat = re.search(r"(?i)Paint\s+(?:Supplies|Materials)\s+([0-9.]+)\s*Hrs\s*\$\s*([0-9,]+(?:\.[0-9]{2})?)", txt)
+        if m_mat:
+            paint_mat_total = float(m_mat.group(2).replace(',', ''))
+        m_tax_amt = re.search(r"(?i)Sales\s+Tax\s+\$\s*([0-9,]+(?:\.[0-9]{2})?)", txt)
+        if m_tax_amt:
+            tax_total = float(m_tax_amt.group(1).replace(',', ''))
+        m_total = re.search(r"(?i)(?:Total\s+Cost\s+of\s+Repairs|Total)\s*\$\s*([0-9,]+(?:\.[0-9]{2})?)", txt)
+        if m_total:
+            total_cost = float(m_total.group(1).replace(',', ''))
+
+        op_lines = []
+        for ln in txt.splitlines():
+            s = re.sub(r"\s+", " ", ln).strip()
+            if not s:
+                continue
+            if re.search(r"(?i)(?:O/H|Overhaul|Repl|Replace|Repair|Refn|Refinish|Blend|Headlamp|Fender|Bumper)", s) and re.search(r"\$\s*[0-9,]+(?:\.[0-9]{2})?|[0-9]+(?:\.[0-9]+)?\s*Hrs", s):
+                op_lines.append(s)
+        op_lines = op_lines[:8]
+
+        if not any(v is not None for v in (parts_total, body_total, paint_total, paint_mat_total, tax_total, total_cost)):
+            return _professional_cost_fallback()
+
+        lines = ["## Approximate Repair Cost Breakdown", "Estimate of Record totals (documented):"]
+        if parts_total is not None:
+            lines.append(f"- Parts: {_money2(parts_total)}")
+        if body_total is not None:
+            if body_rate is not None and m_body:
+                lines.append(f"- Body labor: {m_body.group(1)} hrs @ ${body_rate:,.2f}/hr = {_money2(body_total)}")
+            else:
+                lines.append(f"- Body labor: {_money2(body_total)}")
+        if paint_total is not None:
+            if paint_rate is not None and m_paint:
+                lines.append(f"- Paint labor: {m_paint.group(1)} hrs @ ${paint_rate:,.2f}/hr = {_money2(paint_total)}")
+            else:
+                lines.append(f"- Paint labor: {_money2(paint_total)}")
+        if paint_mat_total is not None:
+            lines.append(f"- Paint supplies/materials: {_money2(paint_mat_total)}")
+        if tax_total is not None:
+            if tax_pct is not None and parts_total is not None and paint_mat_total is not None:
+                lines.append(f"- Sales tax: {_money2(tax_total)} ({tax_pct:.4f}% on {_money2(parts_total + paint_mat_total)})")
+            else:
+                lines.append(f"- Sales tax: {_money2(tax_total)}")
+        if total_cost is not None:
+            lines.append(f"- Total cost of repairs: {_money2(total_cost)}")
+        if op_lines:
+            lines.append("Operations written (high level):")
+            lines.extend([f"- {x}" for x in op_lines])
+        return "\n".join(lines).strip()
+
     try:
         if ai_intent != "damage_report_from_photos":
-            if _needs_customer_scrub(result.get("summary_markdown")):
+            if _needs_customer_scrub(result.get("summary_markdown")) or _comprehensive_summary_is_missing(result.get("summary_markdown")):
                 result["summary_markdown"] = _professional_summary_fallback()
+            _existing_cost_text = str(result.get("estimated_costs_markdown") or "").strip()
+            _existing_cost_compact = re.sub(r"\s+", " ", _existing_cost_text).strip().lower()
+            _cost_placeholder = (
+                (not _existing_cost_text)
+                or ("approximate repair cost evaluation should reflect the estimate lines" in _existing_cost_compact)
+                or (_existing_cost_compact == "## approximate repair cost breakdown")
+            )
+            if _cost_placeholder:
+                result["estimated_costs_markdown"] = _build_comprehensive_estimate_cost_block(uploaded_text_all or "")
+            elif _needs_customer_scrub(result.get("estimated_costs_markdown")):
+                result["estimated_costs_markdown"] = _professional_cost_fallback()
             if _needs_customer_scrub(result.get("fraud_markdown")):
                 result["fraud_markdown"] = _professional_fraud_fallback()
-            if _needs_customer_scrub(result.get("estimated_costs_markdown")):
-                result["estimated_costs_markdown"] = _professional_cost_fallback()
-            if _needs_customer_scrub(result.get("conclusion")):
+            if _needs_customer_scrub(result.get("conclusion")) or _naish(result.get("conclusion")):
                 result["conclusion"] = _professional_conclusion_fallback()
     except Exception:
         pass
@@ -4089,9 +4197,23 @@ async def vision_review(
         mc(f"Compliance Score: {result['compliance_score']}")
         pdf_status = result["redaction_status"].replace("✅", "OK")
         mc(pdf_status)
-        _comp_section_bar("NSPXN.com Condition Summary"); mc((smark or '').strip())
-        _comp_section_bar("Approximate Repair Cost Breakdown"); mc((result.get("estimated_costs_markdown") or "").strip())
+        _comp_summary_text = (smark or '').strip()
+        if _comprehensive_summary_is_missing(_comp_summary_text):
+            _comp_summary_text = _professional_summary_fallback()
+            result["summary_markdown"] = _comp_summary_text
+        _comp_cost_text = (result.get("estimated_costs_markdown") or "").strip()
+        _comp_cost_compact = re.sub(r"\s+", " ", _comp_cost_text).strip().lower()
+        if (not _comp_cost_text) or ("approximate repair cost evaluation should reflect the estimate lines" in _comp_cost_compact):
+            _comp_cost_text = _build_comprehensive_estimate_cost_block(uploaded_text_all or "")
+            result["estimated_costs_markdown"] = _comp_cost_text
+        _comp_conclusion_text = (result.get("conclusion") or "").strip()
+        if _naish(_comp_conclusion_text):
+            _comp_conclusion_text = _professional_conclusion_fallback()
+            result["conclusion"] = _comp_conclusion_text
+        _comp_section_bar("NSPXN.com Condition Summary"); mc(_comp_summary_text)
+        _comp_section_bar("Approximate Repair Cost Breakdown"); mc(_comp_cost_text)
         _comp_section_bar("Fraud Detection"); mc((result["fraud_markdown"] or 'N/A').strip())
+        _comp_section_bar("Conclusion"); mc(_comp_conclusion_text)
 
         # --- AI Disclaimer (after report content) ---
         try:
@@ -4272,5 +4394,6 @@ async def download_pdf(file_number: Optional[str] = None, filename: Optional[str
         return JSONResponse(status_code=404, content={"detail": "Not Found"})
     latest = max(candidates, key=lambda p: os.path.getmtime(p))
     return FileResponse(path=latest, media_type="application/pdf", filename=os.path.basename(latest))
+
 
 
