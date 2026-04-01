@@ -3013,10 +3013,11 @@ async def vision_review(
             _blockers = _collect_report_blockers(_sanity)
             if _blockers:
                 return JSONResponse(
-                    status_code=422,
+                    status_code=200,
                     content={
+                        "status": "blocked",
                         "error": "REPORT BLOCKED: core extraction mismatch",
-                        "blockers": _blockers,
+                        "reasons": _blockers,
                         "sanity_check": _sanity,
                         "draft": {
                             "file_number": file_number,
@@ -4104,5 +4105,6 @@ async def download_pdf(file_number: Optional[str] = None, filename: Optional[str
         return JSONResponse(status_code=404, content={"detail": "Not Found"})
     latest = max(candidates, key=lambda p: os.path.getmtime(p))
     return FileResponse(path=latest, media_type="application/pdf", filename=os.path.basename(latest))
+
 
 
