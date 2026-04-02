@@ -2915,7 +2915,10 @@ async def vision_review(
                 re.search(r"(?i)^=\s*100\s*-", s) or
                 re.search(r"(?i)^Arithmetic\s*:\s*100", s) or
                 re.search(r"(?i)^Adjusted\s+compliance_score\s+reported\s*:", s) or
-                re.search(r"(?i)^Final\s+compliance\s+score\s*:", s)
+                re.search(r"(?i)^Final\s+compliance\s+score\s*:", s) or
+                re.search(r"(?i)^Final\s*:", s) or
+                re.search(r"(?i)^Score\s*math\s*:", s) or
+                re.search(r"(?i)^Current\s+score\s*:", s)
             ):
                 continue
 
@@ -3016,6 +3019,12 @@ async def vision_review(
                 continue
             if re.search(r"(?i)^Final\s+compliance\s+score\s*:", s):
                 continue
+            if re.search(r"(?i)^Final\s*:", s):
+                continue
+            if re.search(r"(?i)^Score\s*math\s*:", s):
+                continue
+            if re.search(r"(?i)^Current\s+score\s*:", s):
+                continue
             if re.search(r"(?i)^Total\s*=\s*100", s):
                 continue
             if re.search(r"(?i)^Adjustment\s*:", s):
@@ -3025,6 +3034,7 @@ async def vision_review(
             if re.search(r"(?i)provided\s+Compliance\s+Score", s):
                 continue
             cleaned_ln = re.sub(r"(?i)\s*New\s+score\s*:\s*\d+\.?$", "", ln).rstrip()
+            cleaned_ln = re.sub(r"(?i)\s*Final\s*:\s*.*$", "", cleaned_ln).rstrip()
             cleaned_s = cleaned_ln.strip()
             if not cleaned_s:
                 continue
@@ -3060,6 +3070,38 @@ async def vision_review(
                 pass
         return str(current_score or "").strip()
 
+    def _validate_locked_compliance_score_block(md_text: str, current_score: str) -> (str, str):
+        t = str(md_text or "").replace("\r\n", "\n").replace("\r", "\n")
+        # Remove stale score math lines that should never survive to customer output
+        cleaned_lines = []
+        for ln in t.splitlines():
+            s = (ln or "").strip()
+            if re.search(r"(?i)^Final\s*:\s*", s):
+                continue
+            if re.search(r"(?i)^Score\s*math\s*:\s*", s):
+                continue
+            if re.search(r"(?i)^Current\s+score\s*:\s*", s):
+                continue
+            cleaned_lines.append(ln)
+        t = "\n".join(cleaned_lines).strip()
+
+        score_from_rationale = _locked_score_from_rationale(t, current_score)
+        score_from_total = None
+        m_total = re.search(r"(?im)^Total\s*=\s*100(?:\s*-\s*\d+)*\s*=\s*(\d{1,3})\.?\s*$", t)
+        if m_total:
+            try:
+                score_from_total = str(max(0, min(100, int(m_total.group(1)))))
+            except Exception:
+                score_from_total = None
+
+        final_score = str(score_from_rationale or current_score or "").strip()
+        if score_from_total and final_score and score_from_total != final_score:
+            # Rebuild from rationale so both displayed values always match
+            t = _build_locked_compliance_score_rationale(t, final_score)
+            final_score = _locked_score_from_rationale(t, final_score)
+
+        return t, final_score
+
     def _build_locked_cost_block(existing_md: str) -> str:
         t = str(existing_md or "").replace("\r\n", "\n").replace("\r", "\n").strip()
         if not t:
@@ -3087,8 +3129,8 @@ async def vision_review(
             return result_obj
         sm = str(result_obj.get("summary_markdown") or "")
         sm = _build_locked_compliance_score_rationale(sm, str(result_obj.get("compliance_score") or ""))
+        sm, locked_score = _validate_locked_compliance_score_block(sm, str(result_obj.get("compliance_score") or ""))
         result_obj["summary_markdown"] = sm
-        locked_score = _locked_score_from_rationale(sm, str(result_obj.get("compliance_score") or ""))
         if locked_score:
             result_obj["compliance_score"] = locked_score
         result_obj["estimated_costs_markdown"] = _build_locked_cost_block(result_obj.get("estimated_costs_markdown") or "")
@@ -4407,3 +4449,4 @@ async def download_pdf(file_number: Optional[str] = None, filename: Optional[str
         return JSONResponse(status_code=404, content={"detail": "Not Found"})
     latest = max(candidates, key=lambda p: os.path.getmtime(p))
     return FileResponse(path=latest, media_type="application/pdf", filename=os.path.basename(latest))
+
