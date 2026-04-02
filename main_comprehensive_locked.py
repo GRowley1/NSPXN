@@ -2595,10 +2595,142 @@ async def vision_review(
             "fallback review",
             "core identifiers and score fields were still returned",
             "this fallback means",
+            "the uploaded files were processed successfully",
+            "available review evidence was preserved",
         ]
         if any(p in low for p in bad_phrases):
             return True
+        lines = [ln.strip() for ln in s.splitlines() if ln.strip()]
+        stripped = []
+        for ln in lines:
+            if ln.startswith("#"):
+                continue
+            if ln.lower() in {"detailed condition report", "approximate repair cost breakdown", "fraud detection", "conclusion"}:
+                continue
+            stripped.append(ln)
+        if not stripped:
+            return True
+        joined = " ".join(stripped).strip().upper()
+        if joined in {"N/A", "NA", "NONE", "NULL", "UNKNOWN"}:
+            return True
         return False
+
+    def _summary_is_effectively_na(v: Any) -> bool:
+        s = str(v or "").strip()
+        if not s:
+            return True
+        lines = [ln.strip() for ln in s.splitlines() if ln.strip()]
+        stripped = []
+        for ln in lines:
+            if ln.startswith("#"):
+                continue
+            if ln.lower() in {"detailed condition report", "overall assessment", "condition summary"}:
+                continue
+            stripped.append(ln)
+        if not stripped:
+            return True
+        joined = " ".join(stripped).strip().upper()
+        return joined in {"N/A", "NA", "NONE", "NULL", "UNKNOWN"}
+
+    def _extract_estimate_record_totals_strict(source_text: str) -> Dict[str, Any]:
+        out: Dict[str, Any] = {
+            "tax_rate": None,
+            "sales_tax": None,
+            "parts_subtotal": None,
+            "labor_subtotal": None,
+            "paint_materials": None,
+            "estimate_total": None,
+        }
+        if not source_text:
+            return out
+        txt = str(source_text).replace("\r\n", "\n").replace("\r", "\n")
+        lines = [ln.strip() for ln in txt.splitlines() if ln.strip()]
+
+        def _money_from_line(line: str, label_rx: str) -> Optional[float]:
+            if not re.search(label_rx, line, flags=re.IGNORECASE):
+                return None
+            m = re.search(r"\$\s*([0-9][0-9,]*(?:\.[0-9]{2})?)", line)
+            if not m:
+                return None
+            try:
+                return float(m.group(1).replace(",", ""))
+            except Exception:
+                return None
+
+        for ln in lines:
+            if out["tax_rate"] is None and re.search(r"(?i)\btax\s*rate\b|\bsales\s*tax\b", ln):
+                m_rate = re.search(r"([0-9]+(?:\.[0-9]+)?)\s*%", ln)
+                if m_rate:
+                    try:
+                        out["tax_rate"] = float(m_rate.group(1))
+                    except Exception:
+                        pass
+            if out["sales_tax"] is None:
+                val = _money_from_line(ln, r"(?i)\bsales\s*tax\b|\btax\s+amount\b|\btotal\s+tax\b")
+                if val is not None:
+                    out["sales_tax"] = val
+            if out["parts_subtotal"] is None:
+                val = _money_from_line(ln, r"(?i)^\s*(parts\s+subtotal|parts\s+total)\b")
+                if val is not None:
+                    out["parts_subtotal"] = val
+            if out["labor_subtotal"] is None:
+                val = _money_from_line(ln, r"(?i)^\s*(labor\s+subtotal|labor\s+total|body\s+labor\s+total|paint\s+labor\s+total)\b")
+                if val is not None:
+                    out["labor_subtotal"] = val
+            if out["paint_materials"] is None:
+                val = _money_from_line(ln, r"(?i)^\s*(paint\s+(?:supplies|materials)|materials\s+subtotal)\b")
+                if val is not None:
+                    out["paint_materials"] = val
+            if out["estimate_total"] is None:
+                val = _money_from_line(ln, r"(?i)^\s*(estimate\s+total|total\s+amount|net\s+amount|grand\s+total|total\s+loss\s+value)\b")
+                if val is not None:
+                    out["estimate_total"] = val
+
+        if out["sales_tax"] is not None:
+            if out["tax_rate"] is not None and out["estimate_total"] is not None:
+                max_reasonable_tax = float(out["estimate_total"]) * max(float(out["tax_rate"]) / 100.0, 0.02) * 1.25
+                if out["sales_tax"] > max_reasonable_tax:
+                    out["sales_tax"] = None
+            elif out["estimate_total"] is not None and out["sales_tax"] > float(out["estimate_total"]) * 0.25:
+                out["sales_tax"] = None
+
+        return out
+
+    def _comprehensive_cost_is_too_thin(v: Any) -> bool:
+        s = str(v or "").strip()
+        if not s:
+            return True
+        if _needs_customer_scrub(s):
+            return True
+        lines = [ln.strip() for ln in s.splitlines() if ln.strip()]
+        non_heading = [ln for ln in lines if not ln.startswith("#") and ln.lower() != "approximate repair cost breakdown"]
+        meaningful_money = [ln for ln in non_heading if "$" in ln]
+        if len(meaningful_money) <= 1:
+            return True
+        return False
+
+    def _build_comprehensive_cost_from_estimate_text() -> str:
+        parsed = _extract_estimate_record_totals_strict(uploaded_text_all or "")
+        bullets: List[str] = []
+        if parsed.get("labor_subtotal") is not None:
+            bullets.append(f"- Labor subtotal: {_money2(parsed['labor_subtotal'])}")
+        if parsed.get("parts_subtotal") is not None:
+            bullets.append(f"- Parts subtotal: {_money2(parsed['parts_subtotal'])}")
+        if parsed.get("paint_materials") is not None:
+            bullets.append(f"- Paint materials: {_money2(parsed['paint_materials'])}")
+        if parsed.get("tax_rate") is not None:
+            bullets.append(f"- Applicable tax rate: {float(parsed['tax_rate']):.3f}%")
+        if parsed.get("sales_tax") is not None:
+            bullets.append(f"- Sales tax: {_money2(parsed['sales_tax'])}")
+        if parsed.get("estimate_total") is not None:
+            bullets.append(f"- Estimate total: {_money2(parsed['estimate_total'])}")
+        if parsed.get("estimate_total") is not None or len(bullets) >= 2:
+            return "## Approximate Repair Cost Breakdown\nEstimate of Record totals (documented):\n" + "\n".join(bullets)
+        return (
+            "## Approximate Repair Cost Breakdown\n"
+            "Estimate of record totals could not be extracted with confidence from the uploaded document text on this run. "
+            "Final estimate totals should be confirmed from the estimate summary/totals page before release."
+        )
 
     def _professional_summary_fallback() -> str:
         claim_txt = result.get("claim_number") if not _naish(result.get("claim_number")) else _extract_claim_from_text(uploaded_text_all or "")
@@ -2643,128 +2775,22 @@ async def vision_review(
         )
 
     def _professional_conclusion_fallback() -> str:
+        rules_txt = "Client guideline requirements" if client_rules_supplied else "available estimate and photo requirements"
         return (
-            "This report preserves the available identifiers and review inputs for appraisal handling. "
-            "Final claim handling should be based on confirmation of estimate support, photo evidence, client guideline requirements, and qualified appraiser review."
+            "Based on the uploaded estimate, limited photo evidence, and the documented review findings in this report, "
+            "the file should not be relied upon as fully documented until the detailed condition narrative, estimate totals, and required supporting photos are confirmed. "
+            f"Final handling should verify estimate-line support, VIN/photo consistency, and {rules_txt} before release or claim decision."
         )
-
-    def _comprehensive_summary_is_missing(md_text: Any) -> bool:
-        s = str(md_text or "").strip()
-        if not s:
-            return True
-        compact = re.sub(r"\s+", " ", s).strip().lower()
-        if compact in {"n/a", "## detailed condition report n/a", "## detailed condition report -", "## detailed condition report none"}:
-            return True
-        lines = [ln.strip() for ln in s.splitlines() if ln.strip()]
-        if len(lines) <= 2 and any(ln.lower().startswith("## detailed condition report") for ln in lines):
-            tail = " ".join([ln for ln in lines if not ln.lower().startswith("## detailed condition report")]).strip().lower()
-            if tail in {"", "n/a", "none", "-"}:
-                return True
-        return False
-
-    def _build_comprehensive_estimate_cost_block(source_text: str) -> str:
-        txt = str(source_text or "")
-        rates = {}
-        body_rate = paint_rate = tax_pct = None
-        m = re.search(r"(?is)Body\s*:\s*([0-9]+(?:\.[0-9]{1,2})?)\s*Paint\s*:\s*([0-9]+(?:\.[0-9]{1,2})?)", txt)
-        if m:
-            body_rate = float(m.group(1))
-            paint_rate = float(m.group(2))
-        m_tax = re.search(r"(?i)Sales\s+Tax[^0-9]{0,20}([0-9]+(?:\.[0-9]{2,4})?)%", txt)
-        if m_tax:
-            tax_pct = float(m_tax.group(1))
-        parts_total = None
-        m_parts = re.search(r"(?i)Parts\s*[:\-]?\s*\$\s*([0-9,]+(?:\.[0-9]{2})?)", txt)
-        if m_parts:
-            parts_total = float(m_parts.group(1).replace(',', ''))
-        body_total = None
-        paint_total = None
-        paint_mat_total = None
-        tax_total = None
-        total_cost = None
-        m_body = re.search(r"(?i)Body\s+Labor\s+([0-9.]+)\s*Hrs\s*\$\s*([0-9,]+(?:\.[0-9]{2})?)", txt)
-        if m_body:
-            body_total = float(m_body.group(2).replace(',', ''))
-            if body_rate is None:
-                try:
-                    body_rate = round(body_total / float(m_body.group(1)), 2)
-                except Exception:
-                    pass
-        m_paint = re.search(r"(?i)Paint\s+Labor\s+([0-9.]+)\s*Hrs\s*\$\s*([0-9,]+(?:\.[0-9]{2})?)", txt)
-        if m_paint:
-            paint_total = float(m_paint.group(2).replace(',', ''))
-            if paint_rate is None:
-                try:
-                    paint_rate = round(paint_total / float(m_paint.group(1)), 2)
-                except Exception:
-                    pass
-        m_mat = re.search(r"(?i)Paint\s+(?:Supplies|Materials)\s+([0-9.]+)\s*Hrs\s*\$\s*([0-9,]+(?:\.[0-9]{2})?)", txt)
-        if m_mat:
-            paint_mat_total = float(m_mat.group(2).replace(',', ''))
-        m_tax_amt = re.search(r"(?i)Sales\s+Tax\s+\$\s*([0-9,]+(?:\.[0-9]{2})?)", txt)
-        if m_tax_amt:
-            tax_total = float(m_tax_amt.group(1).replace(',', ''))
-        m_total = re.search(r"(?i)(?:Total\s+Cost\s+of\s+Repairs|Total)\s*\$\s*([0-9,]+(?:\.[0-9]{2})?)", txt)
-        if m_total:
-            total_cost = float(m_total.group(1).replace(',', ''))
-
-        op_lines = []
-        for ln in txt.splitlines():
-            s = re.sub(r"\s+", " ", ln).strip()
-            if not s:
-                continue
-            if re.search(r"(?i)(?:O/H|Overhaul|Repl|Replace|Repair|Refn|Refinish|Blend|Headlamp|Fender|Bumper)", s) and re.search(r"\$\s*[0-9,]+(?:\.[0-9]{2})?|[0-9]+(?:\.[0-9]+)?\s*Hrs", s):
-                op_lines.append(s)
-        op_lines = op_lines[:8]
-
-        if not any(v is not None for v in (parts_total, body_total, paint_total, paint_mat_total, tax_total, total_cost)):
-            return _professional_cost_fallback()
-
-        lines = ["## Approximate Repair Cost Breakdown", "Estimate of Record totals (documented):"]
-        if parts_total is not None:
-            lines.append(f"- Parts: {_money2(parts_total)}")
-        if body_total is not None:
-            if body_rate is not None and m_body:
-                lines.append(f"- Body labor: {m_body.group(1)} hrs @ ${body_rate:,.2f}/hr = {_money2(body_total)}")
-            else:
-                lines.append(f"- Body labor: {_money2(body_total)}")
-        if paint_total is not None:
-            if paint_rate is not None and m_paint:
-                lines.append(f"- Paint labor: {m_paint.group(1)} hrs @ ${paint_rate:,.2f}/hr = {_money2(paint_total)}")
-            else:
-                lines.append(f"- Paint labor: {_money2(paint_total)}")
-        if paint_mat_total is not None:
-            lines.append(f"- Paint supplies/materials: {_money2(paint_mat_total)}")
-        if tax_total is not None:
-            if tax_pct is not None and parts_total is not None and paint_mat_total is not None:
-                lines.append(f"- Sales tax: {_money2(tax_total)} ({tax_pct:.4f}% on {_money2(parts_total + paint_mat_total)})")
-            else:
-                lines.append(f"- Sales tax: {_money2(tax_total)}")
-        if total_cost is not None:
-            lines.append(f"- Total cost of repairs: {_money2(total_cost)}")
-        if op_lines:
-            lines.append("Operations written (high level):")
-            lines.extend([f"- {x}" for x in op_lines])
-        return "\n".join(lines).strip()
 
     try:
         if ai_intent != "damage_report_from_photos":
-            if _needs_customer_scrub(result.get("summary_markdown")) or _comprehensive_summary_is_missing(result.get("summary_markdown")):
+            if _summary_is_effectively_na(result.get("summary_markdown")) or _needs_customer_scrub(result.get("summary_markdown")):
                 result["summary_markdown"] = _professional_summary_fallback()
-            _existing_cost_text = str(result.get("estimated_costs_markdown") or "").strip()
-            _existing_cost_compact = re.sub(r"\s+", " ", _existing_cost_text).strip().lower()
-            _cost_placeholder = (
-                (not _existing_cost_text)
-                or ("approximate repair cost evaluation should reflect the estimate lines" in _existing_cost_compact)
-                or (_existing_cost_compact == "## approximate repair cost breakdown")
-            )
-            if _cost_placeholder:
-                result["estimated_costs_markdown"] = _build_comprehensive_estimate_cost_block(uploaded_text_all or "")
-            elif _needs_customer_scrub(result.get("estimated_costs_markdown")):
-                result["estimated_costs_markdown"] = _professional_cost_fallback()
             if _needs_customer_scrub(result.get("fraud_markdown")):
                 result["fraud_markdown"] = _professional_fraud_fallback()
-            if _needs_customer_scrub(result.get("conclusion")) or _naish(result.get("conclusion")):
+            if _comprehensive_cost_is_too_thin(result.get("estimated_costs_markdown")):
+                result["estimated_costs_markdown"] = _build_comprehensive_cost_from_estimate_text()
+            if _needs_customer_scrub(result.get("conclusion")):
                 result["conclusion"] = _professional_conclusion_fallback()
     except Exception:
         pass
@@ -4197,23 +4223,10 @@ async def vision_review(
         mc(f"Compliance Score: {result['compliance_score']}")
         pdf_status = result["redaction_status"].replace("✅", "OK")
         mc(pdf_status)
-        _comp_summary_text = (smark or '').strip()
-        if _comprehensive_summary_is_missing(_comp_summary_text):
-            _comp_summary_text = _professional_summary_fallback()
-            result["summary_markdown"] = _comp_summary_text
-        _comp_cost_text = (result.get("estimated_costs_markdown") or "").strip()
-        _comp_cost_compact = re.sub(r"\s+", " ", _comp_cost_text).strip().lower()
-        if (not _comp_cost_text) or ("approximate repair cost evaluation should reflect the estimate lines" in _comp_cost_compact):
-            _comp_cost_text = _build_comprehensive_estimate_cost_block(uploaded_text_all or "")
-            result["estimated_costs_markdown"] = _comp_cost_text
-        _comp_conclusion_text = (result.get("conclusion") or "").strip()
-        if _naish(_comp_conclusion_text):
-            _comp_conclusion_text = _professional_conclusion_fallback()
-            result["conclusion"] = _comp_conclusion_text
-        _comp_section_bar("NSPXN.com Condition Summary"); mc(_comp_summary_text)
-        _comp_section_bar("Approximate Repair Cost Breakdown"); mc(_comp_cost_text)
+        _comp_section_bar("NSPXN.com Condition Summary"); mc((smark or '').strip())
+        _comp_section_bar("Approximate Repair Cost Breakdown"); mc((result.get("estimated_costs_markdown") or "").strip())
         _comp_section_bar("Fraud Detection"); mc((result["fraud_markdown"] or 'N/A').strip())
-        _comp_section_bar("Conclusion"); mc(_comp_conclusion_text)
+        _comp_section_bar("Conclusion"); mc((result.get("conclusion") or "").strip())
 
         # --- AI Disclaimer (after report content) ---
         try:
@@ -4394,6 +4407,3 @@ async def download_pdf(file_number: Optional[str] = None, filename: Optional[str
         return JSONResponse(status_code=404, content={"detail": "Not Found"})
     latest = max(candidates, key=lambda p: os.path.getmtime(p))
     return FileResponse(path=latest, media_type="application/pdf", filename=os.path.basename(latest))
-
-
-
