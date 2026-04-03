@@ -2992,20 +2992,16 @@ async def vision_review(
             return []
         vals: List[int] = []
 
-        for m in re.finditer(r"(?i)\bDeduction\s*:\s*-\s*(\d+)\b", s):
-            try:
-                vals.append(int(m.group(1)))
-            except Exception:
-                pass
+        deduction_patterns = [
+            r"(?i)\bDeduction\b\s*:\s*-\s*(\d+)\b",
+            r"(?i)\bDeduction\b\s*-\s*(\d+)\b",
+            r":\s*-\s*(\d+)\b",
+            r"(?i)\((?:[^)]*?)\b(?:Minor|Moderate|Major)\b\s*-\s*(\d+)(?:[^)]*?)\)",
+            r"\((?:-|–)\s*(\d+)\)",
+        ]
 
-        for m in re.finditer(r"(?i)\((?:[^)]*?)\b(?:Minor|Moderate|Major)\b\s*-\s*(\d+)(?:[^)]*?)\)", s):
-            try:
-                vals.append(int(m.group(1)))
-            except Exception:
-                pass
-
-        if not vals:
-            for m in re.finditer(r"\((?:-|–)\s*(\d+)\)", s):
+        for pat in deduction_patterns:
+            for m in re.finditer(pat, s):
                 try:
                     vals.append(int(m.group(1)))
                 except Exception:
@@ -3018,7 +3014,6 @@ async def vision_review(
                 seen.add(v)
                 deduped.append(v)
         return deduped
-
     def _build_locked_compliance_score_rationale(md_text: str, current_score: str) -> str:
         t = str(md_text or "").replace("\r\n", "\n").replace("\r", "\n")
         lines = t.splitlines()
