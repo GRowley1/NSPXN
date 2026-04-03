@@ -3286,6 +3286,86 @@ async def vision_review(
 
     result["redaction_status"] = "Redacted PII: Successful ✅"
 
+    # -----------------------
+    # PRE-PDF VALIDATOR (Comprehensive / Guidelines only)
+    # Blocks customer PDF generation when core sections are fallback/placeholder content.
+    # -----------------------
+    def _predf_summary_invalid(v: Any) -> bool:
+        s = str(v or "").strip()
+        if not s:
+            return True
+        low = s.lower()
+        if re.search(r"(?im)^##\s*Detailed\s+Condition\s+Report\s*$", s):
+            # heading only
+            lines = [ln.strip() for ln in s.splitlines() if ln.strip() and not ln.strip().startswith('#')]
+            if not lines:
+                return True
+        if re.search(r"(?im)^##\s*Detailed\s+Condition\s+Report\s*\n\s*N/?A\s*$", s):
+            return True
+        bad_phrases = [
+            "structured narrative response did not fully validate",
+            "deterministic extraction completed",
+            "preserved deterministic extracted facts",
+            "instead of printing blank fields",
+            "fallback confirms the job executed",
+            "available identifiers instead of returning blank sections",
+        ]
+        return any(p in low for p in bad_phrases)
+
+    def _predf_cost_invalid(v: Any) -> bool:
+        s = str(v or "").strip()
+        if not s:
+            return True
+        low = s.lower()
+        bad_phrases = [
+            "approximate repair cost evaluation should reflect the estimate lines",
+            "final repair amounts remain subject to estimate validation and qualified appraiser review",
+            "any final amount remains subject to estimate validation and appraiser review",
+            "estimate of record totals could not be extracted with confidence",
+            "unable to generate cost approximation on this run",
+        ]
+        if any(p in low for p in bad_phrases):
+            return True
+        if len(re.findall(r"\$\s*[0-9]", s)) < 2:
+            return True
+        return False
+
+    def _predf_conclusion_invalid(v: Any) -> bool:
+        s = str(v or "").strip()
+        if not s:
+            return True
+        low = s.lower()
+        bad_phrases = [
+            "the uploaded files were processed successfully",
+            "the available review evidence was preserved",
+            "final claim handling should proceed after confirmation",
+            "should not be relied upon as fully documented until",
+            "available estimate and photo requirements",
+        ]
+        return any(p in low for p in bad_phrases)
+
+    if ai_intent in {"comprehensive", "guidelines_only"}:
+        _predf_reasons: List[str] = []
+        if _predf_summary_invalid(result.get("summary_markdown")):
+            _predf_reasons.append("REPORT BLOCKED: invalid or fallback Detailed Condition Report")
+        if _predf_cost_invalid(result.get("estimated_costs_markdown")):
+            _predf_reasons.append("REPORT BLOCKED: invalid or fallback Approximate Repair Cost Breakdown")
+        if _predf_conclusion_invalid(result.get("conclusion")):
+            _predf_reasons.append("REPORT BLOCKED: invalid or fallback Conclusion")
+        if _predf_reasons:
+            log.error("REPORT BLOCKED: pre-PDF validator failure | reasons=%s", _predf_reasons)
+            return JSONResponse(
+                status_code=200,
+                content={
+                    "status": "blocked",
+                    "error": "REPORT BLOCKED: comprehensive quality gate failure",
+                    "reasons": _predf_reasons,
+                    "file_number": file_number,
+                    "request_type": req_label,
+                    "redaction_status": result.get("redaction_status", "Redacted PII: Successful ✅"),
+                },
+            )
+
     # PDF helpers
     # -----------------------
     def _pdf_sanitize(text: str, max_token_len: int = 60) -> str:
@@ -4477,4 +4557,5 @@ async def download_pdf(file_number: Optional[str] = None, filename: Optional[str
         return JSONResponse(status_code=404, content={"detail": "Not Found"})
     latest = max(candidates, key=lambda p: os.path.getmtime(p))
     return FileResponse(path=latest, media_type="application/pdf", filename=os.path.basename(latest))
+
 
