@@ -2986,6 +2986,39 @@ async def vision_review(
     # - estimated_costs_markdown
     # - fraud_markdown
     # -----------------------
+    def _extract_locked_deductions_from_line(line_text: str) -> List[int]:
+        s = str(line_text or "").strip()
+        if not s:
+            return []
+        vals: List[int] = []
+
+        for m in re.finditer(r"(?i)\bDeduction\s*:\s*-\s*(\d+)\b", s):
+            try:
+                vals.append(int(m.group(1)))
+            except Exception:
+                pass
+
+        for m in re.finditer(r"(?i)\((?:[^)]*?)\b(?:Minor|Moderate|Major)\b\s*-\s*(\d+)(?:[^)]*?)\)", s):
+            try:
+                vals.append(int(m.group(1)))
+            except Exception:
+                pass
+
+        if not vals:
+            for m in re.finditer(r"\((?:-|–)\s*(\d+)\)", s):
+                try:
+                    vals.append(int(m.group(1)))
+                except Exception:
+                    pass
+
+        deduped: List[int] = []
+        seen = set()
+        for v in vals:
+            if v not in seen:
+                seen.add(v)
+                deduped.append(v)
+        return deduped
+
     def _build_locked_compliance_score_rationale(md_text: str, current_score: str) -> str:
         t = str(md_text or "").replace("\r\n", "\n").replace("\r", "\n")
         lines = t.splitlines()
@@ -3006,7 +3039,7 @@ async def vision_review(
 
         score_block = lines[start_idx:end_idx]
         body_lines = []
-        deductions = []
+        deductions: List[int] = []
         for ln in score_block[1:]:
             s = (ln or "").strip()
             if not s:
@@ -3038,12 +3071,7 @@ async def vision_review(
             cleaned_s = cleaned_ln.strip()
             if not cleaned_s:
                 continue
-            m = re.search(r"(?i)Deduction\s*:\s*-\s*(\d+)|\((?:-|–)?(\d+)\)", cleaned_s)
-            if m:
-                try:
-                    deductions.append(int(m.group(1) or m.group(2)))
-                except Exception:
-                    pass
+            deductions.extend(_extract_locked_deductions_from_line(cleaned_s))
             body_lines.append(cleaned_ln)
 
         total = max(0, 100 - sum(deductions))
