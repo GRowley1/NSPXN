@@ -2490,13 +2490,11 @@ async def vision_review(
             r"^\s*[-*]?\s*Paint\s+materials\s*:\s*\$\s*([0-9][0-9,]*(?:\.[0-9]{1,2})?)",
         ])
         tax_amt = _grab([
-            r"^\s*[-*]?\s*Sales\s+tax\s*\(assumed\s*[0-9]+(?:\.[0-9]+)?%\s*for\s*approximation\)\s*[:=]\s*\$\s*([0-9][0-9,]*(?:\.[0-9]{1,2})?)",
-            r"^\s*[-*]?\s*Sales\s+tax.*?:\s*\$\s*([0-9][0-9,]*(?:\.[0-9]{1,2})?)",
+            r"^\s*[-*]?\s*Sales\s+tax\s*\(assumed\s*7%\s*for\s*approximation\)\s*=\s*\$\s*([0-9][0-9,]*(?:\.[0-9]{1,2})?)",
             r"^\s*[-*]?\s*Tax\s*:\s*\$\s*([0-9][0-9,]*(?:\.[0-9]{1,2})?)",
         ])
         approx_total = _grab([
             r"^\s*\*\*?\s*Approximate\s+Repair\s+Total\s*:\s*\$\s*([0-9][0-9,]*(?:\.[0-9]{1,2})?)",
-            r"^\s*\*\*?\s*Approximate\s+total\s+repair\s+cost\s*:\s*\$\s*([0-9][0-9,]*(?:\.[0-9]{1,2})?)",
         ])
 
         if labor is None:
@@ -2505,13 +2503,12 @@ async def vision_review(
                 r"^\s*[-*]?\s*Body(?:\s+labor)?\s*:\s*\$\s*([0-9][0-9,]*(?:\.[0-9]{1,2})?)",
             ]) or 0.0
             paint = _grab([
-                r"^\s*[-*]?\s*(?:Paint|Refinish)\s+labor\s*:\s*.*?=\s*\$\s*([0-9][0-9,]*(?:\.[0-9]{1,2})?)",
-                r"^\s*[-*]?\s*(?:Paint|Refinish)\s+labor\s*:\s*\$\s*([0-9][0-9,]*(?:\.[0-9]{1,2})?)",
+                r"^\s*[-*]?\s*Paint\s+labor\s*:\s*.*?=\s*\$\s*([0-9][0-9,]*(?:\.[0-9]{1,2})?)",
+                r"^\s*[-*]?\s*Paint\s+labor\s*:\s*\$\s*([0-9][0-9,]*(?:\.[0-9]{1,2})?)",
             ]) or 0.0
             mechanical = _grab([
                 r"^\s*[-*]?\s*Mechanical(?:/SRS/Glass|/diagnostic)?\s*:\s*.*?=\s*\$\s*([0-9][0-9,]*(?:\.[0-9]{1,2})?)",
                 r"^\s*[-*]?\s*Mechanical(?:/SRS/Glass|/diagnostic)?\s*:\s*\$\s*([0-9][0-9,]*(?:\.[0-9]{1,2})?)",
-                r"^\s*[-*]?\s*Mechanical[^=\n]*=\s*\$\s*([0-9][0-9,]*(?:\.[0-9]{1,2})?)",
             ]) or 0.0
             setup = _grab([
                 r"^\s*[-*]?\s*Setup\s*&\s*Measure\s*:\s*.*?=\s*\$\s*([0-9][0-9,]*(?:\.[0-9]{1,2})?)",
@@ -2526,14 +2523,7 @@ async def vision_review(
                 labor = calc_labor
 
         if tax_amt is None and parts is not None and paint_materials is not None:
-            _rate_match = re.search(r"(?im)^\s*[-*]?\s*(?:Tax\s+rate|Sales\s+tax)\b[^\n]*?([0-9]+(?:\.[0-9]+)?)\s*%", _cm)
-            _rate_val = 0.07
-            if _rate_match:
-                try:
-                    _rate_val = float(_rate_match.group(1)) / 100.0
-                except Exception:
-                    _rate_val = 0.07
-            tax_amt = round((parts + paint_materials) * _rate_val, 2)
+            tax_amt = round((parts + paint_materials) * 0.07, 2)
         if approx_total is None and parts is not None and paint_materials is not None and labor is not None and tax_amt is not None:
             approx_total = round(labor + parts + paint_materials + tax_amt, 2)
 
@@ -4562,6 +4552,7 @@ async def download_pdf(file_number: Optional[str] = None, filename: Optional[str
         return JSONResponse(status_code=404, content={"detail": "Not Found"})
     latest = max(candidates, key=lambda p: os.path.getmtime(p))
     return FileResponse(path=latest, media_type="application/pdf", filename=os.path.basename(latest))
+
 
 
 
