@@ -2322,6 +2322,14 @@ async def vision_review(
                 hrs = _round_half(float(amt) / float(rte))
                 return hrs, rte, amt
 
+            # Case 3b: amount only, but usable labor evidence exists.
+            # Do NOT zero the bucket just because the model omitted hours/rate.
+            # Preserve the labor dollars and derive a consistent tuple from a locked rate.
+            if amt > 0:
+                locked_rate = rte if rte > 0 else (fb if fb > 0 else 75.0)
+                hrs = _round_half(float(amt) / float(locked_rate))
+                return hrs, locked_rate, amt
+
             # Case 4: partial/empty bucket => zero the whole bucket consistently
             return 0.0, rte if rte > 0 else 0.0, 0.0
 
@@ -4121,6 +4129,10 @@ async def download_pdf(file_number: Optional[str] = None, filename: Optional[str
         return JSONResponse(status_code=404, content={"detail": "Not Found"})
     latest = max(candidates, key=lambda p: os.path.getmtime(p))
     return FileResponse(path=latest, media_type="application/pdf", filename=os.path.basename(latest))
+
+
+
+
 
 
 
