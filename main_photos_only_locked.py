@@ -2015,8 +2015,9 @@ async def vision_review(
             r"^\s*[-*]?\s*Rear\s+glass\s+install\s*\(sublet\s+allowance\)\s*:\s*\$\s*([0-9][0-9,]*(?:\.[0-9]{1,2})?)",
         ])
         tax_amt = _grab([
-            r"^\s*[-*]?\s*Sales\s+tax\s*\(assumed\s*7%\s*for\s*approximation\)\s*=\s*\$\s*([0-9][0-9,]*(?:\.[0-9]{1,2})?)",
-            r"^\s*[-*]?\s*Tax\s*:\s*\$\s*([0-9][0-9,]*(?:\.[0-9]{1,2})?)",
+            r"^\s*[-*]?\s*Sales\s+tax\s*\(assumed\s*[0-9]+(?:\.[0-9]+)?%\s*for\s*approximation\)\s*=\s*\$\s*([0-9][0-9,]*(?:\.[0-9]{1,2})?)",
+            r"^\s*[-*]?\s*(?:Estimated\s+tax|Sales\s+tax|Tax)\s*:\s*\$\s*([0-9][0-9,]*(?:\.[0-9]{1,2})?)",
+            r"^\s*[-*]?\s*(?:Estimated\s+tax|Sales\s+tax|Tax)\b.*?=\s*\$\s*([0-9][0-9,]*(?:\.[0-9]{1,2})?)",
         ])
         approx_total = None
 
@@ -2028,10 +2029,14 @@ async def vision_review(
             paint = _grab([
                 r"^\s*[-*]?\s*Paint\s+labor\s*:\s*.*?=\s*\$\s*([0-9][0-9,]*(?:\.[0-9]{1,2})?)",
                 r"^\s*[-*]?\s*Paint\s+labor\s*:\s*\$\s*([0-9][0-9,]*(?:\.[0-9]{1,2})?)",
+                r"^\s*[-*]?\s*Refinish(?:\s+labor)?\s*:\s*.*?=\s*\$\s*([0-9][0-9,]*(?:\.[0-9]{1,2})?)",
+                r"^\s*[-*]?\s*Refinish(?:\s+labor)?\s*:\s*\$\s*([0-9][0-9,]*(?:\.[0-9]{1,2})?)",
             ]) or 0.0
             mechanical = _grab([
                 r"^\s*[-*]?\s*Mechanical(?:/SRS/Glass|/diagnostic)?\s*:\s*.*?=\s*\$\s*([0-9][0-9,]*(?:\.[0-9]{1,2})?)",
                 r"^\s*[-*]?\s*Mechanical(?:/SRS/Glass|/diagnostic)?\s*:\s*\$\s*([0-9][0-9,]*(?:\.[0-9]{1,2})?)",
+                r"^\s*[-*]?\s*Mechanical\s+labor\s*:\s*.*?=\s*\$\s*([0-9][0-9,]*(?:\.[0-9]{1,2})?)",
+                r"^\s*[-*]?\s*Mechanical\s+labor\s*:\s*\$\s*([0-9][0-9,]*(?:\.[0-9]{1,2})?)",
             ]) or 0.0
             setup = _grab([
                 r"^\s*[-*]?\s*Setup\s*&\s*Measure\s*:\s*.*?=\s*\$\s*([0-9][0-9,]*(?:\.[0-9]{1,2})?)",
@@ -2380,10 +2385,19 @@ async def vision_review(
         - if explicit parts subtotal is missing, itemized part lines are summed and become the single parts subtotal
         - carry the actual hours/rates used so the PDF can show how each labor total was derived
         """
-        if tax_rate_value is None or not isinstance(tax_rate_value, (int, float)) or tax_rate_value <= 0:
-            tax_rate_value = 0.07
-
         text_local = str(md_text or '').replace("\r\n", "\n").replace("\r", "\n")
+
+        if tax_rate_value is None or not isinstance(tax_rate_value, (int, float)) or tax_rate_value <= 0:
+            _m_tax_rate_inline = re.search(r'(?im)^\s*[-*]?\s*Tax\s+rate\s*:\s*([0-9]+(?:\.[0-9]+)?)\s*%\s*$', text_local)
+            if not _m_tax_rate_inline:
+                _m_tax_rate_inline = re.search(r'(?im)\bTax\s+rate\s*(?:\(assumed\))?\s*[:\-]?\s*([0-9]+(?:\.[0-9]+)?)\s*%', text_local)
+            if _m_tax_rate_inline:
+                try:
+                    tax_rate_value = float(_m_tax_rate_inline.group(1)) / 100.0
+                except Exception:
+                    tax_rate_value = 0.07
+            else:
+                tax_rate_value = 0.07
 
         def _grab_money_line(pats: List[str]) -> Optional[float]:
             for pat in pats:
@@ -2468,7 +2482,7 @@ async def vision_review(
         ])
         paint_hours = _grab_float_line([
             r'(?im)^\s*[-*]?\s*Paint\s+labor\s*\(?(?:refinish)?\)?\s*:\s*([0-9]+(?:\.[0-9]+)?)\s*hrs?\b',
-            r'(?im)^\s*[-*]?\s*Refinish\s*:\s*([0-9]+(?:\.[0-9]+)?)\s*hrs?\b',
+            r'(?im)^\s*[-*]?\s*Refinish(?:\s+labor)?\s*:\s*([0-9]+(?:\.[0-9]+)?)\s*hrs?\b',
         ])
         setup_hours = _grab_float_line([
             r'(?im)^\s*[-*]?\s*Setup\s*&\s*Measure[^\n]*?:\s*([0-9]+(?:\.[0-9]+)?)\s*hrs?\b',
@@ -2516,8 +2530,8 @@ async def vision_review(
         paint_labor_explicit = _grab_money_line([
             r'^\s*[-*]?\s*Paint\s+labor\s*:\s*.*?=\s*\$\s*([0-9][0-9,]*(?:\.[0-9]{2})?)\b',
             r'^\s*[-*]?\s*Paint\s+labor\s*:\s*.*?\*\*\$\s*([0-9][0-9,]*(?:\.[0-9]{2})?)\*\*\s*$',
-            r'^\s*[-*]?\s*Refinish\s*:\s*.*?=\s*\$\s*([0-9][0-9,]*(?:\.[0-9]{2})?)\b',
-            r'^\s*[-*]?\s*Refinish\s*:\s*.*?\*\*\$\s*([0-9][0-9,]*(?:\.[0-9]{2})?)\*\*\s*$',
+            r'^\s*[-*]?\s*Refinish(?:\s+labor)?\s*:\s*.*?=\s*\$\s*([0-9][0-9,]*(?:\.[0-9]{2})?)\b',
+            r'^\s*[-*]?\s*Refinish(?:\s+labor)?\s*:\s*.*?\*\*\$\s*([0-9][0-9,]*(?:\.[0-9]{2})?)\*\*\s*$',
         ])
         setup_measure_explicit = _grab_money_line([
             r'^\s*[-*]?\s*Setup\s*&\s*Measure\s*:\s*.*?=\s*\$\s*([0-9][0-9,]*(?:\.[0-9]{2})?)\b',
@@ -2530,6 +2544,8 @@ async def vision_review(
         mech_labor_explicit = _grab_money_line([
             r'^\s*[-*]?\s*Mechanical(?:/SRS/Glass|/diagnostic)?\s*:\s*.*?=\s*\$\s*([0-9][0-9,]*(?:\.[0-9]{2})?)\b',
             r'^\s*[-*]?\s*Mechanical(?:/SRS/Glass|/diagnostic)?\s*:\s*.*?\*\*\$\s*([0-9][0-9,]*(?:\.[0-9]{2})?)\*\*\s*$',
+            r'^\s*[-*]?\s*Mechanical\s+labor\s*:\s*.*?=\s*\$\s*([0-9][0-9,]*(?:\.[0-9]{2})?)\b',
+            r'^\s*[-*]?\s*Mechanical\s+labor\s*:\s*.*?\*\*\$\s*([0-9][0-9,]*(?:\.[0-9]{2})?)\*\*\s*$',
         ])
 
         # Preserve hrs @ rate = total formatting by deriving missing rates from explicit dollars when possible.
@@ -4105,6 +4121,9 @@ async def download_pdf(file_number: Optional[str] = None, filename: Optional[str
         return JSONResponse(status_code=404, content={"detail": "Not Found"})
     latest = max(candidates, key=lambda p: os.path.getmtime(p))
     return FileResponse(path=latest, media_type="application/pdf", filename=os.path.basename(latest))
+
+
+
 
 
 
