@@ -3108,8 +3108,9 @@ async def vision_review(
         _final_non_empty_output_lock()
         if ai_intent == "damage_report_from_photos":
             _raw_locked_cost_source = result.get("estimated_costs_markdown") or ""
+            _raw_summary_before_lock = str(result.get("summary_markdown") or "").strip()
             _scope_seed_text = "\n\n".join([
-                str(result.get("summary_markdown") or "").strip(),
+                _raw_summary_before_lock,
                 str(result.get("conclusion") or "").strip(),
             ]).strip()
             _inspection_location_for_lock = _normalize_location_with_zip(_extract_inspection_location(uploaded_text_all or ""), ia_company, uploaded_text_all)
@@ -3136,6 +3137,8 @@ async def vision_review(
             result["estimated_costs_markdown"] = _canonical_locked_photos_only_cost_markdown_from_parsed(
                 locked_costs_obj, tax_rate
             )
+            # Remove any model-injected cost section from the narrative so email/PDF never show two totals.
+            result["summary_markdown"] = _scrub_photo_only_narrative_cost_headers(_raw_summary_before_lock)
             _locked_total = locked_costs_obj.get("total_val") if isinstance(locked_costs_obj, dict) else None
             result["conclusion"] = _force_conclusion_to_locked_total(result.get("conclusion") or "", _locked_total)
             _final_non_empty_output_lock()
