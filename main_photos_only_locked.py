@@ -166,8 +166,10 @@ def _extract_locked_cost_overrides(ai_notes_clean: str) -> Dict[str, float]:
 
     shared_patterns = [
         r'(?i)\bbody\s*(?:and|&)\s*paint\s+labor\s+rates?\b[^0-9$]{0,20}\$?\s*([0-9]+(?:\.[0-9]+)?)',
+        r'(?i)\bbody\s*(?:and|&)\s*paint\s+labor\s+rate\b[^0-9$]{0,20}\$?\s*([0-9]+(?:\.[0-9]+)?)',
         r'(?i)\bbody\s*(?:and|&)\s*paint\b[^0-9$]{0,20}\$?\s*([0-9]+(?:\.[0-9]+)?)\s*(?:/\s*hr|per\s*hour|hr)?',
-        r'(?i)\$\s*([0-9]+(?:\.[0-9]+)?)\s*(?:/\s*hr|per\s*hour|hr)?[^\n]{0,30}\bbody\s*(?:and|&)\s*paint\s+labor\s+rates?\b',
+        r'(?i)\$\s*([0-9]+(?:\.[0-9]+)?)\s*(?:/\s*hr|per\s*hour|hr)?[^\n]{0,50}\bbody\s*(?:and|&)\s*paint\s+labor\s+rates?\b',
+        r'(?i)\$\s*([0-9]+(?:\.[0-9]+)?)\s*(?:/\s*hr|per\s*hour|hr)?[^\n]{0,50}\bbody\s*(?:and|&)\s*paint\s+labor\s+rate\b',
     ]
     for pat in shared_patterns:
         m = re.search(pat, s)
@@ -3579,16 +3581,33 @@ async def vision_review(
         return "\n".join(cleaned).strip()
 
     def _scrub_photo_only_narrative_cost_headers(md_text: str) -> str:
-        """Remove the model's internal prompt cost headers from the main narrative.
-        We render the cost breakdown as its own controlled PDF section.
+        """Remove any model-generated cost section from the narrative/email body.
+        Keep the narrative, fraud, and conclusion text only. The canonical locked
+        cost block is rendered separately from result['estimated_costs_markdown'].
         """
         if not md_text:
             return md_text or ""
+        lines_in = str(md_text).replace("\r\n", "\n").replace("\r", "\n").splitlines()
         out: List[str] = []
-        for ln in str(md_text).replace("\r\n", "\n").replace("\r", "\n").splitlines():
+        skip_cost_block = False
+        for ln in lines_in:
             s = (ln or "").strip()
+
             if re.search(r"(?i)^\s*##\s*Approximate\s+Repair\s+Cost\s+Breakdown\b", s):
+                skip_cost_block = True
                 continue
+
+            if skip_cost_block:
+                if re.search(r"(?i)^\s*##\s+(Fraud\s*&\s*Authenticity\s*Check|Fraud\s+Detection|Conclusion)\b", s):
+                    skip_cost_block = False
+                    out.append(ln)
+                    continue
+                if re.search(r"(?i)^\s*(Fraud\s*&\s*Authenticity\s*Check|Fraud\s+Detection|Conclusion)\s*$", s):
+                    skip_cost_block = False
+                    out.append(ln)
+                    continue
+                continue
+
             if re.search(r"(?i)\bPopulate\s+JSON\s+field\b", ln):
                 continue
             if re.search(r"(?i)\bSee\s+estimated_costs_markdown\s+field\b", ln):
