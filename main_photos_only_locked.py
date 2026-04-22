@@ -150,6 +150,68 @@ def _ai_notes_block(ai_notes_clean: str) -> str:
         "- If notes conflict with visible evidence or orientation is unclear, say so and defer to what is visible.\n"
     )
 
+
+def _extract_locked_cost_overrides(ai_notes_clean: str) -> Dict[str, float]:
+    """Best-effort extraction of explicit labor/tax overrides from Add'l Notes."""
+    out: Dict[str, float] = {}
+    s = str(ai_notes_clean or "")
+    if not s:
+        return out
+
+    def _to_float(v: str) -> Optional[float]:
+        try:
+            return float(str(v).replace(",", "").strip())
+        except Exception:
+            return None
+
+    shared_patterns = [
+        r'(?i)\bbody\s*(?:and|&)\s*paint\s+labor\s+rates?\b[^0-9$]{0,20}\$?\s*([0-9]+(?:\.[0-9]+)?)',
+        r'(?i)\bbody\s*(?:and|&)\s*paint\b[^0-9$]{0,20}\$?\s*([0-9]+(?:\.[0-9]+)?)\s*(?:/\s*hr|per\s*hour|hr)?',
+        r'(?i)\$\s*([0-9]+(?:\.[0-9]+)?)\s*(?:/\s*hr|per\s*hour|hr)?[^\n]{0,30}\bbody\s*(?:and|&)\s*paint\s+labor\s+rates?\b',
+    ]
+    for pat in shared_patterns:
+        m = re.search(pat, s)
+        if m:
+            val = _to_float(m.group(1))
+            if isinstance(val, float) and val > 0:
+                out['body_rate'] = val
+                out['paint_rate'] = val
+                break
+
+    if 'body_rate' not in out:
+        m = re.search(r'(?i)\bbody\s+labor\s+rates?\b[^0-9$]{0,20}\$?\s*([0-9]+(?:\.[0-9]+)?)', s)
+        if m:
+            val = _to_float(m.group(1))
+            if isinstance(val, float) and val > 0:
+                out['body_rate'] = val
+    if 'paint_rate' not in out:
+        m = re.search(r'(?i)\bpaint\s+labor\s+rates?\b[^0-9$]{0,20}\$?\s*([0-9]+(?:\.[0-9]+)?)', s)
+        if m:
+            val = _to_float(m.group(1))
+            if isinstance(val, float) and val > 0:
+                out['paint_rate'] = val
+
+    tax_patterns = [
+        r'(?i)\b(?:sales\s+)?tax\s+rate\b[^0-9]{0,20}([0-9]+(?:\.[0-9]+)?)\s*%',
+        r'(?i)\b([0-9]+(?:\.[0-9]+)?)\s*%\s*(?:sales\s+)?tax\s+rate\b',
+        r'(?i)\b(?:sales\s+)?tax\b[^0-9]{0,10}([0-9]+(?:\.[0-9]+)?)\s*%',
+        r'(?i)\b([0-9]+(?:\.[0-9]+)?)\s*%\s*(?:sales\s+)?tax\b',
+    ]
+    for pat in tax_patterns:
+        m = re.search(pat, s)
+        if m:
+            val = _to_float(m.group(1))
+            if isinstance(val, float) and val > 0:
+                out['tax_rate'] = (val / 100.0) if val > 1 else val
+                break
+
+    if 'body_rate' in out and 'paint_rate' not in out and re.search(r'(?i)\bbody\s*(?:and|&)\s*paint\b', s):
+        out['paint_rate'] = out['body_rate']
+    if 'paint_rate' in out and 'body_rate' not in out and re.search(r'(?i)\bbody\s*(?:and|&)\s*paint\b', s):
+        out['body_rate'] = out['paint_rate']
+
+    return out
+
 # -----------------------
 # Approximate Repair Cost Breakdown (location-based rates)
 # -----------------------
@@ -1007,6 +1069,7 @@ async def vision_review(
     # Normalize/sanitize notes so they cannot break structured prompting
     ai_notes_used = _normalize_ai_notes(ai_notes_used)
     ai_notes_block = _ai_notes_block(ai_notes_used)
+    locked_cost_overrides = _extract_locked_cost_overrides(ai_notes_used)
 
     pdf_text_fulls: List[str] = []  # full PDF text for supplement detection
 
@@ -2998,7 +3061,14 @@ async def vision_review(
             ]).strip()
             _inspection_location_for_lock = _normalize_location_with_zip(_extract_inspection_location(uploaded_text_all or ""), ia_company, uploaded_text_all)
             _seed_rates_for_lock = _lookup_rates(_inspection_location_for_lock)
-            if tax_rate is None or not isinstance(tax_rate, (int, float)) or tax_rate <= 0:
+            if isinstance(locked_cost_overrides, dict):
+                if isinstance(locked_cost_overrides.get("body_rate"), (int, float)) and float(locked_cost_overrides.get("body_rate") or 0.0) > 0:
+                    _seed_rates_for_lock["body_rate"] = float(locked_cost_overrides.get("body_rate"))
+                if isinstance(locked_cost_overrides.get("paint_rate"), (int, float)) and float(locked_cost_overrides.get("paint_rate") or 0.0) > 0:
+                    _seed_rates_for_lock["paint_rate"] = float(locked_cost_overrides.get("paint_rate"))
+            if isinstance(locked_cost_overrides, dict) and isinstance(locked_cost_overrides.get("tax_rate"), (int, float)) and float(locked_cost_overrides.get("tax_rate") or 0.0) > 0:
+                tax_rate = float(locked_cost_overrides.get("tax_rate"))
+            elif tax_rate is None or not isinstance(tax_rate, (int, float)) or tax_rate <= 0:
                 tax_rate = _lookup_tax_rate(_inspection_location_for_lock)
             locked_costs_obj = _parse_locked_photos_only_costs(
                 _raw_locked_cost_source,
@@ -4027,6 +4097,8 @@ async def vision_review(
                 f"{result['redaction_status']}\n\n"
                 "Condition Summary\n"
                 f"{(result['summary_markdown'] or 'N/A')}\n\n"
+                "Approximate Repair Cost Breakdown\n"
+                f"{(result['estimated_costs_markdown'] or 'N/A')}\n\n"
                 "Fraud & Authenticity Check\n"
                 f"{(result['fraud_markdown'] or 'N/A')}\n\n"
                 "Conclusion\n"
@@ -4129,6 +4201,17 @@ async def download_pdf(file_number: Optional[str] = None, filename: Optional[str
         return JSONResponse(status_code=404, content={"detail": "Not Found"})
     latest = max(candidates, key=lambda p: os.path.getmtime(p))
     return FileResponse(path=latest, media_type="application/pdf", filename=os.path.basename(latest))
+
+
+
+
+
+
+
+
+
+
+
 
 
 
