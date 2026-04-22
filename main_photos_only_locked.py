@@ -2447,6 +2447,59 @@ async def vision_review(
         )
         return out
 
+    def _apply_locked_rate_overrides_to_parsed(parsed: Dict[str, Any], overrides: Optional[Dict[str, float]] = None) -> Dict[str, Any]:
+        """Force explicit Add'l Notes labor-rate overrides into the locked parsed object.
+
+        This is intentionally narrow:
+        - only touch rates explicitly supplied by the user notes
+        - keep tax override handling unchanged
+        - recompute the matching labor bucket from hours @ overridden rate when hours exist
+        - if a bucket has dollars but no hours, derive hours from the overridden rate
+        - then run the normal backend lock so subtotal/tax/total stay consistent
+        """
+        out = dict(parsed or {})
+        ov = dict(overrides or {})
+
+        def _pos(v: Any) -> Optional[float]:
+            try:
+                x = float(v)
+                return x if x > 0 else None
+            except Exception:
+                return None
+
+        body_override = _pos(ov.get('body_rate'))
+        paint_override = _pos(ov.get('paint_rate'))
+        if body_override is None and paint_override is not None:
+            body_override = paint_override
+        if paint_override is None and body_override is not None:
+            paint_override = body_override
+
+        def _rebuild(bucket_hours_key: str, bucket_rate_key: str, bucket_amount_key: str, forced_rate: Optional[float]) -> None:
+            if forced_rate is None:
+                return
+            out[bucket_rate_key] = round(float(forced_rate), 2)
+            hrs = out.get(bucket_hours_key)
+            amt = out.get(bucket_amount_key)
+            try:
+                if isinstance(hrs, (int, float)) and float(hrs) > 0:
+                    out[bucket_amount_key] = round(float(hrs) * float(forced_rate), 2)
+                    return
+            except Exception:
+                pass
+            try:
+                if isinstance(amt, (int, float)) and float(amt) > 0:
+                    out[bucket_hours_key] = round(round((float(amt) / float(forced_rate)) * 2.0) / 2.0, 1)
+                    out[bucket_amount_key] = round(float(out[bucket_hours_key]) * float(forced_rate), 2)
+            except Exception:
+                pass
+
+        _rebuild('body_hours', 'body_rate', 'body_labor', body_override)
+        _rebuild('paint_hours', 'paint_rate', 'paint_labor', paint_override)
+        # Setup & Measure follows the body rate in this locked PDF section.
+        _rebuild('setup_hours', 'body_rate', 'setup_measure', body_override)
+
+        return _apply_normalization_lock(out)
+
     def _parse_locked_photos_only_costs(md_text: str, tax_rate_value: Optional[float] = None, seed_rates: Optional[Dict[str, float]] = None, scope_text: Optional[str] = None) -> Dict[str, Any]:
         """Single source of truth for photos-only cost math.
         Locked rules:
@@ -3075,6 +3128,10 @@ async def vision_review(
                 tax_rate,
                 seed_rates=_seed_rates_for_lock,
                 scope_text=_scope_seed_text,
+            )
+            locked_costs_obj = _apply_locked_rate_overrides_to_parsed(
+                locked_costs_obj,
+                locked_cost_overrides,
             )
             result["estimated_costs_markdown"] = _canonical_locked_photos_only_cost_markdown_from_parsed(
                 locked_costs_obj, tax_rate
