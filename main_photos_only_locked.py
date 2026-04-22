@@ -2463,12 +2463,11 @@ async def vision_review(
     def _apply_locked_rate_overrides_to_parsed(parsed: Dict[str, Any], overrides: Optional[Dict[str, float]] = None) -> Dict[str, Any]:
         """Force explicit Add'l Notes labor-rate overrides into the locked parsed object.
 
-        This is intentionally narrow:
-        - only touch rates explicitly supplied by the user notes
-        - keep tax override handling unchanged
-        - recompute the matching labor bucket from hours @ overridden rate when hours exist
-        - if a bucket has dollars but no hours, derive hours from the overridden rate
-        - then run the normal backend lock so subtotal/tax/total stay consistent
+        Narrow lock behavior:
+        - if explicit user body/paint overrides exist, those are the canonical body/paint rates
+        - fallback seeded body/paint rates must never win over those explicit overrides
+        - setup/frame/mech seeds are zeroed back out unless the model cost block explicitly emitted them
+        - tax override handling remains unchanged
         """
         out = dict(parsed or {})
         ov = dict(overrides or {})
@@ -2486,6 +2485,12 @@ async def vision_review(
             body_override = paint_override
         if paint_override is None and body_override is not None:
             paint_override = body_override
+
+        explicit_body_present = bool(out.get('explicit_body_present'))
+        explicit_paint_present = bool(out.get('explicit_paint_present'))
+        explicit_setup_present = bool(out.get('explicit_setup_present'))
+        explicit_frame_present = bool(out.get('explicit_frame_present'))
+        explicit_mech_present = bool(out.get('explicit_mech_present'))
 
         def _rebuild(bucket_hours_key: str, bucket_rate_key: str, bucket_amount_key: str, forced_rate: Optional[float]) -> None:
             if forced_rate is None:
@@ -2506,15 +2511,26 @@ async def vision_review(
             except Exception:
                 pass
 
+        # Re-force explicit user body/paint overrides after any prior parse/seed step.
         _rebuild('body_hours', 'body_rate', 'body_labor', body_override)
         _rebuild('paint_hours', 'paint_rate', 'paint_labor', paint_override)
-        # Setup & Measure follows the body rate in this locked PDF section.
-        _rebuild('setup_hours', 'body_rate', 'setup_measure', body_override)
+
+        # If the model cost block did NOT explicitly include setup/frame/mech, seeded buckets must not print.
+        if (body_override is not None or paint_override is not None) and not explicit_setup_present:
+            out['setup_hours'] = 0.0
+            out['setup_measure'] = 0.0
+        if (body_override is not None or paint_override is not None) and not explicit_frame_present:
+            out['frame_hours'] = 0.0
+            out['frame_labor'] = 0.0
+            out['frame_rate'] = out.get('frame_rate') if explicit_frame_present else 0.0
+        if (body_override is not None or paint_override is not None) and not explicit_mech_present:
+            out['mech_hours'] = 0.0
+            out['mech_labor'] = 0.0
+            out['mech_rate'] = out.get('mech_rate') if explicit_mech_present else 0.0
 
         out = _apply_normalization_lock(out)
 
-        # Final hard lock: after normalization, keep explicit Add'l Notes body/paint overrides
-        # as the canonical printed rates and recompute those matching buckets from the locked hours.
+        # Final hard lock: explicit Add'l Notes body/paint overrides are the canonical printed rates.
         if body_override is not None:
             out['body_rate'] = round(float(body_override), 2)
             try:
@@ -2522,12 +2538,6 @@ async def vision_review(
                     out['body_labor'] = round(float(out.get('body_hours') or 0.0) * float(body_override), 2)
             except Exception:
                 pass
-            try:
-                if isinstance(out.get('setup_hours'), (int, float)):
-                    out['setup_measure'] = round(float(out.get('setup_hours') or 0.0) * float(body_override), 2)
-            except Exception:
-                pass
-
         if paint_override is not None:
             out['paint_rate'] = round(float(paint_override), 2)
             try:
@@ -2535,6 +2545,20 @@ async def vision_review(
                     out['paint_labor'] = round(float(out.get('paint_hours') or 0.0) * float(paint_override), 2)
             except Exception:
                 pass
+
+        # Never let body-rate fallback leak back into setup when setup was not explicit.
+        if (body_override is not None or paint_override is not None) and not explicit_setup_present:
+            out['setup_hours'] = 0.0
+            out['setup_measure'] = 0.0
+        # Keep seeded structure/mechanical buckets zeroed unless explicitly emitted by the model block.
+        if (body_override is not None or paint_override is not None) and not explicit_frame_present:
+            out['frame_hours'] = 0.0
+            out['frame_labor'] = 0.0
+            out['frame_rate'] = 0.0
+        if (body_override is not None or paint_override is not None) and not explicit_mech_present:
+            out['mech_hours'] = 0.0
+            out['mech_labor'] = 0.0
+            out['mech_rate'] = 0.0
 
         return _apply_normalization_lock(out)
 
@@ -2725,6 +2749,12 @@ async def vision_review(
             r'^\s*[-*]?\s*Mechanical\s+labor\s*:\s*.*?\*\*\$\s*([0-9][0-9,]*(?:\.[0-9]{2})?)\*\*\s*$',
         ])
 
+        explicit_body_present = (body_hours is not None) or (body_labor_explicit is not None)
+        explicit_paint_present = (paint_hours is not None) or (paint_labor_explicit is not None)
+        explicit_setup_present = (setup_hours is not None) or (setup_measure_explicit is not None)
+        explicit_frame_present = (frame_hours is not None) or (frame_labor_explicit is not None)
+        explicit_mech_present = (mech_hours is not None) or (mech_labor_explicit is not None)
+
         # Preserve hrs @ rate = total formatting by deriving missing rates from explicit dollars when possible.
         body_rate = _derive_rate_from_amount(body_labor_explicit, body_hours, body_rate)
         paint_rate = _derive_rate_from_amount(paint_labor_explicit, paint_hours, paint_rate)
@@ -2833,6 +2863,11 @@ async def vision_review(
             'tax_amt': tax_amt,
             'total_val': total_val,
             'tax_rate_value': float(tax_rate_value),
+            'explicit_body_present': explicit_body_present,
+            'explicit_paint_present': explicit_paint_present,
+            'explicit_setup_present': explicit_setup_present,
+            'explicit_frame_present': explicit_frame_present,
+            'explicit_mech_present': explicit_mech_present,
         }
         _parsed = _seed_scope_labor_buckets(((scope_text or '') + '\n' + text_local).strip(), _parsed, seed_rates=seed_rates)
         return _apply_normalization_lock(_parsed)
