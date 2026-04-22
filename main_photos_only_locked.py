@@ -2464,10 +2464,11 @@ async def vision_review(
         """Force explicit Add'l Notes labor-rate overrides into the locked parsed object.
 
         Narrow lock behavior:
-        - if explicit user body/paint overrides exist, those are the canonical body/paint rates
-        - fallback seeded body/paint rates must never win over those explicit overrides
-        - setup/frame/mech seeds are zeroed back out unless the model cost block explicitly emitted them
-        - tax override handling remains unchanged
+        - preserve the tax fix and parts capture
+        - explicit Add'l Notes body/paint overrides are the canonical body/paint rates
+        - if the model block already contains real body/paint hours, keep those exact hours and apply the locked override rates
+        - do NOT zero seeded labor buckets unless override-driven body/paint hours were actually locked first
+        - only zero setup/frame/mech when they were seeded-only and the model block did not explicitly emit them
         """
         out = dict(parsed or {})
         ov = dict(overrides or {})
@@ -2478,6 +2479,12 @@ async def vision_review(
                 return x if x > 0 else None
             except Exception:
                 return None
+
+        def _has_pos(v: Any) -> bool:
+            try:
+                return isinstance(v, (int, float)) and float(v) > 0
+            except Exception:
+                return False
 
         body_override = _pos(ov.get('body_rate'))
         paint_override = _pos(ov.get('paint_rate'))
@@ -2511,26 +2518,54 @@ async def vision_review(
             except Exception:
                 pass
 
-        # Re-force explicit user body/paint overrides after any prior parse/seed step.
+        # First pass: if the parser/model block already gave us usable body/paint hours or dollars,
+        # keep those exact hours and apply the explicit Add'l Notes rates.
         _rebuild('body_hours', 'body_rate', 'body_labor', body_override)
         _rebuild('paint_hours', 'paint_rate', 'paint_labor', paint_override)
 
-        # If the model cost block did NOT explicitly include setup/frame/mech, seeded buckets must not print.
-        if (body_override is not None or paint_override is not None) and not explicit_setup_present:
-            out['setup_hours'] = 0.0
-            out['setup_measure'] = 0.0
-        if (body_override is not None or paint_override is not None) and not explicit_frame_present:
-            out['frame_hours'] = 0.0
-            out['frame_labor'] = 0.0
-            out['frame_rate'] = out.get('frame_rate') if explicit_frame_present else 0.0
-        if (body_override is not None or paint_override is not None) and not explicit_mech_present:
-            out['mech_hours'] = 0.0
-            out['mech_labor'] = 0.0
-            out['mech_rate'] = out.get('mech_rate') if explicit_mech_present else 0.0
+        locked_body_paint_hours = (
+            _has_pos(out.get('body_hours')) or _has_pos(out.get('paint_hours')) or
+            _has_pos(out.get('body_labor')) or _has_pos(out.get('paint_labor'))
+        )
+
+        # If explicit overrides exist but no body/paint hours survived parsing, try one narrow reseed from scope.
+        # This preserves the earlier tax fix/parts capture while preventing a zero-labor collapse.
+        if (body_override is not None or paint_override is not None) and not locked_body_paint_hours:
+            try:
+                scope_seed_rates = {
+                    'body_rate': float(body_override or paint_override or 0.0),
+                    'paint_rate': float(paint_override or body_override or 0.0),
+                    'frame_rate': float(out.get('frame_rate') or 0.0),
+                    'mechanical_rate': float(out.get('mech_rate') or 0.0),
+                    'paint_supplies_rate': float(out.get('paint_mat_rate') or 0.0),
+                }
+                out = _seed_scope_labor_buckets(str(out.get('scope_text_for_rate_lock') or ''), out, seed_rates=scope_seed_rates)
+            except Exception:
+                pass
+            _rebuild('body_hours', 'body_rate', 'body_labor', body_override)
+            _rebuild('paint_hours', 'paint_rate', 'paint_labor', paint_override)
+            locked_body_paint_hours = (
+                _has_pos(out.get('body_hours')) or _has_pos(out.get('paint_hours')) or
+                _has_pos(out.get('body_labor')) or _has_pos(out.get('paint_labor'))
+            )
+
+        # Only suppress seeded setup/frame/mech after real override-driven body/paint hours were successfully locked.
+        if locked_body_paint_hours and (body_override is not None or paint_override is not None):
+            if not explicit_setup_present:
+                out['setup_hours'] = 0.0
+                out['setup_measure'] = 0.0
+            if not explicit_frame_present:
+                out['frame_hours'] = 0.0
+                out['frame_labor'] = 0.0
+                out['frame_rate'] = 0.0
+            if not explicit_mech_present:
+                out['mech_hours'] = 0.0
+                out['mech_labor'] = 0.0
+                out['mech_rate'] = 0.0
 
         out = _apply_normalization_lock(out)
 
-        # Final hard lock: explicit Add'l Notes body/paint overrides are the canonical printed rates.
+        # Final hard lock: explicit Add'l Notes body/paint overrides are the printed rates.
         if body_override is not None:
             out['body_rate'] = round(float(body_override), 2)
             try:
@@ -2546,19 +2581,19 @@ async def vision_review(
             except Exception:
                 pass
 
-        # Never let body-rate fallback leak back into setup when setup was not explicit.
-        if (body_override is not None or paint_override is not None) and not explicit_setup_present:
-            out['setup_hours'] = 0.0
-            out['setup_measure'] = 0.0
-        # Keep seeded structure/mechanical buckets zeroed unless explicitly emitted by the model block.
-        if (body_override is not None or paint_override is not None) and not explicit_frame_present:
-            out['frame_hours'] = 0.0
-            out['frame_labor'] = 0.0
-            out['frame_rate'] = 0.0
-        if (body_override is not None or paint_override is not None) and not explicit_mech_present:
-            out['mech_hours'] = 0.0
-            out['mech_labor'] = 0.0
-            out['mech_rate'] = 0.0
+        # Re-apply setup/frame/mech suppression only when body/paint hours actually survived the lock.
+        if locked_body_paint_hours and (body_override is not None or paint_override is not None):
+            if not explicit_setup_present:
+                out['setup_hours'] = 0.0
+                out['setup_measure'] = 0.0
+            if not explicit_frame_present:
+                out['frame_hours'] = 0.0
+                out['frame_labor'] = 0.0
+                out['frame_rate'] = 0.0
+            if not explicit_mech_present:
+                out['mech_hours'] = 0.0
+                out['mech_labor'] = 0.0
+                out['mech_rate'] = 0.0
 
         return _apply_normalization_lock(out)
 
@@ -2868,6 +2903,7 @@ async def vision_review(
             'explicit_setup_present': explicit_setup_present,
             'explicit_frame_present': explicit_frame_present,
             'explicit_mech_present': explicit_mech_present,
+            'scope_text_for_rate_lock': ((scope_text or '') + '\n' + text_local).strip(),
         }
         _parsed = _seed_scope_labor_buckets(((scope_text or '') + '\n' + text_local).strip(), _parsed, seed_rates=seed_rates)
         return _apply_normalization_lock(_parsed)
