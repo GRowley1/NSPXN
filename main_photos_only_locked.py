@@ -165,11 +165,14 @@ def _extract_locked_cost_overrides(ai_notes_clean: str) -> Dict[str, float]:
             return None
 
     shared_patterns = [
-        r'(?i)\bbody\s*(?:and|&)\s*paint\s+labor\s+rates?\b[^0-9$]{0,20}\$?\s*([0-9]+(?:\.[0-9]+)?)',
-        r'(?i)\bbody\s*(?:and|&)\s*paint\s+labor\s+rate\b[^0-9$]{0,20}\$?\s*([0-9]+(?:\.[0-9]+)?)',
-        r'(?i)\bbody\s*(?:and|&)\s*paint\b[^0-9$]{0,20}\$?\s*([0-9]+(?:\.[0-9]+)?)\s*(?:/\s*hr|per\s*hour|hr)?',
-        r'(?i)\$\s*([0-9]+(?:\.[0-9]+)?)\s*(?:/\s*hr|per\s*hour|hr)?[^\n]{0,50}\bbody\s*(?:and|&)\s*paint\s+labor\s+rates?\b',
-        r'(?i)\$\s*([0-9]+(?:\.[0-9]+)?)\s*(?:/\s*hr|per\s*hour|hr)?[^\n]{0,50}\bbody\s*(?:and|&)\s*paint\s+labor\s+rate\b',
+        r'(?i)\bbody\s*(?:and|&|/)\s*paint\s+labor\s+rates?\b[^0-9$]{0,40}\$?\s*([0-9]+(?:\.[0-9]+)?)',
+        r'(?i)\bbody\s*(?:and|&|/)\s*paint\s+labor\s+rate\b[^0-9$]{0,40}\$?\s*([0-9]+(?:\.[0-9]+)?)',
+        r'(?i)\bbody\s*(?:and|&|/)\s*paint\s+rate\b[^0-9$]{0,40}\$?\s*([0-9]+(?:\.[0-9]+)?)',
+        r'(?i)\bbody\s*(?:and|&|/)\s*paint\b[^0-9$]{0,40}\$?\s*([0-9]+(?:\.[0-9]+)?)\s*(?:/\s*hr|per\s*hour|hr)?',
+        r'(?i)\bprovided\b[^\n]{0,40}\$\s*([0-9]+(?:\.[0-9]+)?)\s*(?:/\s*hr|per\s*hour|hr)?[^\n]{0,60}\bbody\s*(?:and|&|/)\s*paint\s+rate\b',
+        r'(?i)\$\s*([0-9]+(?:\.[0-9]+)?)\s*(?:/\s*hr|per\s*hour|hr)?[^\n]{0,80}\bbody\s*(?:and|&|/)\s*paint\s+labor\s+rates?\b',
+        r'(?i)\$\s*([0-9]+(?:\.[0-9]+)?)\s*(?:/\s*hr|per\s*hour|hr)?[^\n]{0,80}\bbody\s*(?:and|&|/)\s*paint\s+labor\s+rate\b',
+        r'(?i)\$\s*([0-9]+(?:\.[0-9]+)?)\s*(?:/\s*hr|per\s*hour|hr)?[^\n]{0,80}\bbody\s*(?:and|&|/)\s*paint\s+rate\b',
     ]
     for pat in shared_patterns:
         m = re.search(pat, s)
@@ -2500,6 +2503,31 @@ async def vision_review(
         # Setup & Measure follows the body rate in this locked PDF section.
         _rebuild('setup_hours', 'body_rate', 'setup_measure', body_override)
 
+        out = _apply_normalization_lock(out)
+
+        # Final hard lock: after normalization, keep explicit Add'l Notes body/paint overrides
+        # as the canonical printed rates and recompute those matching buckets from the locked hours.
+        if body_override is not None:
+            out['body_rate'] = round(float(body_override), 2)
+            try:
+                if isinstance(out.get('body_hours'), (int, float)):
+                    out['body_labor'] = round(float(out.get('body_hours') or 0.0) * float(body_override), 2)
+            except Exception:
+                pass
+            try:
+                if isinstance(out.get('setup_hours'), (int, float)):
+                    out['setup_measure'] = round(float(out.get('setup_hours') or 0.0) * float(body_override), 2)
+            except Exception:
+                pass
+
+        if paint_override is not None:
+            out['paint_rate'] = round(float(paint_override), 2)
+            try:
+                if isinstance(out.get('paint_hours'), (int, float)):
+                    out['paint_labor'] = round(float(out.get('paint_hours') or 0.0) * float(paint_override), 2)
+            except Exception:
+                pass
+
         return _apply_normalization_lock(out)
 
     def _parse_locked_photos_only_costs(md_text: str, tax_rate_value: Optional[float] = None, seed_rates: Optional[Dict[str, float]] = None, scope_text: Optional[str] = None) -> Dict[str, Any]:
@@ -3070,7 +3098,7 @@ async def vision_review(
             if not s:
                 return False
             mentions_cost = bool(re.search(
-                r'(?i)photo-based repair cost approximation|photo-based repair approximation|approximate repair|repair approximation|estimated repair|estimated total|approximate total|repair total|cost total',
+                r'(?i)photo-based repair cost approximation|photo-based repair approximation|approximate repair|repair approximation|estimated repair|estimated total|approximate total|repair total|cost total|body/paint rate|body & paint|tax \(parts \+ paint materials only\)|provided \$?\d+(?:\.\d+)?/hr',
                 s,
             ))
             has_amount = ('$' in s) or bool(re.search(r'(?i)\b\d+(?:\.\d+)?k\b', s))
@@ -3143,6 +3171,7 @@ async def vision_review(
             result["summary_markdown"] = _scrub_photo_only_narrative_cost_headers(_raw_summary_before_lock)
             _locked_total = locked_costs_obj.get("total_val") if isinstance(locked_costs_obj, dict) else None
             result["conclusion"] = _force_conclusion_to_locked_total(result.get("conclusion") or "", _locked_total)
+            result["summary_markdown"] = _scrub_photo_only_narrative_cost_headers(_scrub_model_headings(result.get("summary_markdown") or ""))
             _final_non_empty_output_lock()
     except Exception:
         pass
@@ -4166,6 +4195,9 @@ async def vision_review(
         msg = EmailMessage()
         if ai_intent == "damage_report_from_photos":
             subj = f"NSPXN.com Condition Report: {file_number or ''} {result['claim_number'] or ''}".strip()
+            _locked_total_email = locked_costs_obj.get('total_val') if isinstance(locked_costs_obj, dict) else None
+            _summary_email = _scrub_photo_only_narrative_cost_headers(_scrub_model_headings(result.get('summary_markdown') or ''))
+            _conclusion_email = _force_conclusion_to_locked_total(result.get('conclusion') or '', _locked_total_email)
             body = (
                 "NSPXN.com Condition Report\n\n"
                 f"Generated: {report_generated_ts}\n"
@@ -4175,13 +4207,13 @@ async def vision_review(
                 f"Secondary Impact: {result['secondary_impact'] or 'N/A'}\n\n"
                 f"{result['redaction_status']}\n\n"
                 "Condition Summary\n"
-                f"{(result['summary_markdown'] or 'N/A')}\n\n"
+                f"{(_summary_email or 'N/A')}\n\n"
                 "Approximate Repair Cost Breakdown\n"
                 f"{(result['estimated_costs_markdown'] or 'N/A')}\n\n"
                 "Fraud & Authenticity Check\n"
                 f"{(result['fraud_markdown'] or 'N/A')}\n\n"
                 "Conclusion\n"
-                f"{(result['conclusion'] or 'N/A')}\n"
+                f"{(_conclusion_email or 'N/A')}\n"
             )
         else:
             try:
