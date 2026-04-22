@@ -2594,31 +2594,40 @@ async def vision_review(
                         pass
             return round(total, 2) if found else None
 
+        # Accept both canonical locked lines and model-emitted markdown like:
+        # - Body labor: **45.0 hrs @ $68/hr = $3,060.00**
+        # - Paint & materials: **22.0 refinish hrs × $45/hr = $990.00**
+        _num_pat = r'([0-9][0-9,]*(?:\.[0-9]+)?)'
         body_rate = _grab_float_line([
-            r'(?im)^\s*[-*]?\s*Body\s+labor\s+rate\s*:\s*\$\s*([0-9][0-9,]*(?:\.[0-9]+)?)\s*/\s*hr',
-            r'(?im)^\s*[-*]?\s*Body(?:\s+labor)?\s*:\s*[0-9]+(?:\.[0-9]+)?\s*hrs?\s*@\s*\$\s*([0-9][0-9,]*(?:\.[0-9]+)?)\s*/\s*hr',
+            rf'(?im)^\s*[-*]?\s*Body\s+labor\s+rate\s*:\s*\$\s*{_num_pat}\s*/\s*hr',
+            rf'(?im)^\s*[-*]?\s*Body(?:\s+labor)?\s*:\s*\*{{0,2}}\s*{_num_pat}\s*hrs?\s*@\s*\$\s*{_num_pat}\s*/\s*hr',
+            rf'(?im)^\s*[-*]?\s*Body(?:\s+labor)?\s*:\s*(?:\*{{1,2}})?[^\n]*?@\s*\$\s*{_num_pat}\s*/\s*hr',
         ])
         paint_rate = _grab_float_line([
-            r'(?im)^\s*[-*]?\s*Paint\s+labor\s+rate\s*:\s*\$\s*([0-9][0-9,]*(?:\.[0-9]+)?)\s*/\s*hr',
-            r'(?im)^\s*[-*]?\s*Paint\s+labor\s*:\s*[0-9]+(?:\.[0-9]+)?\s*hrs?\s*@\s*\$\s*([0-9][0-9,]*(?:\.[0-9]+)?)\s*/\s*hr',
-            r'(?im)^\s*[-*]?\s*Refinish\s*:\s*[0-9]+(?:\.[0-9]+)?\s*hrs?\s*@\s*\$\s*([0-9][0-9,]*(?:\.[0-9]+)?)\s*/\s*hr',
+            rf'(?im)^\s*[-*]?\s*Paint\s+labor\s+rate\s*:\s*\$\s*{_num_pat}\s*/\s*hr',
+            rf'(?im)^\s*[-*]?\s*Paint\s+labor\s*:\s*\*{{0,2}}\s*{_num_pat}\s*hrs?\s*@\s*\$\s*{_num_pat}\s*/\s*hr',
+            rf'(?im)^\s*[-*]?\s*Paint\s+labor\s*:\s*(?:\*{{1,2}})?[^\n]*?@\s*\$\s*{_num_pat}\s*/\s*hr',
+            rf'(?im)^\s*[-*]?\s*Refinish(?:\s+labor)?\s*:\s*\*{{0,2}}\s*{_num_pat}\s*hrs?\s*@\s*\$\s*{_num_pat}\s*/\s*hr',
+            rf'(?im)^\s*[-*]?\s*Refinish(?:\s+labor)?\s*:\s*(?:\*{{1,2}})?[^\n]*?@\s*\$\s*{_num_pat}\s*/\s*hr',
         ])
         frame_rate = _grab_float_line([
-            r'(?im)^\s*[-*]?\s*(?:Frame|Structural)(?:\s+labor)?\s+rate\s*:\s*\$\s*([0-9][0-9,]*(?:\.[0-9]+)?)\s*/\s*hr',
-            r'(?im)^\s*[-*]?\s*Frame(?:/measure|\s+labor)?\s*:\s*[0-9]+(?:\.[0-9]+)?\s*hrs?\s*@\s*\$\s*([0-9][0-9,]*(?:\.[0-9]+)?)\s*/\s*hr',
-            r'(?im)^\s*[-*]?\s*Structural(?:\s+labor)?\s*:\s*[0-9]+(?:\.[0-9]+)?\s*hrs?\s*@\s*\$\s*([0-9][0-9,]*(?:\.[0-9]+)?)\s*/\s*hr',
+            rf'(?im)^\s*[-*]?\s*(?:Frame|Structural)(?:\s+labor)?\s+rate\s*:\s*\$\s*{_num_pat}\s*/\s*hr',
+            rf'(?im)^\s*[-*]?\s*Frame(?:/measure|\s+labor)?\s*:\s*(?:\*{{1,2}})?[^\n]*?@\s*\$\s*{_num_pat}\s*/\s*hr',
+            rf'(?im)^\s*[-*]?\s*Structural(?:\s+labor)?\s*:\s*(?:\*{{1,2}})?[^\n]*?@\s*\$\s*{_num_pat}\s*/\s*hr',
         ])
         mech_rate = _grab_float_line([
-            r'(?im)^\s*[-*]?\s*Mechanical(?:/diagnostic)?\s+rate\s*:\s*\$\s*([0-9][0-9,]*(?:\.[0-9]+)?)\s*/\s*hr',
-            r'(?im)^\s*[-*]?\s*Mechanical(?:/SRS/Glass|/diagnostic)?[^\n]*?:\s*[0-9]+(?:\.[0-9]+)?\s*hrs?\s*@\s*\$\s*([0-9][0-9,]*(?:\.[0-9]+)?)\s*/\s*hr',
+            rf'(?im)^\s*[-*]?\s*Mechanical(?:/diagnostic)?\s+rate\s*:\s*\$\s*{_num_pat}\s*/\s*hr',
+            rf'(?im)^\s*[-*]?\s*Mechanical(?:/SRS/Glass|/diagnostic)?[^\n]*?:\s*(?:\*{{1,2}})?[^\n]*?@\s*\$\s*{_num_pat}\s*/\s*hr',
+            rf'(?im)^\s*[-*]?\s*Mechanical\s+labor[^\n]*?:\s*(?:\*{{1,2}})?[^\n]*?@\s*\$\s*{_num_pat}\s*/\s*hr',
         ])
 
         paint_mat_rate = _grab_float_line([
-            r'(?im)^\s*[-*]?\s*Paint\s*(?:&\s*|and\s*)?materials\s+rate\s*:\s*\$\s*([0-9][0-9,]*(?:\.[0-9]+)?)\b',
-            r'(?im)^\s*[-*]?\s*Paint\s+materials\s+rate\s*:\s*\$\s*([0-9][0-9,]*(?:\.[0-9]+)?)\b',
-            r'(?im)^\s*[-*]?\s*Paint\s+suppl(?:y|ies)\s+rate\s*:\s*\$\s*([0-9][0-9,]*(?:\.[0-9]+)?)\b',
-            r'(?im)^\s*[-*]?\s*Paint\s*(?:&\s*|and\s*)?materials\s+rate\s*:\s*\$\s*([0-9][0-9,]*(?:\.[0-9]+)?)\s*(?:per\s+refinish\s+hour|/\s*hr)',
-            r'(?im)^\s*[-*]?\s*Paint\s+materials\s+rate\s*:\s*\$\s*([0-9][0-9,]*(?:\.[0-9]+)?)\s*(?:per\s+refinish\s+hour|/\s*hr)',
+            rf'(?im)^\s*[-*]?\s*Paint\s*(?:&\s*|and\s*)?materials\s+rate\s*:\s*\$\s*{_num_pat}\b',
+            rf'(?im)^\s*[-*]?\s*Paint\s+materials\s+rate\s*:\s*\$\s*{_num_pat}\b',
+            rf'(?im)^\s*[-*]?\s*Paint\s+suppl(?:y|ies)\s+rate\s*:\s*\$\s*{_num_pat}\b',
+            rf'(?im)^\s*[-*]?\s*Paint\s*(?:&\s*|and\s*)?materials\s*:\s*(?:\*{{1,2}})?[^\n]*?[×x*]\s*\$\s*{_num_pat}\s*/\s*hr',
+            rf'(?im)^\s*[-*]?\s*Paint\s*(?:&\s*|and\s*)?materials\s*:\s*(?:\*{{1,2}})?[^\n]*?\$\s*{_num_pat}\s*(?:per\s+refinish\s+hour|/\s*hr)',
+            rf'(?im)^\s*[-*]?\s*Paint\s+materials\s*:\s*(?:\*{{1,2}})?[^\n]*?[×x*]\s*\$\s*{_num_pat}\s*/\s*hr',
         ])
 
         def _derive_rate_from_amount(amount: Optional[float], hours: Optional[float], current_rate: Optional[float]) -> Optional[float]:
@@ -2632,20 +2641,26 @@ async def vision_review(
             return current_rate
 
         body_hours = _grab_float_line([
-            r'(?im)^\s*[-*]?\s*Body(?:\s+labor)?\s*:\s*([0-9]+(?:\.[0-9]+)?)\s*hrs?\b',
+            r'(?im)^\s*[-*]?\s*Body(?:\s+labor)?\s*:\s*\*{0,2}\s*([0-9]+(?:\.[0-9]+)?)\s*hrs?\b',
+            r'(?im)^\s*[-*]?\s*Body(?:\s+labor)?\s*:\s*(?:\*{1,2})?[^\n]*?([0-9]+(?:\.[0-9]+)?)\s*hrs?\s*@',
         ])
         paint_hours = _grab_float_line([
-            r'(?im)^\s*[-*]?\s*Paint\s+labor\s*\(?(?:refinish)?\)?\s*:\s*([0-9]+(?:\.[0-9]+)?)\s*hrs?\b',
-            r'(?im)^\s*[-*]?\s*Refinish(?:\s+labor)?\s*:\s*([0-9]+(?:\.[0-9]+)?)\s*hrs?\b',
+            r'(?im)^\s*[-*]?\s*Paint\s+labor\s*\(?(?:refinish)?\)?\s*:\s*\*{0,2}\s*([0-9]+(?:\.[0-9]+)?)\s*hrs?\b',
+            r'(?im)^\s*[-*]?\s*Paint\s+labor\s*:\s*(?:\*{1,2})?[^\n]*?([0-9]+(?:\.[0-9]+)?)\s*hrs?\s*@',
+            r'(?im)^\s*[-*]?\s*Refinish(?:\s+labor)?\s*:\s*\*{0,2}\s*([0-9]+(?:\.[0-9]+)?)\s*hrs?\b',
+            r'(?im)^\s*[-*]?\s*Refinish(?:\s+labor)?\s*:\s*(?:\*{1,2})?[^\n]*?([0-9]+(?:\.[0-9]+)?)\s*hrs?\s*@',
         ])
         setup_hours = _grab_float_line([
-            r'(?im)^\s*[-*]?\s*Setup\s*&\s*Measure[^\n]*?:\s*([0-9]+(?:\.[0-9]+)?)\s*hrs?\b',
+            r'(?im)^\s*[-*]?\s*Setup\s*&\s*Measure[^\n]*?:\s*\*{0,2}\s*([0-9]+(?:\.[0-9]+)?)\s*hrs?\b',
+            r'(?im)^\s*[-*]?\s*Setup\s*&\s*Measure[^\n]*?:\s*(?:\*{1,2})?[^\n]*?([0-9]+(?:\.[0-9]+)?)\s*hrs?\s*@',
         ])
         frame_hours = _grab_float_line([
-            r'(?im)^\s*[-*]?\s*Frame(?:/measure|\s+labor)?\s*:\s*([0-9]+(?:\.[0-9]+)?)\s*hrs?\b',
+            r'(?im)^\s*[-*]?\s*Frame(?:/measure|\s+labor)?\s*:\s*\*{0,2}\s*([0-9]+(?:\.[0-9]+)?)\s*hrs?\b',
+            r'(?im)^\s*[-*]?\s*Frame(?:/measure|\s+labor)?\s*:\s*(?:\*{1,2})?[^\n]*?([0-9]+(?:\.[0-9]+)?)\s*hrs?\s*@',
         ])
         mech_hours = _grab_float_line([
-            r'(?im)^\s*[-*]?\s*Mechanical(?:/SRS/Glass|/diagnostic)?[^\n]*?:\s*([0-9]+(?:\.[0-9]+)?)\s*hrs?\b',
+            r'(?im)^\s*[-*]?\s*Mechanical(?:/SRS/Glass|/diagnostic)?[^\n]*?:\s*\*{0,2}\s*([0-9]+(?:\.[0-9]+)?)\s*hrs?\b',
+            r'(?im)^\s*[-*]?\s*Mechanical(?:/SRS/Glass|/diagnostic)?[^\n]*?:\s*(?:\*{1,2})?[^\n]*?([0-9]+(?:\.[0-9]+)?)\s*hrs?\s*@',
         ])
 
         # Hard-bind paint labor when refinish/blend scope is present but explicit paint hours were not emitted.
