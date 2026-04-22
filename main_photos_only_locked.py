@@ -2193,7 +2193,7 @@ async def vision_review(
                 return False
             if re.search(r'(?i)\b(rate|assumption|approximation only|cost calculation)\b', s):
                 return False
-            if not re.search(r'(?i)\b(assembly|bumper|reinforcement|impact\s+bar|absorber|lamp|light|glass|hatch|gate|liftgate|panel|closure|quarter|molding|trim|harness|connector|retainer|clips?|fasteners?|sealants?|sensor|camera|exhaust|wheel\-arch|aperture|spoiler|emblem|bracket|cover|grille|fender|door|mirror)\b', s):
+            if not re.search(r'(?i)\b(assembly|bumper|reinforcement|impact\s+bar|absorber|lamp|light|glass|windshield|hatch|gate|liftgate|panel|closure|quarter|molding|trim|harness|connector|retainer|clips?|fasteners?|sealants?|sensor|camera|exhaust|wheel\-arch|aperture|spoiler|emblem|bracket|cover|grille|fender|door|mirror|oem)\b', s):
                 return False
             return True
 
@@ -2658,11 +2658,11 @@ async def vision_review(
         labor_sub = round(body_labor + paint_labor + setup_measure + frame_labor + mech_labor, 2)
 
         parts_sub = _grab_money_line([
-            r'^\s*[-*]?\s*Estimated\s+parts\s+subtotal\s*:\s*\$\s*([0-9][0-9,]*(?:\.[0-9]{2})?)\b',
-            r'^\s*[-*]?\s*Parts\s+subtotal\s*\(approx\.?\)\s*=\s*\$\s*([0-9][0-9,]*(?:\.[0-9]{2})?)\b',
-            r'^\s*[-*]?\s*Parts\s+subtotal\s*\(approx\.?\)\s*:\s*\$\s*([0-9][0-9,]*(?:\.[0-9]{2})?)\b',
-            r'^\s*[-*]?\s*Parts\s+subtotal\s*=\s*\$\s*([0-9][0-9,]*(?:\.[0-9]{2})?)\b',
-            r'^\s*[-*]?\s*Parts\s+subtotal\s*:\s*\$\s*([0-9][0-9,]*(?:\.[0-9]{2})?)\b',
+            r'^\s*\*{0,2}\s*[-*]?\s*Estimated\s+parts\s+subtotal\s*:\s*\*{0,2}\s*\$\s*([0-9][0-9,]*(?:\.[0-9]{2})?)\b',
+            r'^\s*\*{0,2}\s*[-*]?\s*Parts\s+subtotal\s*\(approx\.?\)\s*=\s*\*{0,2}\s*\$\s*([0-9][0-9,]*(?:\.[0-9]{2})?)\b',
+            r'^\s*\*{0,2}\s*[-*]?\s*Parts\s+subtotal\s*\(approx\.?\)\s*:\s*\*{0,2}\s*\$\s*([0-9][0-9,]*(?:\.[0-9]{2})?)\b',
+            r'^\s*\*{0,2}\s*[-*]?\s*Parts\s+subtotal\s*=\s*\*{0,2}\s*\$\s*([0-9][0-9,]*(?:\.[0-9]{2})?)\b',
+            r'^\s*\*{0,2}\s*[-*]?\s*Parts\s+subtotal\s*:\s*\*{0,2}\s*\$\s*([0-9][0-9,]*(?:\.[0-9]{2})?)\b',
         ])
         itemized_parts_sub = _sum_itemized_part_amounts(text_local)
         if isinstance(parts_sub, (int, float)):
@@ -4201,24 +4201,3 @@ async def download_pdf(file_number: Optional[str] = None, filename: Optional[str
         return JSONResponse(status_code=404, content={"detail": "Not Found"})
     latest = max(candidates, key=lambda p: os.path.getmtime(p))
     return FileResponse(path=latest, media_type="application/pdf", filename=os.path.basename(latest))
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
