@@ -2401,8 +2401,16 @@ async def vision_review(
             # Case 4: partial/empty bucket => zero the whole bucket consistently
             return 0.0, rte if rte > 0 else 0.0, 0.0
 
-        for rk in ('body_rate', 'paint_rate', 'frame_rate', 'mech_rate', 'tax_rate_value'):
+        for rk in ('body_rate', 'paint_rate', 'frame_rate', 'mech_rate'):
             out[rk] = _round_rate(out.get(rk))
+
+        # Keep tax_rate_value at full precision. Do not round 0.095 to 0.10.
+        # Only the final tax dollars should be rounded to cents.
+        try:
+            if isinstance(out.get('tax_rate_value'), (int, float)) and float(out.get('tax_rate_value')) > 0:
+                out['tax_rate_value'] = float(out.get('tax_rate_value'))
+        except Exception:
+            out['tax_rate_value'] = out.get('tax_rate_value')
 
         if isinstance(out.get('paint_mat_rate'), (int, float)):
             out['paint_mat_rate'] = _round_rate(out.get('paint_mat_rate'))
