@@ -2758,11 +2758,14 @@ async def vision_review(
         _num_pat = r'([0-9][0-9,]*(?:\.[0-9]+)?)'
         body_rate = _grab_float_line([
             rf'(?im)^\s*[-*]?\s*Body\s+labor\s+rate\s*:\s*\$\s*{_num_pat}\s*/\s*hr',
+            rf'(?im)^\s*[-*]?\s*Body\s+labor\s*:\s*\$\s*{_num_pat}\s*/\s*hr\b',
             rf'(?im)^\s*[-*]?\s*Body(?:\s+labor)?\s*:\s*\*{{0,2}}\s*{_num_pat}\s*hrs?\s*@\s*\$\s*{_num_pat}\s*/\s*hr',
             rf'(?im)^\s*[-*]?\s*Body(?:\s+labor)?\s*:\s*(?:\*{{1,2}})?[^\n]*?@\s*\$\s*{_num_pat}\s*/\s*hr',
         ])
         paint_rate = _grab_float_line([
             rf'(?im)^\s*[-*]?\s*Paint\s+labor\s+rate\s*:\s*\$\s*{_num_pat}\s*/\s*hr',
+            rf'(?im)^\s*[-*]?\s*Paint\s+labor\s*:\s*\$\s*{_num_pat}\s*/\s*hr\b',
+            rf'(?im)^\s*[-*]?\s*Refinish(?:\s+labor)?\s*:\s*\$\s*{_num_pat}\s*/\s*hr\b',
             rf'(?im)^\s*[-*]?\s*Paint\s+labor\s*:\s*\*{{0,2}}\s*{_num_pat}\s*hrs?\s*@\s*\$\s*{_num_pat}\s*/\s*hr',
             rf'(?im)^\s*[-*]?\s*Paint\s+labor\s*:\s*(?:\*{{1,2}})?[^\n]*?@\s*\$\s*{_num_pat}\s*/\s*hr',
             rf'(?im)^\s*[-*]?\s*Refinish(?:\s+labor)?\s*:\s*\*{{0,2}}\s*{_num_pat}\s*hrs?\s*@\s*\$\s*{_num_pat}\s*/\s*hr',
@@ -2770,11 +2773,13 @@ async def vision_review(
         ])
         frame_rate = _grab_float_line([
             rf'(?im)^\s*[-*]?\s*(?:Frame|Structural)(?:\s+labor)?\s+rate\s*:\s*\$\s*{_num_pat}\s*/\s*hr',
+            rf'(?im)^\s*[-*]?\s*Frame(?:/measure|\s+labor)?\s*:\s*\$\s*{_num_pat}\s*/\s*hr\b',
             rf'(?im)^\s*[-*]?\s*Frame(?:/measure|\s+labor)?\s*:\s*(?:\*{{1,2}})?[^\n]*?@\s*\$\s*{_num_pat}\s*/\s*hr',
             rf'(?im)^\s*[-*]?\s*Structural(?:\s+labor)?\s*:\s*(?:\*{{1,2}})?[^\n]*?@\s*\$\s*{_num_pat}\s*/\s*hr',
         ])
         mech_rate = _grab_float_line([
             rf'(?im)^\s*[-*]?\s*Mechanical(?:/diagnostic)?\s+rate\s*:\s*\$\s*{_num_pat}\s*/\s*hr',
+            rf'(?im)^\s*[-*]?\s*Mechanical(?:/diagnostic)?\s*:\s*\$\s*{_num_pat}\s*/\s*hr\b',
             rf'(?im)^\s*[-*]?\s*Mechanical(?:/SRS/Glass|/diagnostic)?[^\n]*?:\s*(?:\*{{1,2}})?[^\n]*?@\s*\$\s*{_num_pat}\s*/\s*hr',
             rf'(?im)^\s*[-*]?\s*Mechanical\s+labor[^\n]*?:\s*(?:\*{{1,2}})?[^\n]*?@\s*\$\s*{_num_pat}\s*/\s*hr',
         ])
@@ -3325,8 +3330,20 @@ async def vision_review(
             _raw_locked_cost_source = result.get("estimated_costs_markdown") or ""
             _raw_summary_before_lock = str(result.get("summary_markdown") or "").strip()
             _inspection_location_for_lock = _normalize_location_with_zip(_extract_inspection_location(uploaded_text_all or ""), ia_company, uploaded_text_all)
+            _inline_model_tax_rate = None
+            try:
+                _m_inline_tax = re.search(r'(?im)assumed\s*([0-9]+(?:\.[0-9]+)?)\s*%\)?', _raw_locked_cost_source or '')
+                if not _m_inline_tax:
+                    _m_inline_tax = re.search(r'(?im)^\s*[-*]?\s*Tax\s+rate\s*:\s*([0-9]+(?:\.[0-9]+)?)\s*%\s*$', _raw_locked_cost_source or '')
+                if _m_inline_tax:
+                    _inline_model_tax_rate = float(_m_inline_tax.group(1)) / 100.0
+            except Exception:
+                _inline_model_tax_rate = None
+
             if isinstance(locked_cost_overrides, dict) and isinstance(locked_cost_overrides.get("tax_rate"), (int, float)) and float(locked_cost_overrides.get("tax_rate") or 0.0) > 0:
                 tax_rate = float(locked_cost_overrides.get("tax_rate"))
+            elif isinstance(_inline_model_tax_rate, (int, float)) and float(_inline_model_tax_rate) > 0:
+                tax_rate = float(_inline_model_tax_rate)
             elif tax_rate is None or not isinstance(tax_rate, (int, float)) or tax_rate <= 0:
                 tax_rate = _lookup_tax_rate(_inspection_location_for_lock)
 
@@ -4487,14 +4504,3 @@ async def download_pdf(file_number: Optional[str] = None, filename: Optional[str
         return JSONResponse(status_code=404, content={"detail": "Not Found"})
     latest = max(candidates, key=lambda p: os.path.getmtime(p))
     return FileResponse(path=latest, media_type="application/pdf", filename=os.path.basename(latest))
-
-
-
-
-
-
-
-
-
-
-
