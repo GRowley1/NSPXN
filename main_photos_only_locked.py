@@ -2688,7 +2688,7 @@ async def vision_review(
 
         return _apply_normalization_lock(out)
 
-    def _parse_locked_photos_only_costs(md_text: str, tax_rate_value: Optional[float] = None, seed_rates: Optional[Dict[str, float]] = None, scope_text: Optional[str] = None) -> Dict[str, Any]:
+    def _parse_locked_photos_only_costs(md_text: str, tax_rate_value: Optional[float] = None, seed_rates: Optional[Dict[str, float]] = None, scope_text: Optional[str] = None, allow_seed: bool = True) -> Dict[str, Any]:
         """Single source of truth for photos-only cost math.
         Locked rules:
         - labor subtotal is ALWAYS recomputed from the five printed labor buckets
@@ -3322,7 +3322,7 @@ async def vision_review(
     try:
         _final_non_empty_output_lock()
         if ai_intent == "damage_report_from_photos":
-            _raw_locked_cost_source = str(result.get("estimated_costs_markdown") or "").strip()
+            _raw_locked_cost_source = result.get("estimated_costs_markdown") or ""
             _raw_summary_before_lock = str(result.get("summary_markdown") or "").strip()
             _inspection_location_for_lock = _normalize_location_with_zip(_extract_inspection_location(uploaded_text_all or ""), ia_company, uploaded_text_all)
             if isinstance(locked_cost_overrides, dict) and isinstance(locked_cost_overrides.get("tax_rate"), (int, float)) and float(locked_cost_overrides.get("tax_rate") or 0.0) > 0:
@@ -3330,23 +3330,27 @@ async def vision_review(
             elif tax_rate is None or not isinstance(tax_rate, (int, float)) or tax_rate <= 0:
                 tax_rate = _lookup_tax_rate(_inspection_location_for_lock)
 
-            # SINGLE SOURCE OF TRUTH:
-            # keep the model/website cost block as the canonical source when it already exists.
-            # Do not re-seed, re-force, or rebuild it for email/PDF.
-            if _raw_locked_cost_source:
-                result["estimated_costs_markdown"] = _raw_locked_cost_source
-                try:
-                    locked_costs_obj = _parse_locked_photos_only_costs(_raw_locked_cost_source, tax_rate)
-                except Exception:
-                    locked_costs_obj = None
-
-            # Remove any model-injected cost section from the narrative so the email body does not show two totals.
+            # FINAL SYNC LOCK:
+            # Treat the website/model cost block as the canonical source of truth.
+            # Parse it once, with no scope reseeding and no fallback labor-rate rebuild,
+            # then render website/email/PDF from that one structured object only.
+            locked_costs_obj = _parse_locked_photos_only_costs(
+                _raw_locked_cost_source,
+                tax_rate,
+                seed_rates=None,
+                scope_text=None,
+                allow_seed=False,
+            )
+            result["estimated_costs_markdown"] = _canonical_locked_photos_only_cost_markdown_from_parsed(
+                locked_costs_obj, tax_rate
+            )
             result["summary_markdown"] = _scrub_photo_only_narrative_cost_headers(_raw_summary_before_lock)
+            _locked_total = locked_costs_obj.get("total_val") if isinstance(locked_costs_obj, dict) else None
+            result["conclusion"] = _force_conclusion_to_locked_total(result.get("conclusion") or "", _locked_total)
             result["summary_markdown"] = _scrub_photo_only_narrative_cost_headers(_scrub_model_headings(result.get("summary_markdown") or ""))
             _final_non_empty_output_lock()
     except Exception:
         pass
-
     try:
         if ai_intent == "damage_report_from_photos":
             _sanity_needed = False
@@ -4187,13 +4191,14 @@ async def vision_review(
         mc(_summary_md if _summary_md else "-")
         pdf.ln(2)
     
-        # Use the same canonical model cost block shown on the website.
-        # Do not rebuild/re-seed cost math again for the PDF.
+        # Controlled Repair Cost section rendering (prevents duplicate headings, Totals blocks, duplicate tiers, and bad totals)
         _raw_costs_md = result.get("estimated_costs_markdown") or ""
         costs_md = _strip_unwanted_cost_lines_for_pdf(_raw_costs_md)
     
+        # NOTE: Total + Severity Tier are rendered deterministically inside render_repair_cost_section.
+    
         _section_bar("APPROXIMATE REPAIR COST BREAKDOWN")
-        mc(costs_md if costs_md else "-")
+        render_repair_cost_section(pdf, costs_md, tax_rate=tax_rate, parsed=locked_costs_obj)
     
         _section_bar("FRAUD & AUTHENTICITY CHECK")
         mc((result.get("fraud_markdown") or "").strip() or "-")
@@ -4431,12 +4436,8 @@ async def vision_review(
                 f"{result['redaction_status']}\n\n"
                 "NSPXN.com Condition Summary\n"
                 f"{result['summary_markdown']}\n\n"
-                "Approximate Repair Cost Breakdown\n"
-                f"{result['estimated_costs_markdown']}\n\n"
                 "Fraud Detection\n"
-                f"{result['fraud_markdown']}\n\n"
-                "Conclusion\n"
-                f"{result['conclusion']}\n"
+                f"{result['fraud_markdown']}\n"
             )
 
         msg["Subject"] = subj
@@ -4486,3 +4487,14 @@ async def download_pdf(file_number: Optional[str] = None, filename: Optional[str
         return JSONResponse(status_code=404, content={"detail": "Not Found"})
     latest = max(candidates, key=lambda p: os.path.getmtime(p))
     return FileResponse(path=latest, media_type="application/pdf", filename=os.path.basename(latest))
+
+
+
+
+
+
+
+
+
+
+
