@@ -4093,112 +4093,66 @@ async def vision_review(
 
 
     def render_repair_cost_section(pdf_obj: FPDF, md: str, tax_rate: Optional[float] = None, parsed: Optional[Dict[str, Any]] = None) -> None:
-        """Render the Approximate Repair Cost Breakdown in a controlled PDF format.
-        Locked behavior:
-        - fixed printed structure every time
-        - print actual labor hours/rates used where available
-        - recompute labor subtotal, tax, and total from one backend-owned path only
+        """Render the website/model cost block directly.
+
+        FINAL DISPLAY SYNC LOCK:
+        - Do not parse, rebuild, seed, recompute, or canonicalize costs here.
+        - The website/model estimated_costs_markdown is the source of truth.
+        - This function only cleans markdown/mojibake and prints it in the PDF section.
         """
-        if tax_rate is None or not isinstance(tax_rate, (int, float)) or tax_rate <= 0:
-            tax_rate = 0.07
+        raw = _normalize_mojibake_text(md or "").strip()
+        if not raw:
+            mc("No cost breakdown was generated on this run.")
+            return
 
-        parsed = parsed if isinstance(parsed, dict) else _parse_locked_photos_only_costs(md, tax_rate)
+        def _clean_pdf_md_line(line: str) -> str:
+            s = _normalize_mojibake_text(line or "").strip()
+            # Drop duplicate cost title only; the PDF already has the green section bar.
+            if re.search(r"(?i)^#{1,6}\s*Approximate\s+Repair\s+Cost\s+Breakdown\b", s):
+                return ""
+            if re.search(r"(?i)^Approximate\s+Repair\s+Cost\s+Breakdown\b", s):
+                return ""
+            # Convert markdown headings to plain subsection labels.
+            s = re.sub(r"^#{1,6}\s*", "", s).strip()
+            # Remove display markdown only; do not remove cost lines, tax, totals, or severity.
+            s = s.replace("**", "").replace("__", "").replace("`", "")
+            return _normalize_mojibake_text(s)
 
-        def _nz_money(v: Optional[float]) -> float:
+        try:
+            pdf_obj.ln(1)
+            pdf_obj.set_font("Helvetica", "", 11)
+        except Exception:
             try:
-                return round(float(v), 2) if isinstance(v, (int, float)) else 0.0
+                pdf_obj.ln(1)
+                pdf_obj.set_font("Arial", "", 11)
             except Exception:
-                return 0.0
+                pass
 
-        def _fmt_hours_rate(hours: Optional[float], rate: Optional[float], amount: float) -> str:
-            if isinstance(rate, (int, float)):
-                shown_hours = float(hours) if isinstance(hours, (int, float)) else 0.0
-                return f"{shown_hours:.1f} hrs @ ${float(rate):,.2f}/hr = {_money2(amount)}"
-            return f"Not separately derived = {_money2(amount)}"
+        for raw_ln in raw.replace("\r\n", "\n").replace("\r", "\n").splitlines():
+            clean = _clean_pdf_md_line(raw_ln)
+            if not clean:
+                try:
+                    pdf_obj.ln(1)
+                except Exception:
+                    pass
+                continue
 
-        body_hours = parsed.get('body_hours')
-        paint_hours = parsed.get('paint_hours')
-        setup_hours = parsed.get('setup_hours')
-        frame_hours = parsed.get('frame_hours')
-        mech_hours = parsed.get('mech_hours')
-        body_rate = parsed.get('body_rate')
-        paint_rate = parsed.get('paint_rate')
-        frame_rate = parsed.get('frame_rate')
-        mech_rate = parsed.get('mech_rate')
-
-        body_labor = _nz_money(parsed.get('body_labor'))
-        paint_labor = _nz_money(parsed.get('paint_labor'))
-        setup_measure = _nz_money(parsed.get('setup_measure'))
-        frame_labor = _nz_money(parsed.get('frame_labor'))
-        mech_labor = _nz_money(parsed.get('mech_labor'))
-        parts_lines = parsed.get('parts_lines') or []
-        parts_sub = _nz_money(parsed.get('parts_sub'))
-        paint_mat = _nz_money(parsed.get('paint_mat'))
-        sublet = _nz_money(parsed.get('sublet'))
-        labor_sub = _nz_money(parsed.get('labor_sub'))
-        tax_basis = _nz_money(parsed.get('tax_basis'))
-        tax_amt = _nz_money(parsed.get('tax_amt'))
-        total_val = _nz_money(parsed.get('total_val'))
-
-        pdf_obj.ln(1)
-        try:
-            pdf_obj.set_font("Helvetica", "", 11)
-        except Exception:
-            pdf_obj.set_font("Arial", "", 11)
-
-        mc(f"Body labor: {_fmt_hours_rate(body_hours, body_rate, body_labor)}")
-        mc(f"Paint labor: {_fmt_hours_rate(paint_hours, paint_rate, paint_labor)}")
-        mc(f"Setup & Measure: {_fmt_hours_rate(setup_hours, body_rate, setup_measure)}")
-        mc(f"Frame labor: {(float(frame_hours) if isinstance(frame_hours, (int, float)) else 0.0):.1f} hrs @ ${(float(frame_rate) if isinstance(frame_rate, (int, float)) else 0.0):,.2f}/hr = {_money2(frame_labor)}")
-        mc(f"Mechanical labor: {_fmt_hours_rate(mech_hours, mech_rate, mech_labor)}")
-        mc(f"Labor subtotal: {_money2(labor_sub)}")
-
-        mc("Itemized parts breakdown:")
-        if parts_lines:
-            for pl in parts_lines:
-                _clean_pl = re.sub(r'^[-*]\s*', '', str(pl).strip())
-                mc(f"- {_clean_pl}")
-        else:
-            mc("- Not separately derived.")
-
-        mc(f"Parts subtotal: {_money2(parts_sub)}")
-        mc(f"Paint & materials: {_money2(paint_mat)}")
-        if sublet > 0:
-            mc(f"Sublet: {_money2(sublet)}")
-
-        mc(f"Tax rate: {float(tax_rate)*100:.3f}%")
-        mc(f"Tax basis (parts + paint materials): {_money2(tax_basis)}")
-        mc(f"Tax: {_money2(tax_amt)}")
-
-        try:
-            pdf_obj.set_font("Helvetica", "B", 11)
-        except Exception:
-            pdf_obj.set_font("Arial", "B", 11)
-        mc(f"Approximate Repair Total: {_money2(total_val)}")
-        try:
-            pdf_obj.set_font("Helvetica", "", 11)
-        except Exception:
-            pdf_obj.set_font("Arial", "", 11)
-
-        if total_val < 3500:
-            tier = "minor"
-        elif total_val < 10000:
-            tier = "moderate"
-        else:
-            tier = "major"
-
-        boxes = {
-            "minor": ("[x]", "[ ]", "[ ]", "[ ]"),
-            "moderate": ("[ ]", "[x]", "[ ]", "[ ]"),
-            "major": ("[ ]", "[ ]", "[x]", "[ ]"),
-        }[tier]
-
-        pdf_obj.ln(1)
-        mc("Severity Tier")
-        mc(f"{boxes[0]} Minor (< $3,500)")
-        mc(f"{boxes[1]} Moderate ($3,500-$10,000)")
-        mc(f"{boxes[2]} Major ($10,000+)")
-        mc(f"{boxes[3]} Possible Total Loss Threshold Approaching")
+            is_label = bool(re.search(
+                r"(?i)^(Labor|Paint\s*&\s*Materials|OEM\s+Replacement\s+Parts|Replacement\s+Parts|Tax|Estimated\s+Total|Approximate\s+Total|Severity\s+Tier|Repair\s+Cost\s+Disclaimer)\b",
+                clean,
+            )) and not clean.startswith("-")
+            if is_label:
+                try:
+                    pdf_obj.set_font("Helvetica", "B", 11)
+                except Exception:
+                    pdf_obj.set_font("Arial", "B", 11)
+                mc(clean)
+                try:
+                    pdf_obj.set_font("Helvetica", "", 11)
+                except Exception:
+                    pdf_obj.set_font("Arial", "", 11)
+            else:
+                mc(clean)
 
     def add_thumbnail_page(pdf_obj: FPDF, image_paths: List[str]) -> None:
         """Append exactly ONE page containing thumbnails of all uploaded photos (as space allows)."""
@@ -4463,14 +4417,13 @@ async def vision_review(
         mc(_summary_md if _summary_md else "-")
         pdf.ln(2)
     
-        # Controlled Repair Cost section rendering (prevents duplicate headings, Totals blocks, duplicate tiers, and bad totals)
+        # Direct Repair Cost section rendering.
+        # Do NOT strip, parse, rebuild, recompute, or canonicalize the model/website cost block.
         _raw_costs_md = result.get("estimated_costs_markdown") or ""
-        costs_md = _strip_unwanted_cost_lines_for_pdf(_raw_costs_md)
-    
-        # NOTE: Total + Severity Tier are rendered deterministically inside render_repair_cost_section.
+        costs_md = _normalize_mojibake_text(_raw_costs_md)
     
         _section_bar("APPROXIMATE REPAIR COST BREAKDOWN")
-        render_repair_cost_section(pdf, costs_md, tax_rate=tax_rate, parsed=locked_costs_obj)
+        render_repair_cost_section(pdf, costs_md, tax_rate=tax_rate, parsed=None)
     
         _section_bar("FRAUD & AUTHENTICITY CHECK")
         mc((result.get("fraud_markdown") or "").strip() or "-")
@@ -4759,7 +4712,6 @@ async def download_pdf(file_number: Optional[str] = None, filename: Optional[str
         return JSONResponse(status_code=404, content={"detail": "Not Found"})
     latest = max(candidates, key=lambda p: os.path.getmtime(p))
     return FileResponse(path=latest, media_type="application/pdf", filename=os.path.basename(latest))
-
 
 
 
