@@ -2278,6 +2278,16 @@ async def vision_review(
           lines with dollar amounts while excluding labor, tax, totals, and rationale lines
         """
         text_local = str(md_text or '').replace("\r\n", "\n").replace("\r", "\n")
+        # Normalize common mojibake / symbol drift before parsing website-style cost blocks.
+        text_local = (
+            text_local
+            .replace('Ã', '×')
+            .replace('â', '[ ]')
+            .replace('â', '[x]')
+            .replace('â', '[x]')
+            .replace('â€”', '-')
+            .replace('â€“', '-')
+        )
         out: List[str] = []
         seen = set()
         in_parts_section = False
@@ -2285,7 +2295,7 @@ async def vision_review(
         def _keep_line(s: str) -> bool:
             if not s or '$' not in s:
                 return False
-            if re.search(r'(?i)body\s+labor|paint\s+labor|paint\s*(?:&|and)\s*materials|setup\s*&\s*measure|frame\s+labor|mechanical|tax\s+rate|tax\s+basis|estimated\s+tax|sales\s+tax|labor\s+subtotal|parts\s+subtotal|subtotal|approximate\s+repair\s+total|severity\s+tier|rationale|hours?\b', s):
+            if re.search(r'(?i)body\s+labor|paint\s+labor|paint\s*(?:&|and)\s*materials|setup\s*&\s*measure|frame\s+labor|mechanical\s+labor|tax\s+rate|tax\s+basis|estimated\s+tax|sales\s+tax|labor\s+subtotal|parts\s+subtotal|subtotal|approximate\s+repair\s+total|severity\s+tier|rationale|hours?\b', s):
                 return False
             if re.search(r'(?i)\b(rate|assumption|approximation only|cost calculation)\b', s):
                 return False
@@ -2298,11 +2308,11 @@ async def vision_review(
             if not s:
                 continue
 
-            if re.search(r'(?i)^\*{0,2}\s*(OEM\s+replacement\s+parts|OEM\s+parts\s+needed|replacement\s+parts|parts\s+needed|itemized\s+parts\s+breakdown)\b', s):
+            if re.search(r'(?i)^\*{0,2}\s*(OEM\s+replacement\s+parts(?:\s*\(approx\.?\))?|OEM\s+parts\s+needed|replacement\s+parts|parts\s+needed|itemized\s+parts\s+breakdown)\b', s):
                 in_parts_section = True
                 continue
 
-            if in_parts_section and re.search(r'(?i)parts\s+subtotal|estimated\s+parts\s+subtotal|taxable\s+subtotal|estimated\s+tax|sales\s+tax|tax\s+rate|tax\s+basis|approximate\s+repair\s+total|severity\s+tier', s):
+            if in_parts_section and re.search(r'(?i)parts\s+subtotal(?:\s*\(approx\.?\))?|estimated\s+parts\s+subtotal|taxable\s+subtotal|estimated\s+tax|sales\s+tax|tax\s+rate|tax\s+basis|approximate\s+repair\s+total|severity\s+tier', s):
                 break
             if in_parts_section and re.search(r'(?i)^\*{0,2}\s*(labor|body\s+labor|paint\s+labor|paint\s*(?:&|and)\s*materials|setup\s*&\s*measure|frame\s+labor|mechanical|sublet)\b', s):
                 break
@@ -2698,6 +2708,16 @@ async def vision_review(
         - carry the actual hours/rates used so the PDF can show how each labor total was derived
         """
         text_local = str(md_text or '').replace("\r\n", "\n").replace("\r", "\n")
+        # Normalize common mojibake / symbol drift before parsing website-style cost blocks.
+        text_local = (
+            text_local
+            .replace('Ã', '×')
+            .replace('â', '[ ]')
+            .replace('â', '[x]')
+            .replace('â', '[x]')
+            .replace('â€”', '-')
+            .replace('â€“', '-')
+        )
 
         if tax_rate_value is None or not isinstance(tax_rate_value, (int, float)) or tax_rate_value <= 0:
             _m_tax_rate_inline = re.search(r'(?im)^\s*[-*]?\s*Tax\s+rate\s*:\s*([0-9]+(?:\.[0-9]+)?)\s*%\s*$', text_local)
@@ -2709,7 +2729,14 @@ async def vision_review(
                 except Exception:
                     tax_rate_value = 0.07
             else:
-                tax_rate_value = 0.07
+                _m_tax_rate_inline = re.search(r'(?im)assumed\s*([0-9]+(?:\.[0-9]+)?)\s*%\s*(?:for\s+approximation)?', text_local)
+                if _m_tax_rate_inline:
+                    try:
+                        tax_rate_value = float(_m_tax_rate_inline.group(1)) / 100.0
+                    except Exception:
+                        tax_rate_value = 0.07
+                else:
+                    tax_rate_value = 0.07
 
         def _grab_money_line(pats: List[str]) -> Optional[float]:
             for pat in pats:
@@ -2778,9 +2805,9 @@ async def vision_review(
             rf'(?im)^\s*[-*]?\s*Structural(?:\s+labor)?\s*:\s*(?:\*{{1,2}})?[^\n]*?@\s*\$\s*{_num_pat}\s*/\s*hr',
         ])
         mech_rate = _grab_float_line([
-            rf'(?im)^\s*[-*]?\s*Mechanical(?:/diagnostic)?\s+rate\s*:\s*\$\s*{_num_pat}\s*/\s*hr',
-            rf'(?im)^\s*[-*]?\s*Mechanical(?:/diagnostic)?\s*:\s*\$\s*{_num_pat}\s*/\s*hr\b',
-            rf'(?im)^\s*[-*]?\s*Mechanical(?:/SRS/Glass|/diagnostic)?[^\n]*?:\s*(?:\*{{1,2}})?[^\n]*?@\s*\$\s*{_num_pat}\s*/\s*hr',
+            rf'(?im)^\s*[-*]?\s*Mechanical(?:/ADAS|/diagnostic)?\s+rate\s*:\s*\$\s*{_num_pat}\s*/\s*hr',
+            rf'(?im)^\s*[-*]?\s*Mechanical(?:/ADAS|/diagnostic)?\s*:\s*\$\s*{_num_pat}\s*/\s*hr\b',
+            rf'(?im)^\s*[-*]?\s*Mechanical(?:/ADAS|/SRS/Glass|/diagnostic)?[^\n]*?:\s*(?:\*{{1,2}})?[^\n]*?@\s*\$\s*{_num_pat}\s*/\s*hr',
             rf'(?im)^\s*[-*]?\s*Mechanical\s+labor[^\n]*?:\s*(?:\*{{1,2}})?[^\n]*?@\s*\$\s*{_num_pat}\s*/\s*hr',
         ])
 
@@ -2822,8 +2849,8 @@ async def vision_review(
             r'(?im)^\s*[-*]?\s*Frame(?:/measure|\s+labor)?\s*:\s*(?:\*{1,2})?[^\n]*?([0-9]+(?:\.[0-9]+)?)\s*hrs?\s*@',
         ])
         mech_hours = _grab_float_line([
-            r'(?im)^\s*[-*]?\s*Mechanical(?:/SRS/Glass|/diagnostic)?[^\n]*?:\s*\*{0,2}\s*([0-9]+(?:\.[0-9]+)?)\s*hrs?\b',
-            r'(?im)^\s*[-*]?\s*Mechanical(?:/SRS/Glass|/diagnostic)?[^\n]*?:\s*(?:\*{1,2})?[^\n]*?([0-9]+(?:\.[0-9]+)?)\s*hrs?\s*@',
+            r'(?im)^\s*[-*]?\s*Mechanical(?:/ADAS|/SRS/Glass|/diagnostic)?[^\n]*?:\s*\*{0,2}\s*([0-9]+(?:\.[0-9]+)?)\s*hrs?\b',
+            r'(?im)^\s*[-*]?\s*Mechanical(?:/ADAS|/SRS/Glass|/diagnostic)?[^\n]*?:\s*(?:\*{1,2})?[^\n]*?([0-9]+(?:\.[0-9]+)?)\s*hrs?\s*@',
         ])
 
         # Hard-bind paint labor when refinish/blend scope is present but explicit paint hours were not emitted.
@@ -2926,7 +2953,7 @@ async def vision_review(
 
         parts_sub = _grab_money_line([
             r'^\s*\*{0,2}\s*[-*]?\s*Estimated\s+parts\s+subtotal\s*:\s*\*{0,2}\s*\$\s*([0-9][0-9,]*(?:\.[0-9]{2})?)\b',
-            r'^\s*\*{0,2}\s*[-*]?\s*Parts\s+subtotal\s*\(approx\.?\)\s*=\s*\*{0,2}\s*\$\s*([0-9][0-9,]*(?:\.[0-9]{2})?)\b',
+            r'^\s*\*{0,2}\s*[-*]?\s*Parts\s+subtotal\s*\(approx\.?\)\s*[:=]\s*\*{0,2}\s*\$\s*([0-9][0-9,]*(?:\.[0-9]{2})?)\b',
             r'^\s*\*{0,2}\s*[-*]?\s*Parts\s+subtotal\s*\(approx\.?\)\s*:\s*\*{0,2}\s*\$\s*([0-9][0-9,]*(?:\.[0-9]{2})?)\b',
             r'^\s*\*{0,2}\s*[-*]?\s*Parts\s+subtotal\s*=\s*\*{0,2}\s*\$\s*([0-9][0-9,]*(?:\.[0-9]{2})?)\b',
             r'^\s*\*{0,2}\s*[-*]?\s*Parts\s+subtotal\s*:\s*\*{0,2}\s*\$\s*([0-9][0-9,]*(?:\.[0-9]{2})?)\b',
@@ -4504,3 +4531,14 @@ async def download_pdf(file_number: Optional[str] = None, filename: Optional[str
         return JSONResponse(status_code=404, content={"detail": "Not Found"})
     latest = max(candidates, key=lambda p: os.path.getmtime(p))
     return FileResponse(path=latest, media_type="application/pdf", filename=os.path.basename(latest))
+
+
+
+
+
+
+
+
+
+
+
