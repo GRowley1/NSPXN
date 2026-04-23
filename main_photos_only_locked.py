@@ -1521,6 +1521,91 @@ async def vision_review(
         except Exception:
             return None
 
+    def _salvage_partial_json_object(raw_text: str) -> Optional[Dict[str, Any]]:
+        """Best-effort salvage when the model starts valid JSON but truncates before closing.
+        Recover only the known top-level fields so the run can continue instead of dropping
+        straight to the all-N/A skeleton.
+        """
+        if not raw_text:
+            return None
+        src = str(raw_text).replace("\ufeff", "").replace("\u200b", "").replace("\u00A0", " ").strip()
+        if not src:
+            return None
+
+        keys_in_order = [
+            'file_number','request_type','claim_number','vin','vin_verification','vehicle',
+            'odometer_estimate_only','compliance_score','summary_brief','summary_markdown',
+            'fraud_markdown','primary_impact','secondary_impact','estimated_costs_markdown','conclusion'
+        ]
+
+        def _unescape_json_string(s: str) -> str:
+            try:
+                return bytes(s, 'utf-8').decode('unicode_escape')
+            except Exception:
+                return s.replace('\\n', '\n').replace('\\r', '\r').replace('\\t', '\t').replace('\\"', '"').replace('\\\\', '\\')
+
+        def _extract_string_value(key: str) -> Optional[str]:
+            pat = re.compile(r'"' + re.escape(key) + r'"\s*:\s*"', flags=re.DOTALL)
+            m = pat.search(src)
+            if not m:
+                return None
+            i = m.end()
+            buf = []
+            esc = False
+            while i < len(src):
+                ch = src[i]
+                if esc:
+                    buf.append(ch)
+                    esc = False
+                elif ch == '\\':
+                    buf.append(ch)
+                    esc = True
+                elif ch == '"':
+                    return _unescape_json_string(''.join(buf))
+                else:
+                    buf.append(ch)
+                i += 1
+            salvaged = ''.join(buf).strip()
+            return _unescape_json_string(salvaged) if salvaged else None
+
+        def _extract_scalar_value(key: str) -> Optional[str]:
+            m = re.search(r'"' + re.escape(key) + r'"\s*:\s*(null|true|false|-?[0-9]+(?:\.[0-9]+)?)', src, flags=re.IGNORECASE)
+            if not m:
+                return None
+            return m.group(1)
+
+        salvaged: Dict[str, Any] = {}
+        recovered = 0
+        for key in keys_in_order:
+            sval = _extract_string_value(key)
+            if sval is not None:
+                salvaged[key] = sval
+                recovered += 1
+                continue
+            scalar = _extract_scalar_value(key)
+            if scalar is not None:
+                salvaged[key] = scalar
+                recovered += 1
+
+        if recovered < 4:
+            return None
+
+        for key in keys_in_order:
+            salvaged.setdefault(key, 'N/A')
+
+        if salvaged.get('summary_markdown') in ('', 'N/A', None):
+            brief = str(salvaged.get('summary_brief') or '').strip()
+            if brief and brief != 'N/A':
+                salvaged['summary_markdown'] = '## Detailed Condition Report\n' + brief
+        if salvaged.get('fraud_markdown') in ('', 'N/A', None):
+            salvaged['fraud_markdown'] = 'No material inconsistencies found.'
+        if salvaged.get('conclusion') in ('', 'N/A', None):
+            brief = str(salvaged.get('summary_brief') or '').strip()
+            salvaged['conclusion'] = brief if brief and brief != 'N/A' else 'Photos were reviewed, but the model response was truncated before the conclusion field finished.'
+        if salvaged.get('estimated_costs_markdown') in ('', 'N/A', None):
+            salvaged['estimated_costs_markdown'] = '## Approximate Repair Cost Breakdown\nModel response was truncated before the cost block finished.'
+        return salvaged
+
     try:
         raw = (rsp.choices[0].message.content or "")
     except Exception as e:
@@ -1528,6 +1613,8 @@ async def vision_review(
         return JSONResponse(status_code=500, content={"error":"Model returned no content."})
 
     data = _try_parse_json(raw)
+    if data is None:
+        data = _salvage_partial_json_object(raw)
     # Prefer door-label VIN when present (OCR -> QR/barcode). Do NOT use filenames.
     # --- HARD VIN LOCK (door label wins; QR only confirms) ---
     try:
@@ -1600,6 +1687,8 @@ async def vision_review(
             )
             raw2 = (rsp2.choices[0].message.content or "")
             data = _try_parse_json(raw2)
+            if data is None:
+                data = _salvage_partial_json_object(raw2)
         except Exception:
             pass
 
@@ -1638,6 +1727,8 @@ async def vision_review(
                 )
             fixed = (fix_rsp.choices[0].message.content or "")
             data = _try_parse_json(fixed)
+            if data is None:
+                data = _salvage_partial_json_object(raw)
         except Exception as e:
             log.error(f"Self-heal reformat failed: {e}")
 
@@ -4296,11 +4387,8 @@ async def vision_review(
                 "NSPXN.com Condition Report\n\n"
                 f"Generated: {report_generated_ts}\n"
                 f"Inspected For: {ia_company}\n"
-                f"Claim #: {result['claim_number'] or 'N/A'}\n"
-                f"File #: {file_number or 'N/A'}\n"
-                f"VIN: {result['vin'] or 'N/A'}\n"
-                f"Odometer: {result['odometer_estimate_only'] or 'N/A'}\n"   
-                f"Primary Impact: {result['primary_impact'] or 'N/A'}\n"
+                f"Claim #: {result['claim_number'] or 'N/A'}    File #: {file_number or 'N/A'}\n"
+                f"Odometer: {result['odometer_estimate_only'] or 'N/A'}    Primary Impact: {result['primary_impact'] or 'N/A'}\n"
                 f"Secondary Impact: {result['secondary_impact'] or 'N/A'}\n\n"
                 f"{result['redaction_status']}\n\n"
                 "Condition Summary\n"
