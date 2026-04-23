@@ -2258,6 +2258,231 @@ async def vision_review(
         ])
         return (_cm.rstrip() + "\n\n" + "\n".join(tail)).strip()
 # -----------------------
+    def _normalize_mojibake_text(text_in: str) -> str:
+        s = str(text_in or '').replace("\r\n", "\n").replace("\r", "\n")
+        fixes = {
+            'Ã': '×',
+            'â': '[ ]',
+            'â': '[x]',
+            'â': '[x]',
+            'â€”': '-',
+            'â€“': '-',
+            'â€œ': '"',
+            'â€': '"',
+            'â€˜': "'",
+            'â€™': "'",
+            'Â ': ' ',
+            'Â': '',
+        }
+        for bad, good in fixes.items():
+            s = s.replace(bad, good)
+        return s
+
+    def _parse_model_cost_block_once(md_text: str, tax_rate_value: Optional[float] = None) -> Optional[Dict[str, Any]]:
+        """Parse the website/model cost block once into a structured object.
+        This bypasses the brittle regex-reparse path that can zero the PDF cost section.
+        """
+        t = _normalize_mojibake_text(md_text)
+        if not t.strip():
+            return None
+
+        lines = [ln.strip() for ln in t.splitlines() if ln.strip()]
+
+        def money_from_line(s: str) -> Optional[float]:
+            m = re.findall(r'\$\s*([0-9][0-9,]*(?:\.[0-9]{1,2})?)', s)
+            if not m:
+                return None
+            try:
+                return float(m[-1].replace(',', ''))
+            except Exception:
+                return None
+
+        def first_float(s: str) -> Optional[float]:
+            m = re.search(r'([0-9]+(?:\.[0-9]+)?)', s)
+            if not m:
+                return None
+            try:
+                return float(m.group(1))
+            except Exception:
+                return None
+
+        parsed: Dict[str, Any] = {
+            'body_hours': None, 'paint_hours': None, 'setup_hours': None, 'frame_hours': None, 'mech_hours': None,
+            'body_rate': None, 'paint_rate': None, 'frame_rate': None, 'mech_rate': None, 'paint_mat_rate': None,
+            'body_labor': 0.0, 'paint_labor': 0.0, 'setup_measure': 0.0, 'frame_labor': 0.0, 'mech_labor': 0.0,
+            'labor_sub': 0.0, 'parts_lines': [], 'parts_sub': 0.0, 'paint_mat': 0.0, 'sublet': 0.0,
+            'tax_basis': 0.0, 'tax_amt': 0.0, 'total_val': 0.0,
+            'explicit_body_present': False, 'explicit_paint_present': False, 'explicit_setup_present': False,
+            'explicit_frame_present': False, 'explicit_mech_present': False,
+        }
+
+        in_parts = False
+        for s in lines:
+            low = s.lower()
+
+            if 'oem replacement parts' in low or 'itemized parts breakdown' in low or 'oem parts needed' in low:
+                in_parts = True
+                continue
+            if in_parts and ('parts subtotal' in low or 'other costs' in low or 'tax (' in low or 'tax rate' in low or 'approximate total repair cost' in low or 'approximate repair total' in low or 'severity tier' in low):
+                in_parts = False
+            if in_parts and '$' in s:
+                cleaned = re.sub(r'^[-*]\s*', '', s).strip()
+                if cleaned and cleaned not in parsed['parts_lines']:
+                    parsed['parts_lines'].append(cleaned)
+                continue
+
+            if 'body labor:' in low and '/hr' in low and 'hrs' not in low:
+                vals = re.findall(r'\$\s*([0-9][0-9,]*(?:\.[0-9]+)?)', s)
+                if vals:
+                    parsed['body_rate'] = float(vals[0].replace(',', ''))
+                continue
+            if ('refinish labor:' in low or 'paint labor:' in low) and '/hr' in low and 'hrs' not in low:
+                vals = re.findall(r'\$\s*([0-9][0-9,]*(?:\.[0-9]+)?)', s)
+                if vals:
+                    parsed['paint_rate'] = float(vals[0].replace(',', ''))
+                continue
+            if 'mechanical labor:' in low and '/hr' in low and 'hrs' not in low:
+                vals = re.findall(r'\$\s*([0-9][0-9,]*(?:\.[0-9]+)?)', s)
+                if vals:
+                    parsed['mech_rate'] = float(vals[0].replace(',', ''))
+                continue
+            if 'frame/measure:' in low and '/hr' in low and 'hrs' not in low:
+                vals = re.findall(r'\$\s*([0-9][0-9,]*(?:\.[0-9]+)?)', s)
+                if vals:
+                    parsed['frame_rate'] = float(vals[0].replace(',', ''))
+                continue
+            if 'paint & materials:' in low and 'per refinish hour' in low:
+                vals = re.findall(r'\$\s*([0-9][0-9,]*(?:\.[0-9]+)?)', s)
+                if vals:
+                    parsed['paint_mat_rate'] = float(vals[0].replace(',', ''))
+                continue
+
+            if low.startswith('- body labor:') and 'hrs' in low:
+                parsed['body_hours'] = first_float(s)
+                parsed['explicit_body_present'] = parsed['body_hours'] is not None
+                amt = money_from_line(s)
+                if amt is not None:
+                    parsed['body_labor'] = amt
+                continue
+            if (low.startswith('- paint labor:') or low.startswith('- refinish labor:')) and 'hrs' in low:
+                parsed['paint_hours'] = first_float(s)
+                parsed['explicit_paint_present'] = parsed['paint_hours'] is not None
+                amt = money_from_line(s)
+                if amt is not None:
+                    parsed['paint_labor'] = amt
+                continue
+            if low.startswith('- setup & measure') and 'hr' in low:
+                parsed['setup_hours'] = first_float(s)
+                parsed['explicit_setup_present'] = parsed['setup_hours'] is not None
+                amt = money_from_line(s)
+                if amt is not None:
+                    parsed['setup_measure'] = amt
+                continue
+            if low.startswith('- frame/measure') and 'hr' in low:
+                parsed['frame_hours'] = first_float(s)
+                parsed['explicit_frame_present'] = parsed['frame_hours'] is not None
+                amt = money_from_line(s)
+                if amt is not None:
+                    parsed['frame_labor'] = amt
+                continue
+            if (low.startswith('- mechanical/diagnostic') or low.startswith('- mechanical/adas') or low.startswith('- mechanical labor:')) and 'hr' in low:
+                parsed['mech_hours'] = first_float(s)
+                parsed['explicit_mech_present'] = parsed['mech_hours'] is not None
+                amt = money_from_line(s)
+                if amt is not None:
+                    parsed['mech_labor'] = amt
+                continue
+            if low.startswith('- paint & materials:') and ('×' in s or 'x' in low or '*' in s):
+                amt = money_from_line(s)
+                if amt is not None:
+                    parsed['paint_mat'] = amt
+                if parsed['paint_hours'] is None:
+                    parsed['paint_hours'] = first_float(s)
+                continue
+
+            if 'labor subtotal' in low and '$' in s:
+                amt = money_from_line(s)
+                if amt is not None:
+                    parsed['labor_sub'] = amt
+                continue
+            if 'parts subtotal' in low and '$' in s:
+                amt = money_from_line(s)
+                if amt is not None:
+                    parsed['parts_sub'] = amt
+                continue
+            if low.startswith('- paint & materials:') and parsed['paint_mat'] <= 0:
+                amt = money_from_line(s)
+                if amt is not None:
+                    parsed['paint_mat'] = amt
+                continue
+            if 'tax rate assumed' in low or low.startswith('- tax rate'):
+                m = re.search(r'([0-9]+(?:\.[0-9]+)?)\s*%', s)
+                if m:
+                    try:
+                        tax_rate_value = float(m.group(1)) / 100.0
+                    except Exception:
+                        pass
+                continue
+            if 'taxable subtotal' in low and '$' in s:
+                amt = money_from_line(s)
+                if amt is not None:
+                    parsed['tax_basis'] = amt
+                continue
+            if low.startswith('- tax =') or re.search(r'(?i)^-\s*tax\b', s):
+                amt = money_from_line(s)
+                if amt is not None:
+                    parsed['tax_amt'] = amt
+                continue
+            if 'approximate total repair cost' in low or 'approximate repair total' in low:
+                amt = money_from_line(s)
+                if amt is not None:
+                    parsed['total_val'] = amt
+                continue
+
+        if not isinstance(tax_rate_value, (int, float)) or float(tax_rate_value) <= 0:
+            tax_rate_value = 0.07
+        parsed['tax_rate_value'] = float(tax_rate_value)
+
+        if parsed['parts_sub'] <= 0 and parsed['parts_lines']:
+            total = 0.0
+            for pl in parsed['parts_lines']:
+                amt = money_from_line(pl)
+                if amt is not None:
+                    total += amt
+            parsed['parts_sub'] = round(total, 2)
+
+        if parsed['body_labor'] <= 0 and isinstance(parsed['body_hours'], (int, float)) and isinstance(parsed['body_rate'], (int, float)):
+            parsed['body_labor'] = round(float(parsed['body_hours']) * float(parsed['body_rate']), 2)
+        if parsed['paint_labor'] <= 0 and isinstance(parsed['paint_hours'], (int, float)) and isinstance(parsed['paint_rate'], (int, float)):
+            parsed['paint_labor'] = round(float(parsed['paint_hours']) * float(parsed['paint_rate']), 2)
+        if parsed['setup_measure'] <= 0 and isinstance(parsed['setup_hours'], (int, float)):
+            setup_rate = parsed['body_rate'] if isinstance(parsed['body_rate'], (int, float)) else 0.0
+            if setup_rate > 0:
+                parsed['setup_measure'] = round(float(parsed['setup_hours']) * float(setup_rate), 2)
+        if parsed['frame_labor'] <= 0 and isinstance(parsed['frame_hours'], (int, float)) and isinstance(parsed['frame_rate'], (int, float)):
+            parsed['frame_labor'] = round(float(parsed['frame_hours']) * float(parsed['frame_rate']), 2)
+        if parsed['mech_labor'] <= 0 and isinstance(parsed['mech_hours'], (int, float)) and isinstance(parsed['mech_rate'], (int, float)):
+            parsed['mech_labor'] = round(float(parsed['mech_hours']) * float(parsed['mech_rate']), 2)
+        if parsed['paint_mat'] <= 0 and isinstance(parsed['paint_hours'], (int, float)) and isinstance(parsed['paint_mat_rate'], (int, float)):
+            parsed['paint_mat'] = round(float(parsed['paint_hours']) * float(parsed['paint_mat_rate']), 2)
+
+        if parsed['labor_sub'] <= 0:
+            parsed['labor_sub'] = round(float(parsed['body_labor']) + float(parsed['paint_labor']) + float(parsed['setup_measure']) + float(parsed['frame_labor']) + float(parsed['mech_labor']), 2)
+        if parsed['tax_basis'] <= 0:
+            parsed['tax_basis'] = round(float(parsed['parts_sub']) + float(parsed['paint_mat']), 2)
+        if parsed['tax_amt'] <= 0 and parsed['tax_basis'] > 0:
+            parsed['tax_amt'] = round(float(parsed['tax_basis']) * float(parsed['tax_rate_value']), 2)
+        if parsed['total_val'] <= 0:
+            parsed['total_val'] = round(float(parsed['labor_sub']) + float(parsed['parts_sub']) + float(parsed['paint_mat']) + float(parsed['sublet']) + float(parsed['tax_amt']), 2)
+
+        core_ok = (
+            (parsed['labor_sub'] > 0 or parsed['parts_sub'] > 0 or parsed['paint_mat'] > 0) and
+            (parsed['total_val'] > 0)
+        )
+        if not core_ok:
+            return None
+        return _apply_normalization_lock(parsed)
+
     # --- Normalize Photos-Only cost markdown for downstream PDF/UI ---
     try:
         if ai_intent == "damage_report_from_photos":
@@ -2277,17 +2502,7 @@ async def vision_review(
         - if no explicit parts section is found, scan all lines for likely part/component
           lines with dollar amounts while excluding labor, tax, totals, and rationale lines
         """
-        text_local = str(md_text or '').replace("\r\n", "\n").replace("\r", "\n")
-        # Normalize common mojibake / symbol drift before parsing website-style cost blocks.
-        text_local = (
-            text_local
-            .replace('Ã', '×')
-            .replace('â', '[ ]')
-            .replace('â', '[x]')
-            .replace('â', '[x]')
-            .replace('â€”', '-')
-            .replace('â€“', '-')
-        )
+        text_local = _normalize_mojibake_text(md_text)
         out: List[str] = []
         seen = set()
         in_parts_section = False
@@ -2707,17 +2922,7 @@ async def vision_review(
         - if explicit parts subtotal is missing, itemized part lines are summed and become the single parts subtotal
         - carry the actual hours/rates used so the PDF can show how each labor total was derived
         """
-        text_local = str(md_text or '').replace("\r\n", "\n").replace("\r", "\n")
-        # Normalize common mojibake / symbol drift before parsing website-style cost blocks.
-        text_local = (
-            text_local
-            .replace('Ã', '×')
-            .replace('â', '[ ]')
-            .replace('â', '[x]')
-            .replace('â', '[x]')
-            .replace('â€”', '-')
-            .replace('â€“', '-')
-        )
+        text_local = _normalize_mojibake_text(md_text)
 
         if tax_rate_value is None or not isinstance(tax_rate_value, (int, float)) or tax_rate_value <= 0:
             _m_tax_rate_inline = re.search(r'(?im)^\s*[-*]?\s*Tax\s+rate\s*:\s*([0-9]+(?:\.[0-9]+)?)\s*%\s*$', text_local)
@@ -3378,13 +3583,17 @@ async def vision_review(
             # Treat the website/model cost block as the canonical source of truth.
             # Parse it once, with no scope reseeding and no fallback labor-rate rebuild,
             # then render website/email/PDF from that one structured object only.
-            locked_costs_obj = _parse_locked_photos_only_costs(
-                _raw_locked_cost_source,
-                tax_rate,
-                seed_rates=None,
-                scope_text=None,
-                allow_seed=False,
-            )
+            locked_costs_obj = _parse_model_cost_block_once(_raw_locked_cost_source, tax_rate)
+            if not isinstance(locked_costs_obj, dict):
+                locked_costs_obj = _parse_locked_photos_only_costs(
+                    _raw_locked_cost_source,
+                    tax_rate,
+                    seed_rates=None,
+                    scope_text=None,
+                    allow_seed=False,
+                )
+            if not isinstance(locked_costs_obj, dict) or float(locked_costs_obj.get('total_val') or 0.0) <= 0.0:
+                raise ValueError('locked cost parse collapsed')
             result["estimated_costs_markdown"] = _canonical_locked_photos_only_cost_markdown_from_parsed(
                 locked_costs_obj, tax_rate
             )
@@ -3440,8 +3649,8 @@ async def vision_review(
     def _pdf_sanitize(text: str, max_token_len: int = 60) -> str:
         if text is None:
             return ""
-        s = str(text).replace("\r\n", "\n").replace("\r", "\n")
-        s = "".join(ch if ord(ch) < 256 else " " for ch in s)
+        s = _normalize_mojibake_text(text)
+        s = ''.join(ch if ord(ch) < 256 else ' ' for ch in s)
         def _break(tok: str) -> str:
             if len(tok) <= max_token_len:
                 return tok
@@ -4531,14 +4740,3 @@ async def download_pdf(file_number: Optional[str] = None, filename: Optional[str
         return JSONResponse(status_code=404, content={"detail": "Not Found"})
     latest = max(candidates, key=lambda p: os.path.getmtime(p))
     return FileResponse(path=latest, media_type="application/pdf", filename=os.path.basename(latest))
-
-
-
-
-
-
-
-
-
-
-
