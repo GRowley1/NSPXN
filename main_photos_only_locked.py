@@ -2259,23 +2259,42 @@ async def vision_review(
         return (_cm.rstrip() + "\n\n" + "\n".join(tail)).strip()
 # -----------------------
     def _normalize_mojibake_text(text_in: str) -> str:
+        """Normalize common UTF-8 mojibake and non-ASCII symbols before UI/email/PDF rendering.
+        FPDF's Latin-1 path can corrupt symbols such as ×, ≈, smart quotes, and checkboxes.
+        Keep this ASCII-safe so website/email/PDF all show clean text.
+        """
         s = str(text_in or '').replace("\r\n", "\n").replace("\r", "\n")
+        # First try a safe mojibake repair for strings that were decoded as Latin-1/Windows-1252.
+        try:
+            if any(bad in s for bad in ('Ã', 'Â', 'â')):
+                repaired = s.encode('latin-1', 'ignore').decode('utf-8', 'ignore')
+                if repaired and len(repaired.strip()) >= max(1, int(len(s.strip()) * 0.50)):
+                    s = repaired
+        except Exception:
+            pass
+
         fixes = {
-            'Ã': '×',
-            'â': '[ ]',
-            'â': '[x]',
-            'â': '[x]',
-            'â€”': '-',
-            'â€“': '-',
-            'â€œ': '"',
-            'â€': '"',
-            'â€˜': "'",
-            'â€™': "'",
-            'Â ': ' ',
-            'Â': '',
+            # multiplication / approximations
+            'Ã': ' x ', '×': ' x ', '✕': ' x ', '✖': ' x ',
+            'â': ' approx. ', '≈': ' approx. ',
+            # checkbox / marks
+            'â': '[ ]', '☐': '[ ]', '☒': '[x]',
+            'â': '[x]', '☑': '[x]',
+            'â': '[x]', '✓': '[x]', '✔': '[x]',
+            'â': '[x]', '✗': '[x]',
+            # dashes / quotes / bullets / ellipsis
+            'â€”': '-', '—': '-', 'â€“': '-', '–': '-',
+            'â€œ': '"', 'â€': '"', '“': '"', '”': '"',
+            'â€˜': "'", 'â€™': "'", '‘': "'", '’': "'",
+            'â€¢': '-', '•': '-', '…': '...',
+            'Â ': ' ', 'Â': '',
         }
         for bad, good in fixes.items():
             s = s.replace(bad, good)
+        # Remove remaining C1 controls that show up as mojibake fragments.
+        s = re.sub(r'[\x80-\x9f]', '', s)
+        # Normalize accidental repeated spaces introduced by symbol replacement.
+        s = re.sub(r'[ \t]{2,}', ' ', s)
         return s
 
     def _parse_model_cost_block_once(md_text: str, tax_rate_value: Optional[float] = None) -> Optional[Dict[str, Any]]:
@@ -2483,12 +2502,14 @@ async def vision_review(
             return None
         return _apply_normalization_lock(parsed)
 
-    # --- Normalize Photos-Only cost markdown for downstream PDF/UI ---
+    # --- Normalize Photos-Only cost markdown for downstream UI/email/PDF ---
+    # Do NOT canonical-rebuild here. The model/website cost block is the source of truth.
+    # Only clean mojibake so valid labor hours, parts, tax, total, and severity do not collapse to zeros.
     try:
         if ai_intent == "damage_report_from_photos":
             _cm = result.get("estimated_costs_markdown") or ""
-            _cm = _normalize_photos_only_cost_block(_cm)
-            result["estimated_costs_markdown"] = _cm
+            if str(_cm).strip():
+                result["estimated_costs_markdown"] = _normalize_mojibake_text(_cm)
     except Exception:
         pass
 
@@ -3559,48 +3580,38 @@ async def vision_review(
     try:
         _final_non_empty_output_lock()
         if ai_intent == "damage_report_from_photos":
-            _raw_locked_cost_source = result.get("estimated_costs_markdown") or ""
-            _raw_summary_before_lock = str(result.get("summary_markdown") or "").strip()
-            _inspection_location_for_lock = _normalize_location_with_zip(_extract_inspection_location(uploaded_text_all or ""), ia_company, uploaded_text_all)
-            _inline_model_tax_rate = None
-            try:
-                _m_inline_tax = re.search(r'(?im)assumed\s*([0-9]+(?:\.[0-9]+)?)\s*%\)?', _raw_locked_cost_source or '')
-                if not _m_inline_tax:
-                    _m_inline_tax = re.search(r'(?im)^\s*[-*]?\s*Tax\s+rate\s*:\s*([0-9]+(?:\.[0-9]+)?)\s*%\s*$', _raw_locked_cost_source or '')
-                if _m_inline_tax:
-                    _inline_model_tax_rate = float(_m_inline_tax.group(1)) / 100.0
-            except Exception:
-                _inline_model_tax_rate = None
-
-            if isinstance(locked_cost_overrides, dict) and isinstance(locked_cost_overrides.get("tax_rate"), (int, float)) and float(locked_cost_overrides.get("tax_rate") or 0.0) > 0:
-                tax_rate = float(locked_cost_overrides.get("tax_rate"))
-            elif isinstance(_inline_model_tax_rate, (int, float)) and float(_inline_model_tax_rate) > 0:
-                tax_rate = float(_inline_model_tax_rate)
-            elif tax_rate is None or not isinstance(tax_rate, (int, float)) or tax_rate <= 0:
-                tax_rate = _lookup_tax_rate(_inspection_location_for_lock)
-
-            # FINAL SYNC LOCK:
-            # Treat the website/model cost block as the canonical source of truth.
-            # Parse it once, with no scope reseeding and no fallback labor-rate rebuild,
-            # then render website/email/PDF from that one structured object only.
-            locked_costs_obj = _parse_model_cost_block_once(_raw_locked_cost_source, tax_rate)
-            if not isinstance(locked_costs_obj, dict):
+            # FINAL DISPLAY SYNC LOCK:
+            # Website/model cost block is already the correct user-visible block.
+            # Do not parse/rebuild/canonicalize it here. Prior rebuild attempts are what
+            # turned valid labor/parts/tax into 0.0 hrs and $0.00 in the PDF/email.
+            _raw_cost_block = _normalize_mojibake_text(result.get("estimated_costs_markdown") or "").strip()
+            if _raw_cost_block and not _bad_field(_raw_cost_block):
+                result["estimated_costs_markdown"] = _raw_cost_block
+            else:
+                # Only fall back to the old parser if the model truly failed to provide a cost block.
+                _inspection_location_for_lock = _normalize_location_with_zip(_extract_inspection_location(uploaded_text_all or ""), ia_company, uploaded_text_all)
+                if tax_rate is None or not isinstance(tax_rate, (int, float)) or tax_rate <= 0:
+                    tax_rate = _lookup_tax_rate(_inspection_location_for_lock)
                 locked_costs_obj = _parse_locked_photos_only_costs(
-                    _raw_locked_cost_source,
+                    _raw_cost_block,
                     tax_rate,
                     seed_rates=None,
                     scope_text=None,
                     allow_seed=False,
                 )
-            if not isinstance(locked_costs_obj, dict) or float(locked_costs_obj.get('total_val') or 0.0) <= 0.0:
-                raise ValueError('locked cost parse collapsed')
-            result["estimated_costs_markdown"] = _canonical_locked_photos_only_cost_markdown_from_parsed(
-                locked_costs_obj, tax_rate
+                result["estimated_costs_markdown"] = _canonical_locked_photos_only_cost_markdown_from_parsed(
+                    locked_costs_obj, tax_rate
+                )
+
+            # Clean symbols everywhere before website/email/PDF rendering.
+            for _k in ("summary_markdown", "fraud_markdown", "conclusion", "summary_brief", "primary_impact", "secondary_impact"):
+                try:
+                    result[_k] = _normalize_mojibake_text(result.get(_k) or "")
+                except Exception:
+                    pass
+            result["summary_markdown"] = _scrub_photo_only_narrative_cost_headers(
+                _scrub_model_headings(result.get("summary_markdown") or "")
             )
-            result["summary_markdown"] = _scrub_photo_only_narrative_cost_headers(_raw_summary_before_lock)
-            _locked_total = locked_costs_obj.get("total_val") if isinstance(locked_costs_obj, dict) else None
-            result["conclusion"] = _force_conclusion_to_locked_total(result.get("conclusion") or "", _locked_total)
-            result["summary_markdown"] = _scrub_photo_only_narrative_cost_headers(_scrub_model_headings(result.get("summary_markdown") or ""))
             _final_non_empty_output_lock()
     except Exception:
         pass
@@ -3641,6 +3652,14 @@ async def vision_review(
                         },
                     },
                 )
+    except Exception:
+        pass
+
+    # Final text cleanup before any website response/email/PDF usage.
+    try:
+        if ai_intent == "damage_report_from_photos":
+            for _k in ("summary_markdown", "estimated_costs_markdown", "fraud_markdown", "conclusion", "summary_brief", "primary_impact", "secondary_impact"):
+                result[_k] = _normalize_mojibake_text(result.get(_k) or "")
     except Exception:
         pass
 
@@ -4623,9 +4642,9 @@ async def vision_review(
         msg = EmailMessage()
         if ai_intent == "damage_report_from_photos":
             subj = f"NSPXN.com Condition Report: {file_number or ''} {result['claim_number'] or ''}".strip()
-            _locked_total_email = locked_costs_obj.get('total_val') if isinstance(locked_costs_obj, dict) else None
-            _summary_email = _scrub_photo_only_narrative_cost_headers(_scrub_model_headings(result.get('summary_markdown') or ''))
-            _conclusion_email = _force_conclusion_to_locked_total(result.get('conclusion') or '', _locked_total_email)
+            _summary_email = _normalize_mojibake_text(_scrub_photo_only_narrative_cost_headers(_scrub_model_headings(result.get('summary_markdown') or '')))
+            _cost_email = _normalize_mojibake_text(result.get('estimated_costs_markdown') or '')
+            _conclusion_email = _normalize_mojibake_text(result.get('conclusion') or '')
             body = (
                 "NSPXN.com Condition Report\n\n"
                 f"Generated: {report_generated_ts}\n"
@@ -4637,7 +4656,7 @@ async def vision_review(
                 "Condition Summary\n"
                 f"{(_summary_email or 'N/A')}\n\n"
                 "Approximate Repair Cost Breakdown\n"
-                f"{(result['estimated_costs_markdown'] or 'N/A')}\n\n"
+                f"{(_cost_email or 'N/A')}\n\n"
                 "Fraud & Authenticity Check\n"
                 f"{(result['fraud_markdown'] or 'N/A')}\n\n"
                 "Conclusion\n"
@@ -4740,3 +4759,14 @@ async def download_pdf(file_number: Optional[str] = None, filename: Optional[str
         return JSONResponse(status_code=404, content={"detail": "Not Found"})
     latest = max(candidates, key=lambda p: os.path.getmtime(p))
     return FileResponse(path=latest, media_type="application/pdf", filename=os.path.basename(latest))
+
+
+
+
+
+
+
+
+
+
+
