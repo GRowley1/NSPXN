@@ -555,6 +555,16 @@ DETAIL_TEMPLATES = {
 - Write a continuous 10–15 sentence narrative summarizing visible damage, impact zones, misalignment/gaps, and repair implications (photo-based).
 - If VIN label or odometer are visible, state them with Photo #. If not visible or unreadable, say so.
 
+## Client Rule Estimate Guidance
+- Include this section ONLY when client_rules text is provided. If client_rules is blank, omit this section entirely.
+- Keep this section advisory only for someone preparing an estimate from the photos-only report; do NOT score the photos-only report against client rules.
+- Only reference rules actually present in the provided client_rules text. Do NOT invent rules, requirements, or client preferences.
+- Use rule-grounded guidance such as: include these items when preparing the estimate; avoid or do not include items unless supported/documented; request/attach these supporting items before finalizing.
+- Address rule-sensitive operations when supported by the provided rules, such as OEM parts, ADAS calibrations, refinish/blend, tax, sublet, structural setup/measure, required photos, invoices, valuation docs, or documentation requirements.
+- Use advisory wording: "Consider", "verify", "include if supported", "do not include unless documented", "request/attach before finalizing".
+- Do NOT let client rules alter the repair cost math or the photos-only cost approximation.
+- Place this section inside summary_markdown after the Detailed Condition Report and before the Approximate Repair Cost Breakdown.
+
 ## Approximate Repair Cost Breakdown
 - You MUST produce a cost approximation derived from the PHOTOS ONLY (do not reference estimates, documents, or 'not evidenced').
 - Provide AI-derived hours and assumptions:
