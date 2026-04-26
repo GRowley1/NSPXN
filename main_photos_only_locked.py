@@ -547,8 +547,9 @@ DETAIL_TEMPLATES = {
 - Cover EVERY provided photo. If no damage is obvious from that angle, write: "No obvious damage visible from this angle" (do not use the word intact).
 
 ## Side Checks
-- **Driver/Left Side**: <what is visible; cite Photo #; if not shown, say not shown>
-- **Passenger/Right Side**: <what is visible; cite Photo #; if not shown, say not shown>
+- **Side shown**: <what is visible; cite Photo #; if not shown, say not shown>
+- **Opposite side shown**: <what is visible; cite Photo #; if not shown, say not shown>
+- Do NOT use Driver/Left Side or Passenger/Right Side labels unless orientation is unmistakably proven.
 
 ## Detailed Condition Report
 - Write a continuous 10–15 sentence narrative summarizing visible damage, impact zones, misalignment/gaps, and repair implications (photo-based).
@@ -2297,6 +2298,30 @@ async def vision_review(
         s = re.sub(r'[ \t]{2,}', ' ', s)
         return s
 
+
+    def _neutralize_photo_only_side_terms(text_in: str) -> str:
+        """Remove left/right/driver/passenger side labels from photos-only output."""
+        s = _normalize_mojibake_text(text_in or "")
+        if not s:
+            return s
+        replacements = [
+            (r"(?im)^\s*[-*]\s*\*\*(?:Driver|Left|Driver/Left|Left/Driver)\s+Side\*\*\s*:", "- **Side shown**:"),
+            (r"(?im)^\s*[-*]\s*\*\*(?:Passenger|Right|Passenger/Right|Right/Passenger)\s+Side\*\*\s*:", "- **Opposite side shown**:"),
+            (r"(?i)\bdriver[-\s]?side\b", "one side"),
+            (r"(?i)\bpassenger[-\s]?side\b", "opposite side"),
+            (r"(?i)\bdriver/left\s+side\b", "side shown"),
+            (r"(?i)\bpassenger/right\s+side\b", "opposite side shown"),
+            (r"(?i)\bleft\s+side\b", "one side"),
+            (r"(?i)\bright\s+side\b", "opposite side"),
+            (r"(?i)\bleft[-\s]?front\b", "front"),
+            (r"(?i)\bright[-\s]?front\b", "front"),
+            (r"(?i)\bleft[-\s]?rear\b", "rear"),
+            (r"(?i)\bright[-\s]?rear\b", "rear"),
+        ]
+        for pat, repl in replacements:
+            s = re.sub(pat, repl, s)
+        return s
+
     def _parse_model_cost_block_once(md_text: str, tax_rate_value: Optional[float] = None) -> Optional[Dict[str, Any]]:
         """Parse the website/model cost block once into a structured object.
         This bypasses the brittle regex-reparse path that can zero the PDF cost section.
@@ -2509,7 +2534,7 @@ async def vision_review(
         if ai_intent == "damage_report_from_photos":
             _cm = result.get("estimated_costs_markdown") or ""
             if str(_cm).strip():
-                result["estimated_costs_markdown"] = _normalize_mojibake_text(_cm)
+                result["estimated_costs_markdown"] = _neutralize_photo_only_side_terms(_normalize_mojibake_text(_cm))
     except Exception:
         pass
 
@@ -3584,7 +3609,7 @@ async def vision_review(
             # Website/model cost block is already the correct user-visible block.
             # Do not parse/rebuild/canonicalize it here. Prior rebuild attempts are what
             # turned valid labor/parts/tax into 0.0 hrs and $0.00 in the PDF/email.
-            _raw_cost_block = _normalize_mojibake_text(result.get("estimated_costs_markdown") or "").strip()
+            _raw_cost_block = _neutralize_photo_only_side_terms(_normalize_mojibake_text(result.get("estimated_costs_markdown") or "")).strip()
             if _raw_cost_block and not _bad_field(_raw_cost_block):
                 result["estimated_costs_markdown"] = _raw_cost_block
             else:
@@ -3606,7 +3631,7 @@ async def vision_review(
             # Clean symbols everywhere before website/email/PDF rendering.
             for _k in ("summary_markdown", "fraud_markdown", "conclusion", "summary_brief", "primary_impact", "secondary_impact"):
                 try:
-                    result[_k] = _normalize_mojibake_text(result.get(_k) or "")
+                    result[_k] = _neutralize_photo_only_side_terms(_normalize_mojibake_text(result.get(_k) or ""))
                 except Exception:
                     pass
             result["summary_markdown"] = _scrub_photo_only_narrative_cost_headers(
@@ -3659,7 +3684,7 @@ async def vision_review(
     try:
         if ai_intent == "damage_report_from_photos":
             for _k in ("summary_markdown", "estimated_costs_markdown", "fraud_markdown", "conclusion", "summary_brief", "primary_impact", "secondary_impact"):
-                result[_k] = _normalize_mojibake_text(result.get(_k) or "")
+                result[_k] = _neutralize_photo_only_side_terms(_normalize_mojibake_text(result.get(_k) or ""))
     except Exception:
         pass
 
@@ -4093,66 +4118,75 @@ async def vision_review(
 
 
     def render_repair_cost_section(pdf_obj: FPDF, md: str, tax_rate: Optional[float] = None, parsed: Optional[Dict[str, Any]] = None) -> None:
-        """Render the website/model cost block directly in the PDF section.
-
-        FINAL PDF SYNC LOCK:
-        - Do not parse, rebuild, seed, recompute, or canonicalize costs here.
-        - The website/model estimated_costs_markdown is the source of truth.
-        - This function only cleans markdown/mojibake and prints the same visible block.
-        """
-        raw = _normalize_mojibake_text(md or "").strip()
+        """Render website/model cost block directly with safe PDF wrapping/page breaks."""
+        raw = _neutralize_photo_only_side_terms(_normalize_mojibake_text(md or "")).strip()
         if not raw:
             mc("No cost breakdown was generated on this run.")
             return
 
         def _clean_pdf_md_line(line: str) -> str:
             s = _normalize_mojibake_text(line or "").strip()
-            # The green PDF bar already says this. Do not print the duplicate heading.
-            if re.search(r"(?i)^#{1,6}\s*Approximate\s+Repair\s+Cost\s+Breakdown", s):
+            if re.search(r"(?i)^#{1,6}\s*Approximate\s+Repair\s+Cost\s+Breakdown\b", s):
                 return ""
-            if re.search(r"(?i)^Approximate\s+Repair\s+Cost\s+Breakdown", s):
+            if re.search(r"(?i)^Approximate\s+Repair\s+Cost\s+Breakdown\b", s):
                 return ""
-            # Convert markdown headings/bold to clean PDF text only.
             s = re.sub(r"^#{1,6}\s*", "", s).strip()
             s = s.replace("**", "").replace("__", "").replace("`", "")
-            return _normalize_mojibake_text(s).strip()
+            s = s.replace("☑", "[x]").replace("☐", "[ ]").replace("✓", "[x]").replace("✔", "[x]")
+            return _pdf_sanitize(_normalize_mojibake_text(s).strip())
+
+        def _pdf_font(style: str = "", size: float = 9.5) -> None:
+            try:
+                pdf_obj.set_font("Helvetica", style, size)
+            except Exception:
+                try:
+                    pdf_obj.set_font("Arial", style, size)
+                except Exception:
+                    pass
+
+        def _safe_pdf_line(text: str, bold: bool = False) -> None:
+            safe = _clean_pdf_md_line(text)
+            if not safe:
+                try:
+                    pdf_obj.ln(1.5)
+                except Exception:
+                    pass
+                return
+            _pdf_font("B" if bold else "", 10.0 if bold else 9.5)
+            try:
+                if pdf_obj.get_y() > (pdf_obj.h - pdf_obj.b_margin - 14):
+                    pdf_obj.add_page()
+            except Exception:
+                pass
+            try:
+                effective_w = pdf_obj.w - pdf_obj.l_margin - pdf_obj.r_margin
+                if effective_w <= 5:
+                    effective_w = 180
+                pdf_obj.set_x(pdf_obj.l_margin)
+                pdf_obj.multi_cell(effective_w, 5, safe)
+            except Exception:
+                try:
+                    safe2 = safe.encode("latin-1", "replace").decode("latin-1")
+                    pdf_obj.set_x(pdf_obj.l_margin)
+                    pdf_obj.multi_cell(pdf_obj.w - pdf_obj.l_margin - pdf_obj.r_margin, 5, safe2)
+                except Exception:
+                    try:
+                        pdf_obj.set_x(pdf_obj.l_margin)
+                        pdf_obj.cell(0, 5, "[line omitted due to PDF encoding issue]", ln=True)
+                    except Exception:
+                        pass
+
+        subsection_rx = re.compile(r"(?i)^(Assumptions|Labor rates|Estimated labor hours|Labor \(|Labor$|Labor \& Materials|Paint\s*&\s*Materials|Paint\s+and\s+Materials|OEM\s+Replacement\s+Parts|OEM\s+replacement\s+parts|Replacement\s+Parts|Parts subtotal|Cost summary|Tax\s*\(|Tax$|Estimated Total|Approximate Total|Severity Tier|Repair Cost Disclaimer)\b")
 
         try:
             pdf_obj.ln(1)
-            pdf_obj.set_font("Helvetica", "", 11)
         except Exception:
-            try:
-                pdf_obj.ln(1)
-                pdf_obj.set_font("Arial", "", 11)
-            except Exception:
-                pass
-
-        subsection_rx = re.compile(
-            r"(?i)^(Assumptions|Labor rates|Estimated labor hours|Labor \(AI-derived hours\)|Labor|Paint\s*&\s*Materials|Paint\s+and\s+Materials|OEM\s+Replacement\s+Parts|OEM\s+replacement\s+parts|Replacement\s+Parts|Parts subtotal|Cost summary|Tax|Estimated Total|Approximate Total|Severity Tier|Repair Cost Disclaimer)"
-        )
-
+            pass
+        _pdf_font("", 9.5)
         for raw_ln in raw.replace("\r\n", "\n").replace("\r", "\n").splitlines():
-            clean = _clean_pdf_md_line(raw_ln)
-            if not clean:
-                try:
-                    pdf_obj.ln(1)
-                except Exception:
-                    pass
-                continue
-
-            is_label = bool(subsection_rx.search(clean)) and not clean.startswith("-")
-            if is_label:
-                try:
-                    pdf_obj.set_font("Helvetica", "B", 11)
-                except Exception:
-                    pdf_obj.set_font("Arial", "B", 11)
-                mc(clean)
-                try:
-                    pdf_obj.set_font("Helvetica", "", 11)
-                except Exception:
-                    pdf_obj.set_font("Arial", "", 11)
-            else:
-                mc(clean)
+            preview = _clean_pdf_md_line(raw_ln)
+            is_label = bool(preview and subsection_rx.search(preview) and not preview.lstrip().startswith("-"))
+            _safe_pdf_line(raw_ln, bold=is_label)
 
     def add_thumbnail_page(pdf_obj: FPDF, image_paths: List[str]) -> None:
         """Append exactly ONE page containing thumbnails of all uploaded photos (as space allows)."""
@@ -4411,15 +4445,15 @@ async def vision_review(
     
         # Report Summary (scrub markdown headings)
         _section_bar("REPORT SUMMARY")
-        _summary_md = _scrub_model_headings(_summary_md_raw)
+        _summary_md = _neutralize_photo_only_side_terms(_scrub_model_headings(_summary_md_raw))
         if ai_intent == "damage_report_from_photos":
-            _summary_md = _scrub_photo_only_narrative_cost_headers(_summary_md)
+            _summary_md = _neutralize_photo_only_side_terms(_scrub_photo_only_narrative_cost_headers(_summary_md))
         mc(_summary_md if _summary_md else "-")
         pdf.ln(2)
     
         # Direct website/model Repair Cost section rendering.
         # Do NOT strip, parse, rebuild, recompute, or canonicalize this block.
-        _raw_costs_md = _normalize_mojibake_text(result.get("estimated_costs_markdown") or "")
+        _raw_costs_md = _neutralize_photo_only_side_terms(_normalize_mojibake_text(result.get("estimated_costs_markdown") or ""))
 
         _section_bar("APPROXIMATE REPAIR COST BREAKDOWN")
         render_repair_cost_section(pdf, _raw_costs_md, tax_rate=None, parsed=None)
@@ -4705,10 +4739,22 @@ async def vision_review(
             return ""
 
     _website_vehicle_block = _normalize_mojibake_text(_build_website_vehicle_identification_block()).strip()
-    _website_output = (
-        (_website_vehicle_block + "\n\n" if _website_vehicle_block else "")
-        + _normalize_mojibake_text(result.get("summary_markdown") or "").strip()
-    ).strip()
+    _website_summary_block = _neutralize_photo_only_side_terms(_normalize_mojibake_text(result.get("summary_markdown") or "")).strip()
+    _website_cost_block = _neutralize_photo_only_side_terms(_normalize_mojibake_text(result.get("estimated_costs_markdown") or "")).strip()
+    _website_fraud_block = _neutralize_photo_only_side_terms(_normalize_mojibake_text(result.get("fraud_markdown") or "")).strip()
+    _website_conclusion_block = _neutralize_photo_only_side_terms(_normalize_mojibake_text(result.get("conclusion") or "")).strip()
+    _website_parts = []
+    if _website_vehicle_block:
+        _website_parts.append(_website_vehicle_block)
+    if _website_summary_block:
+        _website_parts.append(_website_summary_block)
+    if _website_cost_block:
+        _website_parts.append(_website_cost_block)
+    if _website_fraud_block:
+        _website_parts.append("## Fraud & Authenticity Check\n" + _website_fraud_block)
+    if _website_conclusion_block:
+        _website_parts.append("## Conclusion\n" + _website_conclusion_block)
+    _website_output = "\n\n".join(_website_parts).strip()
 
     return {
         **result,
