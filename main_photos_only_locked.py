@@ -4093,12 +4093,12 @@ async def vision_review(
 
 
     def render_repair_cost_section(pdf_obj: FPDF, md: str, tax_rate: Optional[float] = None, parsed: Optional[Dict[str, Any]] = None) -> None:
-        """Render the website/model cost block directly.
+        """Render the website/model cost block directly in the PDF section.
 
-        FINAL DISPLAY SYNC LOCK:
+        FINAL PDF SYNC LOCK:
         - Do not parse, rebuild, seed, recompute, or canonicalize costs here.
         - The website/model estimated_costs_markdown is the source of truth.
-        - This function only cleans markdown/mojibake and prints it in the PDF section.
+        - This function only cleans markdown/mojibake and prints the same visible block.
         """
         raw = _normalize_mojibake_text(md or "").strip()
         if not raw:
@@ -4107,16 +4107,15 @@ async def vision_review(
 
         def _clean_pdf_md_line(line: str) -> str:
             s = _normalize_mojibake_text(line or "").strip()
-            # Drop duplicate cost title only; the PDF already has the green section bar.
-            if re.search(r"(?i)^#{1,6}\s*Approximate\s+Repair\s+Cost\s+Breakdown\b", s):
+            # The green PDF bar already says this. Do not print the duplicate heading.
+            if re.search(r"(?i)^#{1,6}\s*Approximate\s+Repair\s+Cost\s+Breakdown", s):
                 return ""
-            if re.search(r"(?i)^Approximate\s+Repair\s+Cost\s+Breakdown\b", s):
+            if re.search(r"(?i)^Approximate\s+Repair\s+Cost\s+Breakdown", s):
                 return ""
-            # Convert markdown headings to plain subsection labels.
+            # Convert markdown headings/bold to clean PDF text only.
             s = re.sub(r"^#{1,6}\s*", "", s).strip()
-            # Remove display markdown only; do not remove cost lines, tax, totals, or severity.
             s = s.replace("**", "").replace("__", "").replace("`", "")
-            return _normalize_mojibake_text(s)
+            return _normalize_mojibake_text(s).strip()
 
         try:
             pdf_obj.ln(1)
@@ -4128,6 +4127,10 @@ async def vision_review(
             except Exception:
                 pass
 
+        subsection_rx = re.compile(
+            r"(?i)^(Assumptions|Labor rates|Estimated labor hours|Labor \(AI-derived hours\)|Labor|Paint\s*&\s*Materials|Paint\s+and\s+Materials|OEM\s+Replacement\s+Parts|OEM\s+replacement\s+parts|Replacement\s+Parts|Parts subtotal|Cost summary|Tax|Estimated Total|Approximate Total|Severity Tier|Repair Cost Disclaimer)"
+        )
+
         for raw_ln in raw.replace("\r\n", "\n").replace("\r", "\n").splitlines():
             clean = _clean_pdf_md_line(raw_ln)
             if not clean:
@@ -4137,10 +4140,7 @@ async def vision_review(
                     pass
                 continue
 
-            is_label = bool(re.search(
-                r"(?i)^(Labor|Paint\s*&\s*Materials|OEM\s+Replacement\s+Parts|Replacement\s+Parts|Tax|Estimated\s+Total|Approximate\s+Total|Severity\s+Tier|Repair\s+Cost\s+Disclaimer)\b",
-                clean,
-            )) and not clean.startswith("-")
+            is_label = bool(subsection_rx.search(clean)) and not clean.startswith("-")
             if is_label:
                 try:
                     pdf_obj.set_font("Helvetica", "B", 11)
@@ -4417,13 +4417,12 @@ async def vision_review(
         mc(_summary_md if _summary_md else "-")
         pdf.ln(2)
     
-        # Direct Repair Cost section rendering.
-        # Do NOT strip, parse, rebuild, recompute, or canonicalize the model/website cost block.
-        _raw_costs_md = result.get("estimated_costs_markdown") or ""
-        costs_md = _normalize_mojibake_text(_raw_costs_md)
-    
+        # Direct website/model Repair Cost section rendering.
+        # Do NOT strip, parse, rebuild, recompute, or canonicalize this block.
+        _raw_costs_md = _normalize_mojibake_text(result.get("estimated_costs_markdown") or "")
+
         _section_bar("APPROXIMATE REPAIR COST BREAKDOWN")
-        render_repair_cost_section(pdf, costs_md, tax_rate=tax_rate, parsed=None)
+        render_repair_cost_section(pdf, _raw_costs_md, tax_rate=None, parsed=None)
     
         _section_bar("FRAUD & AUTHENTICITY CHECK")
         mc((result.get("fraud_markdown") or "").strip() or "-")
@@ -4685,10 +4684,38 @@ async def vision_review(
     except Exception as e:
         logging.error(f"Email error: {e}")
 
+    def _build_website_vehicle_identification_block() -> str:
+        try:
+            _odo_web = result.get("odometer_estimate_only") or "N/A"
+            _status_web = (result.get("redaction_status") or "N/A").replace("✅", "OK")
+            return (
+                f"File #: {file_number or 'N/A'}\n"
+                f"Generated: {report_generated_ts}\n"
+                f"Claim #: {result.get('claim_number') or 'N/A'}\n"
+                f"Inspected For: {ia_company or 'N/A'}\n"
+                f"VIN: {result.get('vin') or 'N/A'}\n"
+                f"VIN Verification: {result.get('vin_verification') or 'N/A'}\n"
+                f"Vehicle: {_format_vehicle_value(result.get('vehicle'), result.get('vin'))}\n"
+                f"Odometer: {_odo_web}\n"
+                f"Primary Impact: {result.get('primary_impact') or 'N/A'}\n"
+                f"Secondary Impact: {result.get('secondary_impact') or 'N/A'}\n"
+                f"Redaction Status: {_status_web}"
+            )
+        except Exception:
+            return ""
+
+    _website_vehicle_block = _normalize_mojibake_text(_build_website_vehicle_identification_block()).strip()
+    _website_output = (
+        (_website_vehicle_block + "\n\n" if _website_vehicle_block else "")
+        + _normalize_mojibake_text(result.get("summary_markdown") or "").strip()
+    ).strip()
+
     return {
         **result,
+        "vehicle_identification_markdown": _website_vehicle_block,
+        "website_output_markdown": _website_output,
         "web_summary": result["summary_brief"],
-        "gpt_output": result["summary_markdown"],
+        "gpt_output": _website_output,
         "pdf_url": pdf_url,
         "pdf_filename": pdf_filename
     }
@@ -4712,13 +4739,3 @@ async def download_pdf(file_number: Optional[str] = None, filename: Optional[str
         return JSONResponse(status_code=404, content={"detail": "Not Found"})
     latest = max(candidates, key=lambda p: os.path.getmtime(p))
     return FileResponse(path=latest, media_type="application/pdf", filename=os.path.basename(latest))
-
-
-
-
-
-
-
-
-
-
