@@ -3609,7 +3609,15 @@ async def vision_review(
             # Website/model cost block is already the correct user-visible block.
             # Do not parse/rebuild/canonicalize it here. Prior rebuild attempts are what
             # turned valid labor/parts/tax into 0.0 hrs and $0.00 in the PDF/email.
+            _summary_for_cost_rescue = _neutralize_photo_only_side_terms(_normalize_mojibake_text(result.get("summary_markdown") or ""))
+            _summary_cost_block = _extract_photos_only_cost_block(_summary_for_cost_rescue)
             _raw_cost_block = _neutralize_photo_only_side_terms(_normalize_mojibake_text(result.get("estimated_costs_markdown") or "")).strip()
+
+            # If estimated_costs_markdown is missing/truncated but the website narrative contains
+            # the complete cost block, promote that block once, then strip it from narrative.
+            if _summary_cost_block and (_cost_block_is_incomplete(_raw_cost_block) or len(_summary_cost_block) > max(len(_raw_cost_block) + 200, int(len(_raw_cost_block) * 1.25))):
+                _raw_cost_block = _summary_cost_block
+
             if _raw_cost_block and not _bad_field(_raw_cost_block):
                 result["estimated_costs_markdown"] = _raw_cost_block
             else:
@@ -4117,6 +4125,59 @@ async def vision_review(
         return "\n".join(out).strip()
 
 
+
+
+    def _extract_photos_only_cost_block(md_text: str) -> str:
+        """Extract the first complete model/website cost block from markdown.
+        This is used only to rescue the already-correct website block when the
+        JSON field estimated_costs_markdown is missing or truncated. It does not
+        parse, rebuild, or recompute any math.
+        """
+        if not md_text:
+            return ""
+        lines = _normalize_mojibake_text(md_text).replace("\r\n", "\n").replace("\r", "\n").splitlines()
+        start = None
+        for i, ln in enumerate(lines):
+            if re.search(r"(?i)^\s*#{0,6}\s*Approximate\s+Repair\s+Cost\s+Breakdown\b", (ln or "").strip()):
+                start = i
+                break
+        if start is None:
+            return ""
+        end = len(lines)
+        for j in range(start + 1, len(lines)):
+            s = (lines[j] or "").strip()
+            if re.search(r"(?i)^\s*#{1,6}\s+(Fraud\s*&\s*Authenticity\s*Check|Fraud\s+Detection|Conclusion)\b", s):
+                end = j
+                break
+            if re.search(r"(?i)^\s*(Fraud\s*&\s*Authenticity\s*Check|Fraud\s+Detection|Conclusion)\s*$", s):
+                end = j
+                break
+        return "\n".join(lines[start:end]).strip()
+
+    def _cost_block_is_incomplete(md_text: str) -> bool:
+        """Detect the bad truncated cost block that stops before parts/tax/total/severity."""
+        s = _normalize_mojibake_text(md_text or "").strip()
+        if not s:
+            return True
+        has_any_labor = bool(re.search(r"(?i)\b(body\s+labor|paint\s+labor|mechanical\s+labor)\b", s))
+        has_parts = bool(re.search(r"(?i)\b(parts\s+subtotal|OEM\s+Replacement\s+Parts|replacement\s+parts)\b", s))
+        has_total = bool(re.search(r"(?i)\b(approx(?:imate)?\s+(?:total|repair\s+total)|approx\.\s*repair\s+total|approximate\s+total\s+repair\s+cost)\b", s))
+        has_severity = bool(re.search(r"(?i)\bSeverity\s+Tier\b", s))
+        return bool(has_any_labor and not (has_parts and has_total and has_severity))
+
+    def _strip_cost_heading_for_pdf(md_text: str) -> str:
+        """Keep the website/model cost block content but remove its markdown title
+        so the PDF's green section bar is the only title.
+        """
+        if not md_text:
+            return ""
+        out = []
+        for ln in _normalize_mojibake_text(md_text).replace("\r\n", "\n").replace("\r", "\n").splitlines():
+            if re.search(r"(?i)^\s*#{0,6}\s*Approximate\s+Repair\s+Cost\s+Breakdown\b", (ln or "").strip()):
+                continue
+            out.append(ln)
+        return "\n".join(out).strip()
+
     def render_repair_cost_section(pdf_obj: FPDF, md: str, tax_rate: Optional[float] = None, parsed: Optional[Dict[str, Any]] = None) -> None:
         """Render website/model cost block directly with safe PDF wrapping/page breaks."""
         raw = _neutralize_photo_only_side_terms(_normalize_mojibake_text(md or "")).strip()
@@ -4456,7 +4517,7 @@ async def vision_review(
         _raw_costs_md = _neutralize_photo_only_side_terms(_normalize_mojibake_text(result.get("estimated_costs_markdown") or ""))
 
         _section_bar("APPROXIMATE REPAIR COST BREAKDOWN")
-        render_repair_cost_section(pdf, _raw_costs_md, tax_rate=None, parsed=None)
+        render_repair_cost_section(pdf, _strip_cost_heading_for_pdf(_raw_costs_md), tax_rate=None, parsed=None)
     
         _section_bar("FRAUD & AUTHENTICITY CHECK")
         mc((result.get("fraud_markdown") or "").strip() or "-")
@@ -4739,7 +4800,7 @@ async def vision_review(
             return ""
 
     _website_vehicle_block = _normalize_mojibake_text(_build_website_vehicle_identification_block()).strip()
-    _website_summary_block = _neutralize_photo_only_side_terms(_normalize_mojibake_text(result.get("summary_markdown") or "")).strip()
+    _website_summary_block = _neutralize_photo_only_side_terms(_scrub_photo_only_narrative_cost_headers(_scrub_model_headings(_normalize_mojibake_text(result.get("summary_markdown") or "")))).strip()
     _website_cost_block = _neutralize_photo_only_side_terms(_normalize_mojibake_text(result.get("estimated_costs_markdown") or "")).strip()
     _website_fraud_block = _neutralize_photo_only_side_terms(_normalize_mojibake_text(result.get("fraud_markdown") or "")).strip()
     _website_conclusion_block = _neutralize_photo_only_side_terms(_normalize_mojibake_text(result.get("conclusion") or "")).strip()
