@@ -1604,7 +1604,9 @@ async def vision_review(
             brief = str(salvaged.get('summary_brief') or '').strip()
             salvaged['conclusion'] = brief if brief and brief != 'N/A' else 'Photos were reviewed, but the model response was truncated before the conclusion field finished.'
         if salvaged.get('estimated_costs_markdown') in ('', 'N/A', None):
-            salvaged['estimated_costs_markdown'] = '## Approximate Repair Cost Breakdown\nModel response was truncated before the cost block finished.'
+            # Do NOT treat a truncation placeholder as a valid cost block.
+            # Leave blank so the dedicated cost-only retry can generate the real block.
+            salvaged['estimated_costs_markdown'] = ''
         return salvaged
 
     try:
@@ -3602,6 +3604,129 @@ async def vision_review(
 
         return cleaned_base
 
+    # --- COST BLOCK DIRECT-SYNC HELPERS (must be defined before final sync uses them) ---
+    def _cost_block_is_incomplete(md_text: str) -> bool:
+        """True when estimated_costs_markdown is missing, a truncation placeholder,
+        or lacks the minimum fields needed for website/email/PDF display.
+        """
+        s = _normalize_mojibake_text(md_text or "").strip()
+        if not s:
+            return True
+        if re.search(r"(?i)model\s+response\s+was\s+truncated|cost\s+block\s+finished|failed\s+to\s+generate\s+a\s+cost\s+breakdown|please\s+re-run|model\s+should\s+provide|unable\s+to\s+generate", s):
+            return True
+        has_labor = bool(re.search(r"(?i)\b(body\s+labor|paint\s+labor|refinish\s+labor|mechanical\s+labor)\b", s))
+        has_parts = bool(re.search(r"(?i)\b(parts\s+subtotal|OEM\s+Replacement\s+Parts|replacement\s+parts|OEM\s+parts)\b", s))
+        has_tax = bool(re.search(r"(?i)\b(sales\s+tax|taxable\s+subtotal|tax\s*\(|tax\s*=|tax\s*@)\b", s))
+        has_total = bool(re.search(r"(?i)\b(approximate\s+total|approximate\s+repair\s+total|approximate\s+total\s+repair\s+cost|approximate\s+total\s+repair\s+cost|approximate\s+repair\s+cost)\b", s)) and "$" in s
+        has_severity = bool(re.search(r"(?i)\bSeverity\s+Tier\b|\[x\]\s*(Minor|Moderate|Major)|\[ \]\s*(Minor|Moderate|Major)", s))
+        return not (has_labor and has_parts and has_tax and has_total and has_severity)
+
+    def _extract_photos_only_cost_block(md_text: str) -> str:
+        """Extract a complete Approximate Repair Cost Breakdown section from summary markdown.
+        This is only a rescue path when estimated_costs_markdown is missing/truncated.
+        """
+        if not md_text:
+            return ""
+        lines = _normalize_mojibake_text(md_text).replace("\r\n", "\n").replace("\r", "\n").splitlines()
+        starts = []
+        for i, ln in enumerate(lines):
+            if re.search(r"(?i)^\s*#{0,6}\s*Approximate\s+Repair\s+Cost\s+Breakdown\b", (ln or "").strip()):
+                starts.append(i)
+        if not starts:
+            return ""
+        # Prefer the first complete block, otherwise the longest block.
+        best = ""
+        for start in starts:
+            end = len(lines)
+            for j in range(start + 1, len(lines)):
+                sj = (lines[j] or "").strip()
+                if j in starts:
+                    end = j
+                    break
+                if re.search(r"(?i)^\s*#{1,6}\s+(Fraud\s*&\s*Authenticity\s*Check|Fraud\s+Detection|Conclusion)\b", sj):
+                    end = j
+                    break
+                if re.search(r"(?i)^\s*(Fraud\s*&\s*Authenticity\s*Check|Fraud\s+Detection|Conclusion)\s*$", sj):
+                    end = j
+                    break
+            block = "\n".join(lines[start:end]).strip()
+            if block and not _cost_block_is_incomplete(block):
+                return block
+            if len(block) > len(best):
+                best = block
+        return best if best and not _cost_block_is_incomplete(best) else ""
+
+    def _strip_duplicate_cost_sections_from_summary(md_text: str) -> str:
+        """Remove every Approximate Repair Cost Breakdown section from summary_markdown.
+        The PDF/email/website render result['estimated_costs_markdown'] separately.
+        """
+        if not md_text:
+            return md_text or ""
+        lines = _normalize_mojibake_text(md_text).replace("\r\n", "\n").replace("\r", "\n").splitlines()
+        out = []
+        skip = False
+        for ln in lines:
+            s_ln = (ln or "").strip()
+            if re.search(r"(?i)^\s*#{0,6}\s*Approximate\s+Repair\s+Cost\s+Breakdown\b", s_ln):
+                skip = True
+                continue
+            if skip:
+                if re.search(r"(?i)^\s*#{1,6}\s+(Fraud\s*&\s*Authenticity\s*Check|Fraud\s+Detection|Conclusion)\b", s_ln) or re.search(r"(?i)^\s*(Fraud\s*&\s*Authenticity\s*Check|Fraud\s+Detection|Conclusion)\s*$", s_ln):
+                    skip = False
+                    out.append(ln)
+                continue
+            out.append(ln)
+        return "\n".join(out).strip()
+
+    def _retry_cost_block_only() -> str:
+        """Second-pass model call for cost block only. Does not touch narrative/IDs.
+        Returns estimated_costs_markdown content only, or empty string on failure.
+        """
+        try:
+            image_parts = [p for p in parts_payload if isinstance(p, dict) and p.get("type") != "text"][:24]
+            cost_prompt = (
+                "Return ONLY JSON with exactly one key: estimated_costs_markdown.\n"
+                "Generate a complete PHOTOS-ONLY Approximate Repair Cost Breakdown for the provided vehicle photos.\n"
+                "Do not include narrative, fraud, conclusion, or vehicle ID fields.\n"
+                "Required content inside estimated_costs_markdown:\n"
+                "- Rates & assumptions\n"
+                "- Labor hours with body labor, paint/refinish labor, mechanical/ADAS if supported, setup/frame if supported\n"
+                "- Paint & materials as paint/refinish hours x $ per refinish hour\n"
+                "- OEM Replacement Parts list with approximate dollars by part\n"
+                "- Parts subtotal\n"
+                "- Tax applied ONLY to parts + paint materials\n"
+                "- Approximate total repair cost\n"
+                "- Severity Tier checkboxes using [ ] and [x]\n"
+                "- Repair Cost Disclaimer\n"
+                "Forbidden: 'Model response was truncated', 'model should provide', 'N/A', 'from estimate', 'not evidenced'.\n"
+                f"File #: {file_number}\nClient/location: {ia_company}\nAdd'l notes: {ai_notes_used}\n"
+                "Use neutral side wording only; do not use driver/passenger/left/right unless unmistakably proven.\n"
+            )
+            rsp_cost = client.chat.completions.create(
+                model=MODEL,
+                messages=[
+                    {"role": "system", "content": "You generate only a complete photos-only repair cost markdown block in JSON."},
+                    {"role": "user", "content": [{"type": "text", "text": cost_prompt}] + image_parts},
+                ],
+                max_completion_tokens=1800,
+                temperature=0,
+                top_p=1,
+                response_format={"type": "json_object"},
+            )
+            raw_cost = (rsp_cost.choices[0].message.content or "").strip()
+            parsed_cost = _try_parse_json(raw_cost)
+            if isinstance(parsed_cost, dict):
+                cm = str(parsed_cost.get("estimated_costs_markdown") or "").strip()
+                cm = _neutralize_photo_only_side_terms(_normalize_mojibake_text(cm))
+                if cm and not _cost_block_is_incomplete(cm):
+                    return cm
+        except Exception as e:
+            try:
+                log.warning(f"Cost-only retry failed: {e}")
+            except Exception:
+                pass
+        return ""
+
     try:
         _final_non_empty_output_lock()
         if ai_intent == "damage_report_from_photos":
@@ -3613,28 +3738,25 @@ async def vision_review(
             _summary_cost_block = _extract_photos_only_cost_block(_summary_for_cost_rescue)
             _raw_cost_block = _neutralize_photo_only_side_terms(_normalize_mojibake_text(result.get("estimated_costs_markdown") or "")).strip()
 
-            # If estimated_costs_markdown is missing/truncated but the website narrative contains
-            # the complete cost block, promote that block once, then strip it from narrative.
-            if _summary_cost_block and (_cost_block_is_incomplete(_raw_cost_block) or len(_summary_cost_block) > max(len(_raw_cost_block) + 200, int(len(_raw_cost_block) * 1.25))):
+            # Do not accept the JSON-salvage placeholder or any partial block as a real cost section.
+            # Priority: valid estimated_costs_markdown -> valid summary rescue block -> cost-only retry.
+            if _cost_block_is_incomplete(_raw_cost_block):
+                _raw_cost_block = ""
+            if not _raw_cost_block and _summary_cost_block and not _cost_block_is_incomplete(_summary_cost_block):
                 _raw_cost_block = _summary_cost_block
+            if not _raw_cost_block:
+                _raw_cost_block = _retry_cost_block_only()
 
-            if _raw_cost_block and not _bad_field(_raw_cost_block):
+            if _raw_cost_block and not _cost_block_is_incomplete(_raw_cost_block):
                 result["estimated_costs_markdown"] = _raw_cost_block
             else:
-                # Only fall back to the old parser if the model truly failed to provide a cost block.
-                _inspection_location_for_lock = _normalize_location_with_zip(_extract_inspection_location(uploaded_text_all or ""), ia_company, uploaded_text_all)
-                if tax_rate is None or not isinstance(tax_rate, (int, float)) or tax_rate <= 0:
-                    tax_rate = _lookup_tax_rate(_inspection_location_for_lock)
-                locked_costs_obj = _parse_locked_photos_only_costs(
-                    _raw_cost_block,
-                    tax_rate,
-                    seed_rates=None,
-                    scope_text=None,
-                    allow_seed=False,
+                result["estimated_costs_markdown"] = (
+                    "## Approximate Repair Cost Breakdown\n"
+                    "Cost block could not be completed on this run. Please resubmit; PDF/email output was not allowed to use a truncated placeholder."
                 )
-                result["estimated_costs_markdown"] = _canonical_locked_photos_only_cost_markdown_from_parsed(
-                    locked_costs_obj, tax_rate
-                )
+
+            # Always remove duplicate/embedded cost sections from the narrative.
+            result["summary_markdown"] = _strip_duplicate_cost_sections_from_summary(result.get("summary_markdown") or "")
 
             # Clean symbols everywhere before website/email/PDF rendering.
             for _k in ("summary_markdown", "fraud_markdown", "conclusion", "summary_brief", "primary_impact", "secondary_impact"):
@@ -3642,8 +3764,8 @@ async def vision_review(
                     result[_k] = _neutralize_photo_only_side_terms(_normalize_mojibake_text(result.get(_k) or ""))
                 except Exception:
                     pass
-            result["summary_markdown"] = _scrub_photo_only_narrative_cost_headers(
-                _scrub_model_headings(result.get("summary_markdown") or "")
+            result["summary_markdown"] = _strip_duplicate_cost_sections_from_summary(
+                _scrub_photo_only_narrative_cost_headers(_scrub_model_headings(result.get("summary_markdown") or ""))
             )
             _final_non_empty_output_lock()
     except Exception:
@@ -4800,7 +4922,7 @@ async def vision_review(
             return ""
 
     _website_vehicle_block = _normalize_mojibake_text(_build_website_vehicle_identification_block()).strip()
-    _website_summary_block = _neutralize_photo_only_side_terms(_scrub_photo_only_narrative_cost_headers(_scrub_model_headings(_normalize_mojibake_text(result.get("summary_markdown") or "")))).strip()
+    _website_summary_block = _neutralize_photo_only_side_terms(_strip_duplicate_cost_sections_from_summary(_scrub_photo_only_narrative_cost_headers(_scrub_model_headings(_normalize_mojibake_text(result.get("summary_markdown") or ""))))).strip()
     _website_cost_block = _neutralize_photo_only_side_terms(_normalize_mojibake_text(result.get("estimated_costs_markdown") or "")).strip()
     _website_fraud_block = _neutralize_photo_only_side_terms(_normalize_mojibake_text(result.get("fraud_markdown") or "")).strip()
     _website_conclusion_block = _neutralize_photo_only_side_terms(_normalize_mojibake_text(result.get("conclusion") or "")).strip()
