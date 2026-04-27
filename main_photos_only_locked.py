@@ -564,6 +564,7 @@ DETAIL_TEMPLATES = {
 - Use advisory wording: "Consider", "verify", "include if supported", "do not include unless documented", "request/attach before finalizing".
 - Do NOT let client rules alter the repair cost math or the photos-only cost approximation.
 - Place this section inside summary_markdown after the Detailed Condition Report and before the Approximate Repair Cost Breakdown.
+- Immediately before this section, print the exact bold client-rules review header provided in the prompt, such as **National General Rules to be Reviewed**. If rules were pasted manually and no selected rules name is provided, print **Other Rules to be Reviewed**.
 
 ## Approximate Repair Cost Breakdown
 - You MUST produce a cost approximation derived from the PHOTOS ONLY (do not reference estimates, documents, or 'not evidenced').
@@ -1087,6 +1088,27 @@ async def vision_review(
     ai_notes_block = _ai_notes_block(ai_notes_used)
     locked_cost_overrides = _extract_locked_cost_overrides(ai_notes_used)
 
+    # Photos-only client-rules label for the advisory guidance section.
+    # If the frontend posts a selected rules/client name, use it; otherwise pasted/manual rules read as Other.
+    client_rules_review_header = ""
+    if (client_rules or "").strip():
+        selected_rules_name = ""
+        try:
+            _form_for_rules = await request.form()
+            for _k in (
+                "client_name", "clientName", "selected_client", "selectedClient",
+                "client_rules_name", "clientRulesName", "client_rules_file", "clientRulesFile",
+                "rules_client", "rulesClient", "rule_client", "ruleClient"
+            ):
+                _v = str(_form_for_rules.get(_k, "") or "").strip()
+                if _v:
+                    selected_rules_name = _v
+                    break
+        except Exception:
+            selected_rules_name = ""
+        selected_rules_name = re.sub(r"\\.docx$", "", selected_rules_name, flags=re.IGNORECASE).strip()
+        client_rules_review_header = f"{selected_rules_name} Rules to be Reviewed" if selected_rules_name else "Other Rules to be Reviewed"
+
     pdf_text_fulls: List[str] = []  # full PDF text for supplement detection
 
     # Anti-zipbomb guardrails
@@ -1414,6 +1436,7 @@ async def vision_review(
         + "\n\n"
         "CLIENT RULES (only if provided):\n"
         + (client_rules[:1500] if client_rules else "")
+        + (("\n\nCLIENT RULES REVIEW HEADER (print exactly before ## Client Rule Estimate Guidance):\n**" + client_rules_review_header + "**\n") if client_rules_review_header else "")
         + ai_notes_block
         + "\n\n"
         "INSTRUCTIONS:\n"
