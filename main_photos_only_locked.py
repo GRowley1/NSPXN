@@ -1089,7 +1089,10 @@ async def vision_review(
     locked_cost_overrides = _extract_locked_cost_overrides(ai_notes_used)
 
     # Photos-only client-rules label for the advisory guidance section.
-    # If the frontend posts a selected rules/client name, use it; otherwise pasted/manual rules read as Other.
+    # LOCKED LOGIC:
+    # - If a selected client/rules name is posted and it is not "--Select Client--", use that name.
+    # - If "--Select Client--" is posted, or no selected name is posted, but rules text exists, treat it as manual/Other.
+    # - If no rules text exists, omit the header/section entirely.
     client_rules_review_header = ""
     if (client_rules or "").strip():
         selected_rules_name = ""
@@ -1106,8 +1109,18 @@ async def vision_review(
                     break
         except Exception:
             selected_rules_name = ""
-        selected_rules_name = re.sub(r"\\.docx$", "", selected_rules_name, flags=re.IGNORECASE).strip()
-        client_rules_review_header = f"{selected_rules_name} Rules to be Reviewed" if selected_rules_name else "Other Rules to be Reviewed"
+
+        selected_rules_name = re.sub(r"\.docx$", "", selected_rules_name, flags=re.IGNORECASE).strip()
+        selected_rules_name_clean = selected_rules_name.strip()
+        selected_rules_name_lower = selected_rules_name_clean.lower()
+
+        if (
+            selected_rules_name_clean
+            and selected_rules_name_lower not in ("--select client--", "select client", "-- select client --")
+        ):
+            client_rules_review_header = f"{selected_rules_name_clean} Rules to be Reviewed"
+        else:
+            client_rules_review_header = "Other Rules to be Reviewed"
 
     pdf_text_fulls: List[str] = []  # full PDF text for supplement detection
 
