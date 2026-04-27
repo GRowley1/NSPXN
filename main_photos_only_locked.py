@@ -1090,35 +1090,107 @@ async def vision_review(
 
     # Photos-only client-rules label for the advisory guidance section.
     # LOCKED LOGIC:
-    # - If a selected client/rules name is posted and it is not "--Select Client--", use that name.
-    # - If "--Select Client--" is posted, or no selected name is posted, but rules text exists, treat it as manual/Other.
+    # - Prefer the actual selected dropdown/client-rules field when posted and not "--Select Client--".
+    # - Read several possible frontend field names, then scan other rule/client/select form keys.
+    # - If no selected dropdown value is posted, fall back to ia_company only when it matches a real rules file.
+    # - If rules text exists but no selected rules name can be proven, label it Other.
     # - If no rules text exists, omit the header/section entirely.
     client_rules_review_header = ""
     if (client_rules or "").strip():
         selected_rules_name = ""
+
+        def _clean_rules_choice_name(_v: str) -> str:
+            _s = str(_v or "").strip()
+            _s = re.sub(r"\.docx$", "", _s, flags=re.IGNORECASE).strip()
+            _s = re.sub(r"\s+", " ", _s).strip()
+            return _s
+
+        def _is_select_placeholder(_v: str) -> bool:
+            _s = _clean_rules_choice_name(_v).lower()
+            if not _s:
+                return True
+            return _s in (
+                "--select client--", "select client", "-- select client --",
+                "- select client -", "select", "none", "n/a", "na",
+                "manual", "manual rules", "other", "other rules"
+            )
+
+        def _rules_file_exists_for_name(_v: str) -> bool:
+            try:
+                _s = _clean_rules_choice_name(_v)
+                return bool(_s and _find_rules_path(_s, CLIENT_RULES_DIR))
+            except Exception:
+                return False
+
         try:
             _form_for_rules = await request.form()
-            for _k in (
-                "client_name", "clientName", "selected_client", "selectedClient",
-                "client_rules_name", "clientRulesName", "client_rules_file", "clientRulesFile",
-                "rules_client", "rulesClient", "rule_client", "ruleClient"
-            ):
+            _preferred_rule_keys = (
+                "client_name", "clientName", "client", "selected_client", "selectedClient",
+                "selected_client_name", "selectedClientName", "selectedClientRules", "selected_client_rules",
+                "client_rule", "clientRule", "client_rules_dropdown", "clientRulesDropdown",
+                "client_rules_selected", "clientRulesSelected", "client_rules_name", "clientRulesName",
+                "client_rules_file", "clientRulesFile", "rules_file", "rulesFile",
+                "rules_name", "rulesName", "rule_name", "ruleName",
+                "rules_client", "rulesClient", "rule_client", "ruleClient",
+                "selected_rule", "selectedRule", "selected_rules", "selectedRules",
+                "rules_dropdown", "rulesDropdown", "ruleset", "ruleSet", "rule_set"
+            )
+
+            for _k in _preferred_rule_keys:
                 _v = str(_form_for_rules.get(_k, "") or "").strip()
-                if _v:
-                    selected_rules_name = _v
+                if _v and not _is_select_placeholder(_v):
+                    selected_rules_name = _clean_rules_choice_name(_v)
+                    break
+
+            # Last-resort: scan any non-textarea form field whose key suggests it is the dropdown/rules selector.
+            if not selected_rules_name:
+                for _k in _form_for_rules.keys():
+                    _lk = str(_k or "").lower()
+                    if _lk in ("client_rules", "clientrules", "rules_text", "rulestext", "client_rules_text", "clientrulestext"):
+                        continue
+                    if not any(_hint in _lk for _hint in ("client", "rule", "select", "dropdown")):
+                        continue
+                    _v = str(_form_for_rules.get(_k, "") or "").strip()
+                    if not _v or len(_v) > 120 or _is_select_placeholder(_v):
+                        continue
+                    selected_rules_name = _clean_rules_choice_name(_v)
                     break
         except Exception:
             selected_rules_name = ""
 
-        selected_rules_name = re.sub(r"\.docx$", "", selected_rules_name, flags=re.IGNORECASE).strip()
-        selected_rules_name_clean = selected_rules_name.strip()
-        selected_rules_name_lower = selected_rules_name_clean.lower()
+        selected_rules_name = _clean_rules_choice_name(selected_rules_name)
 
-        if (
-            selected_rules_name_clean
-            and selected_rules_name_lower not in ("--select client--", "select client", "-- select client --")
-        ):
-            client_rules_review_header = f"{selected_rules_name_clean} Rules to be Reviewed"
+        # Fallback: only use ia_company if it is actually a known client-rules file name.
+        if not selected_rules_name and _rules_file_exists_for_name(ia_company):
+            selected_rules_name = _clean_rules_choice_name(ia_company)
+
+        # Fallback: if the frontend pasted a rules file but did not post the dropdown name,
+        # identify the matching local DOCX by comparing the pasted rules text to loaded rules files.
+        if not selected_rules_name:
+            try:
+                _posted_rules_norm = re.sub(r"\s+", " ", str(client_rules or "")).strip().lower()
+                _best_name = ""
+                if _posted_rules_norm:
+                    for _path in glob.glob(os.path.join(CLIENT_RULES_DIR, "*.docx")):
+                        try:
+                            _doc_text = "\n".join([p.text for p in Document(_path).paragraphs if p.text.strip()])
+                            _doc_norm = re.sub(r"\s+", " ", _doc_text or "").strip().lower()
+                            if not _doc_norm:
+                                continue
+                            _posted_head = _posted_rules_norm[:500]
+                            _doc_head = _doc_norm[:500]
+                            if (_posted_head and _posted_head in _doc_norm) or (_doc_head and _doc_head in _posted_rules_norm):
+                                _best_name = os.path.splitext(os.path.basename(_path))[0]
+                                break
+                        except Exception:
+                            continue
+                if _best_name:
+                    selected_rules_name = _clean_rules_choice_name(_best_name)
+            except Exception:
+                pass
+
+        if selected_rules_name and not _is_select_placeholder(selected_rules_name):
+            client_rules_review_header = f"{selected_rules_name} Rules to be Reviewed"
         else:
             client_rules_review_header = "Other Rules to be Reviewed"
 
