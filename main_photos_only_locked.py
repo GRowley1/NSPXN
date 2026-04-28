@@ -564,7 +564,7 @@ DETAIL_TEMPLATES = {
 - Use advisory wording: "Consider", "verify", "include if supported", "do not include unless documented", "request/attach before finalizing".
 - Do NOT let client rules alter the repair cost math or the photos-only cost approximation.
 - Place this section inside summary_markdown after the Detailed Condition Report and before the Approximate Repair Cost Breakdown.
-- Immediately before this section, print the exact bold client-rules review header provided in the prompt, such as **National General Rules to be Reviewed**. If rules were pasted manually and no selected rules name is provided, print **Other Rules to be Reviewed**.
+- Immediately before this section, print the exact bold client-rules review header provided in the prompt, such as **National General Rules Advisor**. If rules were pasted manually and no selected rules name is provided, print **Other Rules to be Reviewed**.
 
 ## Approximate Repair Cost Breakdown
 - You MUST produce a cost approximation derived from the PHOTOS ONLY (do not reference estimates, documents, or 'not evidenced').
@@ -1190,7 +1190,7 @@ async def vision_review(
                 pass
 
         if selected_rules_name and not _is_select_placeholder(selected_rules_name):
-            client_rules_review_header = f"{selected_rules_name} Rules to be Reviewed"
+            client_rules_review_header = f"{selected_rules_name} Rules Advisor"
         else:
             client_rules_review_header = "Other Rules to be Reviewed"
 
