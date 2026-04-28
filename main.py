@@ -24,29 +24,39 @@ _ALLOWED_CORS_ORIGINS = {
 
 
 def _extract_ai_intent_from_body(body: bytes, content_type: str) -> str:
+    """Robustly extract ai_intent. Do not let photos-only silently fall into comprehensive."""
     ct = (content_type or "").lower()
 
     if "application/x-www-form-urlencoded" in ct:
         try:
-            parsed = parse_qs(body.decode("utf-8", "ignore"))
+            parsed = parse_qs(body.decode("utf-8", "ignore"), keep_blank_values=True)
             return str((parsed.get("ai_intent") or [""])[0]).strip().lower()
         except Exception:
             return ""
 
     if "multipart/form-data" in ct:
         try:
+            patterns = [
+                rb'name="ai_intent"(?:;[^\r\n]*)?\r?\n(?:[^\r\n]*\r?\n)*\r?\n([^\r\n-][^\r\n]*)',
+                rb'name=ai_intent(?:;[^\r\n]*)?\r?\n(?:[^\r\n]*\r?\n)*\r?\n([^\r\n-][^\r\n]*)',
+            ]
+            for pattern in patterns:
+                m = re.search(pattern, body, flags=re.IGNORECASE)
+                if m:
+                    return m.group(1).decode("utf-8", "ignore").strip().lower()
+
+            decoded = body.decode("utf-8", "ignore")
             m = re.search(
-                rb'name="ai_intent"\r\n(?:[^\r\n]*\r\n)*\r\n([^\r\n]+)',
-                body,
-                flags=re.IGNORECASE,
+                r'name=["\']?ai_intent["\']?.*?\r?\n\r?\n([^\r\n-]+)',
+                decoded,
+                flags=re.IGNORECASE | re.DOTALL,
             )
             if m:
-                return m.group(1).decode("utf-8", "ignore").strip().lower()
+                return m.group(1).strip().lower()
         except Exception:
             return ""
 
     return ""
-
 
 def _cors_headers(scope):
     request_headers = {
@@ -62,7 +72,7 @@ def _cors_headers(scope):
     return [
         (b"access-control-allow-origin", allow_origin.encode("latin1")),
         (b"access-control-allow-methods", b"GET,POST,OPTIONS"),
-        (b"access-control-allow-headers", b"Authorization,Content-Type,Accept,Origin"),
+        (b"access-control-allow-headers", b"Authorization,Content-Type,Accept,Origin,X-NSPXN-AI-Intent"),
         (b"access-control-allow-credentials", b"true"),
         (b"access-control-max-age", b"86400"),
     ]
@@ -208,13 +218,29 @@ class IntentRouterApp:
         content_type = headers.get("content-type", "")
         body = _replace_or_add_form_field(body, content_type, "appraiser_id", current_user.nspxn_id)
         scope = _scope_with_updated_content_length(scope, body)
-        ai_intent = _extract_ai_intent_from_body(body, content_type)
 
-        target_app = (
-            self.photos_only
-            if ai_intent == "damage_report_from_photos"
-            else self.comprehensive
-        )
+        # Prefer explicit frontend header, then fall back to multipart body parsing.
+        # Never silently default to comprehensive when the user selected photos-only.
+        ai_intent = (headers.get("x-nspxn-ai-intent") or "").strip().lower()
+        if not ai_intent:
+            ai_intent = _extract_ai_intent_from_body(body, content_type)
+
+        if ai_intent == "damage_report_from_photos":
+            target_app = self.photos_only
+        elif ai_intent == "comprehensive":
+            target_app = self.comprehensive
+        else:
+            await _send_json(
+                send,
+                400,
+                {
+                    "error": "Missing or invalid AI Review request type.",
+                    "detail": "Missing or invalid ai_intent. Select Comprehensive or Create a Condition/Damage Report from Photos and resubmit.",
+                    "ai_intent_received": ai_intent,
+                },
+                scope=scope,
+            )
+            return
 
         sent = False
 
@@ -237,3 +263,4 @@ class IntentRouterApp:
 
 
 app = IntentRouterApp(comprehensive_app, photos_only_app, auth_app)
+
