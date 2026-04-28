@@ -1,6 +1,6 @@
 import os
 from datetime import datetime, timedelta, timezone
-from typing import Optional, Tuple
+from typing import Optional, Tuple, List
 
 import jwt
 from jwt import ExpiredSignatureError, InvalidTokenError
@@ -614,3 +614,330 @@ def me(current_user: CurrentUser = Depends(get_current_auth_user)):
         "trial_end": account.get("trial_end"),
         "account_status": account.get("account_status"),
     }
+
+
+# ============================================================
+# PHASE 3A - ADMIN BACKEND ENDPOINTS
+# Admin-only account management. Requires role="admin".
+# ============================================================
+
+class AdminCompanyCreateRequest(BaseModel):
+    company_name: str
+    plan_name: str = "AI-4-IA"
+    monthly_upload_limit: int = DEFAULT_MONTHLY_UPLOAD_LIMIT
+    trial_days: int = DEFAULT_TRIAL_DAYS
+    billing_status: str = "trial"
+    is_active: bool = True
+
+
+class AdminCompanyUpdateRequest(BaseModel):
+    company_name: Optional[str] = None
+    plan_name: Optional[str] = None
+    monthly_upload_limit: Optional[int] = None
+    billing_status: Optional[str] = None
+    is_active: Optional[bool] = None
+    trial_days_from_now: Optional[int] = None
+    clear_trial_dates: Optional[bool] = None
+
+
+class AdminUserCreateRequest(BaseModel):
+    nspxn_id: str
+    password: str
+    email: Optional[str] = None
+    company_id: Optional[int] = None
+    company_name: Optional[str] = None
+    role: str = "user"
+    is_active: bool = True
+    plan_name: str = "AI-4-IA"
+    monthly_upload_limit: int = DEFAULT_MONTHLY_UPLOAD_LIMIT
+    trial_days: int = DEFAULT_TRIAL_DAYS
+    billing_status: str = "trial"
+
+
+class AdminUserUpdateRequest(BaseModel):
+    email: Optional[str] = None
+    company_id: Optional[int] = None
+    role: Optional[str] = None
+    is_active: Optional[bool] = None
+
+
+class AdminPasswordResetRequest(BaseModel):
+    password: str
+
+
+def require_admin_user(current_user: CurrentUser = Depends(get_current_auth_user)) -> CurrentUser:
+    if (current_user.role or "").lower() != "admin":
+        raise HTTPException(status_code=403, detail="Admin access required.")
+    return current_user
+
+
+def _company_to_dict(db: Session, company: Company) -> dict:
+    used = count_company_uploads_this_month(db, company.id)
+    limit = int(company.monthly_upload_limit or 0)
+    return {
+        "id": company.id,
+        "company_name": company.company_name,
+        "plan_name": company.plan_name,
+        "monthly_upload_limit": company.monthly_upload_limit,
+        "uploads_used_this_month": used,
+        "uploads_remaining_this_month": max(limit - used, 0),
+        "trial_start": company.trial_start.isoformat() if company.trial_start else None,
+        "trial_end": company.trial_end.isoformat() if company.trial_end else None,
+        "billing_status": company.billing_status,
+        "is_active": company.is_active,
+        "created_at": company.created_at.isoformat() if company.created_at else None,
+    }
+
+
+def _user_to_dict(db: Session, user: AuthUser) -> dict:
+    company = get_company_for_user(db, user)
+    return {
+        "id": user.id,
+        "nspxn_id": user.nspxn_id,
+        "email": user.email,
+        "company_id": company.id if company else user.company_id,
+        "company_name": company.company_name if company else user.company_name,
+        "role": user.role,
+        "is_active": user.is_active,
+        "created_at": user.created_at.isoformat() if user.created_at else None,
+        "last_login": user.last_login.isoformat() if user.last_login else None,
+    }
+
+
+def _usage_to_dict(entry: UsageLog) -> dict:
+    return {
+        "id": entry.id,
+        "user_id": entry.user_id,
+        "company_id": entry.company_id,
+        "nspxn_id": entry.nspxn_id,
+        "company_name": entry.company_name,
+        "ai_intent": entry.ai_intent,
+        "file_number": entry.file_number,
+        "status": entry.status,
+        "created_at": entry.created_at.isoformat() if entry.created_at else None,
+    }
+
+
+@auth_app.get("/admin/summary")
+def admin_summary(
+    admin_user: CurrentUser = Depends(require_admin_user),
+    db: Session = Depends(get_auth_db),
+):
+    companies_count = int(db.query(func.count(Company.id)).scalar() or 0)
+    users_count = int(db.query(func.count(AuthUser.id)).scalar() or 0)
+    active_users_count = int(db.query(func.count(AuthUser.id)).filter(AuthUser.is_active == True).scalar() or 0)  # noqa: E712
+    usage_this_month = int(
+        db.query(func.count(UsageLog.id))
+        .filter(UsageLog.status == "completed")
+        .filter(UsageLog.created_at >= _month_start_utc())
+        .scalar()
+        or 0
+    )
+    return {
+        "companies": companies_count,
+        "users": users_count,
+        "active_users": active_users_count,
+        "uploads_this_month": usage_this_month,
+    }
+
+
+@auth_app.get("/admin/companies")
+def admin_list_companies(
+    q: Optional[str] = None,
+    admin_user: CurrentUser = Depends(require_admin_user),
+    db: Session = Depends(get_auth_db),
+):
+    query = db.query(Company)
+    if q:
+        query = query.filter(Company.company_name.ilike(f"%{q.strip()}%"))
+    companies = query.order_by(Company.company_name.asc()).all()
+    return {"companies": [_company_to_dict(db, c) for c in companies]}
+
+
+@auth_app.post("/admin/companies")
+def admin_create_company(
+    payload: AdminCompanyCreateRequest,
+    admin_user: CurrentUser = Depends(require_admin_user),
+    db: Session = Depends(get_auth_db),
+):
+    existing = db.query(Company).filter(Company.company_name == payload.company_name.strip()).first()
+    if existing:
+        raise HTTPException(status_code=400, detail="Company already exists.")
+    company = get_or_create_company(
+        db=db,
+        company_name=payload.company_name,
+        plan_name=payload.plan_name,
+        monthly_upload_limit=payload.monthly_upload_limit,
+        trial_days=payload.trial_days,
+        billing_status=payload.billing_status,
+        is_active=payload.is_active,
+    )
+    company.is_active = payload.is_active
+    db.commit()
+    db.refresh(company)
+    return {"company": _company_to_dict(db, company)}
+
+
+@auth_app.patch("/admin/companies/{company_id}")
+def admin_update_company(
+    company_id: int,
+    payload: AdminCompanyUpdateRequest,
+    admin_user: CurrentUser = Depends(require_admin_user),
+    db: Session = Depends(get_auth_db),
+):
+    company = db.query(Company).filter(Company.id == company_id).first()
+    if not company:
+        raise HTTPException(status_code=404, detail="Company not found.")
+
+    if payload.company_name is not None:
+        new_name = payload.company_name.strip()
+        if not new_name:
+            raise HTTPException(status_code=400, detail="Company name cannot be blank.")
+        duplicate = db.query(Company).filter(Company.company_name == new_name, Company.id != company_id).first()
+        if duplicate:
+            raise HTTPException(status_code=400, detail="Another company already uses that name.")
+        company.company_name = new_name
+
+    if payload.plan_name is not None:
+        company.plan_name = payload.plan_name.strip() or company.plan_name
+    if payload.monthly_upload_limit is not None:
+        company.monthly_upload_limit = int(payload.monthly_upload_limit)
+    if payload.billing_status is not None:
+        company.billing_status = payload.billing_status.strip() or company.billing_status
+    if payload.is_active is not None:
+        company.is_active = bool(payload.is_active)
+    if payload.clear_trial_dates:
+        company.trial_start = None
+        company.trial_end = None
+    elif payload.trial_days_from_now is not None:
+        days = int(payload.trial_days_from_now)
+        now = datetime.utcnow()
+        company.trial_start = now
+        company.trial_end = now + timedelta(days=days) if days > 0 else now
+
+    db.query(AuthUser).filter(AuthUser.company_id == company.id).update({AuthUser.company_name: company.company_name})
+
+    db.commit()
+    db.refresh(company)
+    return {"company": _company_to_dict(db, company)}
+
+
+@auth_app.get("/admin/users")
+def admin_list_users(
+    q: Optional[str] = None,
+    company_id: Optional[int] = None,
+    admin_user: CurrentUser = Depends(require_admin_user),
+    db: Session = Depends(get_auth_db),
+):
+    query = db.query(AuthUser)
+    if q:
+        like = f"%{q.strip()}%"
+        query = query.filter((AuthUser.nspxn_id.ilike(like)) | (AuthUser.email.ilike(like)) | (AuthUser.company_name.ilike(like)))
+    if company_id:
+        query = query.filter(AuthUser.company_id == company_id)
+    users = query.order_by(AuthUser.id.asc()).all()
+    return {"users": [_user_to_dict(db, u) for u in users]}
+
+
+@auth_app.post("/admin/users")
+def admin_create_user(
+    payload: AdminUserCreateRequest,
+    admin_user: CurrentUser = Depends(require_admin_user),
+    db: Session = Depends(get_auth_db),
+):
+    if not payload.password or len(payload.password.encode("utf-8")) > 72:
+        raise HTTPException(status_code=400, detail="Password is required and must be 72 bytes or shorter.")
+
+    company = None
+    if payload.company_id:
+        company = db.query(Company).filter(Company.id == payload.company_id).first()
+        if not company:
+            raise HTTPException(status_code=404, detail="Company not found.")
+
+    user = create_auth_user(
+        db=db,
+        nspxn_id=payload.nspxn_id,
+        password=payload.password,
+        email=payload.email,
+        company_name=(company.company_name if company else payload.company_name),
+        role=payload.role,
+        is_active=payload.is_active,
+        plan_name=payload.plan_name,
+        monthly_upload_limit=payload.monthly_upload_limit,
+        trial_days=payload.trial_days,
+        billing_status=payload.billing_status,
+    )
+
+    if company and user.company_id != company.id:
+        user.company_id = company.id
+        user.company_name = company.company_name
+        db.commit()
+        db.refresh(user)
+
+    return {"user": _user_to_dict(db, user)}
+
+
+@auth_app.patch("/admin/users/{user_id}")
+def admin_update_user(
+    user_id: int,
+    payload: AdminUserUpdateRequest,
+    admin_user: CurrentUser = Depends(require_admin_user),
+    db: Session = Depends(get_auth_db),
+):
+    user = db.query(AuthUser).filter(AuthUser.id == user_id).first()
+    if not user:
+        raise HTTPException(status_code=404, detail="User not found.")
+
+    if payload.email is not None:
+        user.email = payload.email.strip() or None
+    if payload.company_id is not None:
+        company = db.query(Company).filter(Company.id == int(payload.company_id)).first()
+        if not company:
+            raise HTTPException(status_code=404, detail="Company not found.")
+        user.company_id = company.id
+        user.company_name = company.company_name
+    if payload.role is not None:
+        role = payload.role.strip().lower() or "user"
+        if role not in {"user", "admin"}:
+            raise HTTPException(status_code=400, detail="Role must be user or admin.")
+        user.role = role
+    if payload.is_active is not None:
+        user.is_active = bool(payload.is_active)
+
+    db.commit()
+    db.refresh(user)
+    return {"user": _user_to_dict(db, user)}
+
+
+@auth_app.post("/admin/users/{user_id}/reset-password")
+def admin_reset_user_password(
+    user_id: int,
+    payload: AdminPasswordResetRequest,
+    admin_user: CurrentUser = Depends(require_admin_user),
+    db: Session = Depends(get_auth_db),
+):
+    user = db.query(AuthUser).filter(AuthUser.id == user_id).first()
+    if not user:
+        raise HTTPException(status_code=404, detail="User not found.")
+    if not payload.password or len(payload.password.encode("utf-8")) > 72:
+        raise HTTPException(status_code=400, detail="Password is required and must be 72 bytes or shorter.")
+    user.password_hash = hash_password(payload.password)
+    db.commit()
+    return {"ok": True, "message": f"Password reset for {user.nspxn_id}."}
+
+
+@auth_app.get("/admin/usage")
+def admin_usage(
+    company_id: Optional[int] = None,
+    user_id: Optional[int] = None,
+    limit: int = 100,
+    admin_user: CurrentUser = Depends(require_admin_user),
+    db: Session = Depends(get_auth_db),
+):
+    query = db.query(UsageLog)
+    if company_id:
+        query = query.filter(UsageLog.company_id == company_id)
+    if user_id:
+        query = query.filter(UsageLog.user_id == user_id)
+    rows = query.order_by(UsageLog.created_at.desc()).limit(max(1, min(int(limit or 100), 500))).all()
+    return {"usage": [_usage_to_dict(r) for r in rows]}

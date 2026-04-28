@@ -84,7 +84,7 @@ def _cors_headers(scope):
 
     return [
         (b"access-control-allow-origin", allow_origin.encode("latin1")),
-        (b"access-control-allow-methods", b"GET,POST,OPTIONS"),
+        (b"access-control-allow-methods", b"GET,POST,PATCH,OPTIONS"),
         (b"access-control-allow-headers", b"Authorization,Content-Type,Accept,Origin,X-NSPXN-AI-Intent"),
         (b"access-control-allow-credentials", b"true"),
         (b"access-control-max-age", b"86400"),
@@ -227,7 +227,7 @@ class IntentRouterApp:
             await _send_options(send, scope)
             return
 
-        if path in {"/login", "/me"}:
+        if path in {"/login", "/me"} or path.startswith("/admin"):
             await self.auth(scope, receive, send)
             return
 
