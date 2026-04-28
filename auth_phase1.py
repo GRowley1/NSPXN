@@ -962,4 +962,62 @@ def admin_usage(
     rows = query.order_by(UsageLog.created_at.desc()).limit(max(1, min(int(limit or 100), 500))).all()
     return {"usage": [_usage_to_dict(r) for r in rows]}
 
+@auth_app.post("/admin/usage/reset")
+def admin_reset_current_month_usage(
+    company_id: Optional[int] = None,
+    user_id: Optional[int] = None,
+    reset_all: bool = False,
+    admin_user: CurrentUser = Depends(require_admin_user),
+    db: Session = Depends(get_auth_db),
+):
+    """Admin current-month usage reset.
+
+    This does not delete historical rows. It marks matching current-month
+    completed usage rows as reset_by_admin so monthly counters immediately
+    drop while preserving an audit trail.
+    """
+    if not reset_all and not company_id and not user_id:
+        raise HTTPException(status_code=400, detail="Provide company_id, user_id, or reset_all=true.")
+
+    if reset_all and (company_id or user_id):
+        raise HTTPException(status_code=400, detail="Use reset_all by itself, or reset one company/user.")
+
+    month_start = _month_start_utc()
+    query = (
+        db.query(UsageLog)
+        .filter(UsageLog.status == "completed")
+        .filter(UsageLog.created_at >= month_start)
+    )
+
+    target_label = "all accounts"
+
+    if user_id:
+        user = db.query(AuthUser).filter(AuthUser.id == int(user_id)).first()
+        if not user:
+            raise HTTPException(status_code=404, detail="User not found.")
+        query = query.filter(UsageLog.user_id == int(user_id))
+        target_label = f"user {user.nspxn_id}"
+
+    if company_id:
+        company = db.query(Company).filter(Company.id == int(company_id)).first()
+        if not company:
+            raise HTTPException(status_code=404, detail="Company not found.")
+        query = query.filter(UsageLog.company_id == int(company_id))
+        target_label = f"company {company.company_name}"
+
+    rows = query.all()
+    reset_count = len(rows)
+
+    for row in rows:
+        row.status = "reset_by_admin"
+
+    db.commit()
+
+    return {
+        "ok": True,
+        "reset_count": reset_count,
+        "message": f"Reset {reset_count} current-month completed usage record(s) for {target_label}.",
+    }
+
+
 
