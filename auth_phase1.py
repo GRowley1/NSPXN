@@ -289,6 +289,19 @@ def count_company_uploads_this_month(db: Session, company_id: Optional[int]) -> 
     )
 
 
+def count_user_uploads_this_month(db: Session, user_id: Optional[int]) -> int:
+    if not user_id:
+        return 0
+    return int(
+        db.query(func.count(UsageLog.id))
+        .filter(UsageLog.user_id == user_id)
+        .filter(UsageLog.status == "completed")
+        .filter(UsageLog.created_at >= _month_start_utc())
+        .scalar()
+        or 0
+    )
+
+
 def _account_status_payload(db: Session, user: AuthUser) -> dict:
     company = get_company_for_user(db, user)
     used = count_company_uploads_this_month(db, company.id) if company else 0
@@ -691,6 +704,9 @@ def _company_to_dict(db: Session, company: Company) -> dict:
 
 def _user_to_dict(db: Session, user: AuthUser) -> dict:
     company = get_company_for_user(db, user)
+    user_used = count_user_uploads_this_month(db, user.id)
+    company_used = count_company_uploads_this_month(db, company.id) if company else 0
+    company_limit = int(company.monthly_upload_limit or 0) if company else 0
     return {
         "id": user.id,
         "nspxn_id": user.nspxn_id,
@@ -699,6 +715,10 @@ def _user_to_dict(db: Session, user: AuthUser) -> dict:
         "company_name": company.company_name if company else user.company_name,
         "role": user.role,
         "is_active": user.is_active,
+        "uploads_used_this_month": user_used,
+        "company_uploads_used_this_month": company_used,
+        "company_monthly_upload_limit": company_limit,
+        "company_uploads_remaining_this_month": max(company_limit - company_used, 0) if company else 0,
         "created_at": user.created_at.isoformat() if user.created_at else None,
         "last_login": user.last_login.isoformat() if user.last_login else None,
     }
@@ -941,4 +961,5 @@ def admin_usage(
         query = query.filter(UsageLog.user_id == user_id)
     rows = query.order_by(UsageLog.created_at.desc()).limit(max(1, min(int(limit or 100), 500))).all()
     return {"usage": [_usage_to_dict(r) for r in rows]}
+
 
