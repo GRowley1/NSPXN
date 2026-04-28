@@ -941,3 +941,4 @@ def admin_usage(
         query = query.filter(UsageLog.user_id == user_id)
     rows = query.order_by(UsageLog.created_at.desc()).limit(max(1, min(int(limit or 100), 500))).all()
     return {"usage": [_usage_to_dict(r) for r in rows]}
+
