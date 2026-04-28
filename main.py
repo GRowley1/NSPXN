@@ -4,7 +4,13 @@ from urllib.parse import parse_qs
 
 from fastapi import HTTPException
 
-from auth_phase1 import auth_app, init_auth_db, require_auth_from_authorization_header
+from auth_phase1 import (
+    auth_app,
+    enforce_account_for_upload,
+    init_auth_db,
+    log_usage_event,
+    require_auth_from_authorization_header,
+)
 from main_comprehensive_locked import app as comprehensive_app
 from main_photos_only_locked import app as photos_only_app
 
@@ -23,40 +29,47 @@ _ALLOWED_CORS_ORIGINS = {
 }
 
 
-def _extract_ai_intent_from_body(body: bytes, content_type: str) -> str:
-    """Robustly extract ai_intent. Do not let photos-only silently fall into comprehensive."""
+def _extract_simple_form_field(body: bytes, content_type: str, field_name: str) -> str:
+    """Extract a simple text field from urlencoded or multipart body."""
     ct = (content_type or "").lower()
 
     if "application/x-www-form-urlencoded" in ct:
         try:
             parsed = parse_qs(body.decode("utf-8", "ignore"), keep_blank_values=True)
-            return str((parsed.get("ai_intent") or [""])[0]).strip().lower()
+            return str((parsed.get(field_name) or [""])[0]).strip()
         except Exception:
             return ""
 
     if "multipart/form-data" in ct:
         try:
+            escaped = re.escape(field_name.encode("utf-8"))
             patterns = [
-                rb'name="ai_intent"(?:;[^\r\n]*)?\r?\n(?:[^\r\n]*\r?\n)*\r?\n([^\r\n-][^\r\n]*)',
-                rb'name=ai_intent(?:;[^\r\n]*)?\r?\n(?:[^\r\n]*\r?\n)*\r?\n([^\r\n-][^\r\n]*)',
+                rb'name="' + escaped + rb'"(?:;[^\r\n]*)?\r?\n(?:[^\r\n]*\r?\n)*\r?\n([^\r\n-][^\r\n]*)',
+                rb'name=' + escaped + rb'(?:;[^\r\n]*)?\r?\n(?:[^\r\n]*\r?\n)*\r?\n([^\r\n-][^\r\n]*)',
             ]
             for pattern in patterns:
                 m = re.search(pattern, body, flags=re.IGNORECASE)
                 if m:
-                    return m.group(1).decode("utf-8", "ignore").strip().lower()
+                    return m.group(1).decode("utf-8", "ignore").strip()
 
             decoded = body.decode("utf-8", "ignore")
             m = re.search(
-                r'name=["\']?ai_intent["\']?.*?\r?\n\r?\n([^\r\n-]+)',
+                r'name=["\']?' + re.escape(field_name) + r'["\']?.*?\r?\n\r?\n([^\r\n-]+)',
                 decoded,
                 flags=re.IGNORECASE | re.DOTALL,
             )
             if m:
-                return m.group(1).strip().lower()
+                return m.group(1).strip()
         except Exception:
             return ""
 
     return ""
+
+
+def _extract_ai_intent_from_body(body: bytes, content_type: str) -> str:
+    """Robustly extract ai_intent. Do not let photos-only silently fall into comprehensive."""
+    return _extract_simple_form_field(body, content_type, "ai_intent").lower()
+
 
 def _cors_headers(scope):
     request_headers = {
@@ -100,6 +113,20 @@ def _header_dict(scope):
         k.decode("latin1").lower(): v.decode("latin1")
         for k, v in scope.get("headers", [])
     }
+
+
+def _blocked_payload_from_exception(exc: HTTPException) -> tuple[int, dict]:
+    detail = exc.detail
+
+    if isinstance(detail, dict):
+        payload = dict(detail)
+        payload.setdefault("status", "blocked")
+        payload.setdefault("error", "Account blocked.")
+        payload.setdefault("detail", payload.get("error", "Account blocked."))
+        return exc.status_code, payload
+
+    message = detail if isinstance(detail, str) else "Unauthorized."
+    return exc.status_code, {"detail": message, "error": message}
 
 
 def _replace_or_add_form_field(body: bytes, content_type: str, field_name: str, value: str) -> bytes:
@@ -164,6 +191,24 @@ def _scope_with_updated_content_length(scope, body: bytes):
     return new_scope
 
 
+def _is_completed_response(status_code: int, body: bytes) -> bool:
+    """Count only successful, usable report responses."""
+    if status_code < 200 or status_code >= 300:
+        return False
+
+    if not body:
+        return True
+
+    try:
+        payload = json.loads(body.decode("utf-8", "ignore"))
+        if isinstance(payload, dict) and payload.get("status") == "blocked":
+            return False
+    except Exception:
+        pass
+
+    return True
+
+
 class IntentRouterApp:
     def __init__(self, comprehensive, photos_only, auth):
         self.comprehensive = comprehensive
@@ -195,8 +240,8 @@ class IntentRouterApp:
         try:
             current_user = require_auth_from_authorization_header(headers.get("authorization"))
         except HTTPException as exc:
-            detail = exc.detail if isinstance(exc.detail, str) else "Unauthorized."
-            await _send_json(send, exc.status_code, {"detail": detail, "error": detail}, scope=scope)
+            status_code, payload = _blocked_payload_from_exception(exc)
+            await _send_json(send, status_code, payload, scope=scope)
             return
         except Exception:
             await _send_json(send, 401, {"detail": "Invalid login token.", "error": "Invalid login token."}, scope=scope)
@@ -242,6 +287,19 @@ class IntentRouterApp:
             )
             return
 
+        try:
+            enforce_account_for_upload(current_user)
+        except HTTPException as exc:
+            status_code, payload = _blocked_payload_from_exception(exc)
+            await _send_json(send, status_code, payload, scope=scope)
+            return
+
+        file_number = (
+            _extract_simple_form_field(body, content_type, "file_number")
+            or _extract_simple_form_field(body, content_type, "file-number")
+            or _extract_simple_form_field(body, content_type, "fileNumber")
+        )
+
         sent = False
 
         async def replay_receive():
@@ -259,8 +317,24 @@ class IntentRouterApp:
                 "more_body": False,
             }
 
-        await target_app(scope, replay_receive, send)
+        response_state = {"status": 500, "body": bytearray()}
+
+        async def tracking_send(message):
+            if message["type"] == "http.response.start":
+                response_state["status"] = int(message.get("status", 500))
+            elif message["type"] == "http.response.body":
+                response_state["body"].extend(message.get("body", b"") or b"")
+            await send(message)
+
+        await target_app(scope, replay_receive, tracking_send)
+
+        if _is_completed_response(response_state["status"], bytes(response_state["body"])):
+            log_usage_event(
+                current_user=current_user,
+                ai_intent=ai_intent,
+                file_number=file_number,
+                status="completed",
+            )
 
 
 app = IntentRouterApp(comprehensive_app, photos_only_app, auth_app)
-
