@@ -1,6 +1,6 @@
 from zoneinfo import ZoneInfo
 from datetime import datetime
-from fastapi import FastAPI, File, UploadFile, Form, Request
+from fastapi import FastAPI, File, UploadFile, Form, Request, Response
 from fastapi.responses import JSONResponse, FileResponse
 from fastapi.middleware.cors import CORSMiddleware
 from typing import List, Dict, Any, Optional
@@ -959,6 +959,7 @@ async def list_client_rules():
 @app.post("/vision-review")
 async def vision_review(
     request: Request,
+    response: Response,
     files: Optional[List[UploadFile]] = File(None),
     client_rules: str = Form(""),
     ai_notes: str = Form(""),
@@ -4524,6 +4525,20 @@ async def vision_review(
         log.info("Info email sent to info@nspxn.com")
     except Exception as e:
         logging.error(f"Email error: {e}")
+
+    # Expose lightweight analytics metadata to the outer router via response headers.
+    # This avoids buffering/parsing the full response body in main.py and keeps PDF/report delivery stable.
+    try:
+        response.headers["X-NSPXN-Report-Completed"] = "true"
+        response.headers["X-NSPXN-AI-Intent"] = str(ai_intent or "")
+        response.headers["X-NSPXN-File-Number"] = str(file_number or "")
+        if str(ai_intent or "").strip().lower() == "comprehensive":
+            _score_header = _numeric_score_or_blank(result.get("compliance_score"))
+            if _score_header:
+                response.headers["X-NSPXN-Compliance-Score"] = str(_score_header)
+                response.headers["X-NSPXN-Score-Source"] = "main_comprehensive_locked.result.compliance_score"
+    except Exception:
+        pass
 
     return {
         **result,

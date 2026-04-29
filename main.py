@@ -209,56 +209,6 @@ def _is_completed_response(status_code: int, body: bytes) -> bool:
     return True
 
 
-def _extract_compliance_score_from_response(body: bytes):
-    """Extract Comprehensive compliance score from JSON or narrative text for usage analytics only."""
-    if not body:
-        return None, None
-
-    raw = body.decode("utf-8", "ignore")
-    payload = None
-    try:
-        payload = json.loads(raw)
-    except Exception:
-        payload = None
-
-    def _score_from_value(value):
-        if value is None:
-            return None
-        if isinstance(value, (int, float)):
-            score = float(value)
-            return score if 0 <= score <= 100 else None
-        text = str(value)
-        patterns = [
-            r"Final\s+Compliance\s+Score\s*[:=\-]?\s*([0-9]{1,3}(?:\.[0-9]+)?)\s*(?:/\s*100|%)?",
-            r"Compliance\s+Score\s*[:=\-]?\s*([0-9]{1,3}(?:\.[0-9]+)?)\s*(?:/\s*100|%)?",
-            r"Final\s+Score\s*[:=\-]?\s*([0-9]{1,3}(?:\.[0-9]+)?)\s*(?:/\s*100|%)?",
-            r"\b([0-9]{1,3}(?:\.[0-9]+)?)\s*/\s*100\b",
-        ]
-        for pattern in patterns:
-            m = re.search(pattern, text, flags=re.IGNORECASE)
-            if m:
-                score = float(m.group(1))
-                return score if 0 <= score <= 100 else None
-        return None
-
-    if isinstance(payload, dict):
-        for key in ["compliance_score", "final_compliance_score", "locked_compliance_score", "score"]:
-            score = _score_from_value(payload.get(key))
-            if score is not None:
-                return round(score, 1), f"json.{key}"
-
-        for key in ["gpt_output", "summary_markdown", "summary_brief", "conclusion", "report", "narrative"]:
-            score = _score_from_value(payload.get(key))
-            if score is not None:
-                return round(score, 1), f"json.{key}.text"
-
-    score = _score_from_value(raw)
-    if score is not None:
-        return round(score, 1), "response_text"
-
-    return None, None
-
-
 class IntentRouterApp:
     def __init__(self, comprehensive, photos_only, auth):
         self.comprehensive = comprehensive
@@ -367,22 +317,35 @@ class IntentRouterApp:
                 "more_body": False,
             }
 
-        response_state = {"status": 500, "body": bytearray()}
+        response_state = {"status": 500, "headers": {}}
 
         async def tracking_send(message):
+            # Header-only tracking. Do NOT buffer or parse the response body here;
+            # buffering the full report response can break large PDF/report responses.
             if message["type"] == "http.response.start":
                 response_state["status"] = int(message.get("status", 500))
-            elif message["type"] == "http.response.body":
-                response_state["body"].extend(message.get("body", b"") or b"")
+                response_state["headers"] = {
+                    k.decode("latin1").lower(): v.decode("latin1")
+                    for k, v in message.get("headers", [])
+                }
             await send(message)
 
         await target_app(scope, replay_receive, tracking_send)
 
-        if _is_completed_response(response_state["status"], bytes(response_state["body"])):
+        if 200 <= int(response_state.get("status", 500)) < 300:
             compliance_score = None
             score_source = None
             if ai_intent == "comprehensive":
-                compliance_score, score_source = _extract_compliance_score_from_response(bytes(response_state["body"]))
+                score_header = str(response_state.get("headers", {}).get("x-nspxn-compliance-score") or "").strip()
+                if score_header:
+                    try:
+                        parsed_score = float(score_header)
+                        if 0 <= parsed_score <= 100:
+                            compliance_score = round(parsed_score, 1)
+                            score_source = str(response_state.get("headers", {}).get("x-nspxn-score-source") or "response_header").strip() or "response_header"
+                    except Exception:
+                        compliance_score = None
+                        score_source = None
 
             log_usage_event(
                 current_user=current_user,
