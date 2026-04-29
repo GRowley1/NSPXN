@@ -209,6 +209,56 @@ def _is_completed_response(status_code: int, body: bytes) -> bool:
     return True
 
 
+def _extract_compliance_score_from_response(body: bytes):
+    """Extract Comprehensive compliance score from JSON or narrative text for usage analytics only."""
+    if not body:
+        return None, None
+
+    raw = body.decode("utf-8", "ignore")
+    payload = None
+    try:
+        payload = json.loads(raw)
+    except Exception:
+        payload = None
+
+    def _score_from_value(value):
+        if value is None:
+            return None
+        if isinstance(value, (int, float)):
+            score = float(value)
+            return score if 0 <= score <= 100 else None
+        text = str(value)
+        patterns = [
+            r"Final\s+Compliance\s+Score\s*[:=\-]?\s*([0-9]{1,3}(?:\.[0-9]+)?)\s*(?:/\s*100|%)?",
+            r"Compliance\s+Score\s*[:=\-]?\s*([0-9]{1,3}(?:\.[0-9]+)?)\s*(?:/\s*100|%)?",
+            r"Final\s+Score\s*[:=\-]?\s*([0-9]{1,3}(?:\.[0-9]+)?)\s*(?:/\s*100|%)?",
+            r"\b([0-9]{1,3}(?:\.[0-9]+)?)\s*/\s*100\b",
+        ]
+        for pattern in patterns:
+            m = re.search(pattern, text, flags=re.IGNORECASE)
+            if m:
+                score = float(m.group(1))
+                return score if 0 <= score <= 100 else None
+        return None
+
+    if isinstance(payload, dict):
+        for key in ["compliance_score", "final_compliance_score", "locked_compliance_score", "score"]:
+            score = _score_from_value(payload.get(key))
+            if score is not None:
+                return round(score, 1), f"json.{key}"
+
+        for key in ["gpt_output", "summary_markdown", "summary_brief", "conclusion", "report", "narrative"]:
+            score = _score_from_value(payload.get(key))
+            if score is not None:
+                return round(score, 1), f"json.{key}.text"
+
+    score = _score_from_value(raw)
+    if score is not None:
+        return round(score, 1), "response_text"
+
+    return None, None
+
+
 class IntentRouterApp:
     def __init__(self, comprehensive, photos_only, auth):
         self.comprehensive = comprehensive
@@ -329,11 +379,18 @@ class IntentRouterApp:
         await target_app(scope, replay_receive, tracking_send)
 
         if _is_completed_response(response_state["status"], bytes(response_state["body"])):
+            compliance_score = None
+            score_source = None
+            if ai_intent == "comprehensive":
+                compliance_score, score_source = _extract_compliance_score_from_response(bytes(response_state["body"]))
+
             log_usage_event(
                 current_user=current_user,
                 ai_intent=ai_intent,
                 file_number=file_number,
                 status="completed",
+                compliance_score=compliance_score,
+                score_source=score_source,
             )
 
 

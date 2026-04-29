@@ -9,7 +9,7 @@ import jwt
 from jwt import ExpiredSignatureError, InvalidTokenError
 from passlib.context import CryptContext
 from pydantic import BaseModel
-from sqlalchemy import Boolean, Column, DateTime, ForeignKey, Integer, String, create_engine, func, inspect, text
+from sqlalchemy import Boolean, Column, DateTime, Float, ForeignKey, Integer, String, create_engine, func, inspect, text
 from sqlalchemy.orm import Session, declarative_base, sessionmaker
 
 from fastapi import Depends, FastAPI, Header, HTTPException, Response
@@ -110,6 +110,8 @@ class UsageLog(Base):
     ai_intent = Column(String, nullable=True)
     file_number = Column(String, nullable=True)
     status = Column(String, default="completed", nullable=False)
+    compliance_score = Column(Float, nullable=True)
+    score_source = Column(String, nullable=True)
     created_at = Column(DateTime, default=datetime.utcnow, nullable=False)
 
 
@@ -189,6 +191,10 @@ def _ensure_phase2_schema() -> None:
 
     if "auth_users" in inspect(engine).get_table_names():
         _add_column_if_missing("auth_users", "company_id", "INTEGER")
+
+    if "usage_log" in inspect(engine).get_table_names():
+        _add_column_if_missing("usage_log", "compliance_score", "FLOAT")
+        _add_column_if_missing("usage_log", "score_source", "VARCHAR")
 
     # Backfill existing Phase 1 users into companies so current logins survive.
     db = SessionLocal()
@@ -403,6 +409,8 @@ def log_usage_event(
     ai_intent: Optional[str],
     file_number: Optional[str],
     status: str = "completed",
+    compliance_score: Optional[float] = None,
+    score_source: Optional[str] = None,
 ) -> None:
     db = SessionLocal()
     try:
@@ -416,6 +424,8 @@ def log_usage_event(
             ai_intent=ai_intent,
             file_number=file_number,
             status=status or "completed",
+            compliance_score=compliance_score,
+            score_source=score_source,
         )
         db.add(entry)
         db.commit()
@@ -706,6 +716,8 @@ def require_admin_user(current_user: CurrentUser = Depends(get_current_auth_user
 def _company_to_dict(db: Session, company: Company) -> dict:
     used = count_company_uploads_this_month(db, company.id)
     limit = int(company.monthly_upload_limit or 0)
+    monthly_score_stats = _comprehensive_score_stats_for_company(db, company.id, month_only=True)
+    lifetime_score_stats = _comprehensive_score_stats_for_company(db, company.id, month_only=False)
     return {
         "id": company.id,
         "company_name": company.company_name,
@@ -713,6 +725,10 @@ def _company_to_dict(db: Session, company: Company) -> dict:
         "monthly_upload_limit": company.monthly_upload_limit,
         "uploads_used_this_month": used,
         "uploads_remaining_this_month": max(limit - used, 0),
+        "avg_comprehensive_compliance_score_this_month": monthly_score_stats["avg"],
+        "comprehensive_score_count_this_month": monthly_score_stats["count"],
+        "avg_comprehensive_compliance_score_lifetime": lifetime_score_stats["avg"],
+        "comprehensive_score_count_lifetime": lifetime_score_stats["count"],
         "trial_start": company.trial_start.isoformat() if company.trial_start else None,
         "trial_end": company.trial_end.isoformat() if company.trial_end else None,
         "billing_status": company.billing_status,
@@ -721,11 +737,59 @@ def _company_to_dict(db: Session, company: Company) -> dict:
     }
 
 
+def _comprehensive_score_stats_for_user(db: Session, user_id: Optional[int], month_only: bool = False) -> dict:
+    if not user_id:
+        return {"count": 0, "avg": None, "low": None, "high": None}
+    query = (
+        db.query(UsageLog.compliance_score)
+        .filter(UsageLog.user_id == int(user_id))
+        .filter(UsageLog.status == "completed")
+        .filter(UsageLog.ai_intent == "comprehensive")
+        .filter(UsageLog.compliance_score.isnot(None))
+    )
+    if month_only:
+        query = query.filter(UsageLog.created_at >= _month_start_utc())
+    scores = [float(x[0]) for x in query.all() if x and x[0] is not None]
+    if not scores:
+        return {"count": 0, "avg": None, "low": None, "high": None}
+    return {
+        "count": len(scores),
+        "avg": round(sum(scores) / len(scores), 1),
+        "low": round(min(scores), 1),
+        "high": round(max(scores), 1),
+    }
+
+
+def _comprehensive_score_stats_for_company(db: Session, company_id: Optional[int], month_only: bool = False) -> dict:
+    if not company_id:
+        return {"count": 0, "avg": None, "low": None, "high": None}
+    query = (
+        db.query(UsageLog.compliance_score)
+        .filter(UsageLog.company_id == int(company_id))
+        .filter(UsageLog.status == "completed")
+        .filter(UsageLog.ai_intent == "comprehensive")
+        .filter(UsageLog.compliance_score.isnot(None))
+    )
+    if month_only:
+        query = query.filter(UsageLog.created_at >= _month_start_utc())
+    scores = [float(x[0]) for x in query.all() if x and x[0] is not None]
+    if not scores:
+        return {"count": 0, "avg": None, "low": None, "high": None}
+    return {
+        "count": len(scores),
+        "avg": round(sum(scores) / len(scores), 1),
+        "low": round(min(scores), 1),
+        "high": round(max(scores), 1),
+    }
+
+
 def _user_to_dict(db: Session, user: AuthUser) -> dict:
     company = get_company_for_user(db, user)
     user_used = count_user_uploads_this_month(db, user.id)
     company_used = count_company_uploads_this_month(db, company.id) if company else 0
     company_limit = int(company.monthly_upload_limit or 0) if company else 0
+    monthly_score_stats = _comprehensive_score_stats_for_user(db, user.id, month_only=True)
+    lifetime_score_stats = _comprehensive_score_stats_for_user(db, user.id, month_only=False)
     return {
         "id": user.id,
         "nspxn_id": user.nspxn_id,
@@ -738,6 +802,12 @@ def _user_to_dict(db: Session, user: AuthUser) -> dict:
         "company_uploads_used_this_month": company_used,
         "company_monthly_upload_limit": company_limit,
         "company_uploads_remaining_this_month": max(company_limit - company_used, 0) if company else 0,
+        "avg_comprehensive_compliance_score_this_month": monthly_score_stats["avg"],
+        "comprehensive_score_count_this_month": monthly_score_stats["count"],
+        "lowest_comprehensive_compliance_score_this_month": monthly_score_stats["low"],
+        "highest_comprehensive_compliance_score_this_month": monthly_score_stats["high"],
+        "avg_comprehensive_compliance_score_lifetime": lifetime_score_stats["avg"],
+        "comprehensive_score_count_lifetime": lifetime_score_stats["count"],
         "created_at": user.created_at.isoformat() if user.created_at else None,
         "last_login": user.last_login.isoformat() if user.last_login else None,
     }
@@ -753,6 +823,8 @@ def _usage_to_dict(entry: UsageLog) -> dict:
         "ai_intent": entry.ai_intent,
         "file_number": entry.file_number,
         "status": entry.status,
+        "compliance_score": entry.compliance_score,
+        "score_source": entry.score_source,
         "created_at": entry.created_at.isoformat() if entry.created_at else None,
     }
 
@@ -1173,21 +1245,35 @@ def admin_usage_dashboard(
         status_counts[st] = status_counts.get(st, 0) + 1
         intent_counts[intent] = intent_counts.get(intent, 0) + 1
 
+        is_scored_comprehensive = (st == "completed" and intent == "comprehensive" and row.compliance_score is not None)
+
         if row.company_id:
-            company_counts.setdefault(row.company_id, {"company_id": row.company_id, "company_name": row.company_name or "", "total_records": 0, "completed_uploads": 0, "reset_records": 0})
+            company_counts.setdefault(row.company_id, {"company_id": row.company_id, "company_name": row.company_name or "", "total_records": 0, "completed_uploads": 0, "reset_records": 0, "score_sum": 0.0, "score_count": 0, "score_low": None, "score_high": None})
             company_counts[row.company_id]["total_records"] += 1
             if st == "completed":
                 company_counts[row.company_id]["completed_uploads"] += 1
             if st == "reset_by_admin":
                 company_counts[row.company_id]["reset_records"] += 1
+            if is_scored_comprehensive:
+                score = float(row.compliance_score)
+                company_counts[row.company_id]["score_sum"] += score
+                company_counts[row.company_id]["score_count"] += 1
+                company_counts[row.company_id]["score_low"] = score if company_counts[row.company_id]["score_low"] is None else min(company_counts[row.company_id]["score_low"], score)
+                company_counts[row.company_id]["score_high"] = score if company_counts[row.company_id]["score_high"] is None else max(company_counts[row.company_id]["score_high"], score)
 
         if row.user_id:
-            user_counts.setdefault(row.user_id, {"user_id": row.user_id, "nspxn_id": row.nspxn_id or "", "company_name": row.company_name or "", "total_records": 0, "completed_uploads": 0, "reset_records": 0})
+            user_counts.setdefault(row.user_id, {"user_id": row.user_id, "nspxn_id": row.nspxn_id or "", "company_name": row.company_name or "", "total_records": 0, "completed_uploads": 0, "reset_records": 0, "score_sum": 0.0, "score_count": 0, "score_low": None, "score_high": None})
             user_counts[row.user_id]["total_records"] += 1
             if st == "completed":
                 user_counts[row.user_id]["completed_uploads"] += 1
             if st == "reset_by_admin":
                 user_counts[row.user_id]["reset_records"] += 1
+            if is_scored_comprehensive:
+                score = float(row.compliance_score)
+                user_counts[row.user_id]["score_sum"] += score
+                user_counts[row.user_id]["score_count"] += 1
+                user_counts[row.user_id]["score_low"] = score if user_counts[row.user_id]["score_low"] is None else min(user_counts[row.user_id]["score_low"], score)
+                user_counts[row.user_id]["score_high"] = score if user_counts[row.user_id]["score_high"] is None else max(user_counts[row.user_id]["score_high"], score)
 
     for cid, item in list(company_counts.items()):
         company = db.query(Company).filter(Company.id == cid).first()
@@ -1199,6 +1285,14 @@ def admin_usage_dashboard(
             item["usage_percent"] = round((int(item["completed_uploads"] or 0) / int(company.monthly_upload_limit or 1)) * 100, 1) if int(company.monthly_upload_limit or 0) > 0 else 0
             item["billing_status"] = company.billing_status
             item["trial_end"] = company.trial_end.isoformat() if company.trial_end else None
+        if int(item.get("score_count") or 0) > 0:
+            item["avg_comprehensive_compliance_score"] = round(float(item.get("score_sum") or 0) / int(item.get("score_count") or 1), 1)
+            item["lowest_comprehensive_compliance_score"] = round(float(item.get("score_low")), 1) if item.get("score_low") is not None else None
+            item["highest_comprehensive_compliance_score"] = round(float(item.get("score_high")), 1) if item.get("score_high") is not None else None
+        else:
+            item["avg_comprehensive_compliance_score"] = None
+            item["lowest_comprehensive_compliance_score"] = None
+            item["highest_comprehensive_compliance_score"] = None
 
     for uid, item in list(user_counts.items()):
         user = db.query(AuthUser).filter(AuthUser.id == uid).first()
@@ -1208,6 +1302,16 @@ def admin_usage_dashboard(
             item["role"] = user.role
             item["is_active"] = user.is_active
             item["last_login"] = user.last_login.isoformat() if user.last_login else None
+        if int(item.get("score_count") or 0) > 0:
+            item["avg_comprehensive_compliance_score"] = round(float(item.get("score_sum") or 0) / int(item.get("score_count") or 1), 1)
+            item["lowest_comprehensive_compliance_score"] = round(float(item.get("score_low")), 1) if item.get("score_low") is not None else None
+            item["highest_comprehensive_compliance_score"] = round(float(item.get("score_high")), 1) if item.get("score_high") is not None else None
+        else:
+            item["avg_comprehensive_compliance_score"] = None
+            item["lowest_comprehensive_compliance_score"] = None
+            item["highest_comprehensive_compliance_score"] = None
+
+    scored_rows = [float(row.compliance_score) for row in rows if row.status == "completed" and row.ai_intent == "comprehensive" and row.compliance_score is not None]
 
     return {
         "filters": {
@@ -1223,6 +1327,8 @@ def admin_usage_dashboard(
             "completed_uploads": status_counts.get("completed", 0),
             "reset_records": status_counts.get("reset_by_admin", 0),
             "other_records": len(rows) - status_counts.get("completed", 0) - status_counts.get("reset_by_admin", 0),
+            "avg_comprehensive_compliance_score": round(sum(scored_rows) / len(scored_rows), 1) if scored_rows else None,
+            "comprehensive_score_count": len(scored_rows),
         },
         "status_counts": [{"status": k, "count": v} for k, v in sorted(status_counts.items())],
         "request_type_counts": [{"ai_intent": k, "count": v} for k, v in sorted(intent_counts.items())],
@@ -1246,8 +1352,27 @@ def admin_usage_export(
     rows = query.order_by(UsageLog.created_at.desc()).limit(10000).all()
     output = io.StringIO()
     writer = csv.writer(output)
-    writer.writerow(["created_at", "nspxn_id", "user_id", "company_name", "company_id", "ai_intent", "file_number", "status"])
+    user_score_map = {}
+    company_score_map = {}
     for row in rows:
+        if row.status == "completed" and row.ai_intent == "comprehensive" and row.compliance_score is not None:
+            if row.user_id:
+                user_score_map.setdefault(row.user_id, []).append(float(row.compliance_score))
+            if row.company_id:
+                company_score_map.setdefault(row.company_id, []).append(float(row.compliance_score))
+
+    def _avg(values):
+        return round(sum(values) / len(values), 1) if values else ""
+
+    writer.writerow([
+        "created_at", "nspxn_id", "user_id", "company_name", "company_id", "ai_intent", "file_number", "status",
+        "report_compliance_score", "score_source",
+        "user_average_comprehensive_compliance_score", "user_comprehensive_score_count",
+        "company_average_comprehensive_compliance_score", "company_comprehensive_score_count",
+    ])
+    for row in rows:
+        user_scores = user_score_map.get(row.user_id, []) if row.user_id else []
+        company_scores = company_score_map.get(row.company_id, []) if row.company_id else []
         writer.writerow([
             row.created_at.isoformat() if row.created_at else "",
             row.nspxn_id or "",
@@ -1257,6 +1382,12 @@ def admin_usage_export(
             row.ai_intent or "",
             row.file_number or "",
             row.status or "",
+            row.compliance_score if row.compliance_score is not None else "",
+            row.score_source or "",
+            _avg(user_scores),
+            len(user_scores),
+            _avg(company_scores),
+            len(company_scores),
         ])
     filename = f"nspxn_usage_{start.strftime('%Y%m%d') if start else 'all'}_{datetime.utcnow().strftime('%Y%m%d%H%M%S')}.csv"
     return Response(
@@ -1290,5 +1421,3 @@ def admin_activity(
         )
     rows = query.order_by(AdminActivityLog.created_at.desc()).limit(max(1, min(int(limit or 100), 500))).all()
     return {"activity": [_activity_to_dict(r) for r in rows]}
-
-
