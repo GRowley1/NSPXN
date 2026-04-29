@@ -149,6 +149,10 @@ class LoginResponse(BaseModel):
     uploads_remaining_this_month: Optional[int] = None
     trial_end: Optional[str] = None
     account_status: Optional[str] = None
+    avg_comprehensive_compliance_score_this_month: Optional[float] = None
+    comprehensive_score_count_this_month: int = 0
+    avg_comprehensive_compliance_score_lifetime: Optional[float] = None
+    comprehensive_score_count_lifetime: int = 0
 
 
 class CurrentUser(BaseModel):
@@ -333,18 +337,33 @@ def _account_status_payload(db: Session, user: AuthUser) -> dict:
     limit = company.monthly_upload_limit if company else None
     remaining = None if limit is None else max(int(limit) - used, 0)
 
+    billing_status = company.billing_status if company else None
+    # Only expose a trial end date when the account is actually in trial status.
+    # This prevents active/non-trial accounts from showing stale trial dates on the frontend.
+    trial_end = (
+        company.trial_end.isoformat()
+        if company and billing_status == "trial" and company.trial_end
+        else None
+    )
+
+    monthly_score_stats = _comprehensive_score_stats_for_user(db, user.id, month_only=True)
+    lifetime_score_stats = _comprehensive_score_stats_for_user(db, user.id, month_only=False)
+
     return {
         "company_id": company.id if company else None,
         "company_name": company.company_name if company else user.company_name,
         "plan_name": company.plan_name if company else None,
-        "billing_status": company.billing_status if company else None,
+        "billing_status": billing_status,
         "monthly_upload_limit": limit,
         "uploads_used_this_month": used,
         "uploads_remaining_this_month": remaining,
-        "trial_end": company.trial_end.isoformat() if company and company.trial_end else None,
+        "trial_end": trial_end,
         "account_status": "active" if company and company.is_active else "unknown",
+        "avg_comprehensive_compliance_score_this_month": monthly_score_stats["avg"],
+        "comprehensive_score_count_this_month": monthly_score_stats["count"],
+        "avg_comprehensive_compliance_score_lifetime": lifetime_score_stats["avg"],
+        "comprehensive_score_count_lifetime": lifetime_score_stats["count"],
     }
-
 
 def enforce_account_for_upload(current_user: CurrentUser) -> dict:
     """Return account status or raise HTTPException with clean blocked details."""
@@ -629,6 +648,10 @@ def login(payload: LoginRequest, db: Session = Depends(get_auth_db)):
         uploads_remaining_this_month=account.get("uploads_remaining_this_month"),
         trial_end=account.get("trial_end"),
         account_status=account.get("account_status"),
+        avg_comprehensive_compliance_score_this_month=account.get("avg_comprehensive_compliance_score_this_month"),
+        comprehensive_score_count_this_month=account.get("comprehensive_score_count_this_month") or 0,
+        avg_comprehensive_compliance_score_lifetime=account.get("avg_comprehensive_compliance_score_lifetime"),
+        comprehensive_score_count_lifetime=account.get("comprehensive_score_count_lifetime") or 0,
     )
 
 
@@ -655,6 +678,10 @@ def me(current_user: CurrentUser = Depends(get_current_auth_user)):
         "uploads_remaining_this_month": account.get("uploads_remaining_this_month"),
         "trial_end": account.get("trial_end"),
         "account_status": account.get("account_status"),
+        "avg_comprehensive_compliance_score_this_month": account.get("avg_comprehensive_compliance_score_this_month"),
+        "comprehensive_score_count_this_month": account.get("comprehensive_score_count_this_month") or 0,
+        "avg_comprehensive_compliance_score_lifetime": account.get("avg_comprehensive_compliance_score_lifetime"),
+        "comprehensive_score_count_lifetime": account.get("comprehensive_score_count_lifetime") or 0,
     }
 
 
