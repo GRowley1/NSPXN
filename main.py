@@ -333,28 +333,42 @@ class IntentRouterApp:
         await target_app(scope, replay_receive, tracking_send)
 
         if 200 <= int(response_state.get("status", 500)) < 300:
+            response_headers = response_state.get("headers", {}) or {}
+            report_completed = str(response_headers.get("x-nspxn-report-completed") or "").strip().lower() == "true"
+
+            # Prefer the completed report's own File # header. The multipart request body also
+            # contains appraiser_id/NSPXN ID fields, and those can be confused with the report
+            # file number when logging analytics.
+            report_file_number = str(response_headers.get("x-nspxn-file-number") or "").strip()
+            logged_file_number = report_file_number or file_number
+            if logged_file_number == current_user.nspxn_id and report_file_number:
+                logged_file_number = report_file_number
+
             compliance_score = None
             score_source = None
             if ai_intent == "comprehensive":
-                score_header = str(response_state.get("headers", {}).get("x-nspxn-compliance-score") or "").strip()
+                score_header = str(response_headers.get("x-nspxn-compliance-score") or "").strip()
                 if score_header:
                     try:
                         parsed_score = float(score_header)
                         if 0 <= parsed_score <= 100:
                             compliance_score = round(parsed_score, 1)
-                            score_source = str(response_state.get("headers", {}).get("x-nspxn-score-source") or "response_header").strip() or "response_header"
+                            score_source = str(response_headers.get("x-nspxn-score-source") or "response_header").strip() or "response_header"
                     except Exception:
                         compliance_score = None
                         score_source = None
 
-            log_usage_event(
-                current_user=current_user,
-                ai_intent=ai_intent,
-                file_number=file_number,
-                status="completed",
-                compliance_score=compliance_score,
-                score_source=score_source,
-            )
+            # For Comprehensive reports, only count fully completed report responses that set
+            # the analytics header. This avoids counting blocked comprehensive quality-gate output.
+            if ai_intent != "comprehensive" or report_completed:
+                log_usage_event(
+                    current_user=current_user,
+                    ai_intent=ai_intent,
+                    file_number=logged_file_number,
+                    status="completed",
+                    compliance_score=compliance_score,
+                    score_source=score_source,
+                )
 
 
 app = IntentRouterApp(comprehensive_app, photos_only_app, auth_app)
