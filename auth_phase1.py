@@ -1,3 +1,6 @@
+import csv
+import io
+import json
 import os
 from datetime import datetime, timedelta, timezone
 from typing import Optional, Tuple, List
@@ -9,17 +12,19 @@ from pydantic import BaseModel
 from sqlalchemy import Boolean, Column, DateTime, ForeignKey, Integer, String, create_engine, func, inspect, text
 from sqlalchemy.orm import Session, declarative_base, sessionmaker
 
-from fastapi import Depends, FastAPI, Header, HTTPException
+from fastapi import Depends, FastAPI, Header, HTTPException, Response
 from fastapi.middleware.cors import CORSMiddleware
 
 
 # ============================================================
-# NSPXN AUTH PHASE 2
+# NSPXN AUTH PHASE 3C/3D
 # - Database-backed users
 # - Company/account controls
 # - Monthly upload limits
 # - Trial expiration
 # - Usage logging
+# - Usage dashboard
+# - Admin activity audit log
 # - JWT bearer token login
 # - Helper for ASGI router auth checks
 # ============================================================
@@ -105,6 +110,20 @@ class UsageLog(Base):
     ai_intent = Column(String, nullable=True)
     file_number = Column(String, nullable=True)
     status = Column(String, default="completed", nullable=False)
+    created_at = Column(DateTime, default=datetime.utcnow, nullable=False)
+
+
+class AdminActivityLog(Base):
+    __tablename__ = "admin_activity_log"
+
+    id = Column(Integer, primary_key=True, index=True)
+    admin_user_id = Column(Integer, nullable=True)
+    admin_nspxn_id = Column(String, nullable=True)
+    action = Column(String, nullable=False)
+    target_type = Column(String, nullable=True)
+    target_id = Column(Integer, nullable=True)
+    target_label = Column(String, nullable=True)
+    details_json = Column(String, nullable=True)
     created_at = Column(DateTime, default=datetime.utcnow, nullable=False)
 
 
@@ -738,6 +757,91 @@ def _usage_to_dict(entry: UsageLog) -> dict:
     }
 
 
+def _activity_to_dict(entry: AdminActivityLog) -> dict:
+    details = None
+    if entry.details_json:
+        try:
+            details = json.loads(entry.details_json)
+        except Exception:
+            details = entry.details_json
+    return {
+        "id": entry.id,
+        "admin_user_id": entry.admin_user_id,
+        "admin_nspxn_id": entry.admin_nspxn_id,
+        "action": entry.action,
+        "target_type": entry.target_type,
+        "target_id": entry.target_id,
+        "target_label": entry.target_label,
+        "details": details,
+        "created_at": entry.created_at.isoformat() if entry.created_at else None,
+    }
+
+
+def _log_admin_activity(
+    db: Session,
+    admin_user: CurrentUser,
+    action: str,
+    target_type: Optional[str] = None,
+    target_id: Optional[int] = None,
+    target_label: Optional[str] = None,
+    details: Optional[dict] = None,
+) -> None:
+    try:
+        entry = AdminActivityLog(
+            admin_user_id=admin_user.id if admin_user else None,
+            admin_nspxn_id=admin_user.nspxn_id if admin_user else None,
+            action=(action or "unknown"),
+            target_type=target_type,
+            target_id=target_id,
+            target_label=target_label,
+            details_json=json.dumps(details or {}, default=str),
+        )
+        db.add(entry)
+    except Exception as exc:
+        print(f"WARNING: admin activity logging failed: {exc}")
+
+
+def _parse_admin_date(value: Optional[str], end_of_day: bool = False) -> Optional[datetime]:
+    if not value:
+        return None
+    clean = str(value).strip()
+    if not clean:
+        return None
+    try:
+        if len(clean) == 10:
+            dt = datetime.strptime(clean, "%Y-%m-%d")
+            return dt + timedelta(days=1) if end_of_day else dt
+        return datetime.fromisoformat(clean.replace("Z", "+00:00")).replace(tzinfo=None)
+    except Exception:
+        raise HTTPException(status_code=400, detail="Invalid date format. Use YYYY-MM-DD.")
+
+
+def _filtered_usage_query(
+    db: Session,
+    start_date: Optional[str] = None,
+    end_date: Optional[str] = None,
+    company_id: Optional[int] = None,
+    user_id: Optional[int] = None,
+    status: Optional[str] = None,
+    ai_intent: Optional[str] = None,
+):
+    start = _parse_admin_date(start_date) or _month_start_utc()
+    end = _parse_admin_date(end_date, end_of_day=True)
+
+    query = db.query(UsageLog).filter(UsageLog.created_at >= start)
+    if end:
+        query = query.filter(UsageLog.created_at < end)
+    if company_id:
+        query = query.filter(UsageLog.company_id == int(company_id))
+    if user_id:
+        query = query.filter(UsageLog.user_id == int(user_id))
+    if status and status != "all":
+        query = query.filter(UsageLog.status == status)
+    if ai_intent and ai_intent != "all":
+        query = query.filter(UsageLog.ai_intent == ai_intent)
+    return query, start, end
+
+
 @auth_app.get("/admin/summary")
 def admin_summary(
     admin_user: CurrentUser = Depends(require_admin_user),
@@ -793,6 +897,10 @@ def admin_create_company(
         is_active=payload.is_active,
     )
     company.is_active = payload.is_active
+    _log_admin_activity(
+        db, admin_user, "company_created", "company", company.id, company.company_name,
+        {"plan_name": company.plan_name, "monthly_upload_limit": company.monthly_upload_limit, "billing_status": company.billing_status, "is_active": company.is_active},
+    )
     db.commit()
     db.refresh(company)
     return {"company": _company_to_dict(db, company)}
@@ -837,6 +945,10 @@ def admin_update_company(
 
     db.query(AuthUser).filter(AuthUser.company_id == company.id).update({AuthUser.company_name: company.company_name})
 
+    _log_admin_activity(
+        db, admin_user, "company_updated", "company", company.id, company.company_name,
+        {"company_name": company.company_name, "plan_name": company.plan_name, "monthly_upload_limit": company.monthly_upload_limit, "billing_status": company.billing_status, "is_active": company.is_active, "trial_end": company.trial_end.isoformat() if company.trial_end else None},
+    )
     db.commit()
     db.refresh(company)
     return {"company": _company_to_dict(db, company)}
@@ -894,6 +1006,11 @@ def admin_create_user(
         db.commit()
         db.refresh(user)
 
+    _log_admin_activity(
+        db, admin_user, "user_created", "user", user.id, user.nspxn_id,
+        {"email": user.email, "company_id": user.company_id, "company_name": user.company_name, "role": user.role, "is_active": user.is_active},
+    )
+    db.commit()
     return {"user": _user_to_dict(db, user)}
 
 
@@ -924,6 +1041,10 @@ def admin_update_user(
     if payload.is_active is not None:
         user.is_active = bool(payload.is_active)
 
+    _log_admin_activity(
+        db, admin_user, "user_updated", "user", user.id, user.nspxn_id,
+        {"email": user.email, "company_id": user.company_id, "company_name": user.company_name, "role": user.role, "is_active": user.is_active},
+    )
     db.commit()
     db.refresh(user)
     return {"user": _user_to_dict(db, user)}
@@ -942,6 +1063,7 @@ def admin_reset_user_password(
     if not payload.password or len(payload.password.encode("utf-8")) > 72:
         raise HTTPException(status_code=400, detail="Password is required and must be 72 bytes or shorter.")
     user.password_hash = hash_password(payload.password)
+    _log_admin_activity(db, admin_user, "password_reset", "user", user.id, user.nspxn_id, {})
     db.commit()
     return {"ok": True, "message": f"Password reset for {user.nspxn_id}."}
 
@@ -1011,6 +1133,12 @@ def admin_reset_current_month_usage(
     for row in rows:
         row.status = "reset_by_admin"
 
+    reset_target_type = "all" if reset_all else ("user" if user_id else "company")
+    reset_target_id = int(user_id) if user_id else (int(company_id) if company_id else None)
+    _log_admin_activity(
+        db, admin_user, "usage_reset", reset_target_type, reset_target_id, target_label,
+        {"reset_count": reset_count, "reset_all": reset_all, "company_id": company_id, "user_id": user_id},
+    )
     db.commit()
 
     return {
@@ -1019,5 +1147,148 @@ def admin_reset_current_month_usage(
         "message": f"Reset {reset_count} current-month completed usage record(s) for {target_label}.",
     }
 
+
+@auth_app.get("/admin/usage/dashboard")
+def admin_usage_dashboard(
+    start_date: Optional[str] = None,
+    end_date: Optional[str] = None,
+    company_id: Optional[int] = None,
+    user_id: Optional[int] = None,
+    status: Optional[str] = None,
+    ai_intent: Optional[str] = None,
+    admin_user: CurrentUser = Depends(require_admin_user),
+    db: Session = Depends(get_auth_db),
+):
+    query, start, end = _filtered_usage_query(db, start_date, end_date, company_id, user_id, status, ai_intent)
+    rows = query.all()
+
+    status_counts = {}
+    intent_counts = {}
+    company_counts = {}
+    user_counts = {}
+
+    for row in rows:
+        st = row.status or "unknown"
+        intent = row.ai_intent or "unknown"
+        status_counts[st] = status_counts.get(st, 0) + 1
+        intent_counts[intent] = intent_counts.get(intent, 0) + 1
+
+        if row.company_id:
+            company_counts.setdefault(row.company_id, {"company_id": row.company_id, "company_name": row.company_name or "", "total_records": 0, "completed_uploads": 0, "reset_records": 0})
+            company_counts[row.company_id]["total_records"] += 1
+            if st == "completed":
+                company_counts[row.company_id]["completed_uploads"] += 1
+            if st == "reset_by_admin":
+                company_counts[row.company_id]["reset_records"] += 1
+
+        if row.user_id:
+            user_counts.setdefault(row.user_id, {"user_id": row.user_id, "nspxn_id": row.nspxn_id or "", "company_name": row.company_name or "", "total_records": 0, "completed_uploads": 0, "reset_records": 0})
+            user_counts[row.user_id]["total_records"] += 1
+            if st == "completed":
+                user_counts[row.user_id]["completed_uploads"] += 1
+            if st == "reset_by_admin":
+                user_counts[row.user_id]["reset_records"] += 1
+
+    for cid, item in list(company_counts.items()):
+        company = db.query(Company).filter(Company.id == cid).first()
+        if company:
+            item["company_name"] = company.company_name
+            item["plan_name"] = company.plan_name
+            item["monthly_upload_limit"] = company.monthly_upload_limit
+            item["uploads_remaining"] = max(int(company.monthly_upload_limit or 0) - int(item["completed_uploads"] or 0), 0)
+            item["usage_percent"] = round((int(item["completed_uploads"] or 0) / int(company.monthly_upload_limit or 1)) * 100, 1) if int(company.monthly_upload_limit or 0) > 0 else 0
+            item["billing_status"] = company.billing_status
+            item["trial_end"] = company.trial_end.isoformat() if company.trial_end else None
+
+    for uid, item in list(user_counts.items()):
+        user = db.query(AuthUser).filter(AuthUser.id == uid).first()
+        if user:
+            item["nspxn_id"] = user.nspxn_id
+            item["email"] = user.email
+            item["role"] = user.role
+            item["is_active"] = user.is_active
+            item["last_login"] = user.last_login.isoformat() if user.last_login else None
+
+    return {
+        "filters": {
+            "start_date": start.isoformat() if start else None,
+            "end_date": end.isoformat() if end else None,
+            "company_id": company_id,
+            "user_id": user_id,
+            "status": status or "all",
+            "ai_intent": ai_intent or "all",
+        },
+        "totals": {
+            "total_records": len(rows),
+            "completed_uploads": status_counts.get("completed", 0),
+            "reset_records": status_counts.get("reset_by_admin", 0),
+            "other_records": len(rows) - status_counts.get("completed", 0) - status_counts.get("reset_by_admin", 0),
+        },
+        "status_counts": [{"status": k, "count": v} for k, v in sorted(status_counts.items())],
+        "request_type_counts": [{"ai_intent": k, "count": v} for k, v in sorted(intent_counts.items())],
+        "companies": sorted(company_counts.values(), key=lambda x: (-int(x.get("completed_uploads") or 0), x.get("company_name") or "")),
+        "users": sorted(user_counts.values(), key=lambda x: (-int(x.get("completed_uploads") or 0), x.get("nspxn_id") or "")),
+    }
+
+
+@auth_app.get("/admin/usage/export")
+def admin_usage_export(
+    start_date: Optional[str] = None,
+    end_date: Optional[str] = None,
+    company_id: Optional[int] = None,
+    user_id: Optional[int] = None,
+    status: Optional[str] = None,
+    ai_intent: Optional[str] = None,
+    admin_user: CurrentUser = Depends(require_admin_user),
+    db: Session = Depends(get_auth_db),
+):
+    query, start, end = _filtered_usage_query(db, start_date, end_date, company_id, user_id, status, ai_intent)
+    rows = query.order_by(UsageLog.created_at.desc()).limit(10000).all()
+    output = io.StringIO()
+    writer = csv.writer(output)
+    writer.writerow(["created_at", "nspxn_id", "user_id", "company_name", "company_id", "ai_intent", "file_number", "status"])
+    for row in rows:
+        writer.writerow([
+            row.created_at.isoformat() if row.created_at else "",
+            row.nspxn_id or "",
+            row.user_id or "",
+            row.company_name or "",
+            row.company_id or "",
+            row.ai_intent or "",
+            row.file_number or "",
+            row.status or "",
+        ])
+    filename = f"nspxn_usage_{start.strftime('%Y%m%d') if start else 'all'}_{datetime.utcnow().strftime('%Y%m%d%H%M%S')}.csv"
+    return Response(
+        content=output.getvalue(),
+        media_type="text/csv",
+        headers={"Content-Disposition": f"attachment; filename={filename}"},
+    )
+
+
+@auth_app.get("/admin/activity")
+def admin_activity(
+    q: Optional[str] = None,
+    action: Optional[str] = None,
+    target_type: Optional[str] = None,
+    limit: int = 100,
+    admin_user: CurrentUser = Depends(require_admin_user),
+    db: Session = Depends(get_auth_db),
+):
+    query = db.query(AdminActivityLog)
+    if action:
+        query = query.filter(AdminActivityLog.action == action)
+    if target_type:
+        query = query.filter(AdminActivityLog.target_type == target_type)
+    if q:
+        like = f"%{q.strip()}%"
+        query = query.filter(
+            (AdminActivityLog.admin_nspxn_id.ilike(like)) |
+            (AdminActivityLog.action.ilike(like)) |
+            (AdminActivityLog.target_label.ilike(like)) |
+            (AdminActivityLog.details_json.ilike(like))
+        )
+    rows = query.order_by(AdminActivityLog.created_at.desc()).limit(max(1, min(int(limit or 100), 500))).all()
+    return {"activity": [_activity_to_dict(r) for r in rows]}
 
 
