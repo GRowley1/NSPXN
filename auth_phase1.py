@@ -707,6 +707,12 @@ class AdminPasswordResetRequest(BaseModel):
     password: str
 
 
+class AdminComplianceScoreUpdateRequest(BaseModel):
+    compliance_score: Optional[float] = None
+    clear_score: bool = False
+    reason: Optional[str] = None
+
+
 def require_admin_user(current_user: CurrentUser = Depends(get_current_auth_user)) -> CurrentUser:
     if (current_user.role or "").lower() != "admin":
         raise HTTPException(status_code=403, detail="Admin access required.")
@@ -1155,6 +1161,74 @@ def admin_usage(
         query = query.filter(UsageLog.user_id == user_id)
     rows = query.order_by(UsageLog.created_at.desc()).limit(max(1, min(int(limit or 100), 500))).all()
     return {"usage": [_usage_to_dict(r) for r in rows]}
+
+@auth_app.post("/admin/usage/{usage_id}/score")
+def admin_update_usage_compliance_score(
+    usage_id: int,
+    payload: AdminComplianceScoreUpdateRequest,
+    admin_user: CurrentUser = Depends(require_admin_user),
+    db: Session = Depends(get_auth_db),
+):
+    """Admin correction for a single report compliance score.
+
+    This preserves the usage row and records old/new values in the
+    admin activity log. Compliance scores should only be assigned to
+    completed Comprehensive usage rows.
+    """
+    row = db.query(UsageLog).filter(UsageLog.id == int(usage_id)).first()
+    if not row:
+        raise HTTPException(status_code=404, detail="Usage row not found.")
+
+    old_score = row.compliance_score
+    old_source = row.score_source
+    reason = (payload.reason or "").strip()
+
+    if payload.clear_score:
+        row.compliance_score = None
+        row.score_source = "manual_admin_cleared"
+        action_message = f"Compliance score cleared for usage row {row.id}."
+    else:
+        if payload.compliance_score is None:
+            raise HTTPException(status_code=400, detail="Enter a compliance score or choose clear_score=true.")
+        try:
+            score = float(payload.compliance_score)
+        except Exception:
+            raise HTTPException(status_code=400, detail="Compliance score must be numeric.")
+        if score < 0 or score > 100:
+            raise HTTPException(status_code=400, detail="Compliance score must be between 0 and 100.")
+        if (row.ai_intent or "").lower() != "comprehensive":
+            raise HTTPException(status_code=400, detail="Compliance scores should only be set on Comprehensive usage rows.")
+        if (row.status or "").lower() != "completed":
+            raise HTTPException(status_code=400, detail="Compliance scores should only be set on completed usage rows.")
+        row.compliance_score = round(score, 1)
+        row.score_source = "manual_admin_correction"
+        action_message = f"Compliance score updated for usage row {row.id}."
+
+    _log_admin_activity(
+        db,
+        admin_user,
+        "compliance_score_corrected",
+        "usage",
+        row.id,
+        row.file_number or row.nspxn_id or f"usage #{row.id}",
+        {
+            "usage_id": row.id,
+            "file_number": row.file_number,
+            "nspxn_id": row.nspxn_id,
+            "company_name": row.company_name,
+            "ai_intent": row.ai_intent,
+            "status": row.status,
+            "old_score": old_score,
+            "new_score": row.compliance_score,
+            "old_score_source": old_source,
+            "new_score_source": row.score_source,
+            "reason": reason,
+        },
+    )
+    db.commit()
+    db.refresh(row)
+    return {"ok": True, "message": action_message, "usage": _usage_to_dict(row)}
+
 
 @auth_app.post("/admin/usage/reset")
 def admin_reset_current_month_usage(
