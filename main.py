@@ -13,6 +13,7 @@ from auth_phase1 import (
 )
 from main_comprehensive_locked import app as comprehensive_app
 from main_photos_only_locked import app as photos_only_app
+from main_diminished_value_locked import app as diminished_value_app
 
 
 init_auth_db()
@@ -210,9 +211,10 @@ def _is_completed_response(status_code: int, body: bytes) -> bool:
 
 
 class IntentRouterApp:
-    def __init__(self, comprehensive, photos_only, auth):
+    def __init__(self, comprehensive, photos_only, diminished_value, auth):
         self.comprehensive = comprehensive
         self.photos_only = photos_only
+        self.diminished_value = diminished_value
         self.auth = auth
 
     async def __call__(self, scope, receive, send):
@@ -272,6 +274,8 @@ class IntentRouterApp:
 
         if ai_intent == "damage_report_from_photos":
             target_app = self.photos_only
+        elif ai_intent == "preliminary_diminished_value_screening":
+            target_app = self.diminished_value
         elif ai_intent == "comprehensive":
             target_app = self.comprehensive
         else:
@@ -280,7 +284,7 @@ class IntentRouterApp:
                 400,
                 {
                     "error": "Missing or invalid AI Review request type.",
-                    "detail": "Missing or invalid ai_intent. Select Comprehensive or Create a Condition/Damage Report from Photos and resubmit.",
+                    "detail": "Missing or invalid ai_intent. Select Comprehensive, Create a Condition/Damage Report from Photos, or Preliminary Diminished Value Screening and resubmit.",
                     "ai_intent_received": ai_intent,
                 },
                 scope=scope,
@@ -371,4 +375,4 @@ class IntentRouterApp:
                 )
 
 
-app = IntentRouterApp(comprehensive_app, photos_only_app, auth_app)
+app = IntentRouterApp(comprehensive_app, photos_only_app, diminished_value_app, auth_app)
