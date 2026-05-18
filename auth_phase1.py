@@ -1349,10 +1349,16 @@ def admin_usage_dashboard(
         is_scored_comprehensive = (st == "completed" and intent == "comprehensive" and row.compliance_score is not None)
 
         if row.company_id:
-            company_counts.setdefault(row.company_id, {"company_id": row.company_id, "company_name": row.company_name or "", "total_records": 0, "completed_uploads": 0, "reset_records": 0, "score_sum": 0.0, "score_count": 0, "score_low": None, "score_high": None})
+            company_counts.setdefault(row.company_id, {"company_id": row.company_id, "company_name": row.company_name or "", "total_records": 0, "completed_uploads": 0, "comprehensive_count": 0, "photos_only_count": 0, "dv_screening_count": 0, "reset_records": 0, "score_sum": 0.0, "score_count": 0, "score_low": None, "score_high": None})
             company_counts[row.company_id]["total_records"] += 1
             if st == "completed":
                 company_counts[row.company_id]["completed_uploads"] += 1
+                if intent == "comprehensive":
+                    company_counts[row.company_id]["comprehensive_count"] += 1
+                elif intent == "damage_report_from_photos":
+                    company_counts[row.company_id]["photos_only_count"] += 1
+                elif intent == "preliminary_diminished_value_screening":
+                    company_counts[row.company_id]["dv_screening_count"] += 1
             if st == "reset_by_admin":
                 company_counts[row.company_id]["reset_records"] += 1
             if is_scored_comprehensive:
@@ -1363,10 +1369,16 @@ def admin_usage_dashboard(
                 company_counts[row.company_id]["score_high"] = score if company_counts[row.company_id]["score_high"] is None else max(company_counts[row.company_id]["score_high"], score)
 
         if row.user_id:
-            user_counts.setdefault(row.user_id, {"user_id": row.user_id, "nspxn_id": row.nspxn_id or "", "company_name": row.company_name or "", "total_records": 0, "completed_uploads": 0, "reset_records": 0, "score_sum": 0.0, "score_count": 0, "score_low": None, "score_high": None})
+            user_counts.setdefault(row.user_id, {"user_id": row.user_id, "nspxn_id": row.nspxn_id or "", "company_name": row.company_name or "", "total_records": 0, "completed_uploads": 0, "comprehensive_count": 0, "photos_only_count": 0, "dv_screening_count": 0, "reset_records": 0, "score_sum": 0.0, "score_count": 0, "score_low": None, "score_high": None})
             user_counts[row.user_id]["total_records"] += 1
             if st == "completed":
                 user_counts[row.user_id]["completed_uploads"] += 1
+                if intent == "comprehensive":
+                    user_counts[row.user_id]["comprehensive_count"] += 1
+                elif intent == "damage_report_from_photos":
+                    user_counts[row.user_id]["photos_only_count"] += 1
+                elif intent == "preliminary_diminished_value_screening":
+                    user_counts[row.user_id]["dv_screening_count"] += 1
             if st == "reset_by_admin":
                 user_counts[row.user_id]["reset_records"] += 1
             if is_scored_comprehensive:
