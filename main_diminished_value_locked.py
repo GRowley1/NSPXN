@@ -121,18 +121,30 @@ def _write_pdf(file_number: str, title: str, lines: List[str]) -> str:
     pdf.ln(6)
     pdf.set_text_color(0, 0, 0)
 
+    usable_width = pdf.w - pdf.l_margin - pdf.r_margin
+
+    def _pdf_safe_text(value: str) -> str:
+        text = str(value or "")
+        text = text.replace("	", "    ")
+        text = re.sub(r"[^\S\r\n]+", " ", text)
+        return text.encode("latin-1", "replace").decode("latin-1")
+
     for line in lines:
-        if line.startswith("## "):
+        pdf.set_x(pdf.l_margin)
+        safe_line = _pdf_safe_text(line)
+        if safe_line.startswith("## "):
             pdf.ln(2)
+            pdf.set_x(pdf.l_margin)
             pdf.set_fill_color(230, 230, 230)
             pdf.set_font("Arial", "B", 11)
-            pdf.cell(0, 7, line.replace("## ", ""), ln=True, fill=True)
+            pdf.multi_cell(usable_width, 7, safe_line.replace("## ", "", 1), border=0, align="L", fill=True)
             pdf.set_font("Arial", "", 10)
-        elif line.strip() == "":
+        elif safe_line.strip() == "":
             pdf.ln(3)
         else:
+            pdf.set_x(pdf.l_margin)
             pdf.set_font("Arial", "", 10)
-            pdf.multi_cell(0, 5, line.encode("latin-1", "replace").decode("latin-1"))
+            pdf.multi_cell(usable_width, 5, safe_line)
 
     pdf.output(pdf_path)
     return pdf_filename
