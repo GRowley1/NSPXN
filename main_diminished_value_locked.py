@@ -5,7 +5,7 @@ import os
 import re
 import glob
 
-from fastapi import FastAPI, UploadFile, File, Form, Response
+from fastapi import FastAPI, UploadFile, File, Form, Response, Request
 from fastapi.responses import JSONResponse, FileResponse
 from fastapi.middleware.cors import CORSMiddleware
 from fpdf import FPDF
@@ -53,6 +53,17 @@ def _num(v: Any) -> float:
 def _clean(v: Any, default: str = "N/A") -> str:
     s = str(v or "").strip()
     return s if s else default
+
+
+def _looks_like_nspxn_user_id(value: Any) -> bool:
+    return bool(re.fullmatch(r"(?i)NSPXN\d+", str(value or "").strip()))
+
+
+def _normalize_state_value(value: Any) -> str:
+    s = str(value or "").strip().upper()
+    if re.fullmatch(r"[A-Z]{2}", s):
+        return s
+    return ""
 
 
 def _mileage_multiplier(mileage: float) -> float:
@@ -196,9 +207,9 @@ def _write_pdf(file_number: str, title: str, lines: List[str]) -> str:
         else:
             pdf.set_x(pdf.l_margin)
             if safe_line.startswith("This is a Preliminary Diminished Value Screening only"):
-                pdf.set_text_color(70, 70, 70)
-                pdf.set_font("Arial", "", 9)
-                pdf.multi_cell(usable_width, 5, safe_line)
+                pdf.set_text_color(110, 110, 110)
+                pdf.set_font("Arial", "", 7.5)
+                pdf.multi_cell(usable_width, 4, safe_line)
                 pdf.set_text_color(0, 0, 0)
             elif ":" in safe_line and len(safe_line.split(":", 1)[0]) <= 36:
                 _draw_key_value(safe_line)
@@ -212,6 +223,7 @@ def _write_pdf(file_number: str, title: str, lines: List[str]) -> str:
 
 @app.post("/vision-review")
 async def vision_review(
+    request: Request,
     response: Response,
     files: Optional[List[UploadFile]] = File(None),
     file_number: Optional[str] = Form(None),
@@ -266,6 +278,35 @@ async def vision_review(
     repair_ratio = repair_total / pre_loss_value if pre_loss_value else 0.0
     generated = datetime.now(ZoneInfo("America/New_York")).strftime("%m/%d/%Y %I:%M %p EST")
 
+    # Resolve DV state defensively. Some frontend/browser submissions can accidentally
+    # map the NSPXN User ID into dv_state. Prefer a valid two-letter state from
+    # alternate form keys when present, and never render an NSPXN ID as State.
+    resolved_state = _normalize_state_value(dv_state)
+    if not resolved_state or _looks_like_nspxn_user_id(dv_state):
+        try:
+            form = await request.form()
+            for key in (
+                "dv_state", "dv-state", "dvState", "state", "claim_state",
+                "claimState", "loss_state", "lossState", "vehicle_state", "vehicleState"
+            ):
+                candidate = _normalize_state_value(form.get(key, ""))
+                if candidate:
+                    resolved_state = candidate
+                    break
+            if not resolved_state:
+                for key in form.keys():
+                    key_l = str(key or "").lower()
+                    if "state" not in key_l:
+                        continue
+                    candidate = _normalize_state_value(form.get(key, ""))
+                    if candidate:
+                        resolved_state = candidate
+                        break
+        except Exception:
+            pass
+    if not resolved_state:
+        resolved_state = "N/A"
+
     markdown_lines = [
         "## Preliminary Diminished Value Screening",
         f"Generated: {generated}",
@@ -277,7 +318,7 @@ async def vision_review(
         f"VIN: {_clean(dv_vin)}",
         f"Vehicle: {_clean(dv_year_make_model)}",
         f"Mileage: {mileage:,.0f}",
-        f"State: {_clean(dv_state)}",
+        f"State: {resolved_state}",
         f"Claim Type: {_clean(dv_claim_type)}",
         f"Pre-Loss Value: {_money(pre_loss_value)}",
         f"Pre-Loss Value Source: {_clean(dv_pre_loss_value_source)}",
