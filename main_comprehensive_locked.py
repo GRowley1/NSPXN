@@ -40,7 +40,6 @@ from presidio_anonymizer.entities import OperatorConfig  # required for anonymiz
 # -----------------------
 PDF_DIR = os.getenv("PDF_DIR", "/tmp"); os.makedirs(PDF_DIR, exist_ok=True)
 CLIENT_RULES_DIR = os.getenv("CLIENT_RULES_DIR", "client_rules")
-NSPXN_LOGO_PATH = os.getenv("NSPXN_LOGO_PATH", os.path.join(os.path.dirname(__file__), "logo2.png"))
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s")
 log = logging.getLogger("nspxn")
@@ -770,8 +769,8 @@ def _add_bytes(parts: List[Dict[str,Any]], files_seen: List[str], photo_index: O
     low = fname.lower()
     if low.endswith(SUPPORTED_PDF_EXTS) and used < max_images:
         try:
-            # MEMORY GUARD: never rasterize an entire large PDF at once.
-            # Keep Comprehensive stable on Render by converting only remaining allowed pages.
+            # MEMORY GUARD: do not rasterize an entire large PDF at once.
+            # Convert only the remaining allowed pages at lighter DPI to avoid Render worker restarts.
             remaining_pages = max(1, max_images - used)
             pages = convert_from_bytes(
                 raw,
@@ -891,6 +890,7 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
 
 @app.get("/")
 async def health_check():
@@ -1124,7 +1124,7 @@ async def vision_review(
 
     # Anti-zipbomb guardrails
     MAX_ZIP_FILES = 100
-    MAX_ENTRY_SIZE = 15 * 1024 * 1024  # 15 MB
+    MAX_ENTRY_SIZE = 25 * 1024 * 1024  # 25 MB
 
     for f in sorted(files, key=lambda _f: ((_f.filename or '').lower())):
         raw = await f.read()
@@ -3395,13 +3395,6 @@ async def vision_review(
         return s
 
     pdf = FPDF(); pdf.add_page()
-    # --- NSPXN Logo (Top Right, First Page Only) ---
-    try:
-        logo_path = os.path.join(os.path.dirname(__file__), "ChatGPT logo100725.png")
-        if os.path.exists(logo_path):
-            pdf.image(logo_path, x=pdf.w - 45, y=8, w=35)  # small–medium size
-    except Exception:
-        pass
     pdf.set_auto_page_break(auto=True, margin=10)
     pdf.set_left_margin(10); pdf.set_right_margin(10)
 
@@ -3425,47 +3418,35 @@ async def vision_review(
             pdf.set_x(pdf.l_margin)
             pdf.multi_cell(effective_w, 6, (_pdf_sanitize(str(s))[:2000] + " …"))
 
-
-    
-
-    def _draw_pdf_top_header(title_text: str) -> None:
-        """Draw locked NSPXN PDF top section: logo left, black box, white report header."""
+    def _render_nspxn_top_section(report_title: str) -> None:
+        """Locked NSPXN top section: logo2.png + black report header bar."""
         try:
-            pdf.set_fill_color(8, 12, 18)
-            pdf.rect(0, 0, 210, 32, "F")
-            logo_drawn = False
-            try:
-                if NSPXN_LOGO_PATH and os.path.exists(NSPXN_LOGO_PATH):
-                    pdf.image(NSPXN_LOGO_PATH, x=10, y=5, w=82)
-                    logo_drawn = True
-            except Exception:
-                logo_drawn = False
-            if not logo_drawn:
-                pdf.set_text_color(255, 255, 255)
-                pdf.set_font("Arial", "B", 18)
-                pdf.set_xy(10, 8)
-                pdf.cell(0, 8, "NSPXN.com", ln=True)
+            pdf.set_y(8)
+            logo_path = NSPXN_LOGO_PATH
+            if logo_path and os.path.exists(logo_path):
+                try:
+                    pdf.image(logo_path, x=10, y=8, w=42)
+                except Exception as e:
+                    log.warning(f"Logo render skipped: {e}")
+            pdf.set_y(30)
+            pdf.set_fill_color(0, 0, 0)
             pdf.set_text_color(255, 255, 255)
             try:
                 pdf.set_font("Helvetica", "B", 13)
             except Exception:
                 pdf.set_font("Arial", "B", 13)
-            pdf.set_xy(100, 9)
-            pdf.multi_cell(100, 6, _pdf_sanitize(title_text), align="R")
+            pdf.cell(0, 9, _pdf_sanitize(report_title), ln=True, align="C", fill=True)
             pdf.set_text_color(0, 0, 0)
             try:
-                pdf.set_font("Helvetica", "", 11)
+                pdf.set_font("Helvetica", "", 10)
             except Exception:
-                pdf.set_font("Arial", "", 11)
-            pdf.set_y(38)
-        except Exception:
+                pdf.set_font("Arial", "", 10)
+            pdf.ln(4)
+        except Exception as e:
+            log.warning(f"Top section render skipped: {e}")
             pdf.set_text_color(0, 0, 0)
-            try:
-                pdf.set_font("Helvetica", "B", 16)
-            except Exception:
-                pdf.set_font("Arial", "B", 16)
-            pdf.cell(0, 10, _pdf_sanitize(title_text), ln=True, align="C")
 
+    
     def _money2(x: Optional[float]) -> str:
         try:
             if x is None:
@@ -4244,8 +4225,8 @@ async def vision_review(
                 return m.group(1).replace(",", "") + " mi"
             return None
     
-        # Locked NSPXN top header
-        _draw_pdf_top_header("NSPXN.com Condition Report")
+        # Locked branded top section
+        _render_nspxn_top_section("NSPXN.com Condition Report")
     
         # Vehicle Identification (fixed PDF block)
         _section_bar("VEHICLE IDENTIFICATION")
@@ -4348,7 +4329,7 @@ async def vision_review(
             except Exception:
                 pdf.set_font("Arial", "", 11)
 
-        _draw_pdf_top_header("NSPXN.com Audit Report" if _is_comprehensive_pdf else "NSPXN.com Condition Report")
+        _render_nspxn_top_section("NSPXN.com Audit Report" if _is_comprehensive_pdf else "NSPXN.com Condition Report")
 
         _comp_section_bar("Vehicle Identification")
         mc(f"File Number: {file_number}")
@@ -4453,12 +4434,7 @@ async def vision_review(
         pdf_filename = f"{safe_file}.pdf"
 
 
-    # --- One-page photo thumbnail appendix (Photos-Only only) ---
-    try:
-        if ai_intent == "damage_report_from_photos":
-            add_thumbnail_page(pdf, thumbnail_paths)
-    except Exception:
-        pass
+    # Comprehensive locked reports do not add a photo thumbnail appendix here.
 
     pdf_path = os.path.join(PDF_DIR, pdf_filename)
     pdf_written = False
@@ -4473,26 +4449,14 @@ async def vision_review(
         pdf_written = os.path.exists(pdf_path) and os.path.getsize(pdf_path) > 0
     except Exception as e:
         logging.warning(f"PDF write error: {e}")
+        pdf_written = False
 
-    if not pdf_written:
-        return JSONResponse(
-            status_code=200,
-            content={
-                "status": "blocked",
-                "error": "REPORT BLOCKED: PDF generation failed",
-                "reasons": ["PDF file was not created on the server; no download link was issued."],
-                "file_number": file_number,
-                "request_type": req_label,
-            },
-        )
-
-    pdf_url = f"/download-pdf?filename={pdf_filename}"
+    pdf_url = f"/download-pdf?filename={urllib.parse.quote(pdf_filename)}" if pdf_written else ""
 
     # -----------------------
     # Email — info-only (attach PDF)
     # -----------------------
     try:
-        supp_detected_docs = bool(locals().get("supp_detected_docs", False))
         msg = EmailMessage()
         if ai_intent == "damage_report_from_photos":
             subj = f"NSPXN.com Condition Report: {file_number or ''} {result['claim_number'] or ''}".strip()
@@ -4567,9 +4531,12 @@ async def vision_review(
         msg.set_content(body)
 
         try:
-            with open(pdf_path, "rb") as f:
-                pdf_bytes = f.read()
-            msg.add_attachment(pdf_bytes, maintype="application", subtype="pdf", filename=pdf_filename)
+            if pdf_written and os.path.exists(pdf_path):
+                with open(pdf_path, "rb") as f:
+                    pdf_bytes = f.read()
+                msg.add_attachment(pdf_bytes, maintype="application", subtype="pdf", filename=pdf_filename)
+            else:
+                logging.warning("Skipped PDF attachment because PDF was not written.")
         except Exception as e:
             logging.warning(f"Failed to attach PDF to email: {e}")
 
@@ -4584,7 +4551,7 @@ async def vision_review(
 
         threading.Thread(target=_send_info_email_async, args=(msg,), daemon=True).start()
     except Exception as e:
-        logging.error(f"Email error: {e}")
+        logging.error(f"Email setup error: {e}")
 
     # Expose lightweight analytics metadata to the outer router via response headers.
     # This avoids buffering/parsing the full response body in main.py and keeps PDF/report delivery stable.
@@ -4600,21 +4567,13 @@ async def vision_review(
     except Exception:
         pass
 
-    def _cap_response_text(value: Any, limit: int = 24000) -> str:
-        s = str(value or "")
-        if len(s) <= limit:
-            return s
-        return s[:limit].rstrip() + "\n\n[Output truncated for browser stability. Full report is available in the PDF and email attachment.]"
-
-    response_payload = dict(result)
-    for _k in ("summary_markdown", "fraud_markdown", "estimated_costs_markdown", "conclusion", "summary_brief"):
-        if _k in response_payload:
-            response_payload[_k] = _cap_response_text(response_payload.get(_k), 24000)
-    response_payload["web_summary"] = _cap_response_text(result.get("summary_brief"), 12000)
-    response_payload["gpt_output"] = _cap_response_text(result.get("summary_markdown"), 24000)
-    response_payload["pdf_url"] = pdf_url
-    response_payload["pdf_filename"] = pdf_filename
-    return response_payload
+    return {
+        **result,
+        "web_summary": result["summary_brief"],
+        "gpt_output": result["summary_markdown"],
+        "pdf_url": pdf_url,
+        "pdf_filename": pdf_filename
+    }
 
     # -----------------------
 # PDF download
