@@ -13,7 +13,6 @@ from auth_phase1 import (
 )
 from main_comprehensive_locked import app as comprehensive_app
 from main_photos_only_locked import app as photos_only_app
-from main_diminished_value_locked import app as diminished_value_app
 
 
 init_auth_db()
@@ -28,6 +27,8 @@ _ALLOWED_CORS_ORIGINS = {
     "http://localhost:3000",
     "http://127.0.0.1:5500",
 }
+
+MAX_UPLOAD_BODY_BYTES = 25 * 1024 * 1024  # allow uploads up to 25 MB
 
 
 def _extract_simple_form_field(body: bytes, content_type: str, field_name: str) -> str:
@@ -211,10 +212,9 @@ def _is_completed_response(status_code: int, body: bytes) -> bool:
 
 
 class IntentRouterApp:
-    def __init__(self, comprehensive, photos_only, diminished_value, auth):
+    def __init__(self, comprehensive, photos_only, auth):
         self.comprehensive = comprehensive
         self.photos_only = photos_only
-        self.diminished_value = diminished_value
         self.auth = auth
 
     async def __call__(self, scope, receive, send):
@@ -263,6 +263,18 @@ class IntentRouterApp:
                 break
 
         content_type = headers.get("content-type", "")
+        if len(body) > MAX_UPLOAD_BODY_BYTES:
+            await _send_json(
+                send,
+                413,
+                {
+                    "error": "Upload too large.",
+                    "detail": "Maximum upload size is 25 MB. Please reduce the file size and resubmit.",
+                    "max_upload_mb": 25,
+                },
+                scope=scope,
+            )
+            return
         body = _replace_or_add_form_field(body, content_type, "appraiser_id", current_user.nspxn_id)
         scope = _scope_with_updated_content_length(scope, body)
 
@@ -274,8 +286,6 @@ class IntentRouterApp:
 
         if ai_intent == "damage_report_from_photos":
             target_app = self.photos_only
-        elif ai_intent == "preliminary_diminished_value_screening":
-            target_app = self.diminished_value
         elif ai_intent == "comprehensive":
             target_app = self.comprehensive
         else:
@@ -284,7 +294,7 @@ class IntentRouterApp:
                 400,
                 {
                     "error": "Missing or invalid AI Review request type.",
-                    "detail": "Missing or invalid ai_intent. Select Comprehensive, Create a Condition/Damage Report from Photos, or Preliminary Diminished Value Screening and resubmit.",
+                    "detail": "Missing or invalid ai_intent. Select Comprehensive or Create a Condition/Damage Report from Photos and resubmit.",
                     "ai_intent_received": ai_intent,
                 },
                 scope=scope,
@@ -334,7 +344,21 @@ class IntentRouterApp:
                 }
             await send(message)
 
-        await target_app(scope, replay_receive, tracking_send)
+        try:
+            await target_app(scope, replay_receive, tracking_send)
+        except Exception as exc:
+            await _send_json(
+                send,
+                500,
+                {
+                    "error": "Report processing failed before completion.",
+                    "detail": str(exc),
+                    "ai_intent": ai_intent,
+                    "file_number": file_number,
+                },
+                scope=scope,
+            )
+            return
 
         if 200 <= int(response_state.get("status", 500)) < 300:
             response_headers = response_state.get("headers", {}) or {}
@@ -375,4 +399,4 @@ class IntentRouterApp:
                 )
 
 
-app = IntentRouterApp(comprehensive_app, photos_only_app, diminished_value_app, auth_app)
+app = IntentRouterApp(comprehensive_app, photos_only_app, auth_app)

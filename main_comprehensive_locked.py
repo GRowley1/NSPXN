@@ -40,7 +40,6 @@ from presidio_anonymizer.entities import OperatorConfig  # required for anonymiz
 # -----------------------
 PDF_DIR = os.getenv("PDF_DIR", "/tmp"); os.makedirs(PDF_DIR, exist_ok=True)
 CLIENT_RULES_DIR = os.getenv("CLIENT_RULES_DIR", "client_rules")
-NSPXN_LOGO_PATH = os.getenv("NSPXN_LOGO_PATH", os.path.join(os.path.dirname(__file__), "logo2.png"))
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s")
 log = logging.getLogger("nspxn")
@@ -1107,7 +1106,7 @@ async def vision_review(
 
     # Anti-zipbomb guardrails
     MAX_ZIP_FILES = 100
-    MAX_ENTRY_SIZE = 15 * 1024 * 1024  # 15 MB
+    MAX_ENTRY_SIZE = 25 * 1024 * 1024  # 25 MB
 
     for f in sorted(files, key=lambda _f: ((_f.filename or '').lower())):
         raw = await f.read()
@@ -3378,6 +3377,13 @@ async def vision_review(
         return s
 
     pdf = FPDF(); pdf.add_page()
+    # --- NSPXN Logo (Top Right, First Page Only) ---
+    try:
+        logo_path = os.path.join(os.path.dirname(__file__), "ChatGPT logo100725.png")
+        if os.path.exists(logo_path):
+            pdf.image(logo_path, x=pdf.w - 45, y=8, w=35)  # small–medium size
+    except Exception:
+        pass
     pdf.set_auto_page_break(auto=True, margin=10)
     pdf.set_left_margin(10); pdf.set_right_margin(10)
 
@@ -3403,46 +3409,6 @@ async def vision_review(
 
 
     
-
-
-    def _draw_pdf_top_header(title_text: str) -> None:
-        """Draw the locked NSPXN PDF top section: logo left, black box, white report header."""
-        try:
-            pdf.set_fill_color(8, 12, 18)
-            pdf.rect(0, 0, 210, 32, "F")
-            logo_drawn = False
-            try:
-                if NSPXN_LOGO_PATH and os.path.exists(NSPXN_LOGO_PATH):
-                    pdf.image(NSPXN_LOGO_PATH, x=10, y=5, w=82)
-                    logo_drawn = True
-            except Exception:
-                logo_drawn = False
-            if not logo_drawn:
-                pdf.set_text_color(255, 255, 255)
-                pdf.set_font("Arial", "B", 18)
-                pdf.set_xy(10, 8)
-                pdf.cell(0, 8, "NSPXN.com", ln=True)
-            pdf.set_text_color(255, 255, 255)
-            try:
-                pdf.set_font("Helvetica", "B", 13)
-            except Exception:
-                pdf.set_font("Arial", "B", 13)
-            pdf.set_xy(100, 9)
-            pdf.multi_cell(100, 6, _pdf_sanitize(title_text), align="R")
-            pdf.set_text_color(0, 0, 0)
-            try:
-                pdf.set_font("Helvetica", "", 11)
-            except Exception:
-                pdf.set_font("Arial", "", 11)
-            pdf.set_y(38)
-        except Exception:
-            pdf.set_text_color(0, 0, 0)
-            try:
-                pdf.set_font("Helvetica", "B", 16)
-            except Exception:
-                pdf.set_font("Arial", "B", 16)
-            pdf.cell(0, 10, _pdf_sanitize(title_text), ln=True, align="C")
-
     def _money2(x: Optional[float]) -> str:
         try:
             if x is None:
@@ -4221,7 +4187,17 @@ async def vision_review(
                 return m.group(1).replace(",", "") + " mi"
             return None
     
-        _draw_pdf_top_header("NSPXN.com Condition Report")
+        # Title (larger + bold)
+        try:
+            pdf.set_font("Helvetica", "B", 16)
+        except Exception:
+            pdf.set_font("Arial", "B", 16)
+        pdf.cell(0, 10, "NSPXN.com Condition Report", ln=True, align="C")
+        try:
+            pdf.set_font("Helvetica", "", 11)
+        except Exception:
+            pdf.set_font("Arial", "", 11)
+        pdf.ln(2)
     
         # Vehicle Identification (fixed PDF block)
         _section_bar("VEHICLE IDENTIFICATION")
@@ -4324,7 +4300,17 @@ async def vision_review(
             except Exception:
                 pdf.set_font("Arial", "", 11)
 
-        _draw_pdf_top_header("NSPXN.com Audit Report" if _is_comprehensive_pdf else "NSPXN.com Condition Report")
+        try:
+            pdf.set_font("Helvetica", "B", 16)
+        except Exception:
+            pdf.set_font("Arial", "B", 16)
+        pdf.cell(0,10,("NSPXN.com Audit Report" if _is_comprehensive_pdf else "NSPXN.com Condition Report"), ln=True, align="C")
+        try:
+            pdf.set_font("Helvetica", "", 10)
+        except Exception:
+            pdf.set_font("Arial", "", 10)
+        pdf.ln(3)
+        pdf.ln(12)
 
         _comp_section_bar("Vehicle Identification")
         mc(f"File Number: {file_number}")
