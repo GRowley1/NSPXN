@@ -4540,13 +4540,44 @@ async def vision_review(
     except Exception:
         pass
 
-    return {
-        **result,
-        "web_summary": result["summary_brief"],
-        "gpt_output": result["summary_markdown"],
-        "pdf_url": pdf_url,
-        "pdf_filename": pdf_filename
+    # -----------------------
+    # RESPONSE STABILIZER (Comprehensive safety)
+    # Keep full PDF/email generation untouched above, but return a bounded, valid JSON
+    # payload to the browser so large reports do not cause frontend network failures.
+    # -----------------------
+    def _response_text_cap(value: Any, limit: int = 60000) -> str:
+        try:
+            text = str(value or "")
+        except Exception:
+            text = ""
+        if len(text) <= limit:
+            return text
+        return text[:limit].rstrip() + "\n\n[Output truncated for browser display. Download the PDF for the complete report.]"
+
+    response_payload = dict(result)
+    for _field in ("summary_brief", "summary_markdown", "fraud_markdown", "estimated_costs_markdown", "conclusion"):
+        response_payload[_field] = _response_text_cap(response_payload.get(_field), 60000)
+
+    response_payload["web_summary"] = _response_text_cap(result.get("summary_brief"), 12000)
+    response_payload["gpt_output"] = _response_text_cap(result.get("summary_markdown"), 60000)
+    response_payload["pdf_url"] = pdf_url
+    response_payload["pdf_filename"] = pdf_filename
+
+    response_headers = {
+        "X-NSPXN-Report-Completed": "true",
+        "X-NSPXN-AI-Intent": str(ai_intent or ""),
+        "X-NSPXN-File-Number": str(file_number or ""),
     }
+    try:
+        if str(ai_intent or "").strip().lower() == "comprehensive":
+            _score_header = _numeric_score_or_blank(result.get("compliance_score"))
+            if _score_header:
+                response_headers["X-NSPXN-Compliance-Score"] = str(_score_header)
+                response_headers["X-NSPXN-Score-Source"] = "main_comprehensive_locked.result.compliance_score"
+    except Exception:
+        pass
+
+    return JSONResponse(status_code=200, content=response_payload, headers=response_headers)
 
     # -----------------------
 # PDF download
