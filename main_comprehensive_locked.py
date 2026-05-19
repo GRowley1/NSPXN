@@ -4,7 +4,7 @@ from fastapi import FastAPI, File, UploadFile, Form, Request, Response
 from fastapi.responses import JSONResponse, FileResponse
 from fastapi.middleware.cors import CORSMiddleware
 from typing import List, Dict, Any, Optional
-import os, io, re, json, base64, logging, zipfile, glob, uuid, threading
+import os, io, re, json, base64, logging, zipfile, glob, uuid
 import urllib.parse, urllib.request
 import smtplib  # email transport
 from email.message import EmailMessage
@@ -891,10 +891,6 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
-
-@app.get("/")
-async def health_check():
-    return {"status": "ok", "service": "nspxn-comprehensive"}
 
 # -----------------------
 # Client Rules: fuzzy finder + endpoints
@@ -4537,16 +4533,10 @@ async def vision_review(
         except Exception as e:
             logging.warning(f"Failed to attach PDF to email: {e}")
 
-        def _send_info_email_async(_msg: EmailMessage) -> None:
-            try:
-                with smtplib.SMTP_SSL("mail.tierra.net", 465, timeout=20) as smtp:
-                    smtp.login("info@nspxn.com", "grr2025GRR")
-                    smtp.send_message(_msg)
-                log.info("Info email sent to info@nspxn.com")
-            except Exception as e:
-                logging.error(f"Email error: {e}")
-
-        threading.Thread(target=_send_info_email_async, args=(msg,), daemon=True).start()
+        with smtplib.SMTP_SSL("mail.tierra.net", 465, timeout=20) as smtp:
+            smtp.login("info@nspxn.com", "grr2025GRR")
+            smtp.send_message(msg)
+        log.info("Info email sent to info@nspxn.com")
     except Exception as e:
         logging.error(f"Email error: {e}")
 
