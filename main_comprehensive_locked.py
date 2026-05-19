@@ -4,7 +4,7 @@ from fastapi import FastAPI, File, UploadFile, Form, Request, Response
 from fastapi.responses import JSONResponse, FileResponse
 from fastapi.middleware.cors import CORSMiddleware
 from typing import List, Dict, Any, Optional
-import os, io, re, json, base64, logging, zipfile, glob, uuid, threading
+import os, io, re, json, base64, logging, zipfile, glob, uuid
 import urllib.parse, urllib.request
 import smtplib  # email transport
 from email.message import EmailMessage
@@ -40,6 +40,7 @@ from presidio_anonymizer.entities import OperatorConfig  # required for anonymiz
 # -----------------------
 PDF_DIR = os.getenv("PDF_DIR", "/tmp"); os.makedirs(PDF_DIR, exist_ok=True)
 CLIENT_RULES_DIR = os.getenv("CLIENT_RULES_DIR", "client_rules")
+NSPXN_LOGO_PATH = os.path.join(os.path.dirname(__file__), "logo2.png")
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s")
 log = logging.getLogger("nspxn")
@@ -769,24 +770,40 @@ def _add_bytes(parts: List[Dict[str,Any]], files_seen: List[str], photo_index: O
     low = fname.lower()
     if low.endswith(SUPPORTED_PDF_EXTS) and used < max_images:
         try:
-            # MEMORY GUARD: do not rasterize every PDF page at once. Large 25MB PDFs
-            # can contain many pages and can OOM/restart the Render worker if converted
-            # all at 200 DPI. Convert only the remaining allowed pages at a lighter DPI.
+            # MEMORY GUARD: Render upload size is not the real constraint; converting
+            # too many PDF pages into high-DPI images at once is what spikes memory.
+            # Accept larger PDFs, but cap rendered pages/DPI based on file size.
+            raw_mb = len(raw) / (1024 * 1024)
             remaining_pages = max(1, max_images - used)
+            if raw_mb >= 8:
+                remaining_pages = min(remaining_pages, 20)
+                pdf_dpi = 125
+                jpeg_quality = 65
+                ocr_page_cap = 10
+            elif raw_mb >= 5:
+                remaining_pages = min(remaining_pages, 28)
+                pdf_dpi = 135
+                jpeg_quality = 68
+                ocr_page_cap = 12
+            else:
+                pdf_dpi = 150
+                jpeg_quality = 70
+                ocr_page_cap = min(24, remaining_pages)
+
             pages = convert_from_bytes(
                 raw,
-                dpi=150,
+                dpi=pdf_dpi,
                 first_page=1,
                 last_page=remaining_pages,
                 thread_count=1,
             )
             files_seen.append(f"{fname} (pdf, {len(pages)} page(s) converted; capped at {remaining_pages})")
             _maybe_extract_pdf_text(raw, fname, parts, files_seen, pdf_text_fulls=pdf_text_fulls)
-            OCR_PAGE_CAP = min(24, remaining_pages)
+            OCR_PAGE_CAP = min(ocr_page_cap, remaining_pages)
             ocr_collected = []
-            for idx, im in enumerate(pages):
+            for idx, im in enumerate(pages[:remaining_pages]):
                 b = io.BytesIO()
-                im.save(b, format="JPEG", quality=70, optimize=True)
+                im.save(b, format="JPEG", quality=jpeg_quality, optimize=True)
                 parts.append(_image_part_from_bytes(b.getvalue()))
                 used += 1
                 if photo_index is not None:
@@ -891,10 +908,6 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
-
-@app.get("/")
-async def health_check():
-    return {"status": "ok", "service": "nspxn-comprehensive"}
 
 # -----------------------
 # Client Rules: fuzzy finder + endpoints
@@ -3395,13 +3408,6 @@ async def vision_review(
         return s
 
     pdf = FPDF(); pdf.add_page()
-    # --- NSPXN Logo (Top Right, First Page Only) ---
-    try:
-        logo_path = os.path.join(os.path.dirname(__file__), "ChatGPT logo100725.png")
-        if os.path.exists(logo_path):
-            pdf.image(logo_path, x=pdf.w - 45, y=8, w=35)  # small–medium size
-    except Exception:
-        pass
     pdf.set_auto_page_break(auto=True, margin=10)
     pdf.set_left_margin(10); pdf.set_right_margin(10)
 
@@ -4318,17 +4324,36 @@ async def vision_review(
             except Exception:
                 pdf.set_font("Arial", "", 11)
 
-        try:
-            pdf.set_font("Helvetica", "B", 16)
-        except Exception:
-            pdf.set_font("Arial", "B", 16)
-        pdf.cell(0,10,("NSPXN.com Audit Report" if _is_comprehensive_pdf else "NSPXN.com Condition Report"), ln=True, align="C")
-        try:
-            pdf.set_font("Helvetica", "", 10)
-        except Exception:
-            pdf.set_font("Arial", "", 10)
-        pdf.ln(3)
-        pdf.ln(12)
+        def _render_nspxn_top_section(report_title: str) -> None:
+            """Locked NSPXN PDF top section: logo2.png above black report header bar."""
+            try:
+                pdf.set_y(8)
+                if NSPXN_LOGO_PATH and os.path.exists(NSPXN_LOGO_PATH):
+                    try:
+                        pdf.image(NSPXN_LOGO_PATH, x=10, y=8, w=46)
+                    except Exception as e:
+                        log.warning(f"Logo render skipped: {e}")
+                else:
+                    log.warning(f"logo2.png not found at {NSPXN_LOGO_PATH}")
+                pdf.set_y(30)
+                pdf.set_fill_color(0, 0, 0)
+                pdf.set_text_color(255, 255, 255)
+                try:
+                    pdf.set_font("Helvetica", "B", 13)
+                except Exception:
+                    pdf.set_font("Arial", "B", 13)
+                pdf.cell(0, 9, _pdf_sanitize(report_title), ln=True, align="C", fill=True)
+                pdf.set_text_color(0, 0, 0)
+                try:
+                    pdf.set_font("Helvetica", "", 10)
+                except Exception:
+                    pdf.set_font("Arial", "", 10)
+                pdf.ln(4)
+            except Exception as e:
+                log.warning(f"Top section render skipped: {e}")
+                pdf.set_text_color(0, 0, 0)
+
+        _render_nspxn_top_section("NSPXN.com Audit Report" if _is_comprehensive_pdf else "NSPXN.com Condition Report")
 
         _comp_section_bar("Vehicle Identification")
         mc(f"File Number: {file_number}")
@@ -4440,6 +4465,7 @@ async def vision_review(
         pass
 
     pdf_path = os.path.join(PDF_DIR, pdf_filename)
+    pdf_written = False
     try:
         out = pdf.output(dest="S")
         if isinstance(out, (bytes, bytearray)):
@@ -4448,10 +4474,12 @@ async def vision_review(
             data_bytes = str(out).encode("latin-1", "ignore")
         with open(pdf_path, "wb") as f:
             f.write(data_bytes)
+        pdf_written = os.path.exists(pdf_path) and os.path.getsize(pdf_path) > 0
     except Exception as e:
         logging.warning(f"PDF write error: {e}")
+        pdf_written = False
 
-    pdf_url = f"/download-pdf?filename={pdf_filename}"
+    pdf_url = f"/download-pdf?filename={pdf_filename}" if pdf_written else ""
 
     # -----------------------
     # Email — info-only (attach PDF)
@@ -4531,22 +4559,19 @@ async def vision_review(
         msg.set_content(body)
 
         try:
-            with open(pdf_path, "rb") as f:
-                pdf_bytes = f.read()
-            msg.add_attachment(pdf_bytes, maintype="application", subtype="pdf", filename=pdf_filename)
+            if pdf_written and os.path.exists(pdf_path):
+                with open(pdf_path, "rb") as f:
+                    pdf_bytes = f.read()
+                msg.add_attachment(pdf_bytes, maintype="application", subtype="pdf", filename=pdf_filename)
+            else:
+                logging.warning("PDF was not written; sending email without PDF attachment.")
         except Exception as e:
             logging.warning(f"Failed to attach PDF to email: {e}")
 
-        def _send_info_email_async(_msg: EmailMessage) -> None:
-            try:
-                with smtplib.SMTP_SSL("mail.tierra.net", 465, timeout=20) as smtp:
-                    smtp.login("info@nspxn.com", "grr2025GRR")
-                    smtp.send_message(_msg)
-                log.info("Info email sent to info@nspxn.com")
-            except Exception as e:
-                logging.error(f"Email error: {e}")
-
-        threading.Thread(target=_send_info_email_async, args=(msg,), daemon=True).start()
+        with smtplib.SMTP_SSL("mail.tierra.net", 465, timeout=20) as smtp:
+            smtp.login("info@nspxn.com", "grr2025GRR")
+            smtp.send_message(msg)
+        log.info("Info email sent to info@nspxn.com")
     except Exception as e:
         logging.error(f"Email error: {e}")
 
@@ -4569,7 +4594,8 @@ async def vision_review(
         "web_summary": result["summary_brief"],
         "gpt_output": result["summary_markdown"],
         "pdf_url": pdf_url,
-        "pdf_filename": pdf_filename
+        "pdf_filename": pdf_filename if pdf_written else "",
+        "pdf_status": "ready" if pdf_written else "not_created"
     }
 
     # -----------------------
