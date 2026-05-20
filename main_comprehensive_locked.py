@@ -769,32 +769,14 @@ def _add_bytes(parts: List[Dict[str,Any]], files_seen: List[str], photo_index: O
     low = fname.lower()
     if low.endswith(SUPPORTED_PDF_EXTS) and used < max_images:
         try:
-            # MEMORY GUARD (Render): extract text first, then rasterize only a small,
-            # low-DPI page window. This prevents worker restarts/network errors on larger PDFs.
+            pages = convert_from_bytes(raw, dpi=200)
+            files_seen.append(f"{fname} (pdf, {len(pages)} page(s))")
             _maybe_extract_pdf_text(raw, fname, parts, files_seen, pdf_text_fulls=pdf_text_fulls)
-
-            PDF_RASTER_DPI = int(os.getenv("NSPXN_PDF_RASTER_DPI", "120") or "120")
-            PDF_RASTER_PAGE_CAP = int(os.getenv("NSPXN_PDF_RASTER_PAGE_CAP", "14") or "14")
-            remaining_slots = max(0, max_images - used)
-            page_cap = max(0, min(PDF_RASTER_PAGE_CAP, remaining_slots))
-            if page_cap <= 0:
-                files_seen.append(f"{fname} (pdf text extracted; raster skipped - image cap reached)")
-                return used
-
-            pages = convert_from_bytes(
-                raw,
-                dpi=PDF_RASTER_DPI,
-                first_page=1,
-                last_page=page_cap,
-                thread_count=1,
-            )
-            files_seen.append(f"{fname} (pdf, rasterized {len(pages)} page(s), capped at {page_cap}, {PDF_RASTER_DPI} DPI)")
-
-            OCR_PAGE_CAP = min(8, page_cap)
+            OCR_PAGE_CAP = 100
             ocr_collected = []
-            for idx, im in enumerate(pages):
+            for idx, im in enumerate(pages[:max_images - used]):
                 b = io.BytesIO()
-                im.save(b, format="JPEG", quality=65, optimize=True)
+                im.save(b, format="JPEG", quality=75, optimize=True)
                 parts.append(_image_part_from_bytes(b.getvalue()))
                 used += 1
                 if photo_index is not None:
@@ -803,13 +785,9 @@ def _add_bytes(parts: List[Dict[str,Any]], files_seen: List[str], photo_index: O
                     txt = _maybe_ocr_image_text(im)
                     if txt:
                         ocr_collected.append(txt)
-                try:
-                    im.close()
-                except Exception:
-                    pass
             if ocr_collected:
-                parts.insert(0, {"type": "text", "text": ("\\n".join(ocr_collected))[:12000]})
-                files_seen.append(f"{fname} (ocr text extracted, capped)")
+                parts.insert(0, {"type": "text", "text": ("\n".join(ocr_collected))[:12000]})
+                files_seen.append(f"{fname} (ocr text extracted)")
         except Exception as e:
             logging.warning(f"pdf2image failed for {fname}: {e}")
             files_seen.append(f"{fname} (pdf, could not be converted)")
@@ -825,7 +803,7 @@ def _add_bytes(parts: List[Dict[str,Any]], files_seen: List[str], photo_index: O
             # Secondary confirmation: attempt local QR/barcode decode from the ORIGINAL image (before resizing).
             qr_vin = _qr_decode_vin_from_pil(im_ref)
             # Use the same preprocessing for ZIP and loose JPGs (keep higher res for small label text).
-            max_dim = 1600
+            max_dim = 2048
             if max(im.size) > max_dim:
                 scale = max_dim / float(max(im.size))
                 im = im.resize((int(im.width * scale), int(im.height * scale)))
@@ -1128,7 +1106,7 @@ async def vision_review(
 
     # Anti-zipbomb guardrails
     MAX_ZIP_FILES = 100
-    MAX_ENTRY_SIZE = 25 * 1024 * 1024  # 25 MB
+    MAX_ENTRY_SIZE = 15 * 1024 * 1024  # 15 MB
 
     for f in sorted(files, key=lambda _f: ((_f.filename or '').lower())):
         raw = await f.read()
@@ -3410,9 +3388,9 @@ async def vision_review(
     pdf.set_left_margin(10); pdf.set_right_margin(10)
 
     try:
-        pdf.add_font("DejaVu","", "DejaVuSans.ttf", uni=True); pdf.set_font(size=9)
+        pdf.add_font("DejaVu","", "DejaVuSans.ttf", uni=True); pdf.set_font(size=11)
     except Exception:
-        pdf.set_font("Arial", size=9)
+        pdf.set_font("Arial", size=11)
 
     def mc(s):
         try:
@@ -3423,11 +3401,11 @@ async def vision_review(
             if not safe.strip():
                 safe = "-"
             pdf.set_x(pdf.l_margin)
-            pdf.multi_cell(effective_w, 4.4, safe)
+            pdf.multi_cell(effective_w, 6, safe)
         except Exception:
             effective_w = pdf.w - pdf.l_margin - pdf.r_margin
             pdf.set_x(pdf.l_margin)
-            pdf.multi_cell(effective_w, 4.4, (_pdf_sanitize(str(s))[:2000] + " …"))
+            pdf.multi_cell(effective_w, 6, (_pdf_sanitize(str(s))[:2000] + " …"))
 
 
     
@@ -4162,9 +4140,9 @@ async def vision_review(
             pdf.cell(0, 8, _pdf_sanitize(t), ln=True, fill=True)
             pdf.set_text_color(0, 0, 0)
             try:
-                pdf.set_font("Helvetica", "", 9)
+                pdf.set_font("Helvetica", "", 11)
             except Exception:
-                pdf.set_font("Arial", "", 9)
+                pdf.set_font("Arial", "", 11)
 
         def _scrub_model_headings(md_text: str) -> str:
             """Remove model-emitted headings that duplicate PDF section headers."""
@@ -4216,9 +4194,9 @@ async def vision_review(
             pdf.set_font("Arial", "B", 16)
         pdf.cell(0, 10, "NSPXN.com Condition Report", ln=True, align="C")
         try:
-            pdf.set_font("Helvetica", "", 9)
+            pdf.set_font("Helvetica", "", 11)
         except Exception:
-            pdf.set_font("Arial", "", 9)
+            pdf.set_font("Arial", "", 11)
         pdf.ln(2)
     
         # Vehicle Identification (fixed PDF block)
@@ -4318,21 +4296,58 @@ async def vision_review(
             pdf.cell(0, 8, _pdf_sanitize(t), ln=True, fill=True)
             pdf.set_text_color(0, 0, 0)
             try:
+                pdf.set_font("Helvetica", "", 11)
+            except Exception:
+                pdf.set_font("Arial", "", 11)
+
+        # --- NSPXN branded top section (black box + logo2.png + white report header) ---
+        try:
+            header_x = pdf.l_margin
+            header_y = 8
+            header_w = pdf.w - pdf.l_margin - pdf.r_margin
+            header_h = 24
+            pdf.set_fill_color(0, 0, 0)
+            pdf.rect(header_x, header_y, header_w, header_h, style="F")
+
+            logo2_path = os.path.join(os.path.dirname(__file__), "logo2.png")
+            logo_w = 48
+            if os.path.exists(logo2_path):
+                pdf.image(logo2_path, x=header_x + 4, y=header_y + 4, w=logo_w)
+                title_x = header_x + logo_w + 10
+            else:
+                pdf.set_text_color(255, 255, 255)
+                try:
+                    pdf.set_font("Helvetica", "B", 12)
+                except Exception:
+                    pdf.set_font("Arial", "B", 12)
+                pdf.set_xy(header_x + 5, header_y + 7)
+                pdf.cell(48, 8, "NSPXN.com", ln=False)
+                title_x = header_x + 60
+
+            pdf.set_text_color(255, 255, 255)
+            try:
+                pdf.set_font("Helvetica", "B", 12)
+            except Exception:
+                pdf.set_font("Arial", "B", 12)
+            pdf.set_xy(title_x, header_y + 8)
+            pdf.cell(header_x + header_w - title_x - 4, 8, ("NSPXN.com Audit Report" if _is_comprehensive_pdf else "NSPXN.com Condition Report"), ln=False, align="L")
+            pdf.set_text_color(0, 0, 0)
+            try:
                 pdf.set_font("Helvetica", "", 9)
             except Exception:
                 pdf.set_font("Arial", "", 9)
-
-        try:
-            pdf.set_font("Helvetica", "B", 16)
+            pdf.set_y(header_y + header_h + 6)
         except Exception:
-            pdf.set_font("Arial", "B", 16)
-        pdf.cell(0,10,("NSPXN.com Audit Report" if _is_comprehensive_pdf else "NSPXN.com Condition Report"), ln=True, align="C")
-        try:
-            pdf.set_font("Helvetica", "", 10)
-        except Exception:
-            pdf.set_font("Arial", "", 10)
-        pdf.ln(3)
-        pdf.ln(12)
+            try:
+                pdf.set_font("Helvetica", "B", 12)
+            except Exception:
+                pdf.set_font("Arial", "B", 12)
+            pdf.cell(0, 8, ("NSPXN.com Audit Report" if _is_comprehensive_pdf else "NSPXN.com Condition Report"), ln=True, align="C")
+            try:
+                pdf.set_font("Helvetica", "", 9)
+            except Exception:
+                pdf.set_font("Arial", "", 9)
+            pdf.ln(4)
 
         _comp_section_bar("Vehicle Identification")
         mc(f"File Number: {file_number}")
@@ -4437,14 +4452,11 @@ async def vision_review(
         pdf_filename = f"{safe_file}.pdf"
 
 
-    # --- One-page photo thumbnail appendix (Photos-Only legacy path only) ---
-    # Comprehensive reports do not include a thumbnail appendix; skipping it prevents
-    # duplicate image memory use during PDF generation on Render.
-    if ai_intent == "damage_report_from_photos":
-        try:
-            add_thumbnail_page(pdf, thumbnail_paths)
-        except Exception:
-            pass
+    # --- One-page photo thumbnail appendix (all uploaded photos) ---
+    try:
+        add_thumbnail_page(pdf, thumbnail_paths)
+    except Exception:
+        pass
 
     pdf_path = os.path.join(PDF_DIR, pdf_filename)
     try:
@@ -4458,8 +4470,7 @@ async def vision_review(
     except Exception as e:
         logging.warning(f"PDF write error: {e}")
 
-    pdf_exists = os.path.exists(pdf_path)
-    pdf_url = f"/download-pdf?filename={pdf_filename}" if pdf_exists else ""
+    pdf_url = f"/download-pdf?filename={pdf_filename}"
 
     # -----------------------
     # Email — info-only (attach PDF)
@@ -4539,12 +4550,9 @@ async def vision_review(
         msg.set_content(body)
 
         try:
-            if os.path.exists(pdf_path):
-                with open(pdf_path, "rb") as f:
-                    pdf_bytes = f.read()
-                msg.add_attachment(pdf_bytes, maintype="application", subtype="pdf", filename=pdf_filename)
-            else:
-                logging.warning(f"PDF missing; email will send without attachment: {pdf_path}")
+            with open(pdf_path, "rb") as f:
+                pdf_bytes = f.read()
+            msg.add_attachment(pdf_bytes, maintype="application", subtype="pdf", filename=pdf_filename)
         except Exception as e:
             logging.warning(f"Failed to attach PDF to email: {e}")
 
@@ -4569,25 +4577,12 @@ async def vision_review(
     except Exception:
         pass
 
-    def _api_cap(value: Any, limit: int = 24000) -> str:
-        s = str(value or "")
-        if len(s) <= limit:
-            return s
-        return s[:limit].rstrip() + "\n\n[Output shortened for browser stability. Full report is available in the PDF/email.]"
-
-    # Keep the browser response stable and small. Full content is already written to PDF/email above.
-    result_api = dict(result)
-    result_api["summary_markdown"] = _api_cap(result_api.get("summary_markdown"), 24000)
-    result_api["fraud_markdown"] = _api_cap(result_api.get("fraud_markdown"), 8000)
-    result_api["estimated_costs_markdown"] = _api_cap(result_api.get("estimated_costs_markdown"), 8000)
-    result_api["conclusion"] = _api_cap(result_api.get("conclusion"), 8000)
-
     return {
-        **result_api,
-        "web_summary": _api_cap(result_api.get("summary_brief"), 4000),
-        "gpt_output": result_api["summary_markdown"],
+        **result,
+        "web_summary": result["summary_brief"],
+        "gpt_output": result["summary_markdown"],
         "pdf_url": pdf_url,
-        "pdf_filename": pdf_filename if pdf_exists else ""
+        "pdf_filename": pdf_filename
     }
 
     # -----------------------
