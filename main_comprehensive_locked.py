@@ -4,7 +4,7 @@ from fastapi import FastAPI, File, UploadFile, Form, Request, Response
 from fastapi.responses import JSONResponse, FileResponse
 from fastapi.middleware.cors import CORSMiddleware
 from typing import List, Dict, Any, Optional
-import os, io, re, json, base64, logging, zipfile, glob, uuid, threading
+import os, io, re, json, base64, logging, zipfile, glob, uuid
 import urllib.parse, urllib.request
 import smtplib  # email transport
 from email.message import EmailMessage
@@ -40,7 +40,7 @@ from presidio_anonymizer.entities import OperatorConfig  # required for anonymiz
 # -----------------------
 PDF_DIR = os.getenv("PDF_DIR", "/tmp"); os.makedirs(PDF_DIR, exist_ok=True)
 CLIENT_RULES_DIR = os.getenv("CLIENT_RULES_DIR", "client_rules")
-NSPXN_LOGO_PATH = os.path.join(os.path.dirname(__file__), "logo2.png")
+NSPXN_LOGO_PATH = os.getenv("NSPXN_LOGO_PATH", os.path.join(os.path.dirname(__file__), "logo2.png"))
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s")
 log = logging.getLogger("nspxn")
@@ -770,40 +770,14 @@ def _add_bytes(parts: List[Dict[str,Any]], files_seen: List[str], photo_index: O
     low = fname.lower()
     if low.endswith(SUPPORTED_PDF_EXTS) and used < max_images:
         try:
-            # MEMORY GUARD: upload size is not the real limit; rasterizing every
-            # PDF page at high DPI is what can spike Render memory and restart
-            # the worker. Keep the upload accepted, but cap rendered pages/DPI.
-            raw_mb = len(raw) / (1024 * 1024)
-            remaining_pages = max(1, max_images - used)
-            if raw_mb >= 8:
-                remaining_pages = min(remaining_pages, 20)
-                pdf_dpi = 125
-                jpeg_quality = 65
-                ocr_page_cap = 10
-            elif raw_mb >= 5:
-                remaining_pages = min(remaining_pages, 28)
-                pdf_dpi = 135
-                jpeg_quality = 68
-                ocr_page_cap = 12
-            else:
-                pdf_dpi = 150
-                jpeg_quality = 70
-                ocr_page_cap = min(24, remaining_pages)
-
-            pages = convert_from_bytes(
-                raw,
-                dpi=pdf_dpi,
-                first_page=1,
-                last_page=remaining_pages,
-                thread_count=1,
-            )
-            files_seen.append(f"{fname} (pdf, {len(pages)} page(s) converted; capped at {remaining_pages})")
+            pages = convert_from_bytes(raw, dpi=200)
+            files_seen.append(f"{fname} (pdf, {len(pages)} page(s))")
             _maybe_extract_pdf_text(raw, fname, parts, files_seen, pdf_text_fulls=pdf_text_fulls)
-            OCR_PAGE_CAP = min(ocr_page_cap, remaining_pages)
+            OCR_PAGE_CAP = 100
             ocr_collected = []
-            for idx, im in enumerate(pages[:remaining_pages]):
+            for idx, im in enumerate(pages[:max_images - used]):
                 b = io.BytesIO()
-                im.save(b, format="JPEG", quality=jpeg_quality, optimize=True)
+                im.save(b, format="JPEG", quality=75, optimize=True)
                 parts.append(_image_part_from_bytes(b.getvalue()))
                 used += 1
                 if photo_index is not None:
@@ -812,17 +786,12 @@ def _add_bytes(parts: List[Dict[str,Any]], files_seen: List[str], photo_index: O
                     txt = _maybe_ocr_image_text(im)
                     if txt:
                         ocr_collected.append(txt)
-                try:
-                    im.close()
-                except Exception:
-                    pass
             if ocr_collected:
                 parts.insert(0, {"type": "text", "text": ("\n".join(ocr_collected))[:12000]})
                 files_seen.append(f"{fname} (ocr text extracted)")
         except Exception as e:
             logging.warning(f"pdf2image failed for {fname}: {e}")
             files_seen.append(f"{fname} (pdf, could not be converted)")
-
     elif low.endswith(SUPPORTED_IMAGE_EXTS) and used < max_images:
         im_ref = None
         raw_for_vin = None
@@ -909,10 +878,6 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
-
-@app.get("/")
-async def health_check():
-    return {"status": "ok", "service": "nspxn-comprehensive"}
 
 # -----------------------
 # Client Rules: fuzzy finder + endpoints
@@ -1142,7 +1107,7 @@ async def vision_review(
 
     # Anti-zipbomb guardrails
     MAX_ZIP_FILES = 100
-    MAX_ENTRY_SIZE = 25 * 1024 * 1024  # 25 MB
+    MAX_ENTRY_SIZE = 15 * 1024 * 1024  # 15 MB
 
     for f in sorted(files, key=lambda _f: ((_f.filename or '').lower())):
         raw = await f.read()
@@ -2747,26 +2712,43 @@ async def vision_review(
         return False
 
     def _build_comprehensive_cost_from_estimate_text() -> str:
-        parsed = _extract_estimate_record_totals_strict(uploaded_text_all or "")
+        # IMPORTANT: this function runs before the later PDF helper _money2 is defined.
+        # Use the already-defined _money formatter so the cost fallback cannot fail silently
+        # and trigger a false quality-gate block.
+        source_for_totals = (uploaded_text_all or "") + "\n" + str(result.get("summary_markdown") or "")
+        parsed = _extract_estimate_record_totals_strict(source_for_totals)
+
+        # Additional strict fallback for common CCC wording found in summaries/OCR.
+        if parsed.get("estimate_total") is None:
+            m_total = re.search(
+                r"(?i)\b(?:estimate\s+of\s+record\s+)?(?:total\s+cost\s+of\s+repairs|cost\s+of\s+repairs|estimate\s+total|net\s+amount|grand\s+total)\b[^$]{0,80}\$\s*([0-9][0-9,]*(?:\.[0-9]{2})?)",
+                source_for_totals,
+            )
+            if m_total:
+                try:
+                    parsed["estimate_total"] = float(m_total.group(1).replace(",", ""))
+                except Exception:
+                    pass
+
         bullets: List[str] = []
         if parsed.get("labor_subtotal") is not None:
-            bullets.append(f"- Labor subtotal: {_money2(parsed['labor_subtotal'])}")
+            bullets.append(f"- Labor subtotal: {_money(parsed['labor_subtotal'])}")
         if parsed.get("parts_subtotal") is not None:
-            bullets.append(f"- Parts subtotal: {_money2(parsed['parts_subtotal'])}")
+            bullets.append(f"- Parts subtotal: {_money(parsed['parts_subtotal'])}")
         if parsed.get("paint_materials") is not None:
-            bullets.append(f"- Paint materials: {_money2(parsed['paint_materials'])}")
+            bullets.append(f"- Paint materials: {_money(parsed['paint_materials'])}")
         if parsed.get("tax_rate") is not None:
             bullets.append(f"- Applicable tax rate: {float(parsed['tax_rate']):.3f}%")
         if parsed.get("sales_tax") is not None:
-            bullets.append(f"- Sales tax: {_money2(parsed['sales_tax'])}")
+            bullets.append(f"- Sales tax: {_money(parsed['sales_tax'])}")
         if parsed.get("estimate_total") is not None:
-            bullets.append(f"- Estimate total: {_money2(parsed['estimate_total'])}")
+            bullets.append(f"- Estimate total: {_money(parsed['estimate_total'])}")
         if parsed.get("estimate_total") is not None or len(bullets) >= 2:
             return "## Approximate Repair Cost Breakdown\nEstimate of Record totals (documented):\n" + "\n".join(bullets)
         return (
             "## Approximate Repair Cost Breakdown\n"
-            "Estimate of record totals could not be extracted with confidence from the uploaded document text on this run. "
-            "Final estimate totals should be confirmed from the estimate summary/totals page before release."
+            "Estimate totals were not cleanly extracted into individual subtotal fields from the OCR text. "
+            "The uploaded estimate and model narrative should be reviewed for the final documented repair total before release."
         )
 
     def _professional_summary_fallback() -> str:
@@ -2812,11 +2794,11 @@ async def vision_review(
         )
 
     def _professional_conclusion_fallback() -> str:
-        rules_txt = "Client guideline requirements" if client_rules_supplied else "available estimate and photo requirements"
+        rules_txt = "client guideline requirements" if client_rules_supplied else "available estimate and photo requirements"
         return (
-            "Based on the uploaded estimate, limited photo evidence, and the documented review findings in this report, "
-            "the file should not be relied upon as fully documented until the detailed condition narrative, estimate totals, and required supporting photos are confirmed. "
-            f"Final handling should verify estimate-line support, VIN/photo consistency, and {rules_txt} before release or claim decision."
+            "Based on the uploaded estimate, photo/document evidence, and documented review findings, "
+            "final handling should verify estimate-line support, VIN/photo consistency, repair-scope support, estimate totals, "
+            f"and {rules_txt} before release or claim decision."
         )
 
     try:
@@ -3413,13 +3395,6 @@ async def vision_review(
         return s
 
     pdf = FPDF(); pdf.add_page()
-    # --- NSPXN Logo (Top Right, First Page Only) ---
-    try:
-        logo_path = os.path.join(os.path.dirname(__file__), "ChatGPT logo100725.png")
-        if os.path.exists(logo_path):
-            pdf.image(logo_path, x=pdf.w - 45, y=8, w=35)  # small–medium size
-    except Exception:
-        pass
     pdf.set_auto_page_break(auto=True, margin=10)
     pdf.set_left_margin(10); pdf.set_right_margin(10)
 
@@ -3445,6 +3420,46 @@ async def vision_review(
 
 
     
+
+
+    def _draw_pdf_top_header(title_text: str) -> None:
+        """Draw the locked NSPXN PDF top section: logo left, black box, white report header."""
+        try:
+            pdf.set_fill_color(8, 12, 18)
+            pdf.rect(0, 0, 210, 32, "F")
+            logo_drawn = False
+            try:
+                if NSPXN_LOGO_PATH and os.path.exists(NSPXN_LOGO_PATH):
+                    pdf.image(NSPXN_LOGO_PATH, x=10, y=5, w=82)
+                    logo_drawn = True
+            except Exception:
+                logo_drawn = False
+            if not logo_drawn:
+                pdf.set_text_color(255, 255, 255)
+                pdf.set_font("Arial", "B", 18)
+                pdf.set_xy(10, 8)
+                pdf.cell(0, 8, "NSPXN.com", ln=True)
+            pdf.set_text_color(255, 255, 255)
+            try:
+                pdf.set_font("Helvetica", "B", 13)
+            except Exception:
+                pdf.set_font("Arial", "B", 13)
+            pdf.set_xy(100, 9)
+            pdf.multi_cell(100, 6, _pdf_sanitize(title_text), align="R")
+            pdf.set_text_color(0, 0, 0)
+            try:
+                pdf.set_font("Helvetica", "", 11)
+            except Exception:
+                pdf.set_font("Arial", "", 11)
+            pdf.set_y(38)
+        except Exception:
+            pdf.set_text_color(0, 0, 0)
+            try:
+                pdf.set_font("Helvetica", "B", 16)
+            except Exception:
+                pdf.set_font("Arial", "B", 16)
+            pdf.cell(0, 10, _pdf_sanitize(title_text), ln=True, align="C")
+
     def _money2(x: Optional[float]) -> str:
         try:
             if x is None:
@@ -4223,17 +4238,7 @@ async def vision_review(
                 return m.group(1).replace(",", "") + " mi"
             return None
     
-        # Title (larger + bold)
-        try:
-            pdf.set_font("Helvetica", "B", 16)
-        except Exception:
-            pdf.set_font("Arial", "B", 16)
-        pdf.cell(0, 10, "NSPXN.com Condition Report", ln=True, align="C")
-        try:
-            pdf.set_font("Helvetica", "", 11)
-        except Exception:
-            pdf.set_font("Arial", "", 11)
-        pdf.ln(2)
+        _draw_pdf_top_header("NSPXN.com Condition Report")
     
         # Vehicle Identification (fixed PDF block)
         _section_bar("VEHICLE IDENTIFICATION")
@@ -4336,17 +4341,7 @@ async def vision_review(
             except Exception:
                 pdf.set_font("Arial", "", 11)
 
-        try:
-            pdf.set_font("Helvetica", "B", 16)
-        except Exception:
-            pdf.set_font("Arial", "B", 16)
-        pdf.cell(0,10,("NSPXN.com Audit Report" if _is_comprehensive_pdf else "NSPXN.com Condition Report"), ln=True, align="C")
-        try:
-            pdf.set_font("Helvetica", "", 10)
-        except Exception:
-            pdf.set_font("Arial", "", 10)
-        pdf.ln(3)
-        pdf.ln(12)
+        _draw_pdf_top_header("NSPXN.com Audit Report" if _is_comprehensive_pdf else "NSPXN.com Condition Report")
 
         _comp_section_bar("Vehicle Identification")
         mc(f"File Number: {file_number}")
@@ -4555,16 +4550,10 @@ async def vision_review(
         except Exception as e:
             logging.warning(f"Failed to attach PDF to email: {e}")
 
-        def _send_info_email_async(_msg: EmailMessage) -> None:
-            try:
-                with smtplib.SMTP_SSL("mail.tierra.net", 465, timeout=20) as smtp:
-                    smtp.login("info@nspxn.com", "grr2025GRR")
-                    smtp.send_message(_msg)
-                log.info("Info email sent to info@nspxn.com")
-            except Exception as e:
-                logging.error(f"Email error: {e}")
-
-        threading.Thread(target=_send_info_email_async, args=(msg,), daemon=True).start()
+        with smtplib.SMTP_SSL("mail.tierra.net", 465, timeout=20) as smtp:
+            smtp.login("info@nspxn.com", "grr2025GRR")
+            smtp.send_message(msg)
+        log.info("Info email sent to info@nspxn.com")
     except Exception as e:
         logging.error(f"Email error: {e}")
 
