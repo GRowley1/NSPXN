@@ -769,24 +769,14 @@ def _add_bytes(parts: List[Dict[str,Any]], files_seen: List[str], photo_index: O
     low = fname.lower()
     if low.endswith(SUPPORTED_PDF_EXTS) and used < max_images:
         try:
-            # MEMORY GUARD: do not rasterize every PDF page at once. Large 25MB PDFs
-            # can contain many pages and can OOM/restart the Render worker if converted
-            # all at 200 DPI. Convert only the remaining allowed pages at a lighter DPI.
-            remaining_pages = max(1, max_images - used)
-            pages = convert_from_bytes(
-                raw,
-                dpi=150,
-                first_page=1,
-                last_page=remaining_pages,
-                thread_count=1,
-            )
-            files_seen.append(f"{fname} (pdf, {len(pages)} page(s) converted; capped at {remaining_pages})")
+            pages = convert_from_bytes(raw, dpi=200)
+            files_seen.append(f"{fname} (pdf, {len(pages)} page(s))")
             _maybe_extract_pdf_text(raw, fname, parts, files_seen, pdf_text_fulls=pdf_text_fulls)
-            OCR_PAGE_CAP = min(24, remaining_pages)
+            OCR_PAGE_CAP = 100
             ocr_collected = []
-            for idx, im in enumerate(pages):
+            for idx, im in enumerate(pages[:max_images - used]):
                 b = io.BytesIO()
-                im.save(b, format="JPEG", quality=70, optimize=True)
+                im.save(b, format="JPEG", quality=75, optimize=True)
                 parts.append(_image_part_from_bytes(b.getvalue()))
                 used += 1
                 if photo_index is not None:
@@ -795,10 +785,6 @@ def _add_bytes(parts: List[Dict[str,Any]], files_seen: List[str], photo_index: O
                     txt = _maybe_ocr_image_text(im)
                     if txt:
                         ocr_collected.append(txt)
-                try:
-                    im.close()
-                except Exception:
-                    pass
             if ocr_collected:
                 parts.insert(0, {"type": "text", "text": ("\n".join(ocr_collected))[:12000]})
                 files_seen.append(f"{fname} (ocr text extracted)")
@@ -1120,7 +1106,7 @@ async def vision_review(
 
     # Anti-zipbomb guardrails
     MAX_ZIP_FILES = 100
-    MAX_ENTRY_SIZE = 25 * 1024 * 1024  # 25 MB
+    MAX_ENTRY_SIZE = 15 * 1024 * 1024  # 15 MB
 
     for f in sorted(files, key=lambda _f: ((_f.filename or '').lower())):
         raw = await f.read()
@@ -3391,13 +3377,34 @@ async def vision_review(
         return s
 
     pdf = FPDF(); pdf.add_page()
-    # --- NSPXN Logo (Top Right, First Page Only) ---
+    # --- NSPXN Branded Top Header (logo2.png left + white report title on black box) ---
     try:
-        logo_path = os.path.join(os.path.dirname(__file__), "ChatGPT logo100725.png")
+        _report_title = "NSPXN.com Audit Report" if str(ai_intent or "").strip().lower() == "comprehensive" else "NSPXN.com Condition Report"
+        pdf.set_fill_color(0, 0, 0)
+        pdf.rect(0, 0, pdf.w, 34, "F")
+
+        _title_x = 58
+        logo_path = os.path.join(os.path.dirname(__file__), "logo2.png")
         if os.path.exists(logo_path):
-            pdf.image(logo_path, x=pdf.w - 45, y=8, w=35)  # small–medium size
+            pdf.image(logo_path, x=10, y=6, w=40)
+        else:
+            _title_x = 10
+
+        pdf.set_text_color(255, 255, 255)
+        try:
+            pdf.set_font("Helvetica", "B", 13)
+        except Exception:
+            pdf.set_font("Arial", "B", 13)
+        pdf.set_xy(_title_x, 11)
+        pdf.cell(pdf.w - _title_x - 10, 9, _pdf_sanitize(_report_title), ln=False, align="L")
+        pdf.set_text_color(0, 0, 0)
+        pdf.set_y(40)
     except Exception:
-        pass
+        try:
+            pdf.set_text_color(0, 0, 0)
+        except Exception:
+            pass
+        pdf.set_y(40)
     pdf.set_auto_page_break(auto=True, margin=10)
     pdf.set_left_margin(10); pdf.set_right_margin(10)
 
@@ -4154,9 +4161,9 @@ async def vision_review(
             pdf.cell(0, 8, _pdf_sanitize(t), ln=True, fill=True)
             pdf.set_text_color(0, 0, 0)
             try:
-                pdf.set_font("Helvetica", "", 9)
+                pdf.set_font("Helvetica", "", 11)
             except Exception:
-                pdf.set_font("Arial", "", 9)
+                pdf.set_font("Arial", "", 11)
 
         def _scrub_model_headings(md_text: str) -> str:
             """Remove model-emitted headings that duplicate PDF section headers."""
@@ -4201,18 +4208,17 @@ async def vision_review(
                 return m.group(1).replace(",", "") + " mi"
             return None
     
-        # Title (larger + bold)
+        # Top report header is rendered once above as the black NSPXN branded box.
         try:
-            pdf.set_font("Helvetica", "B", 16)
+            if pdf.get_y() < 40:
+                pdf.set_y(40)
         except Exception:
-            pdf.set_font("Arial", "B", 16)
-        pdf.cell(0, 10, "NSPXN.com Condition Report", ln=True, align="C")
+            pass
         try:
             pdf.set_font("Helvetica", "", 11)
         except Exception:
             pdf.set_font("Arial", "", 11)
-        pdf.ln(2)
-    
+
         # Vehicle Identification (fixed PDF block)
         _section_bar("VEHICLE IDENTIFICATION")
         _summary_md_raw = (result.get("summary_markdown") or "").strip()
@@ -4314,47 +4320,16 @@ async def vision_review(
             except Exception:
                 pdf.set_font("Arial", "", 11)
 
-        # --- Locked NSPXN top section: black box, logo2.png left, white report header right ---
+        # Top report header is rendered once above as the black NSPXN branded box.
         try:
-            _header_x = pdf.l_margin
-            _header_y = 8
-            _header_w = pdf.w - pdf.l_margin - pdf.r_margin
-            _header_h = 25
-            pdf.set_fill_color(0, 0, 0)
-            pdf.rect(_header_x, _header_y, _header_w, _header_h, style="F")
-
-            _title_x = _header_x + 8
-            _logo_path = os.path.join(os.path.dirname(__file__), "logo2.png")
-            if os.path.exists(_logo_path):
-                try:
-                    pdf.image(_logo_path, x=_header_x + 5, y=_header_y + 4, w=40)
-                    _title_x = _header_x + 50
-                except Exception as e:
-                    log.warning(f"Logo render skipped: {e}")
-            else:
-                log.warning(f"logo2.png not found at {_logo_path}")
-
-            pdf.set_xy(_title_x, _header_y + 7)
-            pdf.set_text_color(255, 255, 255)
-            try:
-                pdf.set_font("Helvetica", "B", 12)
-            except Exception:
-                pdf.set_font("Arial", "B", 12)
-            pdf.cell(_header_w - (_title_x - _header_x) - 6, 8, _pdf_sanitize("NSPXN.com Audit Report" if _is_comprehensive_pdf else "NSPXN.com Condition Report"), ln=False, align="L")
-            pdf.set_text_color(0, 0, 0)
-            try:
-                pdf.set_font("Helvetica", "", 9)
-            except Exception:
-                pdf.set_font("Arial", "", 9)
-            pdf.set_y(_header_y + _header_h + 5)
-        except Exception as e:
-            log.warning(f"Top section render skipped: {e}")
-            pdf.set_text_color(0, 0, 0)
-            try:
-                pdf.set_font("Arial", "", 9)
-            except Exception:
-                pass
-            pdf.set_y(38)
+            if pdf.get_y() < 40:
+                pdf.set_y(40)
+        except Exception:
+            pass
+        try:
+            pdf.set_font("Helvetica", "", 10)
+        except Exception:
+            pdf.set_font("Arial", "", 10)
 
         _comp_section_bar("Vehicle Identification")
         mc(f"File Number: {file_number}")
@@ -4466,7 +4441,6 @@ async def vision_review(
         pass
 
     pdf_path = os.path.join(PDF_DIR, pdf_filename)
-    pdf_written = False
     try:
         out = pdf.output(dest="S")
         if isinstance(out, (bytes, bytearray)):
@@ -4475,24 +4449,10 @@ async def vision_review(
             data_bytes = str(out).encode("latin-1", "ignore")
         with open(pdf_path, "wb") as f:
             f.write(data_bytes)
-        pdf_written = os.path.exists(pdf_path) and os.path.getsize(pdf_path) > 0
     except Exception as e:
-        logging.warning(f"PDF write error using dest='S': {e}")
-        try:
-            pdf.output(pdf_path)
-            pdf_written = os.path.exists(pdf_path) and os.path.getsize(pdf_path) > 0
-        except Exception as e2:
-            logging.error(f"PDF write fallback failed: {e2}")
-            pdf_written = False
+        logging.warning(f"PDF write error: {e}")
 
-    if pdf_written:
-        try:
-            with open(os.path.join(PDF_DIR, f"latest_{_safe(file_number)}.txt"), "w", encoding="utf-8") as _mf:
-                _mf.write(os.path.basename(pdf_path))
-        except Exception:
-            pass
-
-    pdf_url = f"/download-pdf?filename={urllib.parse.quote(os.path.basename(pdf_filename))}" if pdf_written else ""
+    pdf_url = f"/download-pdf?filename={pdf_filename}"
 
     # -----------------------
     # Email — info-only (attach PDF)
@@ -4604,8 +4564,7 @@ async def vision_review(
         "web_summary": result["summary_brief"],
         "gpt_output": result["summary_markdown"],
         "pdf_url": pdf_url,
-        "pdf_filename": pdf_filename if pdf_written else "",
-        "pdf_status": "ready" if pdf_written else "not_created"
+        "pdf_filename": pdf_filename
     }
 
     # -----------------------
@@ -4613,55 +4572,21 @@ async def vision_review(
     # -----------------------
 @app.get("/download-pdf")
 async def download_pdf(file_number: Optional[str] = None, filename: Optional[str] = None):
-    """Download the newest matching generated PDF from PDF_DIR.
-    Accepts the exact returned filename or a file_number. This prevents false 404s
-    caused by URL encoding, safe-name normalization, or filename/file_number mismatch.
-    """
-    try:
-        search_dirs: List[str] = []
-        for d in (PDF_DIR, "/tmp"):
-            if d and os.path.isdir(d) and d not in search_dirs:
-                search_dirs.append(d)
+    if filename:
+        safe = _safe(filename)
+        path = os.path.join(PDF_DIR, safe)
+        if os.path.exists(path):
+            return FileResponse(path=path, media_type="application/pdf", filename=safe)
+        return JSONResponse(status_code=404, content={"detail": "Not Found"})
+    if not file_number:
+        return JSONResponse(status_code=400, content={"detail": "Missing query param 'filename' or 'file_number'"})
+    safe_num = _safe(file_number)
+    candidates = glob.glob(os.path.join(PDF_DIR, f"*{safe_num}*.pdf"))
+    if not candidates:
+        return JSONResponse(status_code=404, content={"detail": "Not Found"})
+    latest = max(candidates, key=lambda p: os.path.getmtime(p))
+    return FileResponse(path=latest, media_type="application/pdf", filename=os.path.basename(latest))
 
-        candidates: List[str] = []
 
-        if filename:
-            raw_name = os.path.basename(str(filename))
-            names: List[str] = []
-            for nm in (raw_name, urllib.parse.unquote(raw_name), _safe(raw_name), _safe(urllib.parse.unquote(raw_name))):
-                if nm and nm not in names:
-                    names.append(nm)
-            for d in search_dirs:
-                for nm in names:
-                    pth = os.path.join(d, nm)
-                    if os.path.exists(pth) and os.path.isfile(pth):
-                        candidates.append(pth)
 
-            if not candidates:
-                safe_stem = os.path.splitext(_safe(urllib.parse.unquote(raw_name)))[0]
-                for d in search_dirs:
-                    candidates.extend(glob.glob(os.path.join(d, f"*{safe_stem}*.pdf")))
 
-        if file_number:
-            safe_num = _safe(str(file_number))
-            manifest = os.path.join(PDF_DIR, f"latest_{safe_num}.txt")
-            if os.path.exists(manifest):
-                try:
-                    mf_name = os.path.basename(open(manifest, "r", encoding="utf-8").read().strip())
-                    mf_path = os.path.join(PDF_DIR, mf_name)
-                    if os.path.exists(mf_path) and os.path.isfile(mf_path):
-                        candidates.append(mf_path)
-                except Exception:
-                    pass
-            for d in search_dirs:
-                candidates.extend(glob.glob(os.path.join(d, f"*{safe_num}*.pdf")))
-
-        candidates = [pth for pth in candidates if pth and os.path.exists(pth) and os.path.isfile(pth) and pth.lower().endswith(".pdf")]
-        if not candidates:
-            return JSONResponse(status_code=404, content={"detail": "Not Found"})
-
-        latest = max(candidates, key=lambda pth: os.path.getmtime(pth))
-        return FileResponse(path=latest, media_type="application/pdf", filename=os.path.basename(latest))
-    except Exception as e:
-        logging.error(f"PDF download error: {e}")
-        return JSONResponse(status_code=500, content={"detail": "PDF download error"})
