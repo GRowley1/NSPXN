@@ -1,8 +1,11 @@
 import json
+import os
+import glob
 import re
 from urllib.parse import parse_qs
 
 from fastapi import HTTPException
+from fastapi.responses import FileResponse
 
 from auth_phase1 import (
     auth_app,
@@ -29,6 +32,97 @@ _ALLOWED_CORS_ORIGINS = {
 }
 
 MAX_UPLOAD_BODY_BYTES = 25 * 1024 * 1024  # allow uploads up to 25 MB
+
+PDF_DIR = os.getenv("PDF_DIR", "/tmp")
+
+
+def _safe_download_token(value: str) -> str:
+    """Match the locked modules' safe filename behavior closely enough for downloads."""
+    return re.sub(r"[^\w.\-]+", "-", (value or "").strip()).strip("-_. ")
+
+
+def _query_param(scope, name: str) -> str:
+    try:
+        raw_qs = scope.get("query_string", b"").decode("utf-8", "ignore")
+        parsed = parse_qs(raw_qs, keep_blank_values=True)
+        return str((parsed.get(name) or [""])[0]).strip()
+    except Exception:
+        return ""
+
+
+def _file_response_cors_headers(scope) -> dict:
+    headers = {}
+    for k, v in _cors_headers(scope):
+        headers[k.decode("latin1")] = v.decode("latin1")
+    return headers
+
+
+def _find_pdf_for_download(file_number: str = "", filename: str = "") -> str:
+    """Find a generated report PDF from the shared PDF_DIR.
+
+    This keeps /download-pdf independent from which locked module created the PDF.
+    It first honors an exact filename, then searches by File #, then falls back to
+    a very recent generated PDF only when there is a single clear newest candidate.
+    """
+    base_dir = PDF_DIR or "/tmp"
+
+    if filename:
+        safe_name = _safe_download_token(filename)
+        direct = os.path.join(base_dir, safe_name)
+        if os.path.exists(direct) and os.path.isfile(direct):
+            return direct
+
+    safe_num = _safe_download_token(file_number)
+    if safe_num:
+        candidates = glob.glob(os.path.join(base_dir, f"*{safe_num}*.pdf"))
+        candidates = [p for p in candidates if os.path.isfile(p)]
+        if candidates:
+            return max(candidates, key=lambda p: os.path.getmtime(p))
+
+    # Last-resort safety net for the frontend pattern that calls
+    # /download-pdf?file_number=... even when the actual generated filename differs.
+    # Limit to very recent PDFs so we do not serve stale reports.
+    try:
+        import time
+        now = time.time()
+        recent = [
+            p for p in glob.glob(os.path.join(base_dir, "*.pdf"))
+            if os.path.isfile(p) and (now - os.path.getmtime(p)) <= 15 * 60
+        ]
+        if len(recent) == 1:
+            return recent[0]
+        if recent:
+            return max(recent, key=lambda p: os.path.getmtime(p))
+    except Exception:
+        pass
+
+    return ""
+
+
+async def _serve_shared_pdf_download(scope, receive, send):
+    filename = _query_param(scope, "filename")
+    file_number = (
+        _query_param(scope, "file_number")
+        or _query_param(scope, "file-number")
+        or _query_param(scope, "fileNumber")
+    )
+
+    if not filename and not file_number:
+        await _send_json(send, 400, {"detail": "Missing query param 'filename' or 'file_number'"}, scope=scope)
+        return
+
+    path = _find_pdf_for_download(file_number=file_number, filename=filename)
+    if not path:
+        await _send_json(send, 404, {"detail": "Not Found"}, scope=scope)
+        return
+
+    resp = FileResponse(
+        path=path,
+        media_type="application/pdf",
+        filename=os.path.basename(path),
+        headers=_file_response_cors_headers(scope),
+    )
+    await resp(scope, receive, send)
 
 
 def _extract_simple_form_field(body: bytes, content_type: str, field_name: str) -> str:
@@ -250,7 +344,10 @@ class IntentRouterApp:
             return
 
         if path == "/download-pdf":
-            await self.comprehensive(scope, receive, send)
+            # Download from the shared PDF_DIR instead of assuming the comprehensive app
+            # owns the file. This prevents 404s when the selected request type/module
+            # generated the report under a different locked app or filename.
+            await _serve_shared_pdf_download(scope, receive, send)
             return
 
         body = b""
