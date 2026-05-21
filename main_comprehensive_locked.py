@@ -3377,26 +3377,27 @@ async def vision_review(
         return s
 
     pdf = FPDF(); pdf.add_page()
-    # --- NSPXN Branded Top Header (logo2.png left + white report title on black box) ---
+    # --- NSPXN Branded Top Section (black box + logo2.png + white report header) ---
     try:
-        _report_title = "NSPXN.com Audit Report" if str(ai_intent or "").strip().lower() == "comprehensive" else "NSPXN.com Condition Report"
+        _header_title = "NSPXN.com Condition Report" if ai_intent == "damage_report_from_photos" else "NSPXN.com Audit Report"
         pdf.set_fill_color(0, 0, 0)
         pdf.rect(0, 0, pdf.w, 34, "F")
-
         _title_x = 58
-        logo_path = os.path.join(os.path.dirname(__file__), "logo2.png")
-        if os.path.exists(logo_path):
-            pdf.image(logo_path, x=10, y=6, w=40)
+        _logo_path = os.path.join(os.path.dirname(__file__), "logo2.png")
+        if os.path.exists(_logo_path):
+            try:
+                pdf.image(_logo_path, x=10, y=6, w=40)
+            except Exception:
+                _title_x = 10
         else:
             _title_x = 10
-
         pdf.set_text_color(255, 255, 255)
         try:
             pdf.set_font("Helvetica", "B", 13)
         except Exception:
             pdf.set_font("Arial", "B", 13)
         pdf.set_xy(_title_x, 11)
-        pdf.cell(pdf.w - _title_x - 10, 9, _pdf_sanitize(_report_title), ln=False, align="L")
+        pdf.cell(pdf.w - _title_x - 10, 9, _pdf_sanitize(_header_title), ln=False, align="L")
         pdf.set_text_color(0, 0, 0)
         pdf.set_y(40)
     except Exception:
@@ -4210,15 +4211,12 @@ async def vision_review(
     
         # Top report header is rendered once above as the black NSPXN branded box.
         try:
-            if pdf.get_y() < 40:
-                pdf.set_y(40)
-        except Exception:
-            pass
-        try:
             pdf.set_font("Helvetica", "", 11)
         except Exception:
             pdf.set_font("Arial", "", 11)
-
+        if pdf.get_y() < 40:
+            pdf.set_y(40)
+    
         # Vehicle Identification (fixed PDF block)
         _section_bar("VEHICLE IDENTIFICATION")
         _summary_md_raw = (result.get("summary_markdown") or "").strip()
@@ -4322,14 +4320,11 @@ async def vision_review(
 
         # Top report header is rendered once above as the black NSPXN branded box.
         try:
-            if pdf.get_y() < 40:
-                pdf.set_y(40)
-        except Exception:
-            pass
-        try:
             pdf.set_font("Helvetica", "", 10)
         except Exception:
             pdf.set_font("Arial", "", 10)
+        if pdf.get_y() < 40:
+            pdf.set_y(40)
 
         _comp_section_bar("Vehicle Identification")
         mc(f"File Number: {file_number}")
