@@ -4604,9 +4604,9 @@ async def vision_review(
         "pdf_filename": pdf_filename if pdf_exists else ""
     }
 
-    # -----------------------
+# -----------------------
 # PDF download
-    # -----------------------
+# -----------------------
 @app.get("/download-pdf")
 async def download_pdf(file_number: Optional[str] = None, filename: Optional[str] = None):
     if filename:
@@ -4623,7 +4623,3 @@ async def download_pdf(file_number: Optional[str] = None, filename: Optional[str
         return JSONResponse(status_code=404, content={"detail": "Not Found"})
     latest = max(candidates, key=lambda p: os.path.getmtime(p))
     return FileResponse(path=latest, media_type="application/pdf", filename=os.path.basename(latest))
-
-
-
-
