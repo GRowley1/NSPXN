@@ -46,9 +46,11 @@ log = logging.getLogger("nspxn")
 log.info(f"Using CLIENT_RULES_DIR={CLIENT_RULES_DIR}")
 
 # Use selected model everywhere
-MODEL = os.getenv("OAI_MODEL") or os.getenv("OPENAI_MODEL") or "gpt-5.2"
+MODEL = os.getenv("OAI_MODEL") or os.getenv("OPENAI_MODEL") or "gpt-4.1"
+
 # GPT-5.x models use max_completion_tokens; GPT-4.x uses max_tokens
-_token_kw = "max_completion_tokens"
+IS_GPT5 = MODEL.lower().startswith("gpt-5")
+_TOKEN_PARAM = "max_completion_tokens" if IS_GPT5 else "max_tokens"
 
 if not os.getenv("OPENAI_API_KEY"):
     raise RuntimeError("OPENAI_API_KEY missing")
@@ -1235,8 +1237,7 @@ async def vision_review(
                     {"role": "system", "content": "You extract VINs from vehicle door-jamb certification labels. JSON only."},
                     {"role": "user", "content": [{"type": "text", "text": prompt}, _image_part_from_bytes(raw_bytes)]},
                 ],
-                max_completion_tokens=300,
-                temperature=0,
+                **{_TOKEN_PARAM: 300},                temperature=0,
                 response_format={"type": "json_object"},
             )
             raw_v = (rsp_v.choices[0].message.content or "").strip()
@@ -1623,8 +1624,7 @@ async def vision_review(
             model=MODEL,
             messages=[{"role":"system","content": SYSTEM},
                       {"role":"user","content": parts_payload}],
-            max_completion_tokens=max_tokens,
-            temperature=0,
+            **{_TOKEN_PARAM: max_tokens},            temperature=0,
             top_p=1,
             presence_penalty=0,
             frequency_penalty=0,
@@ -1635,8 +1635,7 @@ async def vision_review(
             model=MODEL,
             messages=[{"role":"system","content": SYSTEM},
                       {"role":"user","content": parts_payload}],
-            max_completion_tokens=max_tokens,
-            temperature=0,
+            **{_TOKEN_PARAM: max_tokens},            temperature=0,
             top_p=1,
             presence_penalty=0,
             frequency_penalty=0,
@@ -1675,8 +1674,7 @@ async def vision_review(
             _rsp = client.chat.completions.create(
                 model=MODEL,
                 messages=[{"role": "system", "content": stage_system}, {"role": "user", "content": stage_parts}],
-                max_completion_tokens=stage_tokens,
-                temperature=0,
+                **{_TOKEN_PARAM: stage_tokens},                temperature=0,
                 top_p=1,
                 presence_penalty=0,
                 frequency_penalty=0,
@@ -1686,8 +1684,7 @@ async def vision_review(
             _rsp = client.chat_completions.create(  # type: ignore[attr-defined]
                 model=MODEL,
                 messages=[{"role": "system", "content": stage_system}, {"role": "user", "content": stage_parts}],
-                max_completion_tokens=stage_tokens,
-                temperature=0,
+                **{_TOKEN_PARAM: stage_tokens},                temperature=0,
                 top_p=1,
                 presence_penalty=0,
                 frequency_penalty=0,
@@ -1854,8 +1851,7 @@ async def vision_review(
                 model=MODEL,
                 messages=[{"role": "system", "content": SYSTEM},
                           {"role": "user", "content": shrunk}],
-                max_completion_tokens=retry_tokens,
-                temperature=0,
+                **{_TOKEN_PARAM: retry_tokens},                temperature=0,
                 response_format={"type": "json_object"}
             )
             raw2 = (rsp2.choices[0].message.content or "")
@@ -1884,16 +1880,14 @@ async def vision_review(
                 fix_rsp = client.chat_completions.create(  # type: ignore[attr-defined]
                     model=MODEL,
                     messages=fix_prompt,
-                    max_completion_tokens=max_tokens,
-                    temperature=0,
+                    **{_TOKEN_PARAM: max_tokens},                    temperature=0,
                     response_format={"type":"json_object"}
                 )
             except AttributeError:
                 fix_rsp = client.chat.completions.create(
                     model=MODEL,
                     messages=fix_prompt,
-                    max_completion_tokens=max_tokens,
-                    temperature=0,
+                    **{_TOKEN_PARAM: max_tokens},                    temperature=0,
                     response_format={"type":"json_object"}
                 )
             fixed = (fix_rsp.choices[0].message.content or "")
@@ -1923,8 +1917,7 @@ async def vision_review(
                     model=MODEL,
                     messages=[{"role":"system","content": SYSTEM},
                               {"role":"user","content": direct_parts}],
-                    max_completion_tokens=min(3200, max_tokens + 700),
-                    temperature=0,
+                    **{_TOKEN_PARAM: min(3200, max_tokens + 700)},                    temperature=0,
                     top_p=1,
                     presence_penalty=0,
                     frequency_penalty=0,
@@ -2256,8 +2249,7 @@ async def vision_review(
                         model=MODEL,
                         messages=[{"role": "system", "content": SYSTEM},
                                   {"role": "user", "content": retry_parts}],
-                        max_completion_tokens=retry_tokens,
-                        temperature=0,
+                        **{_TOKEN_PARAM: retry_tokens},                        temperature=0,
                         top_p=1,
                         presence_penalty=0,
                         frequency_penalty=0,
@@ -2268,8 +2260,7 @@ async def vision_review(
                         model=MODEL,
                         messages=[{"role": "system", "content": SYSTEM},
                                   {"role": "user", "content": retry_parts}],
-                        max_completion_tokens=retry_tokens,
-                        temperature=0,
+                        **{_TOKEN_PARAM: retry_tokens},                        temperature=0,
                         top_p=1,
                         presence_penalty=0,
                         frequency_penalty=0,
