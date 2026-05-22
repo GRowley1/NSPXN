@@ -4,7 +4,7 @@ from fastapi import FastAPI, File, UploadFile, Form, Request, Response
 from fastapi.responses import JSONResponse, FileResponse
 from fastapi.middleware.cors import CORSMiddleware
 from typing import List, Dict, Any, Optional
-import os, io, re, json, base64, logging, zipfile, glob, uuid
+import os, io, re, json, base64, logging, zipfile, glob, uuid, gc
 import urllib.parse, urllib.request
 import smtplib  # email transport
 from email.message import EmailMessage
@@ -53,7 +53,7 @@ _token_kw = "max_completion_tokens"
 if not os.getenv("OPENAI_API_KEY"):
     raise RuntimeError("OPENAI_API_KEY missing")
 try:
-    client = OpenAI(api_key=os.environ["OPENAI_API_KEY"], timeout=120.0, max_retries=0)
+    client = OpenAI(api_key=os.environ["OPENAI_API_KEY"], timeout=120.0, max_retries=1)
 except TypeError:
     # Backwards-compatible init for older openai-python versions
     client = OpenAI(api_key=os.environ["OPENAI_API_KEY"])
@@ -768,15 +768,19 @@ def _qr_decode_vin_from_pil(im: Image.Image) -> Optional[str]:
 def _add_bytes(parts: List[Dict[str,Any]], files_seen: List[str], photo_index: Optional[List[str]], thumb_paths: Optional[List[str]], raw: bytes, fname: str, used: int, max_images: int, pdf_text_fulls: Optional[List[str]] = None, ocr_pairs: Optional[List[Dict[str, Any]]] = None) -> int:
     low = fname.lower()
     if low.endswith(SUPPORTED_PDF_EXTS) and used < max_images:
+        pages = []
         try:
-            pages = convert_from_bytes(raw, dpi=200)
-            files_seen.append(f"{fname} (pdf, {len(pages)} page(s))")
+            page_limit = max(0, max_images - used)
+            # Memory guard: rasterize only pages that can be sent to the model, at lower DPI.
+            # This avoids converting a full 40+ page PDF into high-resolution images in RAM.
+            pages = convert_from_bytes(raw, dpi=150, first_page=1, last_page=page_limit)
+            files_seen.append(f"{fname} (pdf, {len(pages)} page(s) rasterized)")
             _maybe_extract_pdf_text(raw, fname, parts, files_seen, pdf_text_fulls=pdf_text_fulls)
-            OCR_PAGE_CAP = 100
+            OCR_PAGE_CAP = 24
             ocr_collected = []
-            for idx, im in enumerate(pages[:max_images - used]):
+            for idx, im in enumerate(pages):
                 b = io.BytesIO()
-                im.save(b, format="JPEG", quality=75, optimize=True)
+                im.save(b, format="JPEG", quality=70, optimize=True)
                 parts.append(_image_part_from_bytes(b.getvalue()))
                 used += 1
                 if photo_index is not None:
@@ -785,12 +789,25 @@ def _add_bytes(parts: List[Dict[str,Any]], files_seen: List[str], photo_index: O
                     txt = _maybe_ocr_image_text(im)
                     if txt:
                         ocr_collected.append(txt)
+                try:
+                    im.close()
+                except Exception:
+                    pass
             if ocr_collected:
                 parts.insert(0, {"type": "text", "text": ("\n".join(ocr_collected))[:12000]})
                 files_seen.append(f"{fname} (ocr text extracted)")
         except Exception as e:
             logging.warning(f"pdf2image failed for {fname}: {e}")
             files_seen.append(f"{fname} (pdf, could not be converted)")
+        finally:
+            try:
+                pages.clear()
+            except Exception:
+                pass
+            try:
+                gc.collect()
+            except Exception:
+                pass
     elif low.endswith(SUPPORTED_IMAGE_EXTS) and used < max_images:
         im_ref = None
         raw_for_vin = None
@@ -803,7 +820,8 @@ def _add_bytes(parts: List[Dict[str,Any]], files_seen: List[str], photo_index: O
             # Secondary confirmation: attempt local QR/barcode decode from the ORIGINAL image (before resizing).
             qr_vin = _qr_decode_vin_from_pil(im_ref)
             # Use the same preprocessing for ZIP and loose JPGs (keep higher res for small label text).
-            max_dim = 2048
+            # Memory guard: cap loose/ZIP photos before base64 encoding for the model.
+            max_dim = 1800
             if max(im.size) > max_dim:
                 scale = max_dim / float(max(im.size))
                 im = im.resize((int(im.width * scale), int(im.height * scale)))
@@ -1522,47 +1540,6 @@ async def vision_review(
     }
     max_tokens = MAX_TOKENS_BY_INTENT.get(ai_intent, 1500)
 
-    def _openai_handled_error_response(exc: Exception) -> JSONResponse:
-        """Return a clean handled response for OpenAI/API throttling failures.
-        Keep status_code=200 so the existing frontend can display the message instead of showing a generic network failure.
-        """
-        err_text = str(exc)
-        status_code = int(getattr(exc, "status_code", 0) or 0)
-        is_429 = status_code == 429 or "429" in err_text or "Too Many Requests" in err_text
-        is_quota = "insufficient_quota" in err_text or "exceeded your current quota" in err_text.lower()
-        provider_error = "insufficient_quota" if is_quota else ("rate_limit" if is_429 else "api_error")
-        detail = (
-            "OpenAI rejected the request as insufficient_quota. Verify the exact OPENAI_API_KEY and organization/project configured on Render."
-            if is_quota else
-            "OpenAI rate limit was reached for the configured API key/project. Retry shortly or reduce request size/concurrency."
-            if is_429 else
-            "OpenAI API request failed before the report could be generated."
-        )
-        log.error("OPENAI HANDLED FAILURE | provider_error=%s | status=%s | detail=%s", provider_error, status_code or "unknown", err_text[:1000])
-        return JSONResponse(
-            status_code=200,
-            content={
-                "status": "blocked",
-                "error": "OPENAI REQUEST BLOCKED",
-                "detail": detail,
-                "provider": "openai",
-                "provider_error": provider_error,
-                "provider_status_code": status_code or None,
-                "file_number": file_number,
-                "request_type": req_label,
-            },
-        )
-
-    def _looks_like_openai_failure(exc: Exception) -> bool:
-        err_text = str(exc)
-        return (
-            isinstance(exc, (RateLimitError, APIStatusError))
-            or int(getattr(exc, "status_code", 0) or 0) in {400, 401, 403, 408, 409, 429, 500, 502, 503, 504}
-            or "api.openai.com" in err_text
-            or "Too Many Requests" in err_text
-            or "insufficient_quota" in err_text
-        )
-
     def _stage_blank(v: Any) -> bool:
         s = str(v or "").strip()
         return (not s) or (s.upper() in {"N/A", "NA", "NONE", "NULL", "UNKNOWN"})
@@ -1632,36 +1609,29 @@ async def vision_review(
     # Call GPT and parse JSON (JSON hardened)
     # Prefer the canonical SDK path (client.chat.completions). Keep fallback for older SDKs.
     try:
-        try:
-            rsp = client.chat.completions.create(
-                model=MODEL,
-                messages=[{"role":"system","content": SYSTEM},
-                          {"role":"user","content": parts_payload}],
-                max_completion_tokens=max_tokens,
-                temperature=0,
-                top_p=1,
-                presence_penalty=0,
-                frequency_penalty=0,
-                response_format={"type":"json_object"},
-            )
-        except AttributeError:
-            rsp = client.chat_completions.create(  # type: ignore[attr-defined]
-                model=MODEL,
-                messages=[{"role":"system","content": SYSTEM},
-                          {"role":"user","content": parts_payload}],
-                max_completion_tokens=max_tokens,
-                temperature=0,
-                top_p=1,
-                presence_penalty=0,
-                frequency_penalty=0,
-                response_format={"type":"json_object"},
-            )
-    except (RateLimitError, APIStatusError) as e:
-        return _openai_handled_error_response(e)
-    except Exception as e:
-        if _looks_like_openai_failure(e):
-            return _openai_handled_error_response(e)
-        raise
+        rsp = client.chat.completions.create(
+            model=MODEL,
+            messages=[{"role":"system","content": SYSTEM},
+                      {"role":"user","content": parts_payload}],
+            max_completion_tokens=max_tokens,
+            temperature=0,
+            top_p=1,
+            presence_penalty=0,
+            frequency_penalty=0,
+            response_format={"type":"json_object"},
+        )
+    except AttributeError:
+        rsp = client.chat_completions.create(  # type: ignore[attr-defined]
+            model=MODEL,
+            messages=[{"role":"system","content": SYSTEM},
+                      {"role":"user","content": parts_payload}],
+            max_completion_tokens=max_tokens,
+            temperature=0,
+            top_p=1,
+            presence_penalty=0,
+            frequency_penalty=0,
+            response_format={"type":"json_object"},
+        )
 
     # --- Hardened JSON parse helper
     def _try_parse_json(raw_text: str):
@@ -4599,6 +4569,34 @@ async def vision_review(
             if _score_header:
                 response.headers["X-NSPXN-Compliance-Score"] = str(_score_header)
                 response.headers["X-NSPXN-Score-Source"] = "main_comprehensive_locked.result.compliance_score"
+    except Exception:
+        pass
+
+    # Memory guard: release large image/base64/OCR/PDF objects before returning the JSON response.
+    # This keeps Render from holding converted pages, base64 payloads, and thumbnail objects after report generation.
+    try:
+        for _thumb in list(thumbnail_paths or []):
+            try:
+                if _thumb and os.path.exists(_thumb):
+                    os.remove(_thumb)
+            except Exception:
+                pass
+    except Exception:
+        pass
+    try:
+        for _name in (
+            "parts", "parts_payload", "ocr_pairs", "uploaded_text_blobs", "pdf_text_fulls",
+            "_text_parts", "_image_parts", "_stage_text_parts", "_stage_image_parts",
+            "_text_parts_retry", "_image_parts_retry", "shrunk", "direct_parts", "retry_parts",
+            "thumbnail_paths"
+        ):
+            _obj = locals().get(_name)
+            if isinstance(_obj, list):
+                _obj.clear()
+        for _name in ("raw", "raw2", "fixed", "direct_raw", "raw_retry", "pdf_bytes", "data_bytes"):
+            if _name in locals():
+                locals()[_name] = None
+        gc.collect()
     except Exception:
         pass
 
