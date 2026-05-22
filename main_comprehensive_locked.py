@@ -4,7 +4,7 @@ from fastapi import FastAPI, File, UploadFile, Form, Request, Response
 from fastapi.responses import JSONResponse, FileResponse
 from fastapi.middleware.cors import CORSMiddleware
 from typing import List, Dict, Any, Optional
-import os, io, re, json, base64, logging, zipfile, glob, uuid
+import os, io, re, json, base64, logging, zipfile, glob, uuid, gc
 import urllib.parse, urllib.request
 import smtplib  # email transport
 from email.message import EmailMessage
@@ -28,7 +28,7 @@ try:
 except Exception:
     _OCR_ENABLED = False
 
-from openai import OpenAI, RateLimitError, APIStatusError
+from openai import OpenAI
 
 # --- PII Redaction (Presidio) ---
 from presidio_analyzer import AnalyzerEngine, Pattern, PatternRecognizer, RecognizerResult
@@ -40,7 +40,6 @@ from presidio_anonymizer.entities import OperatorConfig  # required for anonymiz
 # -----------------------
 PDF_DIR = os.getenv("PDF_DIR", "/tmp"); os.makedirs(PDF_DIR, exist_ok=True)
 CLIENT_RULES_DIR = os.getenv("CLIENT_RULES_DIR", "client_rules")
-NSPXN_LOGO_PATH = os.getenv("NSPXN_LOGO_PATH", os.path.join(os.path.dirname(__file__), "logo2.png"))
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s")
 log = logging.getLogger("nspxn")
@@ -54,7 +53,7 @@ _token_kw = "max_completion_tokens"
 if not os.getenv("OPENAI_API_KEY"):
     raise RuntimeError("OPENAI_API_KEY missing")
 try:
-    client = OpenAI(api_key=os.environ["OPENAI_API_KEY"], timeout=120.0, max_retries=0)
+    client = OpenAI(api_key=os.environ["OPENAI_API_KEY"], timeout=120.0, max_retries=1)
 except TypeError:
     # Backwards-compatible init for older openai-python versions
     client = OpenAI(api_key=os.environ["OPENAI_API_KEY"])
@@ -792,6 +791,19 @@ def _add_bytes(parts: List[Dict[str,Any]], files_seen: List[str], photo_index: O
         except Exception as e:
             logging.warning(f"pdf2image failed for {fname}: {e}")
             files_seen.append(f"{fname} (pdf, could not be converted)")
+        finally:
+            try:
+                pages.clear()  # type: ignore[name-defined]
+            except Exception:
+                pass
+            try:
+                del pages  # type: ignore[name-defined]
+            except Exception:
+                pass
+            try:
+                gc.collect()
+            except Exception:
+                pass
     elif low.endswith(SUPPORTED_IMAGE_EXTS) and used < max_images:
         im_ref = None
         raw_for_vin = None
@@ -819,15 +831,21 @@ def _add_bytes(parts: List[Dict[str,Any]], files_seen: List[str], photo_index: O
         if photo_index is not None:
             photo_index.append(fname)
         files_seen.append(f"{fname} (photo)")
-        # Keep a local copy of each uploaded photo for the PDF thumbnail appendix page.
-        if thumb_paths is not None:
+        # Memory guard: thumbnail storage is disabled by default for Comprehensive.
+        # Full PDF/report behavior remains unchanged unless NSPXN_ENABLE_PHOTO_THUMBNAILS=1.
+        if thumb_paths is not None and NSPXN_ENABLE_PHOTO_THUMBNAILS:
             try:
                 im_save = im_ref if im_ref is not None else Image.open(io.BytesIO(raw)).convert("RGB")
-                im_save.thumbnail((900, 900))
+                im_save.thumbnail((650, 650))
                 thumb_name = f"thumb_{uuid.uuid4().hex}.jpg"
                 thumb_path = os.path.join(PDF_DIR, thumb_name)
-                im_save.save(thumb_path, format="JPEG", quality=75, optimize=True)
+                im_save.save(thumb_path, format="JPEG", quality=60, optimize=True)
                 thumb_paths.append(thumb_path)
+                try:
+                    if im_save is not im_ref:
+                        im_save.close()
+                except Exception:
+                    pass
             except Exception:
                 pass
         if im_ref is not None:
@@ -840,6 +858,15 @@ def _add_bytes(parts: List[Dict[str,Any]], files_seen: List[str], photo_index: O
             if txt:
                 parts.insert(0, {"type":"text", "text": txt[:12000]})
                 files_seen.append(f"{fname} (ocr text extracted)")
+        try:
+            if im_ref is not None:
+                im_ref.close()
+        except Exception:
+            pass
+        try:
+            im.close()  # type: ignore[name-defined]
+        except Exception:
+            pass
     elif low.endswith(SUPPORTED_DOCX_EXTS):
         try:
             text = "\n".join([p.text for p in Document(io.BytesIO(raw)).paragraphs if p.text.strip()])
@@ -1018,7 +1045,7 @@ async def vision_review(
     if not files:
         return JSONResponse(status_code=400, content={"error": "Missing required upload: files"})
     vin_candidates: List[str] = []  # reserved (filenames not used)
-    MAX_IMAGES = 48
+    MAX_IMAGES = max(1, min(48, NSPXN_MAX_MODEL_IMAGES))
     used = 0
     # Coalesce Add\'l Notes from multiple possible frontend field names
     ai_notes_used = ((ai_notes or "").strip() or (addl_notes or "").strip() or (additional_notes or "").strip() or (notes or "").strip())
@@ -1589,80 +1616,32 @@ async def vision_review(
 
     staged_guideline_markdown = ""
 
-    def _openai_handled_error_response(exc: Exception) -> JSONResponse:
-        """Return a clean handled response for OpenAI/API throttling failures.
-        Keep status_code=200 so the existing frontend can display the message instead of showing a generic network failure.
-        """
-        err_text = str(exc)
-        status_code = int(getattr(exc, "status_code", 0) or 0)
-        is_429 = status_code == 429 or "429" in err_text or "Too Many Requests" in err_text
-        is_quota = "insufficient_quota" in err_text or "exceeded your current quota" in err_text.lower()
-        provider_error = "insufficient_quota" if is_quota else ("rate_limit" if is_429 else "api_error")
-        detail = (
-            "OpenAI rejected the request as insufficient_quota. Verify the exact OPENAI_API_KEY and organization/project configured on Render."
-            if is_quota else
-            "OpenAI rate limit was reached for the configured API key/project. Retry shortly or reduce request size/concurrency."
-            if is_429 else
-            "OpenAI API request failed before the report could be generated."
-        )
-        log.error("OPENAI HANDLED FAILURE | provider_error=%s | status=%s | detail=%s", provider_error, status_code or "unknown", err_text[:1000])
-        return JSONResponse(
-            status_code=200,
-            content={
-                "status": "blocked",
-                "error": "OPENAI REQUEST BLOCKED",
-                "detail": detail,
-                "provider": "openai",
-                "provider_error": provider_error,
-                "provider_status_code": status_code or None,
-                "file_number": file_number,
-                "request_type": req_label,
-            },
-        )
-
-    def _looks_like_openai_failure(exc: Exception) -> bool:
-        err_text = str(exc)
-        return (
-            isinstance(exc, (RateLimitError, APIStatusError))
-            or int(getattr(exc, "status_code", 0) or 0) in {400, 401, 403, 408, 409, 429, 500, 502, 503, 504}
-            or "api.openai.com" in err_text
-            or "Too Many Requests" in err_text
-            or "insufficient_quota" in err_text
-        )
-
     # Call GPT and parse JSON (JSON hardened)
     # Prefer the canonical SDK path (client.chat.completions). Keep fallback for older SDKs.
     try:
-        try:
-            rsp = client.chat.completions.create(
-                model=MODEL,
-                messages=[{"role":"system","content": SYSTEM},
-                          {"role":"user","content": parts_payload}],
-                max_completion_tokens=max_tokens,
-                temperature=0,
-                top_p=1,
-                presence_penalty=0,
-                frequency_penalty=0,
-                response_format={"type":"json_object"},
-            )
-        except AttributeError:
-            rsp = client.chat_completions.create(  # type: ignore[attr-defined]
-                model=MODEL,
-                messages=[{"role":"system","content": SYSTEM},
-                          {"role":"user","content": parts_payload}],
-                max_completion_tokens=max_tokens,
-                temperature=0,
-                top_p=1,
-                presence_penalty=0,
-                frequency_penalty=0,
-                response_format={"type":"json_object"},
-            )
-    except (RateLimitError, APIStatusError) as e:
-        return _openai_handled_error_response(e)
-    except Exception as e:
-        if _looks_like_openai_failure(e):
-            return _openai_handled_error_response(e)
-        raise
+        rsp = client.chat.completions.create(
+            model=MODEL,
+            messages=[{"role":"system","content": SYSTEM},
+                      {"role":"user","content": parts_payload}],
+            max_completion_tokens=max_tokens,
+            temperature=0,
+            top_p=1,
+            presence_penalty=0,
+            frequency_penalty=0,
+            response_format={"type":"json_object"},
+        )
+    except AttributeError:
+        rsp = client.chat_completions.create(  # type: ignore[attr-defined]
+            model=MODEL,
+            messages=[{"role":"system","content": SYSTEM},
+                      {"role":"user","content": parts_payload}],
+            max_completion_tokens=max_tokens,
+            temperature=0,
+            top_p=1,
+            presence_penalty=0,
+            frequency_penalty=0,
+            response_format={"type":"json_object"},
+        )
 
     # --- Hardened JSON parse helper
     def _try_parse_json(raw_text: str):
@@ -2760,43 +2739,26 @@ async def vision_review(
         return False
 
     def _build_comprehensive_cost_from_estimate_text() -> str:
-        # IMPORTANT: this function runs before the later PDF helper _money2 is defined.
-        # Use the already-defined _money formatter so the cost fallback cannot fail silently
-        # and trigger a false quality-gate block.
-        source_for_totals = (uploaded_text_all or "") + "\n" + str(result.get("summary_markdown") or "")
-        parsed = _extract_estimate_record_totals_strict(source_for_totals)
-
-        # Additional strict fallback for common CCC wording found in summaries/OCR.
-        if parsed.get("estimate_total") is None:
-            m_total = re.search(
-                r"(?i)\b(?:estimate\s+of\s+record\s+)?(?:total\s+cost\s+of\s+repairs|cost\s+of\s+repairs|estimate\s+total|net\s+amount|grand\s+total)\b[^$]{0,80}\$\s*([0-9][0-9,]*(?:\.[0-9]{2})?)",
-                source_for_totals,
-            )
-            if m_total:
-                try:
-                    parsed["estimate_total"] = float(m_total.group(1).replace(",", ""))
-                except Exception:
-                    pass
-
+        parsed = _extract_estimate_record_totals_strict(uploaded_text_all or "")
         bullets: List[str] = []
         if parsed.get("labor_subtotal") is not None:
-            bullets.append(f"- Labor subtotal: {_money(parsed['labor_subtotal'])}")
+            bullets.append(f"- Labor subtotal: {_money2(parsed['labor_subtotal'])}")
         if parsed.get("parts_subtotal") is not None:
-            bullets.append(f"- Parts subtotal: {_money(parsed['parts_subtotal'])}")
+            bullets.append(f"- Parts subtotal: {_money2(parsed['parts_subtotal'])}")
         if parsed.get("paint_materials") is not None:
-            bullets.append(f"- Paint materials: {_money(parsed['paint_materials'])}")
+            bullets.append(f"- Paint materials: {_money2(parsed['paint_materials'])}")
         if parsed.get("tax_rate") is not None:
             bullets.append(f"- Applicable tax rate: {float(parsed['tax_rate']):.3f}%")
         if parsed.get("sales_tax") is not None:
-            bullets.append(f"- Sales tax: {_money(parsed['sales_tax'])}")
+            bullets.append(f"- Sales tax: {_money2(parsed['sales_tax'])}")
         if parsed.get("estimate_total") is not None:
-            bullets.append(f"- Estimate total: {_money(parsed['estimate_total'])}")
+            bullets.append(f"- Estimate total: {_money2(parsed['estimate_total'])}")
         if parsed.get("estimate_total") is not None or len(bullets) >= 2:
             return "## Approximate Repair Cost Breakdown\nEstimate of Record totals (documented):\n" + "\n".join(bullets)
         return (
             "## Approximate Repair Cost Breakdown\n"
-            "Estimate totals were not cleanly extracted into individual subtotal fields from the OCR text. "
-            "The uploaded estimate and model narrative should be reviewed for the final documented repair total before release."
+            "Estimate of record totals could not be extracted with confidence from the uploaded document text on this run. "
+            "Final estimate totals should be confirmed from the estimate summary/totals page before release."
         )
 
     def _professional_summary_fallback() -> str:
@@ -2842,11 +2804,11 @@ async def vision_review(
         )
 
     def _professional_conclusion_fallback() -> str:
-        rules_txt = "client guideline requirements" if client_rules_supplied else "available estimate and photo requirements"
+        rules_txt = "Client guideline requirements" if client_rules_supplied else "available estimate and photo requirements"
         return (
-            "Based on the uploaded estimate, photo/document evidence, and documented review findings, "
-            "final handling should verify estimate-line support, VIN/photo consistency, repair-scope support, estimate totals, "
-            f"and {rules_txt} before release or claim decision."
+            "Based on the uploaded estimate, limited photo evidence, and the documented review findings in this report, "
+            "the file should not be relied upon as fully documented until the detailed condition narrative, estimate totals, and required supporting photos are confirmed. "
+            f"Final handling should verify estimate-line support, VIN/photo consistency, and {rules_txt} before release or claim decision."
         )
 
     try:
@@ -3447,9 +3409,9 @@ async def vision_review(
     pdf.set_left_margin(10); pdf.set_right_margin(10)
 
     try:
-        pdf.add_font("DejaVu","", "DejaVuSans.ttf", uni=True); pdf.set_font(size=11)
+        pdf.add_font("DejaVu","", "DejaVuSans.ttf", uni=True); pdf.set_font(size=9)
     except Exception:
-        pdf.set_font("Arial", size=11)
+        pdf.set_font("Arial", size=9)
 
     def mc(s):
         try:
@@ -3460,54 +3422,14 @@ async def vision_review(
             if not safe.strip():
                 safe = "-"
             pdf.set_x(pdf.l_margin)
-            pdf.multi_cell(effective_w, 6, safe)
+            pdf.multi_cell(effective_w, 4.4, safe)
         except Exception:
             effective_w = pdf.w - pdf.l_margin - pdf.r_margin
             pdf.set_x(pdf.l_margin)
-            pdf.multi_cell(effective_w, 6, (_pdf_sanitize(str(s))[:2000] + " …"))
+            pdf.multi_cell(effective_w, 4.4, (_pdf_sanitize(str(s))[:2000] + " …"))
 
 
     
-
-
-    def _draw_pdf_top_header(title_text: str) -> None:
-        """Draw the locked NSPXN PDF top section: logo left, black box, white report header."""
-        try:
-            pdf.set_fill_color(8, 12, 18)
-            pdf.rect(0, 0, 210, 32, "F")
-            logo_drawn = False
-            try:
-                if NSPXN_LOGO_PATH and os.path.exists(NSPXN_LOGO_PATH):
-                    pdf.image(NSPXN_LOGO_PATH, x=10, y=5, w=82)
-                    logo_drawn = True
-            except Exception:
-                logo_drawn = False
-            if not logo_drawn:
-                pdf.set_text_color(255, 255, 255)
-                pdf.set_font("Arial", "B", 18)
-                pdf.set_xy(10, 8)
-                pdf.cell(0, 8, "NSPXN.com", ln=True)
-            pdf.set_text_color(255, 255, 255)
-            try:
-                pdf.set_font("Helvetica", "B", 13)
-            except Exception:
-                pdf.set_font("Arial", "B", 13)
-            pdf.set_xy(100, 9)
-            pdf.multi_cell(100, 6, _pdf_sanitize(title_text), align="R")
-            pdf.set_text_color(0, 0, 0)
-            try:
-                pdf.set_font("Helvetica", "", 11)
-            except Exception:
-                pdf.set_font("Arial", "", 11)
-            pdf.set_y(38)
-        except Exception:
-            pdf.set_text_color(0, 0, 0)
-            try:
-                pdf.set_font("Helvetica", "B", 16)
-            except Exception:
-                pdf.set_font("Arial", "B", 16)
-            pdf.cell(0, 10, _pdf_sanitize(title_text), ln=True, align="C")
-
     def _money2(x: Optional[float]) -> str:
         try:
             if x is None:
@@ -4286,7 +4208,17 @@ async def vision_review(
                 return m.group(1).replace(",", "") + " mi"
             return None
     
-        _draw_pdf_top_header("NSPXN.com Condition Report")
+        # Title (larger + bold)
+        try:
+            pdf.set_font("Helvetica", "B", 16)
+        except Exception:
+            pdf.set_font("Arial", "B", 16)
+        pdf.cell(0, 10, "NSPXN.com Condition Report", ln=True, align="C")
+        try:
+            pdf.set_font("Helvetica", "", 11)
+        except Exception:
+            pdf.set_font("Arial", "", 11)
+        pdf.ln(2)
     
         # Vehicle Identification (fixed PDF block)
         _section_bar("VEHICLE IDENTIFICATION")
@@ -4375,21 +4307,62 @@ async def vision_review(
                 "DISCLAIMER": (96, 96, 96),
             }
             rgb = cmap.get(t.upper(), (0, 112, 192))
-            pdf.ln(3)
+            pdf.ln(2)
             pdf.set_fill_color(*rgb)
             pdf.set_text_color(255, 255, 255)
             try:
-                pdf.set_font("Helvetica", "B", 12)
+                pdf.set_font("Helvetica", "B", 9)
             except Exception:
-                pdf.set_font("Arial", "B", 12)
-            pdf.cell(0, 8, _pdf_sanitize(t), ln=True, fill=True)
+                pdf.set_font("Arial", "B", 9)
+            pdf.cell(0, 6, _pdf_sanitize(t), ln=True, fill=True)
             pdf.set_text_color(0, 0, 0)
             try:
-                pdf.set_font("Helvetica", "", 11)
+                pdf.set_font("Helvetica", "", 9)
             except Exception:
-                pdf.set_font("Arial", "", 11)
+                pdf.set_font("Arial", "", 9)
 
-        _draw_pdf_top_header("NSPXN.com Audit Report" if _is_comprehensive_pdf else "NSPXN.com Condition Report")
+        # Locked NSPXN top section: full-width black box with logo2.png left and white report title right.
+        try:
+            report_title = "NSPXN.com Audit Report" if _is_comprehensive_pdf else "NSPXN.com Condition Report"
+            x_left = pdf.l_margin
+            y_top = 8
+            box_w = pdf.w - pdf.l_margin - pdf.r_margin
+            box_h = 22
+            pdf.set_y(y_top)
+            pdf.set_fill_color(0, 0, 0)
+            pdf.rect(x_left, y_top, box_w, box_h, style="F")
+
+            logo_x = x_left + 4
+            logo_y = y_top + 3
+            logo_w = 42
+            if NSPXN_LOGO_PATH and os.path.exists(NSPXN_LOGO_PATH):
+                try:
+                    pdf.image(NSPXN_LOGO_PATH, x=logo_x, y=logo_y, w=logo_w)
+                except Exception as e:
+                    log.warning(f"Logo render skipped: {e}")
+            else:
+                log.warning(f"logo2.png not found at {NSPXN_LOGO_PATH}")
+
+            pdf.set_xy(logo_x + logo_w + 8, y_top + 6)
+            pdf.set_text_color(255, 255, 255)
+            try:
+                pdf.set_font("Helvetica", "B", 11)
+            except Exception:
+                pdf.set_font("Arial", "B", 11)
+            pdf.cell(max(20, box_w - logo_w - 16), 9, _pdf_sanitize(report_title), ln=False, align="L")
+            pdf.set_text_color(0, 0, 0)
+            try:
+                pdf.set_font("Helvetica", "", 9)
+            except Exception:
+                pdf.set_font("Arial", "", 9)
+            pdf.set_y(y_top + box_h + 4)
+        except Exception as e:
+            log.warning(f"Top section render skipped: {e}")
+            pdf.set_text_color(0, 0, 0)
+            try:
+                pdf.set_font("Helvetica", "", 9)
+            except Exception:
+                pdf.set_font("Arial", "", 9)
 
         _comp_section_bar("Vehicle Identification")
         mc(f"File Number: {file_number}")
@@ -4619,10 +4592,33 @@ async def vision_review(
     except Exception:
         pass
 
+    def _api_cap(value: Any, limit: int = NSPXN_API_TEXT_LIMIT) -> str:
+        s = str(value or "")
+        if len(s) <= limit:
+            return s
+        return s[:limit].rstrip() + "\n\n[Output shortened for browser stability. Full report is available in the PDF/email.]"
+
+    # Keep the browser response stable and small. Full content is already written to PDF/email above.
+    result_api = dict(result)
+    result_api["summary_markdown"] = _api_cap(result_api.get("summary_markdown"), NSPXN_API_TEXT_LIMIT)
+    result_api["fraud_markdown"] = _api_cap(result_api.get("fraud_markdown"), 5000)
+    result_api["estimated_costs_markdown"] = _api_cap(result_api.get("estimated_costs_markdown"), 5000)
+    result_api["conclusion"] = _api_cap(result_api.get("conclusion"), 4000)
+
+    # Drop heavy in-memory request/model objects before the final JSON body is serialized.
+    try:
+        parts.clear(); parts_payload.clear(); files_seen.clear(); photo_index.clear(); thumbnail_paths.clear(); ocr_pairs.clear(); pdf_text_fulls.clear(); uploaded_text_blobs.clear()
+    except Exception:
+        pass
+    try:
+        gc.collect()
+    except Exception:
+        pass
+
     return {
-        **result,
-        "web_summary": result["summary_brief"],
-        "gpt_output": result["summary_markdown"],
+        **result_api,
+        "web_summary": _api_cap(result_api.get("summary_brief"), 2500),
+        "gpt_output": _api_cap(result_api.get("summary_markdown"), NSPXN_API_TEXT_LIMIT),
         "pdf_url": pdf_url,
         "pdf_filename": pdf_filename
     }
