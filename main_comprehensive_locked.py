@@ -28,7 +28,7 @@ try:
 except Exception:
     _OCR_ENABLED = False
 
-from openai import OpenAI
+from openai import OpenAI, RateLimitError, APIStatusError
 
 # --- PII Redaction (Presidio) ---
 from presidio_analyzer import AnalyzerEngine, Pattern, PatternRecognizer, RecognizerResult
@@ -40,6 +40,9 @@ from presidio_anonymizer.entities import OperatorConfig  # required for anonymiz
 # -----------------------
 PDF_DIR = os.getenv("PDF_DIR", "/tmp"); os.makedirs(PDF_DIR, exist_ok=True)
 CLIENT_RULES_DIR = os.getenv("CLIENT_RULES_DIR", "client_rules")
+NSPXN_MAX_MODEL_IMAGES = int(os.getenv("NSPXN_MAX_MODEL_IMAGES", "48"))
+# Comprehensive currently builds a thumbnail appendix; keep that behavior ON by default.
+NSPXN_ENABLE_PHOTO_THUMBNAILS = os.getenv("NSPXN_ENABLE_PHOTO_THUMBNAILS", "1").strip().lower() not in {"0", "false", "no", "off"}
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s")
 log = logging.getLogger("nspxn")
@@ -54,7 +57,7 @@ _TOKEN_PARAM = "max_completion_tokens" if IS_GPT5 else "max_tokens"
 if not os.getenv("OPENAI_API_KEY"):
     raise RuntimeError("OPENAI_API_KEY missing")
 try:
-    client = OpenAI(api_key=os.environ["OPENAI_API_KEY"], timeout=120.0, max_retries=0)
+    client = OpenAI(api_key=os.environ["OPENAI_API_KEY"], timeout=120.0, max_retries=1)
 except TypeError:
     # Backwards-compatible init for older openai-python versions
     client = OpenAI(api_key=os.environ["OPENAI_API_KEY"])
@@ -907,6 +910,32 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
+@app.exception_handler(RateLimitError)
+async def _openai_rate_limit_handler(request: Request, exc: RateLimitError):
+    log.warning(f"OpenAI rate limit handled: {exc}")
+    return JSONResponse(
+        status_code=429,
+        content={
+            "status": "blocked",
+            "error": "OpenAI rate limit reached while processing this Comprehensive report. Please retry in a few minutes.",
+            "reason": "openai_rate_limit",
+        },
+    )
+
+@app.exception_handler(APIStatusError)
+async def _openai_api_status_handler(request: Request, exc: APIStatusError):
+    status_code = getattr(exc, "status_code", 500) or 500
+    log.warning(f"OpenAI API status handled: {status_code} {exc}")
+    return JSONResponse(
+        status_code=status_code if status_code < 500 else 502,
+        content={
+            "status": "blocked",
+            "error": "OpenAI API request failed. Please retry shortly.",
+            "reason": "openai_api_status",
+            "openai_status_code": status_code,
+        },
+    )
+
 # -----------------------
 # Client Rules: fuzzy finder + endpoints
 # -----------------------
@@ -1251,8 +1280,6 @@ async def vision_review(
                     vv = vv.strip().upper()
                     if re.fullmatch(VIN_PATTERN, vv):
                         return vv
-        except (RateLimitError, APIStatusError):
-            raise
         except Exception:
             return None
         return None
@@ -1714,8 +1741,6 @@ async def vision_review(
         stage1_parts = [{"type": "text", "text": stage1_prompt}] + _stage_text_parts[1:4] + _stage_image_parts[:8]
         try:
             stage1_data = _call_json_stage("STAGE1 EXTRACTION", "You extract locked appraisal header facts. Return JSON only.", stage1_parts, 900)
-        except (RateLimitError, APIStatusError):
-            raise
         except Exception:
             stage1_data = None
         if isinstance(stage1_data, dict):
@@ -1737,8 +1762,6 @@ async def vision_review(
             stage2_parts = [{"type": "text", "text": stage2_prompt}] + _stage_text_parts[1:6] + _stage_image_parts[:10]
             try:
                 stage2_data = _call_json_stage("STAGE2 GUIDELINE COMPARISON", "You compare client guidelines against estimate and photo evidence. Return JSON only.", stage2_parts, 2200)
-            except (RateLimitError, APIStatusError):
-                raise
             except Exception:
                 stage2_data = None
             if isinstance(stage2_data, dict):
@@ -1867,8 +1890,6 @@ async def vision_review(
             )
             raw2 = (rsp2.choices[0].message.content or "")
             data = _try_parse_json(raw2)
-        except (RateLimitError, APIStatusError):
-            raise
         except Exception:
             pass
 
@@ -1907,8 +1928,6 @@ async def vision_review(
                 )
             fixed = (fix_rsp.choices[0].message.content or "")
             data = _try_parse_json(fixed)
-        except (RateLimitError, APIStatusError):
-            raise
         except Exception as e:
             log.error(f"Self-heal reformat failed: {e}")
 
@@ -1946,8 +1965,6 @@ async def vision_review(
                 log.info((direct_raw or "")[:4000])
                 log.info("PHOTOS-ONLY DIRECT RECOVERY RAW RESPONSE END")
                 data = _try_parse_json(direct_raw)
-            except (RateLimitError, APIStatusError):
-                raise
             except Exception as e:
                 log.error(f"Photos-only direct recovery failed: {e}")
 
@@ -2328,8 +2345,6 @@ async def vision_review(
                             "This photo-based condition report should be finalized from the visible evidence in the uploaded images and reviewed by a qualified appraiser."
                         )
 
-    except (RateLimitError, APIStatusError):
-        raise
     except Exception:
         # Fail-open: never break the request if retry logic fails.
         pass
