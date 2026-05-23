@@ -57,7 +57,7 @@ _TOKEN_PARAM = "max_completion_tokens" if IS_GPT5 else "max_tokens"
 if not os.getenv("OPENAI_API_KEY"):
     raise RuntimeError("OPENAI_API_KEY missing")
 try:
-    client = OpenAI(api_key=os.environ["OPENAI_API_KEY"], timeout=120.0, max_retries=1)
+    client = OpenAI(api_key=os.environ["OPENAI_API_KEY"], timeout=120.0, max_retries=0)
 except TypeError:
     # Backwards-compatible init for older openai-python versions
     client = OpenAI(api_key=os.environ["OPENAI_API_KEY"])
@@ -1646,32 +1646,80 @@ async def vision_review(
 
     staged_guideline_markdown = ""
 
+    def _openai_handled_error_response(exc: Exception) -> JSONResponse:
+        """Return one clean handled JSON response for OpenAI/API failures.
+        This prevents 429/API errors from escaping into main.py and causing
+        duplicate ASGI response sends.
+        """
+        err_text = str(exc or "")
+        status_code = int(getattr(exc, "status_code", 0) or 0)
+        is_quota = "insufficient_quota" in err_text.lower() or "exceeded your current quota" in err_text.lower()
+        is_429 = status_code == 429 or "429" in err_text or "too many requests" in err_text.lower()
+        provider_error = "insufficient_quota" if is_quota else ("rate_limit" if is_429 else "api_error")
+        message = (
+            "OpenAI rejected the request as insufficient_quota. Verify the exact OPENAI_API_KEY and organization/project configured on Render."
+            if is_quota else
+            "OpenAI rate limit reached while processing this Comprehensive report. Please retry in a few minutes."
+            if is_429 else
+            "OpenAI API request failed before the report could be generated. Please retry shortly."
+        )
+        log.error("OPENAI HANDLED FAILURE | provider_error=%s | status=%s | detail=%s", provider_error, status_code or "unknown", err_text[:1000])
+        return JSONResponse(
+            status_code=200,
+            content={
+                "status": "blocked",
+                "error": message,
+                "provider": "openai",
+                "provider_error": provider_error,
+                "provider_status_code": status_code or None,
+                "file_number": file_number,
+                "request_type": req_label,
+            },
+        )
+
+    def _looks_like_openai_failure(exc: Exception) -> bool:
+        err_text = str(exc or "")
+        return (
+            isinstance(exc, (RateLimitError, APIStatusError))
+            or int(getattr(exc, "status_code", 0) or 0) in {400, 401, 403, 408, 409, 429, 500, 502, 503, 504}
+            or "api.openai.com" in err_text
+            or "Too Many Requests" in err_text
+            or "insufficient_quota" in err_text
+        )
+
     # Call GPT and parse JSON (JSON hardened)
     # Prefer the canonical SDK path (client.chat.completions). Keep fallback for older SDKs.
     try:
-        rsp = client.chat.completions.create(
-            model=MODEL,
-            messages=[{"role":"system","content": SYSTEM},
-                      {"role":"user","content": parts_payload}],
-            **{_TOKEN_PARAM: max_tokens},
-            temperature=0,
-            top_p=1,
-            presence_penalty=0,
-            frequency_penalty=0,
-            response_format={"type":"json_object"},
-        )
-    except AttributeError:
-        rsp = client.chat_completions.create(  # type: ignore[attr-defined]
-            model=MODEL,
-            messages=[{"role":"system","content": SYSTEM},
-                      {"role":"user","content": parts_payload}],
-            **{_TOKEN_PARAM: max_tokens},
-            temperature=0,
-            top_p=1,
-            presence_penalty=0,
-            frequency_penalty=0,
-            response_format={"type":"json_object"},
-        )
+        try:
+            rsp = client.chat.completions.create(
+                model=MODEL,
+                messages=[{"role":"system","content": SYSTEM},
+                          {"role":"user","content": parts_payload}],
+                **{_TOKEN_PARAM: max_tokens},
+                temperature=0,
+                top_p=1,
+                presence_penalty=0,
+                frequency_penalty=0,
+                response_format={"type":"json_object"},
+            )
+        except AttributeError:
+            rsp = client.chat_completions.create(  # type: ignore[attr-defined]
+                model=MODEL,
+                messages=[{"role":"system","content": SYSTEM},
+                          {"role":"user","content": parts_payload}],
+                **{_TOKEN_PARAM: max_tokens},
+                temperature=0,
+                top_p=1,
+                presence_penalty=0,
+                frequency_penalty=0,
+                response_format={"type":"json_object"},
+            )
+    except (RateLimitError, APIStatusError) as e:
+        return _openai_handled_error_response(e)
+    except Exception as e:
+        if _looks_like_openai_failure(e):
+            return _openai_handled_error_response(e)
+        raise
 
     # --- Hardened JSON parse helper
     def _try_parse_json(raw_text: str):
@@ -1729,7 +1777,9 @@ async def vision_review(
         log.info(f"{stage_name} RAW RESPONSE END")
         return _try_parse_json(_raw)
 
-    if ai_intent in {"comprehensive", "guidelines_only"}:
+    # Do not make secondary OpenAI stage calls after the first successful Comprehensive/Guidelines call.
+    # This prevents rate-limit cascades and duplicate response paths.
+    if False and ai_intent in {"comprehensive", "guidelines_only"}:
         _stage_text_parts = [p for p in parts_payload if p.get("type") == "text"]
         _stage_image_parts = [p for p in parts_payload if p.get("type") != "text"]
 
@@ -2282,29 +2332,36 @@ async def vision_review(
                 retry_tokens = min(3200, max_tokens + 500)
 
                 try:
-                    rsp_retry = client.chat.completions.create(
-                        model=MODEL,
-                        messages=[{"role": "system", "content": SYSTEM},
-                                  {"role": "user", "content": retry_parts}],
-                        **{_TOKEN_PARAM: retry_tokens},
-                        temperature=0,
-                        top_p=1,
-                        presence_penalty=0,
-                        frequency_penalty=0,
-                        response_format={"type": "json_object"},
-                    )
-                except AttributeError:
-                    rsp_retry = client.chat_completions.create(  # type: ignore[attr-defined]
-                        model=MODEL,
-                        messages=[{"role": "system", "content": SYSTEM},
-                                  {"role": "user", "content": retry_parts}],
-                        **{_TOKEN_PARAM: retry_tokens},
-                        temperature=0,
-                        top_p=1,
-                        presence_penalty=0,
-                        frequency_penalty=0,
-                        response_format={"type": "json_object"},
-                    )
+                    try:
+                        rsp_retry = client.chat.completions.create(
+                            model=MODEL,
+                            messages=[{"role": "system", "content": SYSTEM},
+                                      {"role": "user", "content": retry_parts}],
+                            **{_TOKEN_PARAM: retry_tokens},
+                            temperature=0,
+                            top_p=1,
+                            presence_penalty=0,
+                            frequency_penalty=0,
+                            response_format={"type": "json_object"},
+                        )
+                    except AttributeError:
+                        rsp_retry = client.chat_completions.create(  # type: ignore[attr-defined]
+                            model=MODEL,
+                            messages=[{"role": "system", "content": SYSTEM},
+                                      {"role": "user", "content": retry_parts}],
+                            **{_TOKEN_PARAM: retry_tokens},
+                            temperature=0,
+                            top_p=1,
+                            presence_penalty=0,
+                            frequency_penalty=0,
+                            response_format={"type": "json_object"},
+                        )
+                except (RateLimitError, APIStatusError) as e:
+                    return _openai_handled_error_response(e)
+                except Exception as e:
+                    if _looks_like_openai_failure(e):
+                        return _openai_handled_error_response(e)
+                    raise
 
                 raw_retry = (rsp_retry.choices[0].message.content or "")
                 data_retry = _try_parse_json(raw_retry)
