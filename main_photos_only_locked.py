@@ -47,7 +47,6 @@ log.info(f"Using CLIENT_RULES_DIR={CLIENT_RULES_DIR}")
 
 # Use selected model everywhere
 MODEL = os.getenv("OAI_MODEL") or os.getenv("OPENAI_MODEL") or "gpt-4.1"
-
 # GPT-5.x models use max_completion_tokens; GPT-4.x uses max_tokens
 IS_GPT5 = MODEL.lower().startswith("gpt-5")
 _TOKEN_PARAM = "max_completion_tokens" if IS_GPT5 else "max_tokens"
@@ -1301,7 +1300,8 @@ async def vision_review(
                     {"role": "system", "content": "You extract VINs from vehicle door-jamb certification labels. JSON only."},
                     {"role": "user", "content": [{"type": "text", "text": prompt}, _image_part_from_bytes(raw_bytes)]},
                 ],
-                **{_TOKEN_PARAM: 300},                temperature=0,
+                **{_TOKEN_PARAM: 300},
+                temperature=0,
                 response_format={"type": "json_object"},
             )
             raw_v = (rsp_v.choices[0].message.content or "").strip()
@@ -1594,7 +1594,8 @@ async def vision_review(
             model=MODEL,
             messages=[{"role":"system","content": SYSTEM},
                       {"role":"user","content": parts_payload}],
-            **{_TOKEN_PARAM: max_tokens},            temperature=0,
+            **{_TOKEN_PARAM: max_tokens},
+            temperature=0,
             top_p=1,
             presence_penalty=0,
             frequency_penalty=0,
@@ -1605,7 +1606,8 @@ async def vision_review(
             model=MODEL,
             messages=[{"role":"system","content": SYSTEM},
                       {"role":"user","content": parts_payload}],
-            **{_TOKEN_PARAM: max_tokens},            temperature=0,
+            **{_TOKEN_PARAM: max_tokens},
+            temperature=0,
             top_p=1,
             presence_penalty=0,
             frequency_penalty=0,
@@ -1801,7 +1803,8 @@ async def vision_review(
                 model=MODEL,
                 messages=[{"role": "system", "content": SYSTEM},
                           {"role": "user", "content": shrunk}],
-                **{_TOKEN_PARAM: retry_tokens},                temperature=0,
+                **{_TOKEN_PARAM: retry_tokens},
+                temperature=0,
                 response_format={"type": "json_object"}
             )
             raw2 = (rsp2.choices[0].message.content or "")
@@ -1832,14 +1835,16 @@ async def vision_review(
                 fix_rsp = client.chat_completions.create(  # type: ignore[attr-defined]
                     model=MODEL,
                     messages=fix_prompt,
-                    **{_TOKEN_PARAM: max_tokens},                    temperature=0,
+                    **{_TOKEN_PARAM: max_tokens},
+                    temperature=0,
                     response_format={"type":"json_object"}
                 )
             except AttributeError:
                 fix_rsp = client.chat.completions.create(
                     model=MODEL,
                     messages=fix_prompt,
-                    **{_TOKEN_PARAM: max_tokens},                    temperature=0,
+                    **{_TOKEN_PARAM: max_tokens},
+                    temperature=0,
                     response_format={"type":"json_object"}
                 )
             fixed = (fix_rsp.choices[0].message.content or "")
@@ -2022,7 +2027,8 @@ async def vision_review(
                         model=MODEL,
                         messages=[{"role": "system", "content": SYSTEM},
                                   {"role": "user", "content": retry_parts}],
-                        **{_TOKEN_PARAM: retry_tokens},                        temperature=0,
+                        **{_TOKEN_PARAM: retry_tokens},
+                        temperature=0,
                         top_p=1,
                         presence_penalty=0,
                         frequency_penalty=0,
@@ -2033,7 +2039,8 @@ async def vision_review(
                         model=MODEL,
                         messages=[{"role": "system", "content": SYSTEM},
                                   {"role": "user", "content": retry_parts}],
-                        **{_TOKEN_PARAM: retry_tokens},                        temperature=0,
+                        **{_TOKEN_PARAM: retry_tokens},
+                        temperature=0,
                         top_p=1,
                         presence_penalty=0,
                         frequency_penalty=0,
@@ -3473,7 +3480,8 @@ async def vision_review(
                     {"role": "system", "content": "You perform narrow visual sanity checks for auto damage photos. JSON only."},
                     {"role": "user", "content": [{"type": "text", "text": sanity_prompt}] + image_parts},
                 ],
-                **{_TOKEN_PARAM: 250},                temperature=0,
+                **{_TOKEN_PARAM: 250},
+                temperature=0,
                 response_format={"type": "json_object"},
             )
             raw_sanity = (rsp_sanity.choices[0].message.content or "").strip()
@@ -3819,7 +3827,8 @@ async def vision_review(
                     {"role": "system", "content": "You generate only a complete photos-only repair cost markdown block in JSON."},
                     {"role": "user", "content": [{"type": "text", "text": cost_prompt}] + image_parts},
                 ],
-                **{_TOKEN_PARAM: 1800},                temperature=0,
+                **{_TOKEN_PARAM: 1800},
+                temperature=0,
                 top_p=1,
                 response_format={"type": "json_object"},
             )
