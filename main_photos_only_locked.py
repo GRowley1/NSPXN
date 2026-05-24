@@ -28,7 +28,7 @@ try:
 except Exception:
     _OCR_ENABLED = False
 
-from openai import OpenAI
+from openai import OpenAI, RateLimitError, APIStatusError
 
 # --- PII Redaction (Presidio) ---
 from presidio_analyzer import AnalyzerEngine, Pattern, PatternRecognizer, RecognizerResult
@@ -53,7 +53,7 @@ _token_kw = "max_completion_tokens"
 if not os.getenv("OPENAI_API_KEY"):
     raise RuntimeError("OPENAI_API_KEY missing")
 try:
-    client = OpenAI(api_key=os.environ["OPENAI_API_KEY"], timeout=120.0, max_retries=1)
+    client = OpenAI(api_key=os.environ["OPENAI_API_KEY"], timeout=120.0, max_retries=0)
 except TypeError:
     # Backwards-compatible init for older openai-python versions
     client = OpenAI(api_key=os.environ["OPENAI_API_KEY"])
@@ -928,6 +928,32 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+@app.exception_handler(RateLimitError)
+async def _openai_rate_limit_handler(request: Request, exc: RateLimitError):
+    log.warning(f"OpenAI rate limit handled: {exc}")
+    return JSONResponse(
+        status_code=200,
+        content={
+            "status": "blocked",
+            "error": "OpenAI service/account quota or rate limit is blocking this request. Please verify the OPENAI_API_KEY project/billing/quota on Render, or retry after quota is available.",
+            "reason": "openai_rate_limit",
+        },
+    )
+
+@app.exception_handler(APIStatusError)
+async def _openai_api_status_handler(request: Request, exc: APIStatusError):
+    status_code = getattr(exc, "status_code", 500) or 500
+    log.warning(f"OpenAI API status handled: {status_code} {exc}")
+    return JSONResponse(
+        status_code=200,
+        content={
+            "status": "blocked",
+            "error": "OpenAI API request was blocked or failed. Verify the OPENAI_API_KEY project/billing/quota on Render, or retry shortly.",
+            "reason": "openai_api_status",
+            "openai_status_code": status_code,
+        },
+    )
 
 # -----------------------
 # Client Rules: fuzzy finder + endpoints
