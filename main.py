@@ -1,4 +1,5 @@
 import json
+import logging
 import re
 from urllib.parse import parse_qs
 
@@ -350,6 +351,7 @@ class IntentRouterApp:
         try:
             await target_app(scope, replay_receive, tracking_send)
         except Exception as exc:
+            logging.exception("NSPXN Comprehensive/Photos router exception", exc_info=exc)
             # If the mounted app already started or completed a response, do not send
             # a second ASGI response. Sending another response start is what caused
             # "Unexpected ASGI message 'http.response.start'" and browser Network Error.
