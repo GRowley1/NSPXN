@@ -28,7 +28,7 @@ try:
 except Exception:
     _OCR_ENABLED = False
 
-from openai import OpenAI, RateLimitError, APIStatusError
+from openai import OpenAI
 
 # --- PII Redaction (Presidio) ---
 from presidio_analyzer import AnalyzerEngine, Pattern, PatternRecognizer, RecognizerResult
@@ -46,9 +46,10 @@ log = logging.getLogger("nspxn")
 log.info(f"Using CLIENT_RULES_DIR={CLIENT_RULES_DIR}")
 
 # Use selected model everywhere
-MODEL = os.getenv("OAI_MODEL") or os.getenv("OPENAI_MODEL") or "gpt-5.2"
+MODEL = os.getenv("OAI_MODEL") or os.getenv("OPENAI_MODEL") or "gpt-4.1"
 # GPT-5.x models use max_completion_tokens; GPT-4.x uses max_tokens
-_token_kw = "max_completion_tokens"
+IS_GPT5 = MODEL.lower().startswith("gpt-5")
+_TOKEN_PARAM = "max_completion_tokens" if IS_GPT5 else "max_tokens"
 
 if not os.getenv("OPENAI_API_KEY"):
     raise RuntimeError("OPENAI_API_KEY missing")
@@ -57,6 +58,15 @@ try:
 except TypeError:
     # Backwards-compatible init for older openai-python versions
     client = OpenAI(api_key=os.environ["OPENAI_API_KEY"])
+
+# Runtime limits / feature flags
+# Defaults preserve current behavior unless overridden in Render.
+try:
+    NSPXN_MAX_MODEL_IMAGES = int(os.getenv("NSPXN_MAX_MODEL_IMAGES", "48"))
+except Exception:
+    NSPXN_MAX_MODEL_IMAGES = 48
+
+NSPXN_ENABLE_PHOTO_THUMBNAILS = str(os.getenv("NSPXN_ENABLE_PHOTO_THUMBNAILS", "0")).strip().lower() in {"1", "true", "yes", "on"}
 
 # --------------------------------
 # Presidio: Analyzer/Anonymizer (preserve VIN & Claim #)
@@ -906,32 +916,6 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-@app.exception_handler(RateLimitError)
-async def _openai_rate_limit_handler(request: Request, exc: RateLimitError):
-    log.warning(f"OpenAI rate limit handled: {exc}")
-    return JSONResponse(
-        status_code=200,
-        content={
-            "status": "blocked",
-            "error": "OpenAI service/account quota or rate limit is blocking this request. Please verify the OPENAI_API_KEY project/billing/quota on Render, or retry after quota is available.",
-            "reason": "openai_rate_limit",
-        },
-    )
-
-@app.exception_handler(APIStatusError)
-async def _openai_api_status_handler(request: Request, exc: APIStatusError):
-    status_code = getattr(exc, "status_code", 500) or 500
-    log.warning(f"OpenAI API status handled: {status_code} {exc}")
-    return JSONResponse(
-        status_code=200,
-        content={
-            "status": "blocked",
-            "error": "OpenAI API request was blocked or failed. Verify the OPENAI_API_KEY project/billing/quota on Render, or retry shortly.",
-            "reason": "openai_api_status",
-            "openai_status_code": status_code,
-        },
-    )
-
 # -----------------------
 # Client Rules: fuzzy finder + endpoints
 # -----------------------
@@ -1261,7 +1245,7 @@ async def vision_review(
                     {"role": "system", "content": "You extract VINs from vehicle door-jamb certification labels. JSON only."},
                     {"role": "user", "content": [{"type": "text", "text": prompt}, _image_part_from_bytes(raw_bytes)]},
                 ],
-                max_completion_tokens=300,
+                **{_TOKEN_PARAM: 300},
                 temperature=0,
                 response_format={"type": "json_object"},
             )
@@ -1276,6 +1260,8 @@ async def vision_review(
                     vv = vv.strip().upper()
                     if re.fullmatch(VIN_PATTERN, vv):
                         return vv
+        except (RateLimitError, APIStatusError):
+            raise
         except Exception:
             return None
         return None
@@ -1649,7 +1635,7 @@ async def vision_review(
             model=MODEL,
             messages=[{"role":"system","content": SYSTEM},
                       {"role":"user","content": parts_payload}],
-            max_completion_tokens=max_tokens,
+            **{_TOKEN_PARAM: max_tokens},
             temperature=0,
             top_p=1,
             presence_penalty=0,
@@ -1661,7 +1647,7 @@ async def vision_review(
             model=MODEL,
             messages=[{"role":"system","content": SYSTEM},
                       {"role":"user","content": parts_payload}],
-            max_completion_tokens=max_tokens,
+            **{_TOKEN_PARAM: max_tokens},
             temperature=0,
             top_p=1,
             presence_penalty=0,
@@ -1701,7 +1687,7 @@ async def vision_review(
             _rsp = client.chat.completions.create(
                 model=MODEL,
                 messages=[{"role": "system", "content": stage_system}, {"role": "user", "content": stage_parts}],
-                max_completion_tokens=stage_tokens,
+                **{_TOKEN_PARAM: stage_tokens},
                 temperature=0,
                 top_p=1,
                 presence_penalty=0,
@@ -1712,7 +1698,7 @@ async def vision_review(
             _rsp = client.chat_completions.create(  # type: ignore[attr-defined]
                 model=MODEL,
                 messages=[{"role": "system", "content": stage_system}, {"role": "user", "content": stage_parts}],
-                max_completion_tokens=stage_tokens,
+                **{_TOKEN_PARAM: stage_tokens},
                 temperature=0,
                 top_p=1,
                 presence_penalty=0,
@@ -1737,6 +1723,8 @@ async def vision_review(
         stage1_parts = [{"type": "text", "text": stage1_prompt}] + _stage_text_parts[1:4] + _stage_image_parts[:8]
         try:
             stage1_data = _call_json_stage("STAGE1 EXTRACTION", "You extract locked appraisal header facts. Return JSON only.", stage1_parts, 900)
+        except (RateLimitError, APIStatusError):
+            raise
         except Exception:
             stage1_data = None
         if isinstance(stage1_data, dict):
@@ -1758,6 +1746,8 @@ async def vision_review(
             stage2_parts = [{"type": "text", "text": stage2_prompt}] + _stage_text_parts[1:6] + _stage_image_parts[:10]
             try:
                 stage2_data = _call_json_stage("STAGE2 GUIDELINE COMPARISON", "You compare client guidelines against estimate and photo evidence. Return JSON only.", stage2_parts, 2200)
+            except (RateLimitError, APIStatusError):
+                raise
             except Exception:
                 stage2_data = None
             if isinstance(stage2_data, dict):
@@ -1880,12 +1870,14 @@ async def vision_review(
                 model=MODEL,
                 messages=[{"role": "system", "content": SYSTEM},
                           {"role": "user", "content": shrunk}],
-                max_completion_tokens=retry_tokens,
+                **{_TOKEN_PARAM: retry_tokens},
                 temperature=0,
                 response_format={"type": "json_object"}
             )
             raw2 = (rsp2.choices[0].message.content or "")
             data = _try_parse_json(raw2)
+        except (RateLimitError, APIStatusError):
+            raise
         except Exception:
             pass
 
@@ -1910,7 +1902,7 @@ async def vision_review(
                 fix_rsp = client.chat_completions.create(  # type: ignore[attr-defined]
                     model=MODEL,
                     messages=fix_prompt,
-                    max_completion_tokens=max_tokens,
+                    **{_TOKEN_PARAM: max_tokens},
                     temperature=0,
                     response_format={"type":"json_object"}
                 )
@@ -1918,12 +1910,14 @@ async def vision_review(
                 fix_rsp = client.chat.completions.create(
                     model=MODEL,
                     messages=fix_prompt,
-                    max_completion_tokens=max_tokens,
+                    **{_TOKEN_PARAM: max_tokens},
                     temperature=0,
                     response_format={"type":"json_object"}
                 )
             fixed = (fix_rsp.choices[0].message.content or "")
             data = _try_parse_json(fixed)
+        except (RateLimitError, APIStatusError):
+            raise
         except Exception as e:
             log.error(f"Self-heal reformat failed: {e}")
 
@@ -1949,7 +1943,7 @@ async def vision_review(
                     model=MODEL,
                     messages=[{"role":"system","content": SYSTEM},
                               {"role":"user","content": direct_parts}],
-                    max_completion_tokens=min(3200, max_tokens + 700),
+                    **{_TOKEN_PARAM: min(3200, max_tokens + 700)},
                     temperature=0,
                     top_p=1,
                     presence_penalty=0,
@@ -1961,6 +1955,8 @@ async def vision_review(
                 log.info((direct_raw or "")[:4000])
                 log.info("PHOTOS-ONLY DIRECT RECOVERY RAW RESPONSE END")
                 data = _try_parse_json(direct_raw)
+            except (RateLimitError, APIStatusError):
+                raise
             except Exception as e:
                 log.error(f"Photos-only direct recovery failed: {e}")
 
@@ -2282,7 +2278,7 @@ async def vision_review(
                         model=MODEL,
                         messages=[{"role": "system", "content": SYSTEM},
                                   {"role": "user", "content": retry_parts}],
-                        max_completion_tokens=retry_tokens,
+                        **{_TOKEN_PARAM: retry_tokens},
                         temperature=0,
                         top_p=1,
                         presence_penalty=0,
@@ -2294,7 +2290,7 @@ async def vision_review(
                         model=MODEL,
                         messages=[{"role": "system", "content": SYSTEM},
                                   {"role": "user", "content": retry_parts}],
-                        max_completion_tokens=retry_tokens,
+                        **{_TOKEN_PARAM: retry_tokens},
                         temperature=0,
                         top_p=1,
                         presence_penalty=0,
@@ -2341,6 +2337,8 @@ async def vision_review(
                             "This photo-based condition report should be finalized from the visible evidence in the uploaded images and reviewed by a qualified appraiser."
                         )
 
+    except (RateLimitError, APIStatusError):
+        raise
     except Exception:
         # Fail-open: never break the request if retry logic fails.
         pass
