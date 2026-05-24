@@ -28,7 +28,7 @@ try:
 except Exception:
     _OCR_ENABLED = False
 
-from openai import OpenAI, RateLimitError, APIStatusError
+from openai import OpenAI
 
 # --- PII Redaction (Presidio) ---
 from presidio_analyzer import AnalyzerEngine, Pattern, PatternRecognizer, RecognizerResult
@@ -41,36 +41,19 @@ from presidio_anonymizer.entities import OperatorConfig  # required for anonymiz
 PDF_DIR = os.getenv("PDF_DIR", "/tmp"); os.makedirs(PDF_DIR, exist_ok=True)
 CLIENT_RULES_DIR = os.getenv("CLIENT_RULES_DIR", "client_rules")
 
-# Runtime guards used by the upload/image pipeline.
-# Defaults preserve the existing Comprehensive behavior while preventing
-# NameError crashes before the OpenAI call.
-try:
-    NSPXN_MAX_MODEL_IMAGES = int(os.getenv("NSPXN_MAX_MODEL_IMAGES", "48"))
-except Exception:
-    NSPXN_MAX_MODEL_IMAGES = 48
-NSPXN_MAX_MODEL_IMAGES = max(1, min(48, NSPXN_MAX_MODEL_IMAGES))
-
-NSPXN_ENABLE_PHOTO_THUMBNAILS = os.getenv(
-    "NSPXN_ENABLE_PHOTO_THUMBNAILS", "0"
-).strip().lower() in {"1", "true", "yes", "on"}
-NSPXN_MAX_MODEL_IMAGES = int(os.getenv("NSPXN_MAX_MODEL_IMAGES", "48"))
-# Comprehensive currently builds a thumbnail appendix; keep that behavior ON by default.
-NSPXN_ENABLE_PHOTO_THUMBNAILS = os.getenv("NSPXN_ENABLE_PHOTO_THUMBNAILS", "1").strip().lower() not in {"0", "false", "no", "off"}
-
 logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s")
 log = logging.getLogger("nspxn")
 log.info(f"Using CLIENT_RULES_DIR={CLIENT_RULES_DIR}")
 
 # Use selected model everywhere
-MODEL = os.getenv("OAI_MODEL") or os.getenv("OPENAI_MODEL") or "gpt-4.1"
+MODEL = os.getenv("OAI_MODEL") or os.getenv("OPENAI_MODEL") or "gpt-5.2"
 # GPT-5.x models use max_completion_tokens; GPT-4.x uses max_tokens
-IS_GPT5 = MODEL.lower().startswith("gpt-5")
-_TOKEN_PARAM = "max_completion_tokens" if IS_GPT5 else "max_tokens"
+_token_kw = "max_completion_tokens"
 
 if not os.getenv("OPENAI_API_KEY"):
     raise RuntimeError("OPENAI_API_KEY missing")
 try:
-    client = OpenAI(api_key=os.environ["OPENAI_API_KEY"], timeout=120.0, max_retries=1)
+    client = OpenAI(api_key=os.environ["OPENAI_API_KEY"], timeout=120.0, max_retries=0)
 except TypeError:
     # Backwards-compatible init for older openai-python versions
     client = OpenAI(api_key=os.environ["OPENAI_API_KEY"])
@@ -927,10 +910,10 @@ app.add_middleware(
 async def _openai_rate_limit_handler(request: Request, exc: RateLimitError):
     log.warning(f"OpenAI rate limit handled: {exc}")
     return JSONResponse(
-        status_code=429,
+        status_code=200,
         content={
             "status": "blocked",
-            "error": "OpenAI rate limit reached while processing this Comprehensive report. Please retry in a few minutes.",
+            "error": "OpenAI service/account quota or rate limit is blocking this request. Please verify the OPENAI_API_KEY project/billing/quota on Render, or retry after quota is available.",
             "reason": "openai_rate_limit",
         },
     )
@@ -940,10 +923,10 @@ async def _openai_api_status_handler(request: Request, exc: APIStatusError):
     status_code = getattr(exc, "status_code", 500) or 500
     log.warning(f"OpenAI API status handled: {status_code} {exc}")
     return JSONResponse(
-        status_code=status_code if status_code < 500 else 502,
+        status_code=200,
         content={
             "status": "blocked",
-            "error": "OpenAI API request failed. Please retry shortly.",
+            "error": "OpenAI API request was blocked or failed. Verify the OPENAI_API_KEY project/billing/quota on Render, or retry shortly.",
             "reason": "openai_api_status",
             "openai_status_code": status_code,
         },
@@ -1278,7 +1261,7 @@ async def vision_review(
                     {"role": "system", "content": "You extract VINs from vehicle door-jamb certification labels. JSON only."},
                     {"role": "user", "content": [{"type": "text", "text": prompt}, _image_part_from_bytes(raw_bytes)]},
                 ],
-                **{_TOKEN_PARAM: 300},
+                max_completion_tokens=300,
                 temperature=0,
                 response_format={"type": "json_object"},
             )
@@ -1666,7 +1649,7 @@ async def vision_review(
             model=MODEL,
             messages=[{"role":"system","content": SYSTEM},
                       {"role":"user","content": parts_payload}],
-            **{_TOKEN_PARAM: max_tokens},
+            max_completion_tokens=max_tokens,
             temperature=0,
             top_p=1,
             presence_penalty=0,
@@ -1678,7 +1661,7 @@ async def vision_review(
             model=MODEL,
             messages=[{"role":"system","content": SYSTEM},
                       {"role":"user","content": parts_payload}],
-            **{_TOKEN_PARAM: max_tokens},
+            max_completion_tokens=max_tokens,
             temperature=0,
             top_p=1,
             presence_penalty=0,
@@ -1718,7 +1701,7 @@ async def vision_review(
             _rsp = client.chat.completions.create(
                 model=MODEL,
                 messages=[{"role": "system", "content": stage_system}, {"role": "user", "content": stage_parts}],
-                **{_TOKEN_PARAM: stage_tokens},
+                max_completion_tokens=stage_tokens,
                 temperature=0,
                 top_p=1,
                 presence_penalty=0,
@@ -1729,7 +1712,7 @@ async def vision_review(
             _rsp = client.chat_completions.create(  # type: ignore[attr-defined]
                 model=MODEL,
                 messages=[{"role": "system", "content": stage_system}, {"role": "user", "content": stage_parts}],
-                **{_TOKEN_PARAM: stage_tokens},
+                max_completion_tokens=stage_tokens,
                 temperature=0,
                 top_p=1,
                 presence_penalty=0,
@@ -1897,7 +1880,7 @@ async def vision_review(
                 model=MODEL,
                 messages=[{"role": "system", "content": SYSTEM},
                           {"role": "user", "content": shrunk}],
-                **{_TOKEN_PARAM: retry_tokens},
+                max_completion_tokens=retry_tokens,
                 temperature=0,
                 response_format={"type": "json_object"}
             )
@@ -1927,7 +1910,7 @@ async def vision_review(
                 fix_rsp = client.chat_completions.create(  # type: ignore[attr-defined]
                     model=MODEL,
                     messages=fix_prompt,
-                    **{_TOKEN_PARAM: max_tokens},
+                    max_completion_tokens=max_tokens,
                     temperature=0,
                     response_format={"type":"json_object"}
                 )
@@ -1935,7 +1918,7 @@ async def vision_review(
                 fix_rsp = client.chat.completions.create(
                     model=MODEL,
                     messages=fix_prompt,
-                    **{_TOKEN_PARAM: max_tokens},
+                    max_completion_tokens=max_tokens,
                     temperature=0,
                     response_format={"type":"json_object"}
                 )
@@ -1966,7 +1949,7 @@ async def vision_review(
                     model=MODEL,
                     messages=[{"role":"system","content": SYSTEM},
                               {"role":"user","content": direct_parts}],
-                    **{_TOKEN_PARAM: min(3200, max_tokens + 700)},
+                    max_completion_tokens=min(3200, max_tokens + 700),
                     temperature=0,
                     top_p=1,
                     presence_penalty=0,
@@ -2299,7 +2282,7 @@ async def vision_review(
                         model=MODEL,
                         messages=[{"role": "system", "content": SYSTEM},
                                   {"role": "user", "content": retry_parts}],
-                        **{_TOKEN_PARAM: retry_tokens},
+                        max_completion_tokens=retry_tokens,
                         temperature=0,
                         top_p=1,
                         presence_penalty=0,
@@ -2311,7 +2294,7 @@ async def vision_review(
                         model=MODEL,
                         messages=[{"role": "system", "content": SYSTEM},
                                   {"role": "user", "content": retry_parts}],
-                        **{_TOKEN_PARAM: retry_tokens},
+                        max_completion_tokens=retry_tokens,
                         temperature=0,
                         top_p=1,
                         presence_penalty=0,
