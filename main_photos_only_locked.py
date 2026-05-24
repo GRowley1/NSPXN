@@ -28,7 +28,7 @@ try:
 except Exception:
     _OCR_ENABLED = False
 
-from openai import OpenAI, RateLimitError, APIStatusError
+from openai import OpenAI
 
 # --- PII Redaction (Presidio) ---
 from presidio_analyzer import AnalyzerEngine, Pattern, PatternRecognizer, RecognizerResult
@@ -53,7 +53,7 @@ _token_kw = "max_completion_tokens"
 if not os.getenv("OPENAI_API_KEY"):
     raise RuntimeError("OPENAI_API_KEY missing")
 try:
-    client = OpenAI(api_key=os.environ["OPENAI_API_KEY"], timeout=120.0, max_retries=0)
+    client = OpenAI(api_key=os.environ["OPENAI_API_KEY"], timeout=120.0, max_retries=1)
 except TypeError:
     # Backwards-compatible init for older openai-python versions
     client = OpenAI(api_key=os.environ["OPENAI_API_KEY"])
@@ -547,24 +547,12 @@ DETAIL_TEMPLATES = {
 - Cover EVERY provided photo. If no damage is obvious from that angle, write: "No obvious damage visible from this angle" (do not use the word intact).
 
 ## Side Checks
-- **Side shown**: <what is visible; cite Photo #; if not shown, say not shown>
-- **Opposite side shown**: <what is visible; cite Photo #; if not shown, say not shown>
-- Do NOT use Driver/Left Side or Passenger/Right Side labels unless orientation is unmistakably proven.
+- **Driver/Left Side**: <what is visible; cite Photo #; if not shown, say not shown>
+- **Passenger/Right Side**: <what is visible; cite Photo #; if not shown, say not shown>
 
 ## Detailed Condition Report
 - Write a continuous 10–15 sentence narrative summarizing visible damage, impact zones, misalignment/gaps, and repair implications (photo-based).
 - If VIN label or odometer are visible, state them with Photo #. If not visible or unreadable, say so.
-
-## Client Rule Estimate Guidance
-- Include this section ONLY when client_rules text is provided. If client_rules is blank, omit this section entirely.
-- Keep this section advisory only for someone preparing an estimate from the photos-only report; do NOT score the photos-only report against client rules.
-- Only reference rules actually present in the provided client_rules text. Do NOT invent rules, requirements, or client preferences.
-- Use rule-grounded guidance such as: include these items when preparing the estimate; avoid or do not include items unless supported/documented; request/attach these supporting items before finalizing.
-- Address rule-sensitive operations when supported by the provided rules, such as OEM parts, ADAS calibrations, refinish/blend, tax, sublet, structural setup/measure, required photos, invoices, valuation docs, or documentation requirements.
-- Use advisory wording: "Consider", "verify", "include if supported", "do not include unless documented", "request/attach before finalizing".
-- Do NOT let client rules alter the repair cost math or the photos-only cost approximation.
-- Place this section inside summary_markdown after the Detailed Condition Report and before the Approximate Repair Cost Breakdown.
-- Immediately before this section, print the exact bold client-rules review header provided in the prompt, such as **National General Rules Advisor**. If rules were pasted manually and no selected rules name is provided, print **Other Rules to be Reviewed**.
 
 ## Approximate Repair Cost Breakdown
 - You MUST produce a cost approximation derived from the PHOTOS ONLY (do not reference estimates, documents, or 'not evidenced').
@@ -929,32 +917,6 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-@app.exception_handler(RateLimitError)
-async def _openai_rate_limit_handler(request: Request, exc: RateLimitError):
-    log.warning(f"OpenAI rate limit handled: {exc}")
-    return JSONResponse(
-        status_code=200,
-        content={
-            "status": "blocked",
-            "error": "OpenAI service/account quota or rate limit is blocking this request. Please verify the OPENAI_API_KEY project/billing/quota on Render, or retry after quota is available.",
-            "reason": "openai_rate_limit",
-        },
-    )
-
-@app.exception_handler(APIStatusError)
-async def _openai_api_status_handler(request: Request, exc: APIStatusError):
-    status_code = getattr(exc, "status_code", 500) or 500
-    log.warning(f"OpenAI API status handled: {status_code} {exc}")
-    return JSONResponse(
-        status_code=200,
-        content={
-            "status": "blocked",
-            "error": "OpenAI API request was blocked or failed. Verify the OPENAI_API_KEY project/billing/quota on Render, or retry shortly.",
-            "reason": "openai_api_status",
-            "openai_status_code": status_code,
-        },
-    )
-
 # -----------------------
 # Client Rules: fuzzy finder + endpoints
 # -----------------------
@@ -1113,112 +1075,6 @@ async def vision_review(
     ai_notes_used = _normalize_ai_notes(ai_notes_used)
     ai_notes_block = _ai_notes_block(ai_notes_used)
     locked_cost_overrides = _extract_locked_cost_overrides(ai_notes_used)
-
-    # Photos-only client-rules label for the advisory guidance section.
-    # LOCKED LOGIC:
-    # - Prefer the actual selected dropdown/client-rules field when posted and not "--Select Client--".
-    # - Read several possible frontend field names, then scan other rule/client/select form keys.
-    # - If no selected dropdown value is posted, fall back to ia_company only when it matches a real rules file.
-    # - If rules text exists but no selected rules name can be proven, label it Other.
-    # - If no rules text exists, omit the header/section entirely.
-    client_rules_review_header = ""
-    if (client_rules or "").strip():
-        selected_rules_name = ""
-
-        def _clean_rules_choice_name(_v: str) -> str:
-            _s = str(_v or "").strip()
-            _s = re.sub(r"\.docx$", "", _s, flags=re.IGNORECASE).strip()
-            _s = re.sub(r"\s+", " ", _s).strip()
-            return _s
-
-        def _is_select_placeholder(_v: str) -> bool:
-            _s = _clean_rules_choice_name(_v).lower()
-            if not _s:
-                return True
-            return _s in (
-                "--select client--", "select client", "-- select client --",
-                "- select client -", "select", "none", "n/a", "na",
-                "manual", "manual rules", "other", "other rules"
-            )
-
-        def _rules_file_exists_for_name(_v: str) -> bool:
-            try:
-                _s = _clean_rules_choice_name(_v)
-                return bool(_s and _find_rules_path(_s, CLIENT_RULES_DIR))
-            except Exception:
-                return False
-
-        try:
-            _form_for_rules = await request.form()
-            _preferred_rule_keys = (
-                "client_name", "clientName", "client", "selected_client", "selectedClient",
-                "selected_client_name", "selectedClientName", "selectedClientRules", "selected_client_rules",
-                "client_rule", "clientRule", "client_rules_dropdown", "clientRulesDropdown",
-                "client_rules_selected", "clientRulesSelected", "client_rules_name", "clientRulesName",
-                "client_rules_file", "clientRulesFile", "rules_file", "rulesFile",
-                "rules_name", "rulesName", "rule_name", "ruleName",
-                "rules_client", "rulesClient", "rule_client", "ruleClient",
-                "selected_rule", "selectedRule", "selected_rules", "selectedRules",
-                "rules_dropdown", "rulesDropdown", "ruleset", "ruleSet", "rule_set"
-            )
-
-            for _k in _preferred_rule_keys:
-                _v = str(_form_for_rules.get(_k, "") or "").strip()
-                if _v and not _is_select_placeholder(_v):
-                    selected_rules_name = _clean_rules_choice_name(_v)
-                    break
-
-            # Last-resort: scan any non-textarea form field whose key suggests it is the dropdown/rules selector.
-            if not selected_rules_name:
-                for _k in _form_for_rules.keys():
-                    _lk = str(_k or "").lower()
-                    if _lk in ("client_rules", "clientrules", "rules_text", "rulestext", "client_rules_text", "clientrulestext"):
-                        continue
-                    if not any(_hint in _lk for _hint in ("client", "rule", "select", "dropdown")):
-                        continue
-                    _v = str(_form_for_rules.get(_k, "") or "").strip()
-                    if not _v or len(_v) > 120 or _is_select_placeholder(_v):
-                        continue
-                    selected_rules_name = _clean_rules_choice_name(_v)
-                    break
-        except Exception:
-            selected_rules_name = ""
-
-        selected_rules_name = _clean_rules_choice_name(selected_rules_name)
-
-        # Fallback: only use ia_company if it is actually a known client-rules file name.
-        if not selected_rules_name and _rules_file_exists_for_name(ia_company):
-            selected_rules_name = _clean_rules_choice_name(ia_company)
-
-        # Fallback: if the frontend pasted a rules file but did not post the dropdown name,
-        # identify the matching local DOCX by comparing the pasted rules text to loaded rules files.
-        if not selected_rules_name:
-            try:
-                _posted_rules_norm = re.sub(r"\s+", " ", str(client_rules or "")).strip().lower()
-                _best_name = ""
-                if _posted_rules_norm:
-                    for _path in glob.glob(os.path.join(CLIENT_RULES_DIR, "*.docx")):
-                        try:
-                            _doc_text = "\n".join([p.text for p in Document(_path).paragraphs if p.text.strip()])
-                            _doc_norm = re.sub(r"\s+", " ", _doc_text or "").strip().lower()
-                            if not _doc_norm:
-                                continue
-                            _posted_head = _posted_rules_norm[:500]
-                            _doc_head = _doc_norm[:500]
-                            if (_posted_head and _posted_head in _doc_norm) or (_doc_head and _doc_head in _posted_rules_norm):
-                                _best_name = os.path.splitext(os.path.basename(_path))[0]
-                                break
-                        except Exception:
-                            continue
-                if _best_name:
-                    selected_rules_name = _clean_rules_choice_name(_best_name)
-            except Exception:
-                pass
-
-        if selected_rules_name and not _is_select_placeholder(selected_rules_name):
-            client_rules_review_header = f"{selected_rules_name} Rules Advisor"
-        else:
-            client_rules_review_header = "Other Rules to be Reviewed"
 
     pdf_text_fulls: List[str] = []  # full PDF text for supplement detection
 
@@ -1547,7 +1403,6 @@ async def vision_review(
         + "\n\n"
         "CLIENT RULES (only if provided):\n"
         + (client_rules[:1500] if client_rules else "")
-        + (("\n\nCLIENT RULES REVIEW HEADER (print exactly before ## Client Rule Estimate Guidance):\n**" + client_rules_review_header + "**\n") if client_rules_review_header else "")
         + ai_notes_block
         + "\n\n"
         "INSTRUCTIONS:\n"
@@ -1666,93 +1521,6 @@ async def vision_review(
         except Exception:
             return None
 
-    def _salvage_partial_json_object(raw_text: str) -> Optional[Dict[str, Any]]:
-        """Best-effort salvage when the model starts valid JSON but truncates before closing.
-        Recover only the known top-level fields so the run can continue instead of dropping
-        straight to the all-N/A skeleton.
-        """
-        if not raw_text:
-            return None
-        src = str(raw_text).replace("\ufeff", "").replace("\u200b", "").replace("\u00A0", " ").strip()
-        if not src:
-            return None
-
-        keys_in_order = [
-            'file_number','request_type','claim_number','vin','vin_verification','vehicle',
-            'odometer_estimate_only','compliance_score','summary_brief','summary_markdown',
-            'fraud_markdown','primary_impact','secondary_impact','estimated_costs_markdown','conclusion'
-        ]
-
-        def _unescape_json_string(s: str) -> str:
-            try:
-                return bytes(s, 'utf-8').decode('unicode_escape')
-            except Exception:
-                return s.replace('\\n', '\n').replace('\\r', '\r').replace('\\t', '\t').replace('\\"', '"').replace('\\\\', '\\')
-
-        def _extract_string_value(key: str) -> Optional[str]:
-            pat = re.compile(r'"' + re.escape(key) + r'"\s*:\s*"', flags=re.DOTALL)
-            m = pat.search(src)
-            if not m:
-                return None
-            i = m.end()
-            buf = []
-            esc = False
-            while i < len(src):
-                ch = src[i]
-                if esc:
-                    buf.append(ch)
-                    esc = False
-                elif ch == '\\':
-                    buf.append(ch)
-                    esc = True
-                elif ch == '"':
-                    return _unescape_json_string(''.join(buf))
-                else:
-                    buf.append(ch)
-                i += 1
-            salvaged = ''.join(buf).strip()
-            return _unescape_json_string(salvaged) if salvaged else None
-
-        def _extract_scalar_value(key: str) -> Optional[str]:
-            m = re.search(r'"' + re.escape(key) + r'"\s*:\s*(null|true|false|-?[0-9]+(?:\.[0-9]+)?)', src, flags=re.IGNORECASE)
-            if not m:
-                return None
-            return m.group(1)
-
-        salvaged: Dict[str, Any] = {}
-        recovered = 0
-        for key in keys_in_order:
-            sval = _extract_string_value(key)
-            if sval is not None:
-                salvaged[key] = sval
-                recovered += 1
-                continue
-            scalar = _extract_scalar_value(key)
-            if scalar is not None:
-                salvaged[key] = scalar
-                recovered += 1
-
-        if recovered < 4:
-            return None
-
-        for key in keys_in_order:
-            salvaged.setdefault(key, 'N/A')
-
-        if salvaged.get('summary_markdown') in ('', 'N/A', None):
-            brief = str(salvaged.get('summary_brief') or '').strip()
-            if brief and brief != 'N/A':
-                salvaged['summary_markdown'] = '## Detailed Condition Report\n' + brief
-        if salvaged.get('fraud_markdown') in ('', 'N/A', None):
-            salvaged['fraud_markdown'] = 'No material inconsistencies found.'
-        if salvaged.get('conclusion') in ('', 'N/A', None):
-            brief = str(salvaged.get('summary_brief') or '').strip()
-            salvaged['conclusion'] = brief if brief and brief != 'N/A' else 'Photos were reviewed, but the model response was truncated before the conclusion field finished.'
-        if salvaged.get('estimated_costs_markdown') in ('', 'N/A', None):
-            # Do NOT treat a truncation placeholder as a valid cost block.
-            # Leave blank so the dedicated cost-only retry can generate the real block.
-            salvaged['estimated_costs_markdown'] = ''
-        return salvaged
-
     try:
         raw = (rsp.choices[0].message.content or "")
     except Exception as e:
@@ -1760,8 +1528,6 @@ async def vision_review(
         return JSONResponse(status_code=500, content={"error":"Model returned no content."})
 
     data = _try_parse_json(raw)
-    if data is None:
-        data = _salvage_partial_json_object(raw)
     # Prefer door-label VIN when present (OCR -> QR/barcode). Do NOT use filenames.
     # --- HARD VIN LOCK (door label wins; QR only confirms) ---
     try:
@@ -1834,8 +1600,6 @@ async def vision_review(
             )
             raw2 = (rsp2.choices[0].message.content or "")
             data = _try_parse_json(raw2)
-            if data is None:
-                data = _salvage_partial_json_object(raw2)
         except Exception:
             pass
 
@@ -1874,8 +1638,6 @@ async def vision_review(
                 )
             fixed = (fix_rsp.choices[0].message.content or "")
             data = _try_parse_json(fixed)
-            if data is None:
-                data = _salvage_partial_json_object(raw)
         except Exception as e:
             log.error(f"Self-heal reformat failed: {e}")
 
@@ -2405,282 +2167,12 @@ async def vision_review(
         ])
         return (_cm.rstrip() + "\n\n" + "\n".join(tail)).strip()
 # -----------------------
-    def _normalize_mojibake_text(text_in: str) -> str:
-        """Normalize common UTF-8 mojibake and non-ASCII symbols before UI/email/PDF rendering.
-        FPDF's Latin-1 path can corrupt symbols such as ×, ≈, smart quotes, and checkboxes.
-        Keep this ASCII-safe so website/email/PDF all show clean text.
-        """
-        s = str(text_in or '').replace("\r\n", "\n").replace("\r", "\n")
-        # First try a safe mojibake repair for strings that were decoded as Latin-1/Windows-1252.
-        try:
-            if any(bad in s for bad in ('Ã', 'Â', 'â')):
-                repaired = s.encode('latin-1', 'ignore').decode('utf-8', 'ignore')
-                if repaired and len(repaired.strip()) >= max(1, int(len(s.strip()) * 0.50)):
-                    s = repaired
-        except Exception:
-            pass
-
-        fixes = {
-            # multiplication / approximations
-            'Ã': ' x ', '×': ' x ', '✕': ' x ', '✖': ' x ',
-            'â': ' approx. ', '≈': ' approx. ',
-            # checkbox / marks
-            'â': '[ ]', '☐': '[ ]', '☒': '[x]',
-            'â': '[x]', '☑': '[x]',
-            'â': '[x]', '✓': '[x]', '✔': '[x]',
-            'â': '[x]', '✗': '[x]',
-            # dashes / quotes / bullets / ellipsis
-            'â€”': '-', '—': '-', 'â€“': '-', '–': '-',
-            'â€œ': '"', 'â€': '"', '“': '"', '”': '"',
-            'â€˜': "'", 'â€™': "'", '‘': "'", '’': "'",
-            'â€¢': '-', '•': '-', '…': '...',
-            'Â ': ' ', 'Â': '',
-        }
-        for bad, good in fixes.items():
-            s = s.replace(bad, good)
-        # Remove remaining C1 controls that show up as mojibake fragments.
-        s = re.sub(r'[\x80-\x9f]', '', s)
-        # Normalize accidental repeated spaces introduced by symbol replacement.
-        s = re.sub(r'[ \t]{2,}', ' ', s)
-        return s
-
-
-    def _neutralize_photo_only_side_terms(text_in: str) -> str:
-        """Remove left/right/driver/passenger side labels from photos-only output."""
-        s = _normalize_mojibake_text(text_in or "")
-        if not s:
-            return s
-        replacements = [
-            (r"(?im)^\s*[-*]\s*\*\*(?:Driver|Left|Driver/Left|Left/Driver)\s+Side\*\*\s*:", "- **Side shown**:"),
-            (r"(?im)^\s*[-*]\s*\*\*(?:Passenger|Right|Passenger/Right|Right/Passenger)\s+Side\*\*\s*:", "- **Opposite side shown**:"),
-            (r"(?i)\bdriver[-\s]?side\b", "one side"),
-            (r"(?i)\bpassenger[-\s]?side\b", "opposite side"),
-            (r"(?i)\bdriver/left\s+side\b", "side shown"),
-            (r"(?i)\bpassenger/right\s+side\b", "opposite side shown"),
-            (r"(?i)\bleft\s+side\b", "one side"),
-            (r"(?i)\bright\s+side\b", "opposite side"),
-            (r"(?i)\bleft[-\s]?front\b", "front"),
-            (r"(?i)\bright[-\s]?front\b", "front"),
-            (r"(?i)\bleft[-\s]?rear\b", "rear"),
-            (r"(?i)\bright[-\s]?rear\b", "rear"),
-        ]
-        for pat, repl in replacements:
-            s = re.sub(pat, repl, s)
-        return s
-
-    def _parse_model_cost_block_once(md_text: str, tax_rate_value: Optional[float] = None) -> Optional[Dict[str, Any]]:
-        """Parse the website/model cost block once into a structured object.
-        This bypasses the brittle regex-reparse path that can zero the PDF cost section.
-        """
-        t = _normalize_mojibake_text(md_text)
-        if not t.strip():
-            return None
-
-        lines = [ln.strip() for ln in t.splitlines() if ln.strip()]
-
-        def money_from_line(s: str) -> Optional[float]:
-            m = re.findall(r'\$\s*([0-9][0-9,]*(?:\.[0-9]{1,2})?)', s)
-            if not m:
-                return None
-            try:
-                return float(m[-1].replace(',', ''))
-            except Exception:
-                return None
-
-        def first_float(s: str) -> Optional[float]:
-            m = re.search(r'([0-9]+(?:\.[0-9]+)?)', s)
-            if not m:
-                return None
-            try:
-                return float(m.group(1))
-            except Exception:
-                return None
-
-        parsed: Dict[str, Any] = {
-            'body_hours': None, 'paint_hours': None, 'setup_hours': None, 'frame_hours': None, 'mech_hours': None,
-            'body_rate': None, 'paint_rate': None, 'frame_rate': None, 'mech_rate': None, 'paint_mat_rate': None,
-            'body_labor': 0.0, 'paint_labor': 0.0, 'setup_measure': 0.0, 'frame_labor': 0.0, 'mech_labor': 0.0,
-            'labor_sub': 0.0, 'parts_lines': [], 'parts_sub': 0.0, 'paint_mat': 0.0, 'sublet': 0.0,
-            'tax_basis': 0.0, 'tax_amt': 0.0, 'total_val': 0.0,
-            'explicit_body_present': False, 'explicit_paint_present': False, 'explicit_setup_present': False,
-            'explicit_frame_present': False, 'explicit_mech_present': False,
-        }
-
-        in_parts = False
-        for s in lines:
-            low = s.lower()
-
-            if 'oem replacement parts' in low or 'itemized parts breakdown' in low or 'oem parts needed' in low:
-                in_parts = True
-                continue
-            if in_parts and ('parts subtotal' in low or 'other costs' in low or 'tax (' in low or 'tax rate' in low or 'approximate total repair cost' in low or 'approximate repair total' in low or 'severity tier' in low):
-                in_parts = False
-            if in_parts and '$' in s:
-                cleaned = re.sub(r'^[-*]\s*', '', s).strip()
-                if cleaned and cleaned not in parsed['parts_lines']:
-                    parsed['parts_lines'].append(cleaned)
-                continue
-
-            if 'body labor:' in low and '/hr' in low and 'hrs' not in low:
-                vals = re.findall(r'\$\s*([0-9][0-9,]*(?:\.[0-9]+)?)', s)
-                if vals:
-                    parsed['body_rate'] = float(vals[0].replace(',', ''))
-                continue
-            if ('refinish labor:' in low or 'paint labor:' in low) and '/hr' in low and 'hrs' not in low:
-                vals = re.findall(r'\$\s*([0-9][0-9,]*(?:\.[0-9]+)?)', s)
-                if vals:
-                    parsed['paint_rate'] = float(vals[0].replace(',', ''))
-                continue
-            if 'mechanical labor:' in low and '/hr' in low and 'hrs' not in low:
-                vals = re.findall(r'\$\s*([0-9][0-9,]*(?:\.[0-9]+)?)', s)
-                if vals:
-                    parsed['mech_rate'] = float(vals[0].replace(',', ''))
-                continue
-            if 'frame/measure:' in low and '/hr' in low and 'hrs' not in low:
-                vals = re.findall(r'\$\s*([0-9][0-9,]*(?:\.[0-9]+)?)', s)
-                if vals:
-                    parsed['frame_rate'] = float(vals[0].replace(',', ''))
-                continue
-            if 'paint & materials:' in low and 'per refinish hour' in low:
-                vals = re.findall(r'\$\s*([0-9][0-9,]*(?:\.[0-9]+)?)', s)
-                if vals:
-                    parsed['paint_mat_rate'] = float(vals[0].replace(',', ''))
-                continue
-
-            if low.startswith('- body labor:') and 'hrs' in low:
-                parsed['body_hours'] = first_float(s)
-                parsed['explicit_body_present'] = parsed['body_hours'] is not None
-                amt = money_from_line(s)
-                if amt is not None:
-                    parsed['body_labor'] = amt
-                continue
-            if (low.startswith('- paint labor:') or low.startswith('- refinish labor:')) and 'hrs' in low:
-                parsed['paint_hours'] = first_float(s)
-                parsed['explicit_paint_present'] = parsed['paint_hours'] is not None
-                amt = money_from_line(s)
-                if amt is not None:
-                    parsed['paint_labor'] = amt
-                continue
-            if low.startswith('- setup & measure') and 'hr' in low:
-                parsed['setup_hours'] = first_float(s)
-                parsed['explicit_setup_present'] = parsed['setup_hours'] is not None
-                amt = money_from_line(s)
-                if amt is not None:
-                    parsed['setup_measure'] = amt
-                continue
-            if low.startswith('- frame/measure') and 'hr' in low:
-                parsed['frame_hours'] = first_float(s)
-                parsed['explicit_frame_present'] = parsed['frame_hours'] is not None
-                amt = money_from_line(s)
-                if amt is not None:
-                    parsed['frame_labor'] = amt
-                continue
-            if (low.startswith('- mechanical/diagnostic') or low.startswith('- mechanical/adas') or low.startswith('- mechanical labor:')) and 'hr' in low:
-                parsed['mech_hours'] = first_float(s)
-                parsed['explicit_mech_present'] = parsed['mech_hours'] is not None
-                amt = money_from_line(s)
-                if amt is not None:
-                    parsed['mech_labor'] = amt
-                continue
-            if low.startswith('- paint & materials:') and ('×' in s or 'x' in low or '*' in s):
-                amt = money_from_line(s)
-                if amt is not None:
-                    parsed['paint_mat'] = amt
-                if parsed['paint_hours'] is None:
-                    parsed['paint_hours'] = first_float(s)
-                continue
-
-            if 'labor subtotal' in low and '$' in s:
-                amt = money_from_line(s)
-                if amt is not None:
-                    parsed['labor_sub'] = amt
-                continue
-            if 'parts subtotal' in low and '$' in s:
-                amt = money_from_line(s)
-                if amt is not None:
-                    parsed['parts_sub'] = amt
-                continue
-            if low.startswith('- paint & materials:') and parsed['paint_mat'] <= 0:
-                amt = money_from_line(s)
-                if amt is not None:
-                    parsed['paint_mat'] = amt
-                continue
-            if 'tax rate assumed' in low or low.startswith('- tax rate'):
-                m = re.search(r'([0-9]+(?:\.[0-9]+)?)\s*%', s)
-                if m:
-                    try:
-                        tax_rate_value = float(m.group(1)) / 100.0
-                    except Exception:
-                        pass
-                continue
-            if 'taxable subtotal' in low and '$' in s:
-                amt = money_from_line(s)
-                if amt is not None:
-                    parsed['tax_basis'] = amt
-                continue
-            if low.startswith('- tax =') or re.search(r'(?i)^-\s*tax\b', s):
-                amt = money_from_line(s)
-                if amt is not None:
-                    parsed['tax_amt'] = amt
-                continue
-            if 'approximate total repair cost' in low or 'approximate repair total' in low:
-                amt = money_from_line(s)
-                if amt is not None:
-                    parsed['total_val'] = amt
-                continue
-
-        if not isinstance(tax_rate_value, (int, float)) or float(tax_rate_value) <= 0:
-            tax_rate_value = 0.07
-        parsed['tax_rate_value'] = float(tax_rate_value)
-
-        if parsed['parts_sub'] <= 0 and parsed['parts_lines']:
-            total = 0.0
-            for pl in parsed['parts_lines']:
-                amt = money_from_line(pl)
-                if amt is not None:
-                    total += amt
-            parsed['parts_sub'] = round(total, 2)
-
-        if parsed['body_labor'] <= 0 and isinstance(parsed['body_hours'], (int, float)) and isinstance(parsed['body_rate'], (int, float)):
-            parsed['body_labor'] = round(float(parsed['body_hours']) * float(parsed['body_rate']), 2)
-        if parsed['paint_labor'] <= 0 and isinstance(parsed['paint_hours'], (int, float)) and isinstance(parsed['paint_rate'], (int, float)):
-            parsed['paint_labor'] = round(float(parsed['paint_hours']) * float(parsed['paint_rate']), 2)
-        if parsed['setup_measure'] <= 0 and isinstance(parsed['setup_hours'], (int, float)):
-            setup_rate = parsed['body_rate'] if isinstance(parsed['body_rate'], (int, float)) else 0.0
-            if setup_rate > 0:
-                parsed['setup_measure'] = round(float(parsed['setup_hours']) * float(setup_rate), 2)
-        if parsed['frame_labor'] <= 0 and isinstance(parsed['frame_hours'], (int, float)) and isinstance(parsed['frame_rate'], (int, float)):
-            parsed['frame_labor'] = round(float(parsed['frame_hours']) * float(parsed['frame_rate']), 2)
-        if parsed['mech_labor'] <= 0 and isinstance(parsed['mech_hours'], (int, float)) and isinstance(parsed['mech_rate'], (int, float)):
-            parsed['mech_labor'] = round(float(parsed['mech_hours']) * float(parsed['mech_rate']), 2)
-        if parsed['paint_mat'] <= 0 and isinstance(parsed['paint_hours'], (int, float)) and isinstance(parsed['paint_mat_rate'], (int, float)):
-            parsed['paint_mat'] = round(float(parsed['paint_hours']) * float(parsed['paint_mat_rate']), 2)
-
-        if parsed['labor_sub'] <= 0:
-            parsed['labor_sub'] = round(float(parsed['body_labor']) + float(parsed['paint_labor']) + float(parsed['setup_measure']) + float(parsed['frame_labor']) + float(parsed['mech_labor']), 2)
-        if parsed['tax_basis'] <= 0:
-            parsed['tax_basis'] = round(float(parsed['parts_sub']) + float(parsed['paint_mat']), 2)
-        if parsed['tax_amt'] <= 0 and parsed['tax_basis'] > 0:
-            parsed['tax_amt'] = round(float(parsed['tax_basis']) * float(parsed['tax_rate_value']), 2)
-        if parsed['total_val'] <= 0:
-            parsed['total_val'] = round(float(parsed['labor_sub']) + float(parsed['parts_sub']) + float(parsed['paint_mat']) + float(parsed['sublet']) + float(parsed['tax_amt']), 2)
-
-        core_ok = (
-            (parsed['labor_sub'] > 0 or parsed['parts_sub'] > 0 or parsed['paint_mat'] > 0) and
-            (parsed['total_val'] > 0)
-        )
-        if not core_ok:
-            return None
-        return _apply_normalization_lock(parsed)
-
-    # --- Normalize Photos-Only cost markdown for downstream UI/email/PDF ---
-    # Do NOT canonical-rebuild here. The model/website cost block is the source of truth.
-    # Only clean mojibake so valid labor hours, parts, tax, total, and severity do not collapse to zeros.
+    # --- Normalize Photos-Only cost markdown for downstream PDF/UI ---
     try:
         if ai_intent == "damage_report_from_photos":
             _cm = result.get("estimated_costs_markdown") or ""
-            if str(_cm).strip():
-                result["estimated_costs_markdown"] = _neutralize_photo_only_side_terms(_normalize_mojibake_text(_cm))
+            _cm = _normalize_photos_only_cost_block(_cm)
+            result["estimated_costs_markdown"] = _cm
     except Exception:
         pass
 
@@ -2694,7 +2186,7 @@ async def vision_review(
         - if no explicit parts section is found, scan all lines for likely part/component
           lines with dollar amounts while excluding labor, tax, totals, and rationale lines
         """
-        text_local = _normalize_mojibake_text(md_text)
+        text_local = str(md_text or '').replace("\r\n", "\n").replace("\r", "\n")
         out: List[str] = []
         seen = set()
         in_parts_section = False
@@ -2702,7 +2194,7 @@ async def vision_review(
         def _keep_line(s: str) -> bool:
             if not s or '$' not in s:
                 return False
-            if re.search(r'(?i)body\s+labor|paint\s+labor|paint\s*(?:&|and)\s*materials|setup\s*&\s*measure|frame\s+labor|mechanical\s+labor|tax\s+rate|tax\s+basis|estimated\s+tax|sales\s+tax|labor\s+subtotal|parts\s+subtotal|subtotal|approximate\s+repair\s+total|severity\s+tier|rationale|hours?\b', s):
+            if re.search(r'(?i)body\s+labor|paint\s+labor|paint\s*(?:&|and)\s*materials|setup\s*&\s*measure|frame\s+labor|mechanical|tax\s+rate|tax\s+basis|estimated\s+tax|sales\s+tax|labor\s+subtotal|parts\s+subtotal|subtotal|approximate\s+repair\s+total|severity\s+tier|rationale|hours?\b', s):
                 return False
             if re.search(r'(?i)\b(rate|assumption|approximation only|cost calculation)\b', s):
                 return False
@@ -2715,11 +2207,11 @@ async def vision_review(
             if not s:
                 continue
 
-            if re.search(r'(?i)^\*{0,2}\s*(OEM\s+replacement\s+parts(?:\s*\(approx\.?\))?|OEM\s+parts\s+needed|replacement\s+parts|parts\s+needed|itemized\s+parts\s+breakdown)\b', s):
+            if re.search(r'(?i)^\*{0,2}\s*(OEM\s+replacement\s+parts|OEM\s+parts\s+needed|replacement\s+parts|parts\s+needed|itemized\s+parts\s+breakdown)\b', s):
                 in_parts_section = True
                 continue
 
-            if in_parts_section and re.search(r'(?i)parts\s+subtotal(?:\s*\(approx\.?\))?|estimated\s+parts\s+subtotal|taxable\s+subtotal|estimated\s+tax|sales\s+tax|tax\s+rate|tax\s+basis|approximate\s+repair\s+total|severity\s+tier', s):
+            if in_parts_section and re.search(r'(?i)parts\s+subtotal|estimated\s+parts\s+subtotal|taxable\s+subtotal|estimated\s+tax|sales\s+tax|tax\s+rate|tax\s+basis|approximate\s+repair\s+total|severity\s+tier', s):
                 break
             if in_parts_section and re.search(r'(?i)^\*{0,2}\s*(labor|body\s+labor|paint\s+labor|paint\s*(?:&|and)\s*materials|setup\s*&\s*measure|frame\s+labor|mechanical|sublet)\b', s):
                 break
@@ -3105,7 +2597,7 @@ async def vision_review(
 
         return _apply_normalization_lock(out)
 
-    def _parse_locked_photos_only_costs(md_text: str, tax_rate_value: Optional[float] = None, seed_rates: Optional[Dict[str, float]] = None, scope_text: Optional[str] = None, allow_seed: bool = True) -> Dict[str, Any]:
+    def _parse_locked_photos_only_costs(md_text: str, tax_rate_value: Optional[float] = None, seed_rates: Optional[Dict[str, float]] = None, scope_text: Optional[str] = None) -> Dict[str, Any]:
         """Single source of truth for photos-only cost math.
         Locked rules:
         - labor subtotal is ALWAYS recomputed from the five printed labor buckets
@@ -3114,7 +2606,7 @@ async def vision_review(
         - if explicit parts subtotal is missing, itemized part lines are summed and become the single parts subtotal
         - carry the actual hours/rates used so the PDF can show how each labor total was derived
         """
-        text_local = _normalize_mojibake_text(md_text)
+        text_local = str(md_text or '').replace("\r\n", "\n").replace("\r", "\n")
 
         if tax_rate_value is None or not isinstance(tax_rate_value, (int, float)) or tax_rate_value <= 0:
             _m_tax_rate_inline = re.search(r'(?im)^\s*[-*]?\s*Tax\s+rate\s*:\s*([0-9]+(?:\.[0-9]+)?)\s*%\s*$', text_local)
@@ -3126,14 +2618,7 @@ async def vision_review(
                 except Exception:
                     tax_rate_value = 0.07
             else:
-                _m_tax_rate_inline = re.search(r'(?im)assumed\s*([0-9]+(?:\.[0-9]+)?)\s*%\s*(?:for\s+approximation)?', text_local)
-                if _m_tax_rate_inline:
-                    try:
-                        tax_rate_value = float(_m_tax_rate_inline.group(1)) / 100.0
-                    except Exception:
-                        tax_rate_value = 0.07
-                else:
-                    tax_rate_value = 0.07
+                tax_rate_value = 0.07
 
         def _grab_money_line(pats: List[str]) -> Optional[float]:
             for pat in pats:
@@ -3182,14 +2667,11 @@ async def vision_review(
         _num_pat = r'([0-9][0-9,]*(?:\.[0-9]+)?)'
         body_rate = _grab_float_line([
             rf'(?im)^\s*[-*]?\s*Body\s+labor\s+rate\s*:\s*\$\s*{_num_pat}\s*/\s*hr',
-            rf'(?im)^\s*[-*]?\s*Body\s+labor\s*:\s*\$\s*{_num_pat}\s*/\s*hr\b',
             rf'(?im)^\s*[-*]?\s*Body(?:\s+labor)?\s*:\s*\*{{0,2}}\s*{_num_pat}\s*hrs?\s*@\s*\$\s*{_num_pat}\s*/\s*hr',
             rf'(?im)^\s*[-*]?\s*Body(?:\s+labor)?\s*:\s*(?:\*{{1,2}})?[^\n]*?@\s*\$\s*{_num_pat}\s*/\s*hr',
         ])
         paint_rate = _grab_float_line([
             rf'(?im)^\s*[-*]?\s*Paint\s+labor\s+rate\s*:\s*\$\s*{_num_pat}\s*/\s*hr',
-            rf'(?im)^\s*[-*]?\s*Paint\s+labor\s*:\s*\$\s*{_num_pat}\s*/\s*hr\b',
-            rf'(?im)^\s*[-*]?\s*Refinish(?:\s+labor)?\s*:\s*\$\s*{_num_pat}\s*/\s*hr\b',
             rf'(?im)^\s*[-*]?\s*Paint\s+labor\s*:\s*\*{{0,2}}\s*{_num_pat}\s*hrs?\s*@\s*\$\s*{_num_pat}\s*/\s*hr',
             rf'(?im)^\s*[-*]?\s*Paint\s+labor\s*:\s*(?:\*{{1,2}})?[^\n]*?@\s*\$\s*{_num_pat}\s*/\s*hr',
             rf'(?im)^\s*[-*]?\s*Refinish(?:\s+labor)?\s*:\s*\*{{0,2}}\s*{_num_pat}\s*hrs?\s*@\s*\$\s*{_num_pat}\s*/\s*hr',
@@ -3197,14 +2679,12 @@ async def vision_review(
         ])
         frame_rate = _grab_float_line([
             rf'(?im)^\s*[-*]?\s*(?:Frame|Structural)(?:\s+labor)?\s+rate\s*:\s*\$\s*{_num_pat}\s*/\s*hr',
-            rf'(?im)^\s*[-*]?\s*Frame(?:/measure|\s+labor)?\s*:\s*\$\s*{_num_pat}\s*/\s*hr\b',
             rf'(?im)^\s*[-*]?\s*Frame(?:/measure|\s+labor)?\s*:\s*(?:\*{{1,2}})?[^\n]*?@\s*\$\s*{_num_pat}\s*/\s*hr',
             rf'(?im)^\s*[-*]?\s*Structural(?:\s+labor)?\s*:\s*(?:\*{{1,2}})?[^\n]*?@\s*\$\s*{_num_pat}\s*/\s*hr',
         ])
         mech_rate = _grab_float_line([
-            rf'(?im)^\s*[-*]?\s*Mechanical(?:/ADAS|/diagnostic)?\s+rate\s*:\s*\$\s*{_num_pat}\s*/\s*hr',
-            rf'(?im)^\s*[-*]?\s*Mechanical(?:/ADAS|/diagnostic)?\s*:\s*\$\s*{_num_pat}\s*/\s*hr\b',
-            rf'(?im)^\s*[-*]?\s*Mechanical(?:/ADAS|/SRS/Glass|/diagnostic)?[^\n]*?:\s*(?:\*{{1,2}})?[^\n]*?@\s*\$\s*{_num_pat}\s*/\s*hr',
+            rf'(?im)^\s*[-*]?\s*Mechanical(?:/diagnostic)?\s+rate\s*:\s*\$\s*{_num_pat}\s*/\s*hr',
+            rf'(?im)^\s*[-*]?\s*Mechanical(?:/SRS/Glass|/diagnostic)?[^\n]*?:\s*(?:\*{{1,2}})?[^\n]*?@\s*\$\s*{_num_pat}\s*/\s*hr',
             rf'(?im)^\s*[-*]?\s*Mechanical\s+labor[^\n]*?:\s*(?:\*{{1,2}})?[^\n]*?@\s*\$\s*{_num_pat}\s*/\s*hr',
         ])
 
@@ -3246,8 +2726,8 @@ async def vision_review(
             r'(?im)^\s*[-*]?\s*Frame(?:/measure|\s+labor)?\s*:\s*(?:\*{1,2})?[^\n]*?([0-9]+(?:\.[0-9]+)?)\s*hrs?\s*@',
         ])
         mech_hours = _grab_float_line([
-            r'(?im)^\s*[-*]?\s*Mechanical(?:/ADAS|/SRS/Glass|/diagnostic)?[^\n]*?:\s*\*{0,2}\s*([0-9]+(?:\.[0-9]+)?)\s*hrs?\b',
-            r'(?im)^\s*[-*]?\s*Mechanical(?:/ADAS|/SRS/Glass|/diagnostic)?[^\n]*?:\s*(?:\*{1,2})?[^\n]*?([0-9]+(?:\.[0-9]+)?)\s*hrs?\s*@',
+            r'(?im)^\s*[-*]?\s*Mechanical(?:/SRS/Glass|/diagnostic)?[^\n]*?:\s*\*{0,2}\s*([0-9]+(?:\.[0-9]+)?)\s*hrs?\b',
+            r'(?im)^\s*[-*]?\s*Mechanical(?:/SRS/Glass|/diagnostic)?[^\n]*?:\s*(?:\*{1,2})?[^\n]*?([0-9]+(?:\.[0-9]+)?)\s*hrs?\s*@',
         ])
 
         # Hard-bind paint labor when refinish/blend scope is present but explicit paint hours were not emitted.
@@ -3350,7 +2830,7 @@ async def vision_review(
 
         parts_sub = _grab_money_line([
             r'^\s*\*{0,2}\s*[-*]?\s*Estimated\s+parts\s+subtotal\s*:\s*\*{0,2}\s*\$\s*([0-9][0-9,]*(?:\.[0-9]{2})?)\b',
-            r'^\s*\*{0,2}\s*[-*]?\s*Parts\s+subtotal\s*\(approx\.?\)\s*[:=]\s*\*{0,2}\s*\$\s*([0-9][0-9,]*(?:\.[0-9]{2})?)\b',
+            r'^\s*\*{0,2}\s*[-*]?\s*Parts\s+subtotal\s*\(approx\.?\)\s*=\s*\*{0,2}\s*\$\s*([0-9][0-9,]*(?:\.[0-9]{2})?)\b',
             r'^\s*\*{0,2}\s*[-*]?\s*Parts\s+subtotal\s*\(approx\.?\)\s*:\s*\*{0,2}\s*\$\s*([0-9][0-9,]*(?:\.[0-9]{2})?)\b',
             r'^\s*\*{0,2}\s*[-*]?\s*Parts\s+subtotal\s*=\s*\*{0,2}\s*\$\s*([0-9][0-9,]*(?:\.[0-9]{2})?)\b',
             r'^\s*\*{0,2}\s*[-*]?\s*Parts\s+subtotal\s*:\s*\*{0,2}\s*\$\s*([0-9][0-9,]*(?:\.[0-9]{2})?)\b',
@@ -3748,172 +3228,48 @@ async def vision_review(
 
         return cleaned_base
 
-    # --- COST BLOCK DIRECT-SYNC HELPERS (must be defined before final sync uses them) ---
-    def _cost_block_is_incomplete(md_text: str) -> bool:
-        """True when estimated_costs_markdown is missing, a truncation placeholder,
-        or lacks the minimum fields needed for website/email/PDF display.
-        """
-        s = _normalize_mojibake_text(md_text or "").strip()
-        if not s:
-            return True
-        if re.search(r"(?i)model\s+response\s+was\s+truncated|cost\s+block\s+finished|failed\s+to\s+generate\s+a\s+cost\s+breakdown|please\s+re-run|model\s+should\s+provide|unable\s+to\s+generate", s):
-            return True
-        has_labor = bool(re.search(r"(?i)\b(body\s+labor|paint\s+labor|refinish\s+labor|mechanical\s+labor)\b", s))
-        has_parts = bool(re.search(r"(?i)\b(parts\s+subtotal|OEM\s+Replacement\s+Parts|replacement\s+parts|OEM\s+parts)\b", s))
-        has_tax = bool(re.search(r"(?i)\b(sales\s+tax|taxable\s+subtotal|tax\s*\(|tax\s*=|tax\s*@)\b", s))
-        has_total = bool(re.search(r"(?i)\b(approximate\s+total|approximate\s+repair\s+total|approximate\s+total\s+repair\s+cost|approximate\s+total\s+repair\s+cost|approximate\s+repair\s+cost)\b", s)) and "$" in s
-        has_severity = bool(re.search(r"(?i)\bSeverity\s+Tier\b|\[x\]\s*(Minor|Moderate|Major)|\[ \]\s*(Minor|Moderate|Major)", s))
-        return not (has_labor and has_parts and has_tax and has_total and has_severity)
-
-    def _extract_photos_only_cost_block(md_text: str) -> str:
-        """Extract a complete Approximate Repair Cost Breakdown section from summary markdown.
-        This is only a rescue path when estimated_costs_markdown is missing/truncated.
-        """
-        if not md_text:
-            return ""
-        lines = _normalize_mojibake_text(md_text).replace("\r\n", "\n").replace("\r", "\n").splitlines()
-        starts = []
-        for i, ln in enumerate(lines):
-            if re.search(r"(?i)^\s*#{0,6}\s*Approximate\s+Repair\s+Cost\s+Breakdown\b", (ln or "").strip()):
-                starts.append(i)
-        if not starts:
-            return ""
-        # Prefer the first complete block, otherwise the longest block.
-        best = ""
-        for start in starts:
-            end = len(lines)
-            for j in range(start + 1, len(lines)):
-                sj = (lines[j] or "").strip()
-                if j in starts:
-                    end = j
-                    break
-                if re.search(r"(?i)^\s*#{1,6}\s+(Fraud\s*&\s*Authenticity\s*Check|Fraud\s+Detection|Conclusion)\b", sj):
-                    end = j
-                    break
-                if re.search(r"(?i)^\s*(Fraud\s*&\s*Authenticity\s*Check|Fraud\s+Detection|Conclusion)\s*$", sj):
-                    end = j
-                    break
-            block = "\n".join(lines[start:end]).strip()
-            if block and not _cost_block_is_incomplete(block):
-                return block
-            if len(block) > len(best):
-                best = block
-        return best if best and not _cost_block_is_incomplete(best) else ""
-
-    def _strip_duplicate_cost_sections_from_summary(md_text: str) -> str:
-        """Remove every Approximate Repair Cost Breakdown section from summary_markdown.
-        The PDF/email/website render result['estimated_costs_markdown'] separately.
-        """
-        if not md_text:
-            return md_text or ""
-        lines = _normalize_mojibake_text(md_text).replace("\r\n", "\n").replace("\r", "\n").splitlines()
-        out = []
-        skip = False
-        for ln in lines:
-            s_ln = (ln or "").strip()
-            if re.search(r"(?i)^\s*#{0,6}\s*Approximate\s+Repair\s+Cost\s+Breakdown\b", s_ln):
-                skip = True
-                continue
-            if skip:
-                if re.search(r"(?i)^\s*#{1,6}\s+(Fraud\s*&\s*Authenticity\s*Check|Fraud\s+Detection|Conclusion)\b", s_ln) or re.search(r"(?i)^\s*(Fraud\s*&\s*Authenticity\s*Check|Fraud\s+Detection|Conclusion)\s*$", s_ln):
-                    skip = False
-                    out.append(ln)
-                continue
-            out.append(ln)
-        return "\n".join(out).strip()
-
-    def _retry_cost_block_only() -> str:
-        """Second-pass model call for cost block only. Does not touch narrative/IDs.
-        Returns estimated_costs_markdown content only, or empty string on failure.
-        """
-        try:
-            image_parts = [p for p in parts_payload if isinstance(p, dict) and p.get("type") != "text"][:24]
-            cost_prompt = (
-                "Return ONLY JSON with exactly one key: estimated_costs_markdown.\n"
-                "Generate a complete PHOTOS-ONLY Approximate Repair Cost Breakdown for the provided vehicle photos.\n"
-                "Do not include narrative, fraud, conclusion, or vehicle ID fields.\n"
-                "Required content inside estimated_costs_markdown:\n"
-                "- Rates & assumptions\n"
-                "- Labor hours with body labor, paint/refinish labor, mechanical/ADAS if supported, setup/frame if supported\n"
-                "- Paint & materials as paint/refinish hours x $ per refinish hour\n"
-                "- OEM Replacement Parts list with approximate dollars by part\n"
-                "- Parts subtotal\n"
-                "- Tax applied ONLY to parts + paint materials\n"
-                "- Approximate total repair cost\n"
-                "- Severity Tier checkboxes using [ ] and [x]\n"
-                "- Repair Cost Disclaimer\n"
-                "Forbidden: 'Model response was truncated', 'model should provide', 'N/A', 'from estimate', 'not evidenced'.\n"
-                f"File #: {file_number}\nClient/location: {ia_company}\nAdd'l notes: {ai_notes_used}\n"
-                "Use neutral side wording only; do not use driver/passenger/left/right unless unmistakably proven.\n"
-            )
-            rsp_cost = client.chat.completions.create(
-                model=MODEL,
-                messages=[
-                    {"role": "system", "content": "You generate only a complete photos-only repair cost markdown block in JSON."},
-                    {"role": "user", "content": [{"type": "text", "text": cost_prompt}] + image_parts},
-                ],
-                max_completion_tokens=1800,
-                temperature=0,
-                top_p=1,
-                response_format={"type": "json_object"},
-            )
-            raw_cost = (rsp_cost.choices[0].message.content or "").strip()
-            parsed_cost = _try_parse_json(raw_cost)
-            if isinstance(parsed_cost, dict):
-                cm = str(parsed_cost.get("estimated_costs_markdown") or "").strip()
-                cm = _neutralize_photo_only_side_terms(_normalize_mojibake_text(cm))
-                if cm and not _cost_block_is_incomplete(cm):
-                    return cm
-        except Exception as e:
-            try:
-                log.warning(f"Cost-only retry failed: {e}")
-            except Exception:
-                pass
-        return ""
-
     try:
         _final_non_empty_output_lock()
         if ai_intent == "damage_report_from_photos":
-            # FINAL DISPLAY SYNC LOCK:
-            # Website/model cost block is already the correct user-visible block.
-            # Do not parse/rebuild/canonicalize it here. Prior rebuild attempts are what
-            # turned valid labor/parts/tax into 0.0 hrs and $0.00 in the PDF/email.
-            _summary_for_cost_rescue = _neutralize_photo_only_side_terms(_normalize_mojibake_text(result.get("summary_markdown") or ""))
-            _summary_cost_block = _extract_photos_only_cost_block(_summary_for_cost_rescue)
-            _raw_cost_block = _neutralize_photo_only_side_terms(_normalize_mojibake_text(result.get("estimated_costs_markdown") or "")).strip()
-
-            # Do not accept the JSON-salvage placeholder or any partial block as a real cost section.
-            # Priority: valid estimated_costs_markdown -> valid summary rescue block -> cost-only retry.
-            if _cost_block_is_incomplete(_raw_cost_block):
-                _raw_cost_block = ""
-            if not _raw_cost_block and _summary_cost_block and not _cost_block_is_incomplete(_summary_cost_block):
-                _raw_cost_block = _summary_cost_block
-            if not _raw_cost_block:
-                _raw_cost_block = _retry_cost_block_only()
-
-            if _raw_cost_block and not _cost_block_is_incomplete(_raw_cost_block):
-                result["estimated_costs_markdown"] = _raw_cost_block
-            else:
-                result["estimated_costs_markdown"] = (
-                    "## Approximate Repair Cost Breakdown\n"
-                    "Cost block could not be completed on this run. Please resubmit; PDF/email output was not allowed to use a truncated placeholder."
-                )
-
-            # Always remove duplicate/embedded cost sections from the narrative.
-            result["summary_markdown"] = _strip_duplicate_cost_sections_from_summary(result.get("summary_markdown") or "")
-
-            # Clean symbols everywhere before website/email/PDF rendering.
-            for _k in ("summary_markdown", "fraud_markdown", "conclusion", "summary_brief", "primary_impact", "secondary_impact"):
-                try:
-                    result[_k] = _neutralize_photo_only_side_terms(_normalize_mojibake_text(result.get(_k) or ""))
-                except Exception:
-                    pass
-            result["summary_markdown"] = _strip_duplicate_cost_sections_from_summary(
-                _scrub_photo_only_narrative_cost_headers(_scrub_model_headings(result.get("summary_markdown") or ""))
+            _raw_locked_cost_source = result.get("estimated_costs_markdown") or ""
+            _raw_summary_before_lock = str(result.get("summary_markdown") or "").strip()
+            _scope_seed_text = "\n\n".join([
+                _raw_summary_before_lock,
+                str(result.get("conclusion") or "").strip(),
+            ]).strip()
+            _inspection_location_for_lock = _normalize_location_with_zip(_extract_inspection_location(uploaded_text_all or ""), ia_company, uploaded_text_all)
+            _seed_rates_for_lock = _lookup_rates(_inspection_location_for_lock)
+            if isinstance(locked_cost_overrides, dict):
+                if isinstance(locked_cost_overrides.get("body_rate"), (int, float)) and float(locked_cost_overrides.get("body_rate") or 0.0) > 0:
+                    _seed_rates_for_lock["body_rate"] = float(locked_cost_overrides.get("body_rate"))
+                if isinstance(locked_cost_overrides.get("paint_rate"), (int, float)) and float(locked_cost_overrides.get("paint_rate") or 0.0) > 0:
+                    _seed_rates_for_lock["paint_rate"] = float(locked_cost_overrides.get("paint_rate"))
+            if isinstance(locked_cost_overrides, dict) and isinstance(locked_cost_overrides.get("tax_rate"), (int, float)) and float(locked_cost_overrides.get("tax_rate") or 0.0) > 0:
+                tax_rate = float(locked_cost_overrides.get("tax_rate"))
+            elif tax_rate is None or not isinstance(tax_rate, (int, float)) or tax_rate <= 0:
+                tax_rate = _lookup_tax_rate(_inspection_location_for_lock)
+            locked_costs_obj = _parse_locked_photos_only_costs(
+                _raw_locked_cost_source,
+                tax_rate,
+                seed_rates=_seed_rates_for_lock,
+                scope_text=_scope_seed_text,
             )
+            locked_costs_obj = _apply_locked_rate_overrides_to_parsed(
+                locked_costs_obj,
+                locked_cost_overrides,
+            )
+            result["estimated_costs_markdown"] = _canonical_locked_photos_only_cost_markdown_from_parsed(
+                locked_costs_obj, tax_rate
+            )
+            # Remove any model-injected cost section from the narrative so email/PDF never show two totals.
+            result["summary_markdown"] = _scrub_photo_only_narrative_cost_headers(_raw_summary_before_lock)
+            _locked_total = locked_costs_obj.get("total_val") if isinstance(locked_costs_obj, dict) else None
+            result["conclusion"] = _force_conclusion_to_locked_total(result.get("conclusion") or "", _locked_total)
+            result["summary_markdown"] = _scrub_photo_only_narrative_cost_headers(_scrub_model_headings(result.get("summary_markdown") or ""))
             _final_non_empty_output_lock()
     except Exception:
         pass
+
     try:
         if ai_intent == "damage_report_from_photos":
             _sanity_needed = False
@@ -3954,21 +3310,13 @@ async def vision_review(
     except Exception:
         pass
 
-    # Final text cleanup before any website response/email/PDF usage.
-    try:
-        if ai_intent == "damage_report_from_photos":
-            for _k in ("summary_markdown", "estimated_costs_markdown", "fraud_markdown", "conclusion", "summary_brief", "primary_impact", "secondary_impact"):
-                result[_k] = _neutralize_photo_only_side_terms(_normalize_mojibake_text(result.get(_k) or ""))
-    except Exception:
-        pass
-
     # PDF helpers
     # -----------------------
     def _pdf_sanitize(text: str, max_token_len: int = 60) -> str:
         if text is None:
             return ""
-        s = _normalize_mojibake_text(text)
-        s = ''.join(ch if ord(ch) < 256 else ' ' for ch in s)
+        s = str(text).replace("\r\n", "\n").replace("\r", "\n")
+        s = "".join(ch if ord(ch) < 256 else " " for ch in s)
         def _break(tok: str) -> str:
             if len(tok) <= max_token_len:
                 return tok
@@ -4391,129 +3739,113 @@ async def vision_review(
         return "\n".join(out).strip()
 
 
-
-
-    def _extract_photos_only_cost_block(md_text: str) -> str:
-        """Extract the first complete model/website cost block from markdown.
-        This is used only to rescue the already-correct website block when the
-        JSON field estimated_costs_markdown is missing or truncated. It does not
-        parse, rebuild, or recompute any math.
-        """
-        if not md_text:
-            return ""
-        lines = _normalize_mojibake_text(md_text).replace("\r\n", "\n").replace("\r", "\n").splitlines()
-        start = None
-        for i, ln in enumerate(lines):
-            if re.search(r"(?i)^\s*#{0,6}\s*Approximate\s+Repair\s+Cost\s+Breakdown\b", (ln or "").strip()):
-                start = i
-                break
-        if start is None:
-            return ""
-        end = len(lines)
-        for j in range(start + 1, len(lines)):
-            s = (lines[j] or "").strip()
-            if re.search(r"(?i)^\s*#{1,6}\s+(Fraud\s*&\s*Authenticity\s*Check|Fraud\s+Detection|Conclusion)\b", s):
-                end = j
-                break
-            if re.search(r"(?i)^\s*(Fraud\s*&\s*Authenticity\s*Check|Fraud\s+Detection|Conclusion)\s*$", s):
-                end = j
-                break
-        return "\n".join(lines[start:end]).strip()
-
-    def _cost_block_is_incomplete(md_text: str) -> bool:
-        """Detect the bad truncated cost block that stops before parts/tax/total/severity."""
-        s = _normalize_mojibake_text(md_text or "").strip()
-        if not s:
-            return True
-        has_any_labor = bool(re.search(r"(?i)\b(body\s+labor|paint\s+labor|mechanical\s+labor)\b", s))
-        has_parts = bool(re.search(r"(?i)\b(parts\s+subtotal|OEM\s+Replacement\s+Parts|replacement\s+parts)\b", s))
-        has_total = bool(re.search(r"(?i)\b(approx(?:imate)?\s+(?:total|repair\s+total)|approx\.\s*repair\s+total|approximate\s+total\s+repair\s+cost)\b", s))
-        has_severity = bool(re.search(r"(?i)\bSeverity\s+Tier\b", s))
-        return bool(has_any_labor and not (has_parts and has_total and has_severity))
-
-    def _strip_cost_heading_for_pdf(md_text: str) -> str:
-        """Keep the website/model cost block content but remove its markdown title
-        so the PDF's green section bar is the only title.
-        """
-        if not md_text:
-            return ""
-        out = []
-        for ln in _normalize_mojibake_text(md_text).replace("\r\n", "\n").replace("\r", "\n").splitlines():
-            if re.search(r"(?i)^\s*#{0,6}\s*Approximate\s+Repair\s+Cost\s+Breakdown\b", (ln or "").strip()):
-                continue
-            out.append(ln)
-        return "\n".join(out).strip()
-
     def render_repair_cost_section(pdf_obj: FPDF, md: str, tax_rate: Optional[float] = None, parsed: Optional[Dict[str, Any]] = None) -> None:
-        """Render website/model cost block directly with safe PDF wrapping/page breaks."""
-        raw = _neutralize_photo_only_side_terms(_normalize_mojibake_text(md or "")).strip()
-        if not raw:
-            mc("No cost breakdown was generated on this run.")
-            return
+        """Render the Approximate Repair Cost Breakdown in a controlled PDF format.
+        Locked behavior:
+        - fixed printed structure every time
+        - print actual labor hours/rates used where available
+        - recompute labor subtotal, tax, and total from one backend-owned path only
+        """
+        if tax_rate is None or not isinstance(tax_rate, (int, float)) or tax_rate <= 0:
+            tax_rate = 0.07
 
-        def _clean_pdf_md_line(line: str) -> str:
-            s = _normalize_mojibake_text(line or "").strip()
-            if re.search(r"(?i)^#{1,6}\s*Approximate\s+Repair\s+Cost\s+Breakdown\b", s):
-                return ""
-            if re.search(r"(?i)^Approximate\s+Repair\s+Cost\s+Breakdown\b", s):
-                return ""
-            s = re.sub(r"^#{1,6}\s*", "", s).strip()
-            s = s.replace("**", "").replace("__", "").replace("`", "")
-            s = s.replace("☑", "[x]").replace("☐", "[ ]").replace("✓", "[x]").replace("✔", "[x]")
-            return _pdf_sanitize(_normalize_mojibake_text(s).strip())
+        parsed = parsed if isinstance(parsed, dict) else _parse_locked_photos_only_costs(md, tax_rate)
 
-        def _pdf_font(style: str = "", size: float = 9.5) -> None:
+        def _nz_money(v: Optional[float]) -> float:
             try:
-                pdf_obj.set_font("Helvetica", style, size)
+                return round(float(v), 2) if isinstance(v, (int, float)) else 0.0
             except Exception:
-                try:
-                    pdf_obj.set_font("Arial", style, size)
-                except Exception:
-                    pass
+                return 0.0
 
-        def _safe_pdf_line(text: str, bold: bool = False) -> None:
-            safe = _clean_pdf_md_line(text)
-            if not safe:
-                try:
-                    pdf_obj.ln(1.5)
-                except Exception:
-                    pass
-                return
-            _pdf_font("B" if bold else "", 10.0 if bold else 9.5)
-            try:
-                if pdf_obj.get_y() > (pdf_obj.h - pdf_obj.b_margin - 14):
-                    pdf_obj.add_page()
-            except Exception:
-                pass
-            try:
-                effective_w = pdf_obj.w - pdf_obj.l_margin - pdf_obj.r_margin
-                if effective_w <= 5:
-                    effective_w = 180
-                pdf_obj.set_x(pdf_obj.l_margin)
-                pdf_obj.multi_cell(effective_w, 5, safe)
-            except Exception:
-                try:
-                    safe2 = safe.encode("latin-1", "replace").decode("latin-1")
-                    pdf_obj.set_x(pdf_obj.l_margin)
-                    pdf_obj.multi_cell(pdf_obj.w - pdf_obj.l_margin - pdf_obj.r_margin, 5, safe2)
-                except Exception:
-                    try:
-                        pdf_obj.set_x(pdf_obj.l_margin)
-                        pdf_obj.cell(0, 5, "[line omitted due to PDF encoding issue]", ln=True)
-                    except Exception:
-                        pass
+        def _fmt_hours_rate(hours: Optional[float], rate: Optional[float], amount: float) -> str:
+            if isinstance(rate, (int, float)):
+                shown_hours = float(hours) if isinstance(hours, (int, float)) else 0.0
+                return f"{shown_hours:.1f} hrs @ ${float(rate):,.2f}/hr = {_money2(amount)}"
+            return f"Not separately derived = {_money2(amount)}"
 
-        subsection_rx = re.compile(r"(?i)^(Assumptions|Labor rates|Estimated labor hours|Labor \(|Labor$|Labor \& Materials|Paint\s*&\s*Materials|Paint\s+and\s+Materials|OEM\s+Replacement\s+Parts|OEM\s+replacement\s+parts|Replacement\s+Parts|Parts subtotal|Cost summary|Tax\s*\(|Tax$|Estimated Total|Approximate Total|Severity Tier|Repair Cost Disclaimer)\b")
+        body_hours = parsed.get('body_hours')
+        paint_hours = parsed.get('paint_hours')
+        setup_hours = parsed.get('setup_hours')
+        frame_hours = parsed.get('frame_hours')
+        mech_hours = parsed.get('mech_hours')
+        body_rate = parsed.get('body_rate')
+        paint_rate = parsed.get('paint_rate')
+        frame_rate = parsed.get('frame_rate')
+        mech_rate = parsed.get('mech_rate')
+
+        body_labor = _nz_money(parsed.get('body_labor'))
+        paint_labor = _nz_money(parsed.get('paint_labor'))
+        setup_measure = _nz_money(parsed.get('setup_measure'))
+        frame_labor = _nz_money(parsed.get('frame_labor'))
+        mech_labor = _nz_money(parsed.get('mech_labor'))
+        parts_lines = parsed.get('parts_lines') or []
+        parts_sub = _nz_money(parsed.get('parts_sub'))
+        paint_mat = _nz_money(parsed.get('paint_mat'))
+        sublet = _nz_money(parsed.get('sublet'))
+        labor_sub = _nz_money(parsed.get('labor_sub'))
+        tax_basis = _nz_money(parsed.get('tax_basis'))
+        tax_amt = _nz_money(parsed.get('tax_amt'))
+        total_val = _nz_money(parsed.get('total_val'))
+
+        pdf_obj.ln(1)
+        try:
+            pdf_obj.set_font("Helvetica", "", 11)
+        except Exception:
+            pdf_obj.set_font("Arial", "", 11)
+
+        mc(f"Body labor: {_fmt_hours_rate(body_hours, body_rate, body_labor)}")
+        mc(f"Paint labor: {_fmt_hours_rate(paint_hours, paint_rate, paint_labor)}")
+        mc(f"Setup & Measure: {_fmt_hours_rate(setup_hours, body_rate, setup_measure)}")
+        mc(f"Frame labor: {(float(frame_hours) if isinstance(frame_hours, (int, float)) else 0.0):.1f} hrs @ ${(float(frame_rate) if isinstance(frame_rate, (int, float)) else 0.0):,.2f}/hr = {_money2(frame_labor)}")
+        mc(f"Mechanical labor: {_fmt_hours_rate(mech_hours, mech_rate, mech_labor)}")
+        mc(f"Labor subtotal: {_money2(labor_sub)}")
+
+        mc("Itemized parts breakdown:")
+        if parts_lines:
+            for pl in parts_lines:
+                _clean_pl = re.sub(r'^[-*]\s*', '', str(pl).strip())
+                mc(f"- {_clean_pl}")
+        else:
+            mc("- Not separately derived.")
+
+        mc(f"Parts subtotal: {_money2(parts_sub)}")
+        mc(f"Paint & materials: {_money2(paint_mat)}")
+        if sublet > 0:
+            mc(f"Sublet: {_money2(sublet)}")
+
+        mc(f"Tax rate: {float(tax_rate)*100:.3f}%")
+        mc(f"Tax basis (parts + paint materials): {_money2(tax_basis)}")
+        mc(f"Tax: {_money2(tax_amt)}")
 
         try:
-            pdf_obj.ln(1)
+            pdf_obj.set_font("Helvetica", "B", 11)
         except Exception:
-            pass
-        _pdf_font("", 9.5)
-        for raw_ln in raw.replace("\r\n", "\n").replace("\r", "\n").splitlines():
-            preview = _clean_pdf_md_line(raw_ln)
-            is_label = bool(preview and subsection_rx.search(preview) and not preview.lstrip().startswith("-"))
-            _safe_pdf_line(raw_ln, bold=is_label)
+            pdf_obj.set_font("Arial", "B", 11)
+        mc(f"Approximate Repair Total: {_money2(total_val)}")
+        try:
+            pdf_obj.set_font("Helvetica", "", 11)
+        except Exception:
+            pdf_obj.set_font("Arial", "", 11)
+
+        if total_val < 3500:
+            tier = "minor"
+        elif total_val < 10000:
+            tier = "moderate"
+        else:
+            tier = "major"
+
+        boxes = {
+            "minor": ("[x]", "[ ]", "[ ]", "[ ]"),
+            "moderate": ("[ ]", "[x]", "[ ]", "[ ]"),
+            "major": ("[ ]", "[ ]", "[x]", "[ ]"),
+        }[tier]
+
+        pdf_obj.ln(1)
+        mc("Severity Tier")
+        mc(f"{boxes[0]} Minor (< $3,500)")
+        mc(f"{boxes[1]} Moderate ($3,500-$10,000)")
+        mc(f"{boxes[2]} Major ($10,000+)")
+        mc(f"{boxes[3]} Possible Total Loss Threshold Approaching")
 
     def add_thumbnail_page(pdf_obj: FPDF, image_paths: List[str]) -> None:
         """Append exactly ONE page containing thumbnails of all uploaded photos (as space allows)."""
@@ -4772,18 +4104,20 @@ async def vision_review(
     
         # Report Summary (scrub markdown headings)
         _section_bar("REPORT SUMMARY")
-        _summary_md = _neutralize_photo_only_side_terms(_scrub_model_headings(_summary_md_raw))
+        _summary_md = _scrub_model_headings(_summary_md_raw)
         if ai_intent == "damage_report_from_photos":
-            _summary_md = _neutralize_photo_only_side_terms(_scrub_photo_only_narrative_cost_headers(_summary_md))
+            _summary_md = _scrub_photo_only_narrative_cost_headers(_summary_md)
         mc(_summary_md if _summary_md else "-")
         pdf.ln(2)
     
-        # Direct website/model Repair Cost section rendering.
-        # Do NOT strip, parse, rebuild, recompute, or canonicalize this block.
-        _raw_costs_md = _neutralize_photo_only_side_terms(_normalize_mojibake_text(result.get("estimated_costs_markdown") or ""))
-
+        # Controlled Repair Cost section rendering (prevents duplicate headings, Totals blocks, duplicate tiers, and bad totals)
+        _raw_costs_md = result.get("estimated_costs_markdown") or ""
+        costs_md = _strip_unwanted_cost_lines_for_pdf(_raw_costs_md)
+    
+        # NOTE: Total + Severity Tier are rendered deterministically inside render_repair_cost_section.
+    
         _section_bar("APPROXIMATE REPAIR COST BREAKDOWN")
-        render_repair_cost_section(pdf, _strip_cost_heading_for_pdf(_raw_costs_md), tax_rate=None, parsed=None)
+        render_repair_cost_section(pdf, costs_md, tax_rate=tax_rate, parsed=locked_costs_obj)
     
         _section_bar("FRAUD & AUTHENTICITY CHECK")
         mc((result.get("fraud_markdown") or "").strip() or "-")
@@ -4955,9 +4289,9 @@ async def vision_review(
         msg = EmailMessage()
         if ai_intent == "damage_report_from_photos":
             subj = f"NSPXN.com Condition Report: {file_number or ''} {result['claim_number'] or ''}".strip()
-            _summary_email = _normalize_mojibake_text(_scrub_photo_only_narrative_cost_headers(_scrub_model_headings(result.get('summary_markdown') or '')))
-            _cost_email = _normalize_mojibake_text(result.get('estimated_costs_markdown') or '')
-            _conclusion_email = _normalize_mojibake_text(result.get('conclusion') or '')
+            _locked_total_email = locked_costs_obj.get('total_val') if isinstance(locked_costs_obj, dict) else None
+            _summary_email = _scrub_photo_only_narrative_cost_headers(_scrub_model_headings(result.get('summary_markdown') or ''))
+            _conclusion_email = _force_conclusion_to_locked_total(result.get('conclusion') or '', _locked_total_email)
             body = (
                 "NSPXN.com Condition Report\n\n"
                 f"Generated: {report_generated_ts}\n"
@@ -4969,7 +4303,7 @@ async def vision_review(
                 "Condition Summary\n"
                 f"{(_summary_email or 'N/A')}\n\n"
                 "Approximate Repair Cost Breakdown\n"
-                f"{(_cost_email or 'N/A')}\n\n"
+                f"{(result['estimated_costs_markdown'] or 'N/A')}\n\n"
                 "Fraud & Authenticity Check\n"
                 f"{(result['fraud_markdown'] or 'N/A')}\n\n"
                 "Conclusion\n"
@@ -5045,50 +4379,10 @@ async def vision_review(
     except Exception as e:
         logging.error(f"Email error: {e}")
 
-    def _build_website_vehicle_identification_block() -> str:
-        try:
-            _odo_web = result.get("odometer_estimate_only") or "N/A"
-            _status_web = (result.get("redaction_status") or "N/A").replace("✅", "OK")
-            return (
-                f"File #: {file_number or 'N/A'}\n"
-                f"Generated: {report_generated_ts}\n"
-                f"Claim #: {result.get('claim_number') or 'N/A'}\n"
-                f"Inspected For: {ia_company or 'N/A'}\n"
-                f"VIN: {result.get('vin') or 'N/A'}\n"
-                f"VIN Verification: {result.get('vin_verification') or 'N/A'}\n"
-                f"Vehicle: {_format_vehicle_value(result.get('vehicle'), result.get('vin'))}\n"
-                f"Odometer: {_odo_web}\n"
-                f"Primary Impact: {result.get('primary_impact') or 'N/A'}\n"
-                f"Secondary Impact: {result.get('secondary_impact') or 'N/A'}\n"
-                f"Redaction Status: {_status_web}"
-            )
-        except Exception:
-            return ""
-
-    _website_vehicle_block = _normalize_mojibake_text(_build_website_vehicle_identification_block()).strip()
-    _website_summary_block = _neutralize_photo_only_side_terms(_strip_duplicate_cost_sections_from_summary(_scrub_photo_only_narrative_cost_headers(_scrub_model_headings(_normalize_mojibake_text(result.get("summary_markdown") or ""))))).strip()
-    _website_cost_block = _neutralize_photo_only_side_terms(_normalize_mojibake_text(result.get("estimated_costs_markdown") or "")).strip()
-    _website_fraud_block = _neutralize_photo_only_side_terms(_normalize_mojibake_text(result.get("fraud_markdown") or "")).strip()
-    _website_conclusion_block = _neutralize_photo_only_side_terms(_normalize_mojibake_text(result.get("conclusion") or "")).strip()
-    _website_parts = []
-    if _website_vehicle_block:
-        _website_parts.append(_website_vehicle_block)
-    if _website_summary_block:
-        _website_parts.append(_website_summary_block)
-    if _website_cost_block:
-        _website_parts.append(_website_cost_block)
-    if _website_fraud_block:
-        _website_parts.append("## Fraud & Authenticity Check\n" + _website_fraud_block)
-    if _website_conclusion_block:
-        _website_parts.append("## Conclusion\n" + _website_conclusion_block)
-    _website_output = "\n\n".join(_website_parts).strip()
-
     return {
         **result,
-        "vehicle_identification_markdown": _website_vehicle_block,
-        "website_output_markdown": _website_output,
         "web_summary": result["summary_brief"],
-        "gpt_output": _website_output,
+        "gpt_output": result["summary_markdown"],
         "pdf_url": pdf_url,
         "pdf_filename": pdf_filename
     }
@@ -5112,3 +4406,14 @@ async def download_pdf(file_number: Optional[str] = None, filename: Optional[str
         return JSONResponse(status_code=404, content={"detail": "Not Found"})
     latest = max(candidates, key=lambda p: os.path.getmtime(p))
     return FileResponse(path=latest, media_type="application/pdf", filename=os.path.basename(latest))
+
+
+
+
+
+
+
+
+
+
+
