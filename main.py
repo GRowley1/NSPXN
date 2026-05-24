@@ -331,60 +331,28 @@ class IntentRouterApp:
                 "more_body": False,
             }
 
-        response_state = {"status": 500, "headers": {}, "started": False, "completed": False}
+        response_state = {"status": 500, "headers": {}}
 
         async def tracking_send(message):
             # Header-only tracking. Do NOT buffer or parse the response body here;
             # buffering the full report response can break large PDF/report responses.
             if message["type"] == "http.response.start":
-                response_state["started"] = True
                 response_state["status"] = int(message.get("status", 500))
                 response_state["headers"] = {
                     k.decode("latin1").lower(): v.decode("latin1")
                     for k, v in message.get("headers", [])
                 }
-            elif message["type"] == "http.response.body" and not message.get("more_body", False):
-                response_state["completed"] = True
             await send(message)
 
         try:
             await target_app(scope, replay_receive, tracking_send)
         except Exception as exc:
-            # If the mounted app already started or completed a response, do not send
-            # a second ASGI response. Sending another response start is what caused
-            # "Unexpected ASGI message 'http.response.start'" and browser Network Error.
-            if response_state.get("started") or response_state.get("completed"):
-                return
-
-            detail = str(exc)
-            exc_name = exc.__class__.__name__
-            is_quota_error = (
-                "insufficient_quota" in detail
-                or "exceeded your current quota" in detail.lower()
-                or "ratelimiterror" in exc_name.lower()
-                or "rate limit" in detail.lower()
-            )
-            if is_quota_error:
-                await _send_json(
-                    send,
-                    429,
-                    {
-                        "status": "blocked",
-                        "error": "OpenAI quota/rate limit reached.",
-                        "detail": "The AI report could not be completed because the OpenAI API quota or rate limit was reached. Check the OpenAI billing/usage limit, then resubmit.",
-                        "ai_intent": ai_intent,
-                        "file_number": file_number,
-                    },
-                    scope=scope,
-                )
-                return
-
             await _send_json(
                 send,
                 500,
                 {
                     "error": "Report processing failed before completion.",
-                    "detail": detail,
+                    "detail": str(exc),
                     "ai_intent": ai_intent,
                     "file_number": file_number,
                 },
