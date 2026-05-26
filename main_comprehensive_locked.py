@@ -28,7 +28,7 @@ try:
 except Exception:
     _OCR_ENABLED = False
 
-from openai import OpenAI
+from openai import OpenAI, RateLimitError, APIStatusError
 
 # --- PII Redaction (Presidio) ---
 from presidio_analyzer import AnalyzerEngine, Pattern, PatternRecognizer, RecognizerResult
@@ -41,12 +41,13 @@ from presidio_anonymizer.entities import OperatorConfig  # required for anonymiz
 PDF_DIR = os.getenv("PDF_DIR", "/tmp"); os.makedirs(PDF_DIR, exist_ok=True)
 CLIENT_RULES_DIR = os.getenv("CLIENT_RULES_DIR", "client_rules")
 
-# Comprehensive runtime limits / feature flags
-# Defaults preserve current Comprehensive behavior and keep thumbnails OFF.
+# Runtime guards used by the Comprehensive upload/image pipeline.
+# Thumbnails are intentionally OFF for Comprehensive. Do not attach photo thumbnails.
 try:
     NSPXN_MAX_MODEL_IMAGES = int(os.getenv("NSPXN_MAX_MODEL_IMAGES", "48"))
 except Exception:
     NSPXN_MAX_MODEL_IMAGES = 48
+NSPXN_MAX_MODEL_IMAGES = max(1, min(48, NSPXN_MAX_MODEL_IMAGES))
 
 NSPXN_ENABLE_PHOTO_THUMBNAILS = False
 
@@ -55,14 +56,15 @@ log = logging.getLogger("nspxn")
 log.info(f"Using CLIENT_RULES_DIR={CLIENT_RULES_DIR}")
 
 # Use selected model everywhere
-MODEL = os.getenv("OAI_MODEL") or os.getenv("OPENAI_MODEL") or "gpt-5.2"
+MODEL = os.getenv("OAI_MODEL") or os.getenv("OPENAI_MODEL") or "gpt-4.1"
 # GPT-5.x models use max_completion_tokens; GPT-4.x uses max_tokens
-_token_kw = "max_completion_tokens"
+IS_GPT5 = MODEL.lower().startswith("gpt-5")
+_TOKEN_PARAM = "max_completion_tokens" if IS_GPT5 else "max_tokens"
 
 if not os.getenv("OPENAI_API_KEY"):
     raise RuntimeError("OPENAI_API_KEY missing")
 try:
-    client = OpenAI(api_key=os.environ["OPENAI_API_KEY"], timeout=120.0, max_retries=1)
+    client = OpenAI(api_key=os.environ["OPENAI_API_KEY"], timeout=120.0, max_retries=0)
 except TypeError:
     # Backwards-compatible init for older openai-python versions
     client = OpenAI(api_key=os.environ["OPENAI_API_KEY"])
@@ -915,6 +917,32 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
+@app.exception_handler(RateLimitError)
+async def _openai_rate_limit_handler(request: Request, exc: RateLimitError):
+    log.warning(f"OpenAI rate limit handled: {exc}")
+    return JSONResponse(
+        status_code=200,
+        content={
+            "status": "blocked",
+            "error": "OpenAI rate limit reached while processing this Comprehensive report. Please retry in a few minutes.",
+            "reason": "openai_rate_limit",
+        },
+    )
+
+@app.exception_handler(APIStatusError)
+async def _openai_api_status_handler(request: Request, exc: APIStatusError):
+    status_code = getattr(exc, "status_code", 500) or 500
+    log.warning(f"OpenAI API status handled: {status_code} {exc}")
+    return JSONResponse(
+        status_code=200,
+        content={
+            "status": "blocked",
+            "error": "OpenAI API request failed before the report could be generated. Please retry shortly.",
+            "reason": "openai_api_status",
+            "openai_status_code": status_code,
+        },
+    )
+
 # -----------------------
 # Client Rules: fuzzy finder + endpoints
 # -----------------------
@@ -1169,9 +1197,9 @@ async def vision_review(
                     data = zf.read(zi)
                 except Exception as e:
                     files_seen.append(f"{fname}::{inner_name} (read error: {e})"); continue
-                used = _add_bytes(parts, files_seen, photo_index, thumbnail_paths, data, f"{fname}::{inner_name}", used, MAX_IMAGES, pdf_text_fulls=pdf_text_fulls, ocr_pairs=ocr_pairs)
+                used = _add_bytes(parts, files_seen, photo_index, None, data, f"{fname}::{inner_name}", used, MAX_IMAGES, pdf_text_fulls=pdf_text_fulls, ocr_pairs=ocr_pairs)
         else:
-            used = _add_bytes(parts, files_seen, photo_index, thumbnail_paths, raw, fname, used, MAX_IMAGES, pdf_text_fulls=pdf_text_fulls, ocr_pairs=ocr_pairs)
+            used = _add_bytes(parts, files_seen, photo_index, None, raw, fname, used, MAX_IMAGES, pdf_text_fulls=pdf_text_fulls, ocr_pairs=ocr_pairs)
 
     # Collect uploaded TEXT ONLY for evidence checks
     uploaded_text_blobs = []
@@ -1244,7 +1272,7 @@ async def vision_review(
                     {"role": "system", "content": "You extract VINs from vehicle door-jamb certification labels. JSON only."},
                     {"role": "user", "content": [{"type": "text", "text": prompt}, _image_part_from_bytes(raw_bytes)]},
                 ],
-                max_completion_tokens=300,
+                **{_TOKEN_PARAM: 300},
                 temperature=0,
                 response_format={"type": "json_object"},
             )
@@ -1625,32 +1653,85 @@ async def vision_review(
 
     staged_guideline_markdown = ""
 
+    def _openai_handled_error_response(exc: Exception) -> JSONResponse:
+        """Return one clean handled JSON response for OpenAI/API failures.
+
+        Do not expose provider-quota wording to customers.
+        Keep this response status 200 so the existing frontend can display it instead
+        of surfacing a generic network failure.
+        """
+        err_text = str(exc or "")
+        status_code = int(getattr(exc, "status_code", 0) or 0)
+        is_429 = status_code == 429 or "429" in err_text or "too many requests" in err_text.lower()
+        provider_error = "rate_limit" if is_429 else "api_error"
+        message = (
+            "OpenAI rate limit reached while processing this Comprehensive report. Please retry in a few minutes."
+            if is_429 else
+            "OpenAI API request failed before the report could be generated. Please retry shortly."
+        )
+        log.error(
+            "OPENAI HANDLED FAILURE | provider_error=%s | status=%s | detail=%s",
+            provider_error,
+            status_code or "unknown",
+            err_text[:1000],
+        )
+        return JSONResponse(
+            status_code=200,
+            content={
+                "status": "blocked",
+                "error": message,
+                "provider": "openai",
+                "provider_error": provider_error,
+                "provider_status_code": status_code or None,
+                "file_number": file_number,
+                "request_type": req_label,
+            },
+        )
+
+    def _looks_like_openai_failure(exc: Exception) -> bool:
+        err_text = str(exc or "")
+        return (
+            isinstance(exc, (RateLimitError, APIStatusError))
+            or int(getattr(exc, "status_code", 0) or 0) in {400, 401, 403, 408, 409, 429, 500, 502, 503, 504}
+            or "api.openai.com" in err_text
+            or "too many requests" in err_text.lower()
+            or "insufficient_quota" in err_text.lower()
+            or "exceeded your current quota" in err_text.lower()
+        )
+
     # Call GPT and parse JSON (JSON hardened)
     # Prefer the canonical SDK path (client.chat.completions). Keep fallback for older SDKs.
     try:
-        rsp = client.chat.completions.create(
-            model=MODEL,
-            messages=[{"role":"system","content": SYSTEM},
-                      {"role":"user","content": parts_payload}],
-            max_completion_tokens=max_tokens,
-            temperature=0,
-            top_p=1,
-            presence_penalty=0,
-            frequency_penalty=0,
-            response_format={"type":"json_object"},
-        )
-    except AttributeError:
-        rsp = client.chat_completions.create(  # type: ignore[attr-defined]
-            model=MODEL,
-            messages=[{"role":"system","content": SYSTEM},
-                      {"role":"user","content": parts_payload}],
-            max_completion_tokens=max_tokens,
-            temperature=0,
-            top_p=1,
-            presence_penalty=0,
-            frequency_penalty=0,
-            response_format={"type":"json_object"},
-        )
+        try:
+            rsp = client.chat.completions.create(
+                model=MODEL,
+                messages=[{"role":"system","content": SYSTEM},
+                          {"role":"user","content": parts_payload}],
+                **{_TOKEN_PARAM: max_tokens},
+                temperature=0,
+                top_p=1,
+                presence_penalty=0,
+                frequency_penalty=0,
+                response_format={"type":"json_object"},
+            )
+        except AttributeError:
+            rsp = client.chat_completions.create(  # type: ignore[attr-defined]
+                model=MODEL,
+                messages=[{"role":"system","content": SYSTEM},
+                          {"role":"user","content": parts_payload}],
+                **{_TOKEN_PARAM: max_tokens},
+                temperature=0,
+                top_p=1,
+                presence_penalty=0,
+                frequency_penalty=0,
+                response_format={"type":"json_object"},
+            )
+    except (RateLimitError, APIStatusError) as e:
+        return _openai_handled_error_response(e)
+    except Exception as e:
+        if _looks_like_openai_failure(e):
+            return _openai_handled_error_response(e)
+        raise
 
     # --- Hardened JSON parse helper
     def _try_parse_json(raw_text: str):
@@ -1684,7 +1765,7 @@ async def vision_review(
             _rsp = client.chat.completions.create(
                 model=MODEL,
                 messages=[{"role": "system", "content": stage_system}, {"role": "user", "content": stage_parts}],
-                max_completion_tokens=stage_tokens,
+                **{_TOKEN_PARAM: stage_tokens},
                 temperature=0,
                 top_p=1,
                 presence_penalty=0,
@@ -1695,7 +1776,7 @@ async def vision_review(
             _rsp = client.chat_completions.create(  # type: ignore[attr-defined]
                 model=MODEL,
                 messages=[{"role": "system", "content": stage_system}, {"role": "user", "content": stage_parts}],
-                max_completion_tokens=stage_tokens,
+                **{_TOKEN_PARAM: stage_tokens},
                 temperature=0,
                 top_p=1,
                 presence_penalty=0,
@@ -1708,7 +1789,7 @@ async def vision_review(
         log.info(f"{stage_name} RAW RESPONSE END")
         return _try_parse_json(_raw)
 
-    if ai_intent in {"comprehensive", "guidelines_only"}:
+    if False and ai_intent in {"comprehensive", "guidelines_only"}:
         _stage_text_parts = [p for p in parts_payload if p.get("type") == "text"]
         _stage_image_parts = [p for p in parts_payload if p.get("type") != "text"]
 
@@ -1853,7 +1934,7 @@ async def vision_review(
     except Exception:
         finish_reason = None
 
-    if data is None:
+    if data is None and ai_intent == "damage_report_from_photos":
         _text_parts_retry = [p for p in parts_payload if p.get("type") == "text"]
         _image_parts_retry = [p for p in parts_payload if p.get("type") != "text"]
         shrunk = _text_parts_retry[: max(3, len(_text_parts_retry)//2)] + _image_parts_retry
@@ -1863,7 +1944,7 @@ async def vision_review(
                 model=MODEL,
                 messages=[{"role": "system", "content": SYSTEM},
                           {"role": "user", "content": shrunk}],
-                max_completion_tokens=retry_tokens,
+                **{_TOKEN_PARAM: retry_tokens},
                 temperature=0,
                 response_format={"type": "json_object"}
             )
@@ -1872,8 +1953,8 @@ async def vision_review(
         except Exception:
             pass
 
-    # Fallback: formatting pass
-    if data is None:
+    # Fallback: formatting pass (photos-only only; comprehensive must not make secondary OpenAI calls)
+    if data is None and ai_intent == "damage_report_from_photos":
         try:
             fix_prompt = [
                 {"role":"system","content":
@@ -1893,7 +1974,7 @@ async def vision_review(
                 fix_rsp = client.chat_completions.create(  # type: ignore[attr-defined]
                     model=MODEL,
                     messages=fix_prompt,
-                    max_completion_tokens=max_tokens,
+                    **{_TOKEN_PARAM: max_tokens},
                     temperature=0,
                     response_format={"type":"json_object"}
                 )
@@ -1901,7 +1982,7 @@ async def vision_review(
                 fix_rsp = client.chat.completions.create(
                     model=MODEL,
                     messages=fix_prompt,
-                    max_completion_tokens=max_tokens,
+                    **{_TOKEN_PARAM: max_tokens},
                     temperature=0,
                     response_format={"type":"json_object"}
                 )
@@ -1932,7 +2013,7 @@ async def vision_review(
                     model=MODEL,
                     messages=[{"role":"system","content": SYSTEM},
                               {"role":"user","content": direct_parts}],
-                    max_completion_tokens=min(3200, max_tokens + 700),
+                    **{_TOKEN_PARAM: min(3200, max_tokens + 700)},
                     temperature=0,
                     top_p=1,
                     presence_penalty=0,
@@ -2261,29 +2342,36 @@ async def vision_review(
                 retry_tokens = min(3200, max_tokens + 500)
 
                 try:
-                    rsp_retry = client.chat.completions.create(
-                        model=MODEL,
-                        messages=[{"role": "system", "content": SYSTEM},
-                                  {"role": "user", "content": retry_parts}],
-                        max_completion_tokens=retry_tokens,
-                        temperature=0,
-                        top_p=1,
-                        presence_penalty=0,
-                        frequency_penalty=0,
-                        response_format={"type": "json_object"},
-                    )
-                except AttributeError:
-                    rsp_retry = client.chat_completions.create(  # type: ignore[attr-defined]
-                        model=MODEL,
-                        messages=[{"role": "system", "content": SYSTEM},
-                                  {"role": "user", "content": retry_parts}],
-                        max_completion_tokens=retry_tokens,
-                        temperature=0,
-                        top_p=1,
-                        presence_penalty=0,
-                        frequency_penalty=0,
-                        response_format={"type": "json_object"},
-                    )
+                    try:
+                        rsp_retry = client.chat.completions.create(
+                            model=MODEL,
+                            messages=[{"role": "system", "content": SYSTEM},
+                                      {"role": "user", "content": retry_parts}],
+                            **{_TOKEN_PARAM: retry_tokens},
+                            temperature=0,
+                            top_p=1,
+                            presence_penalty=0,
+                            frequency_penalty=0,
+                            response_format={"type": "json_object"},
+                        )
+                    except AttributeError:
+                        rsp_retry = client.chat_completions.create(  # type: ignore[attr-defined]
+                            model=MODEL,
+                            messages=[{"role": "system", "content": SYSTEM},
+                                      {"role": "user", "content": retry_parts}],
+                            **{_TOKEN_PARAM: retry_tokens},
+                            temperature=0,
+                            top_p=1,
+                            presence_penalty=0,
+                            frequency_penalty=0,
+                            response_format={"type": "json_object"},
+                        )
+                except (RateLimitError, APIStatusError) as e:
+                    return _openai_handled_error_response(e)
+                except Exception as e:
+                    if _looks_like_openai_failure(e):
+                        return _openai_handled_error_response(e)
+                    raise
 
                 raw_retry = (rsp_retry.choices[0].message.content or "")
                 data_retry = _try_parse_json(raw_retry)
@@ -4476,31 +4564,18 @@ async def vision_review(
         pdf_filename = f"{safe_file}.pdf"
 
 
-    # --- One-page photo thumbnail appendix (all uploaded photos) ---
-    try:
-        add_thumbnail_page(pdf, thumbnail_paths)
-    except Exception:
-        pass
+    # Comprehensive thumbnail appendix disabled by design.
+    # No uploaded-photo thumbnails are attached to the Comprehensive PDF.
 
     pdf_path = os.path.join(PDF_DIR, pdf_filename)
     try:
-        # Memory guard: write PDF directly to disk instead of holding the full PDF
-        # as bytes in memory. This preserves the PDF output while preventing Render
-        # worker memory spikes after Comprehensive reports.
-        try:
-            pdf.output(pdf_path)
-        except TypeError:
-            out = pdf.output(dest="S")
-            if isinstance(out, (bytes, bytearray)):
-                with open(pdf_path, "wb") as f:
-                    f.write(bytes(out))
-            else:
-                with open(pdf_path, "wb") as f:
-                    f.write(str(out).encode("latin-1", "ignore"))
-            try:
-                del out
-            except Exception:
-                pass
+        out = pdf.output(dest="S")
+        if isinstance(out, (bytes, bytearray)):
+            data_bytes = bytes(out)
+        else:
+            data_bytes = str(out).encode("latin-1", "ignore")
+        with open(pdf_path, "wb") as f:
+            f.write(data_bytes)
     except Exception as e:
         logging.warning(f"PDF write error: {e}")
 
@@ -4594,28 +4669,8 @@ async def vision_review(
             smtp.login("info@nspxn.com", "grr2025GRR")
             smtp.send_message(msg)
         log.info("Info email sent to info@nspxn.com")
-        try:
-            del pdf_bytes
-        except Exception:
-            pass
-        try:
-            del msg
-        except Exception:
-            pass
-        try:
-            gc.collect()
-        except Exception:
-            pass
     except Exception as e:
         logging.error(f"Email error: {e}")
-        try:
-            del msg
-        except Exception:
-            pass
-        try:
-            gc.collect()
-        except Exception:
-            pass
 
     # Expose lightweight analytics metadata to the outer router via response headers.
     # This avoids buffering/parsing the full response body in main.py and keeps PDF/report delivery stable.
@@ -4644,25 +4699,9 @@ async def vision_review(
     result_api["estimated_costs_markdown"] = _api_cap(result_api.get("estimated_costs_markdown"), 5000)
     result_api["conclusion"] = _api_cap(result_api.get("conclusion"), 4000)
 
-    # Drop heavy in-memory request/model/PDF/email objects before the final JSON body is serialized.
+    # Drop heavy in-memory request/model objects before the final JSON body is serialized.
     try:
         parts.clear(); parts_payload.clear(); files_seen.clear(); photo_index.clear(); thumbnail_paths.clear(); ocr_pairs.clear(); pdf_text_fulls.clear(); uploaded_text_blobs.clear()
-    except Exception:
-        pass
-    try:
-        del pdf
-    except Exception:
-        pass
-    try:
-        del raw
-    except Exception:
-        pass
-    try:
-        del uploaded_text_all
-    except Exception:
-        pass
-    try:
-        del result
     except Exception:
         pass
     try:
