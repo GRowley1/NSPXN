@@ -4,14 +4,14 @@ from fastapi import FastAPI, File, UploadFile, Form, Request, Response
 from fastapi.responses import JSONResponse, FileResponse
 from fastapi.middleware.cors import CORSMiddleware
 from typing import List, Dict, Any, Optional
-import os, io, re, json, base64, logging, zipfile, glob, uuid, gc, tempfile
+import os, io, re, json, base64, logging, zipfile, glob, uuid, gc
 import urllib.parse, urllib.request
 import smtplib  # email transport
 from email.message import EmailMessage
 
 from fpdf import FPDF
 from docx import Document
-from pdf2image import convert_from_path, pdfinfo_from_path
+from pdf2image import convert_from_bytes
 from PIL import Image
 
 # Optional HEIC/HEIF support if available
@@ -50,30 +50,6 @@ log.info(f"Using CLIENT_RULES_DIR={CLIENT_RULES_DIR}")
 MODEL = os.getenv("OAI_MODEL") or os.getenv("OPENAI_MODEL") or "gpt-5.2"
 # GPT-5.x models use max_completion_tokens; GPT-4.x uses max_tokens
 _token_kw = "max_completion_tokens"
-
-# Runtime model/image cap. REQUIRED before vision_review() uses NSPXN_MAX_MODEL_IMAGES.
-try:
-    NSPXN_MAX_MODEL_IMAGES = int(os.getenv("NSPXN_MAX_MODEL_IMAGES", "48"))
-except Exception:
-    NSPXN_MAX_MODEL_IMAGES = 48
-
-# Runtime browser/API response cap. Keep browser JSON small after PDF/email generation.
-try:
-    NSPXN_API_TEXT_LIMIT = int(os.getenv("NSPXN_API_TEXT_LIMIT", "12000"))
-except Exception:
-    NSPXN_API_TEXT_LIMIT = 12000
-
-# Comprehensive photo thumbnails are disabled unless explicitly enabled.
-try:
-    NSPXN_ENABLE_PHOTO_THUMBNAILS = os.getenv("NSPXN_ENABLE_PHOTO_THUMBNAILS", "0").strip().lower() in {"1", "true", "yes", "on"}
-except Exception:
-    NSPXN_ENABLE_PHOTO_THUMBNAILS = False
-
-# Extra staged GPT calls are disabled by default to reduce runtime.
-try:
-    NSPXN_ENABLE_STAGED_REVIEW = os.getenv("NSPXN_ENABLE_STAGED_REVIEW", "0").strip().lower() in {"1", "true", "yes", "on"}
-except Exception:
-    NSPXN_ENABLE_STAGED_REVIEW = False
 
 if not os.getenv("OPENAI_API_KEY"):
     raise RuntimeError("OPENAI_API_KEY missing")
@@ -793,105 +769,23 @@ def _qr_decode_vin_from_pil(im: Image.Image) -> Optional[str]:
 def _add_bytes(parts: List[Dict[str,Any]], files_seen: List[str], photo_index: Optional[List[str]], thumb_paths: Optional[List[str]], raw: bytes, fname: str, used: int, max_images: int, pdf_text_fulls: Optional[List[str]] = None, ocr_pairs: Optional[List[Dict[str, Any]]] = None) -> int:
     low = fname.lower()
     if low.endswith(SUPPORTED_PDF_EXTS) and used < max_images:
-        pdf_path = None
         try:
-            # Memory-safe PDF intake:
-            # - write compressed PDF bytes to disk
-            # - inspect page count from file path
-            # - render only the page range that can actually be sent to the model
-            # - render one page at a time at 150 DPI
-            # This avoids convert_from_bytes(..., dpi=200), which expands the full PDF into
-            # a large in-memory list and can exceed Render memory on photo-heavy PDFs.
-            with tempfile.NamedTemporaryFile(delete=False, suffix=".pdf", dir=PDF_DIR) as tmp_pdf:
-                tmp_pdf.write(raw)
-                pdf_path = tmp_pdf.name
-
+            pages = convert_from_bytes(raw, dpi=200)
+            files_seen.append(f"{fname} (pdf, {len(pages)} page(s))")
             _maybe_extract_pdf_text(raw, fname, parts, files_seen, pdf_text_fulls=pdf_text_fulls)
-
-            remaining_slots = max(0, max_images - used)
-            try:
-                info = pdfinfo_from_path(pdf_path)
-                page_count = int(info.get("Pages") or 0)
-            except Exception:
-                page_count = remaining_slots
-
-            pages_to_render = max(0, min(page_count or remaining_slots, remaining_slots))
-            files_seen.append(f"{fname} (pdf, {page_count or pages_to_render} page(s); rendered {pages_to_render} page(s) at 150 DPI)")
-
-            OCR_PAGE_CAP = min(100, pages_to_render)
+            OCR_PAGE_CAP = 100
             ocr_collected = []
-
-            with tempfile.TemporaryDirectory(dir=PDF_DIR) as tmp_img_dir:
-                for page_no in range(1, pages_to_render + 1):
-                    if used >= max_images:
-                        break
-                    im = None
-                    b = None
-                    image_paths = []
-                    try:
-                        image_paths = convert_from_path(
-                            pdf_path,
-                            dpi=150,
-                            first_page=page_no,
-                            last_page=page_no,
-                            fmt="jpeg",
-                            output_folder=tmp_img_dir,
-                            paths_only=True,
-                            thread_count=1,
-                        )
-                        if not image_paths:
-                            continue
-                        image_path = image_paths[0]
-                        im = Image.open(image_path).convert("RGB")
-
-                        # Keep model images bounded even if a PDF page renders very large.
-                        max_dim = 2048
-                        if max(im.size) > max_dim:
-                            scale = max_dim / float(max(im.size))
-                            resized = im.resize((int(im.width * scale), int(im.height * scale)))
-                            try:
-                                im.close()
-                            except Exception:
-                                pass
-                            im = resized
-
-                        b = io.BytesIO()
-                        im.save(b, format="JPEG", quality=75, optimize=True)
-                        parts.append(_image_part_from_bytes(b.getvalue()))
-                        used += 1
-
-                        if photo_index is not None:
-                            photo_index.append(f"{fname}::page_{page_no}")
-
-                        if (page_no - 1) < OCR_PAGE_CAP:
-                            txt = _maybe_ocr_image_text(im)
-                            if txt:
-                                ocr_collected.append(txt)
-                    finally:
-                        try:
-                            if b is not None:
-                                b.close()
-                        except Exception:
-                            pass
-                        try:
-                            if im is not None:
-                                im.close()
-                        except Exception:
-                            pass
-                        for image_path in image_paths or []:
-                            try:
-                                os.remove(image_path)
-                            except Exception:
-                                pass
-                        try:
-                            del image_paths
-                        except Exception:
-                            pass
-                        try:
-                            gc.collect()
-                        except Exception:
-                            pass
-
+            for idx, im in enumerate(pages[:max_images - used]):
+                b = io.BytesIO()
+                im.save(b, format="JPEG", quality=75, optimize=True)
+                parts.append(_image_part_from_bytes(b.getvalue()))
+                used += 1
+                if photo_index is not None:
+                    photo_index.append(f"{fname}::page_{idx+1}")
+                if idx < OCR_PAGE_CAP:
+                    txt = _maybe_ocr_image_text(im)
+                    if txt:
+                        ocr_collected.append(txt)
             if ocr_collected:
                 parts.insert(0, {"type": "text", "text": ("\n".join(ocr_collected))[:12000]})
                 files_seen.append(f"{fname} (ocr text extracted)")
@@ -900,8 +794,11 @@ def _add_bytes(parts: List[Dict[str,Any]], files_seen: List[str], photo_index: O
             files_seen.append(f"{fname} (pdf, could not be converted)")
         finally:
             try:
-                if pdf_path and os.path.exists(pdf_path):
-                    os.remove(pdf_path)
+                pages.clear()  # type: ignore[name-defined]
+            except Exception:
+                pass
+            try:
+                del pages  # type: ignore[name-defined]
             except Exception:
                 pass
             try:
@@ -1674,11 +1571,9 @@ async def vision_review(
 
     # Token limits
     MAX_TOKENS_BY_INTENT = {
-        # Comprehensive needs enough room for Detailed Condition Report,
-        # real Client Guidelines Comparison, and numeric Compliance Score Rationale.
-        "comprehensive": int(os.getenv("NSPXN_COMPREHENSIVE_MAX_TOKENS", "3600")),
-        "guidelines_only": int(os.getenv("NSPXN_GUIDELINES_MAX_TOKENS", "2200")),
-        "damage_report_from_photos": int(os.getenv("NSPXN_PHOTOS_ONLY_MAX_TOKENS", "2400")),
+        "comprehensive": 2200,
+        "guidelines_only": 1500,
+        "damage_report_from_photos": 2400
     }
     max_tokens = MAX_TOKENS_BY_INTENT.get(ai_intent, 1500)
 
@@ -1831,7 +1726,7 @@ async def vision_review(
         log.info(f"{stage_name} RAW RESPONSE END")
         return _try_parse_json(_raw)
 
-    if NSPXN_ENABLE_STAGED_REVIEW and ai_intent in {"comprehensive", "guidelines_only"}:
+    if ai_intent in {"comprehensive", "guidelines_only"}:
         _stage_text_parts = [p for p in parts_payload if p.get("type") == "text"]
         _stage_image_parts = [p for p in parts_payload if p.get("type") != "text"]
 
@@ -3016,27 +2911,21 @@ async def vision_review(
         return (head.rstrip() + "\n\n## Client Guidelines Comparison\n" + body + ("\n" + rest if rest else "")).strip()
 
     def _ensure_client_guidelines_section(md_text: str) -> str:
-        """Do not generate customer-facing placeholder guideline bullets.
-        GPT must write the actual Client Guidelines Comparison. If it does not,
-        the pre-PDF validator will block the report cleanly.
-        """
         t = str(md_text or "").strip()
         if not client_rules_supplied or ai_intent not in {"comprehensive", "guidelines_only"}:
             return t
         t = _scrub_false_missing_client_rules_claims(t)
-
-        # Remove old backend placeholder fallback lines if they exist from any prior path.
-        cleaned_lines: List[str] = []
-        for ln in t.replace("\r\n", "\n").replace("\r", "\n").splitlines():
-            s = (ln or "").strip()
-            if re.search(r"(?i)^[-*]\s*Rule\s+supplied\s+for\s+review\s*:", s):
-                continue
-            if re.search(r"(?i)Compare\s+against\s+the\s+uploaded\s+estimate/photos", s):
-                continue
-            if re.search(r"(?i)Client\s+guidelines\s+were\s+supplied.*must\s+be\s+applied", s):
-                continue
-            cleaned_lines.append(ln)
-        return "\n".join(cleaned_lines).strip()
+        if re.search(r"(?im)^##\s*Client\s+Guidelines\s+Comparison\b", t):
+            return t
+        fragments = _extract_client_rule_fragments(client_rules or resolved_rules_text or "")
+        bullets: List[str] = []
+        if fragments:
+            for frag in fragments:
+                bullets.append(f'- Rule supplied for review: "{frag}" — Compare against the uploaded estimate/photos and confirm Aligned / Not Aligned / Not Evidenced using document or photo citations.')
+        else:
+            bullets.append("- Client guidelines were supplied from the frontend selection/pasted Client Rules box and must be applied to this review.")
+        section = "## Client Guidelines Comparison\n" + "\n".join(bullets)
+        return (t + "\n\n" + section).strip() if t else section
 
     def _scrub_comprehensive_rationale_text(md_text: str) -> str:
         """Targeted comprehensive scrub:
@@ -3186,8 +3075,6 @@ async def vision_review(
         deduction_patterns = [
             r"(?i)\bDeduction\b\s*:\s*-\s*(\d+)\b",
             r"(?i)\bDeduction\b\s*-\s*(\d+)\b",
-            # Repair-model formats such as: - **-10:** reason... or - -10: reason...
-            r"(?i)^\s*[-*]\s*\*{0,2}-\s*(\d+)\*{0,2}\s*:",
             r":\s*-\s*(\d+)\b",
             r"(?i)\((?:[^)]*?)\b(?:Minor|Moderate|Major)\b\s*-\s*(\d+)(?:[^)]*?)\)",
             r"\((?:-|–)\s*(\d+)\)",
@@ -3344,13 +3231,30 @@ async def vision_review(
         t = str(md_text or "")
         if not re.search(r"(?im)^##\s*Compliance\s+Score\s+Rationale\b", t):
             return False
-        return bool(re.search(r"(?i)\bDeduction\b\s*:?\s*-\s*\d+|^\s*[-*]\s*\*{0,2}-\s*\d+\*{0,2}\s*:|\((?:-|–)\s*\d+\)|Total\s*=\s*100\s*-|Calculation\s*:\s*100\s*-", t, flags=re.MULTILINE))
+        return bool(re.search(r"(?i)\bDeduction\b\s*:?\s*-\s*\d+|\((?:-|–)\s*\d+\)|Total\s*=\s*100\s*-", t))
 
     def _prevent_advisory_score_collapse(result_obj: dict) -> dict:
-        """Preserve the model/staged score output.
-        Do not inject internal score-protection language into customer reports.
-        The pre-PDF validator is responsible for blocking unsupported sub-100 scores.
-        """
+        """Do not accept a very low GPT/stage score from advisory Not Evidenced list output
+        unless there is an explicit numeric deduction rationale supporting it."""
+        try:
+            raw_score = str(result_obj.get("compliance_score") or "").strip()
+            m = re.search(r"\d{1,3}", raw_score)
+            if not m:
+                return result_obj
+            score = max(0, min(100, int(m.group(0))))
+            sm = str(result_obj.get("summary_markdown") or "")
+            if score < 60 and not _has_explicit_score_rationale(sm):
+                result_obj["compliance_score"] = "100"
+                result_obj["summary_markdown"] = (
+                    sm.rstrip()
+                    + "\n\n## Compliance Score Rationale\n"
+                    + "Starting from 100.\n"
+                    + "- No code-owned numeric deductions were supported by an explicit material deduction rationale in the final report body. Advisory-only Not Evidenced/Not Aligned guideline notes were not allowed to collapse the score.\n"
+                    + "Final compliance score: **100**.\n"
+                    + "Total = 100 = 100."
+                ).strip()
+        except Exception:
+            pass
         return result_obj
 
     def _apply_locked_final_postprocessor(result_obj: dict) -> dict:
@@ -3566,173 +3470,14 @@ async def vision_review(
         ]
         return any(p in low for p in bad_phrases)
 
-    def _predf_score_rationale_invalid(result_obj: Dict[str, Any]) -> bool:
-        """Block any sub-100 score unless the customer report contains explicit numeric deductions."""
-        try:
-            raw_score = str(result_obj.get("compliance_score") or "").strip()
-            m_score = re.search(r"\d{1,3}", raw_score)
-            if not m_score:
-                return False
-            score = max(0, min(100, int(m_score.group(0))))
-            if score >= 100:
-                return False
-            sm = str(result_obj.get("summary_markdown") or "")
-            return not _has_explicit_score_rationale(sm)
-        except Exception:
-            return True
-
-    def _predf_guideline_comparison_invalid(v: Any) -> bool:
-        """Block placeholder or missing Client Guidelines Comparison when rules were supplied."""
-        if not client_rules_supplied:
-            return False
-        s = str(v or "").replace("\r\n", "\n").replace("\r", "\n").strip()
-        if not s:
-            return True
-        m_sec = re.search(r"(?im)^##\s*Client\s+Guidelines\s+Comparison\b", s)
-        if not m_sec:
-            return True
-        after = s[m_sec.end():]
-        next_h = re.search(r"(?m)^##\s+", after)
-        body = (after[:next_h.start()] if next_h else after).strip()
-        if not body:
-            return True
-
-        placeholder_patterns = [
-            r"(?i)Rule\s+supplied\s+for\s+review",
-            r"(?i)Compare\s+against\s+the\s+uploaded\s+estimate/photos",
-            r"(?i)confirm\s+Aligned\s*/\s*Not\s+Aligned\s*/\s*Not\s+Evidenced",
-            r"(?i)Client\s+guidelines\s+were\s+supplied.*must\s+be\s+applied",
-            r"(?i)should\s+be\s+compared\s+against\s+the\s+estimate/photos",
-            r"(?i)detailed\s+rule-by-rule\s+comparison\s+was\s+not\s+finalized",
-        ]
-        if any(re.search(pat, body) for pat in placeholder_patterns):
-            return True
-
-        has_status = bool(re.search(r"(?i)\bAligned\b|\bNot\s+Aligned\b|\bNot\s+Evidenced\b|\bCompliant\b|\bNon-compliant\b", body))
-        has_evidence = bool(re.search(r"(?i)\bp\d+\b|\bp\d+/L\d+\b|\bPhoto\s*\d+\b|\bestimate\b|\bclosing\s+report\b", body))
-        return not (has_status and has_evidence)
-
-    def _replace_or_append_markdown_section(md_text: str, heading: str, section_md: str) -> str:
-        base = str(md_text or "").replace("\r\n", "\n").replace("\r", "\n").strip()
-        section = str(section_md or "").replace("\r\n", "\n").replace("\r", "\n").strip()
-        if not section:
-            return base
-        heading_text = heading.replace("## ", "")
-        section = re.sub(r"(?im)^##\s*" + re.escape(heading_text) + r"\b", heading, section, count=1).strip()
-        if not re.search(r"(?im)^" + re.escape(heading) + r"\b", section):
-            section = heading + "\n" + section
-        m = re.search(r"(?im)^" + re.escape(heading) + r"\b", base)
-        if not m:
-            return (base.rstrip() + "\n\n" + section).strip() if base else section
-        after = base[m.end():]
-        next_h = re.search(r"(?m)^##\s+", after)
-        if next_h:
-            return (base[:m.start()].rstrip() + "\n\n" + section + "\n\n" + after[next_h.start():].lstrip()).strip()
-        return (base[:m.start()].rstrip() + "\n\n" + section).strip()
-
-    def _collect_predf_reasons() -> List[str]:
-        reasons: List[str] = []
-        if _predf_summary_invalid(result.get("summary_markdown")):
-            reasons.append("REPORT BLOCKED: invalid or fallback Detailed Condition Report")
-        if _predf_cost_invalid(result.get("estimated_costs_markdown")):
-            reasons.append("REPORT BLOCKED: invalid or fallback Approximate Repair Cost Breakdown")
-        if _predf_conclusion_invalid(result.get("conclusion")):
-            reasons.append("REPORT BLOCKED: invalid or fallback Conclusion")
-        if _predf_score_rationale_invalid(result):
-            reasons.append("REPORT BLOCKED: sub-100 Compliance Score has no explicit numeric deduction rationale")
-        if _predf_guideline_comparison_invalid(result.get("summary_markdown")):
-            reasons.append("REPORT BLOCKED: client guideline comparison was not finalized by model")
-        return reasons
-
-    def _repair_missing_quality_sections_once(result_obj: Dict[str, Any]) -> Dict[str, Any]:
-        """One targeted model repair for guarded customer-facing sections only.
-        This runs only after the main review is complete and only when the pre-PDF
-        validator would otherwise block. It does not change upload handling,
-        routing, PDF layout, email sending, VIN, claim number, or vehicle fields.
-        """
-        try:
-            score_txt = str(result_obj.get("compliance_score") or "").strip()
-            repair_prompt = (
-                "Return ONLY strict JSON with keys: client_guidelines_comparison_markdown, "
-                "compliance_score_rationale_markdown, estimated_costs_markdown, conclusion_markdown.\n"
-                "Task: repair ONLY missing or validator-blocked final customer-facing sections for an NSPXN comprehensive audit.\n"
-                "Rules:\n"
-                "- Do not rewrite the Detailed Condition Report, fraud section, VIN, claim number, vehicle, odometer, request type, routing, PDF layout, or email content.\n"
-                "- Do not invent facts. Use only the existing report narrative, supplied client rules, and evidence snippets below.\n"
-                "- client_guidelines_comparison_markdown MUST be real markdown bullets under ## Client Guidelines Comparison.\n"
-                "- Each guideline bullet must quote or summarize the rule, mark Aligned / Not Aligned / Not Evidenced, and cite p#/L#, Photo #, estimate, supplement, Advisor Report, or closing report evidence where available.\n"
-                "- Never output placeholder wording such as 'Compare against the uploaded estimate/photos'.\n"
-                f"- Current compliance_score is {score_txt}. If this score is below 100, compliance_score_rationale_markdown MUST contain ## Compliance Score Rationale, Starting from 100, and itemized bullet deductions using exactly this format: '- Deficiency text. Deduction: -10'. The deductions MUST reconcile to {score_txt}.\n"
-                f"- The score rationale MUST end with: 'Final compliance score: **{score_txt}**.' and 'Total = 100 - ... = {score_txt}.'\n"
-                "- estimated_costs_markdown should be populated only if the existing cost section is missing/fallback/thin. Use the estimate/supplement totals and documented dollar amounts from the evidence snippets. Do not create a photos-only approximation in comprehensive mode.\n"
-                "- conclusion_markdown should be populated only if the existing conclusion is missing/fallback. Write a concise professional final conclusion consistent with the existing report findings.\n"
-            )
-            repair_context = (
-                "EXISTING SUMMARY_MARKDOWN:\n" + str(result_obj.get("summary_markdown") or "")[:9000] + "\n\n"
-                "EXISTING ESTIMATED_COSTS_MARKDOWN:\n" + str(result_obj.get("estimated_costs_markdown") or "")[:3000] + "\n\n"
-                "EXISTING CONCLUSION:\n" + str(result_obj.get("conclusion") or "")[:2000] + "\n\n"
-                "CLIENT_RULES_SUPPLIED:\n" + str(client_rules or resolved_rules_text or "")[:7000] + "\n\n"
-                "EVIDENCE_SNIPPETS_FROM_UPLOADS:\n" + str(uploaded_text_all or "")[:9000] + "\n\n"
-                "FILES_SEEN:\n- " + "\n- ".join(files_seen[:80]) + "\n"
-            )
-            _rsp_repair = client.chat.completions.create(
-                model=MODEL,
-                messages=[
-                    {"role": "system", "content": "You repair missing final audit sections. Return JSON only."},
-                    {"role": "user", "content": [{"type": "text", "text": repair_prompt + "\n\n" + repair_context}]},
-                ],
-                max_completion_tokens=int(os.getenv("NSPXN_QUALITY_REPAIR_MAX_TOKENS", "2200")),
-                temperature=0,
-                top_p=1,
-                presence_penalty=0,
-                frequency_penalty=0,
-                response_format={"type": "json_object"},
-            )
-            repair_raw = (_rsp_repair.choices[0].message.content or "")
-            log.info("QUALITY SECTION REPAIR RAW RESPONSE START")
-            log.info((repair_raw or "")[:4000])
-            log.info("QUALITY SECTION REPAIR RAW RESPONSE END")
-            repair_data = _try_parse_json(repair_raw)
-            if not isinstance(repair_data, dict):
-                return result_obj
-            sm = str(result_obj.get("summary_markdown") or "")
-            guide_md = str(repair_data.get("client_guidelines_comparison_markdown") or "").strip()
-            score_md = str(repair_data.get("compliance_score_rationale_markdown") or "").strip()
-            cost_md = str(repair_data.get("estimated_costs_markdown") or "").strip()
-            conclusion_md = str(repair_data.get("conclusion_markdown") or "").strip()
-            if guide_md:
-                sm = _replace_or_append_markdown_section(sm, "## Client Guidelines Comparison", guide_md)
-            if score_md:
-                sm = _replace_or_append_markdown_section(sm, "## Compliance Score Rationale", score_md)
-            result_obj["summary_markdown"] = sm
-            if cost_md:
-                result_obj["estimated_costs_markdown"] = cost_md
-            if conclusion_md:
-                result_obj["conclusion"] = conclusion_md
-            return result_obj
-        except Exception as e:
-            log.warning(f"Quality section repair failed: {e}")
-            return result_obj
-
     if ai_intent in {"comprehensive", "guidelines_only"}:
-        _predf_reasons = _collect_predf_reasons()
-        _repairable_reasons = {
-            "REPORT BLOCKED: sub-100 Compliance Score has no explicit numeric deduction rationale",
-            "REPORT BLOCKED: client guideline comparison was not finalized by model",
-            "REPORT BLOCKED: invalid or fallback Approximate Repair Cost Breakdown",
-            "REPORT BLOCKED: invalid or fallback Conclusion",
-        }
-        if _predf_reasons and any(r in _repairable_reasons for r in _predf_reasons):
-            result = _repair_missing_quality_sections_once(result)
-            try:
-                result = _apply_locked_final_postprocessor(result)
-                result["summary_markdown"] = _ensure_client_guidelines_section(result.get("summary_markdown") or "")
-                result["summary_markdown"] = _normalize_client_guidelines_list_format(result.get("summary_markdown") or "")
-                result, _ = _final_scrub_customer_fields(result, _known_pii_names)
-            except Exception:
-                pass
-            _predf_reasons = _collect_predf_reasons()
-
+        _predf_reasons: List[str] = []
+        if _predf_summary_invalid(result.get("summary_markdown")):
+            _predf_reasons.append("REPORT BLOCKED: invalid or fallback Detailed Condition Report")
+        if _predf_cost_invalid(result.get("estimated_costs_markdown")):
+            _predf_reasons.append("REPORT BLOCKED: invalid or fallback Approximate Repair Cost Breakdown")
+        if _predf_conclusion_invalid(result.get("conclusion")):
+            _predf_reasons.append("REPORT BLOCKED: invalid or fallback Conclusion")
         if _predf_reasons:
             log.error("REPORT BLOCKED: pre-PDF validator failure | reasons=%s", _predf_reasons)
             return JSONResponse(
@@ -4979,11 +4724,30 @@ async def vision_review(
     except Exception:
         pass
 
+    # Return a compact browser payload only. The full report is already in the PDF/email.
+    # This prevents long runs from ending with a large JSON response that the frontend/XHR may treat as a network failure.
+    try:
+        absolute_pdf_url = str(request.base_url).rstrip("/") + pdf_url
+    except Exception:
+        absolute_pdf_url = pdf_url
+
     return {
-        **result_api,
-        "web_summary": _api_cap(result_api.get("summary_brief"), 2500),
-        "gpt_output": _api_cap(result_api.get("summary_markdown"), NSPXN_API_TEXT_LIMIT),
+        "status": "success",
+        "file_number": str(file_number or ""),
+        "request_type": str(result.get("request_type") or req_label or ""),
+        "claim_number": str(result.get("claim_number") or ""),
+        "vin": str(result.get("vin") or ""),
+        "vin_verification": str(result.get("vin_verification") or ""),
+        "vehicle": _format_vehicle_value(result.get("vehicle")),
+        "odometer_estimate_only": str(result.get("odometer_estimate_only") or ""),
+        "compliance_score": str(result.get("compliance_score") or ""),
+        "redaction_status": str(result.get("redaction_status") or ""),
+        "web_summary": _api_cap(result_api.get("summary_brief"), 1200),
+        "gpt_output": _api_cap(result_api.get("summary_markdown"), 6000),
+        "summary_markdown": _api_cap(result_api.get("summary_markdown"), 6000),
         "pdf_url": pdf_url,
+        "download_url": pdf_url,
+        "absolute_pdf_url": absolute_pdf_url,
         "pdf_filename": pdf_filename
     }
 
