@@ -51,6 +51,30 @@ MODEL = os.getenv("OAI_MODEL") or os.getenv("OPENAI_MODEL") or "gpt-5.2"
 # GPT-5.x models use max_completion_tokens; GPT-4.x uses max_tokens
 _token_kw = "max_completion_tokens"
 
+# Runtime model/image cap. REQUIRED before vision_review() uses NSPXN_MAX_MODEL_IMAGES.
+try:
+    NSPXN_MAX_MODEL_IMAGES = int(os.getenv("NSPXN_MAX_MODEL_IMAGES", "48"))
+except Exception:
+    NSPXN_MAX_MODEL_IMAGES = 48
+
+# Runtime browser/API response cap. Keep browser JSON small after PDF/email generation.
+try:
+    NSPXN_API_TEXT_LIMIT = int(os.getenv("NSPXN_API_TEXT_LIMIT", "12000"))
+except Exception:
+    NSPXN_API_TEXT_LIMIT = 12000
+
+# Comprehensive photo thumbnails are disabled unless explicitly enabled.
+try:
+    NSPXN_ENABLE_PHOTO_THUMBNAILS = os.getenv("NSPXN_ENABLE_PHOTO_THUMBNAILS", "0").strip().lower() in {"1", "true", "yes", "on"}
+except Exception:
+    NSPXN_ENABLE_PHOTO_THUMBNAILS = False
+
+# Extra staged GPT calls are disabled by default to reduce runtime.
+try:
+    NSPXN_ENABLE_STAGED_REVIEW = os.getenv("NSPXN_ENABLE_STAGED_REVIEW", "0").strip().lower() in {"1", "true", "yes", "on"}
+except Exception:
+    NSPXN_ENABLE_STAGED_REVIEW = False
+
 if not os.getenv("OPENAI_API_KEY"):
     raise RuntimeError("OPENAI_API_KEY missing")
 try:
@@ -1072,7 +1096,12 @@ async def vision_review(
     if not files:
         return JSONResponse(status_code=400, content={"error": "Missing required upload: files"})
     vin_candidates: List[str] = []  # reserved (filenames not used)
-    MAX_IMAGES = max(1, min(48, NSPXN_MAX_MODEL_IMAGES))
+    # Hard local fallback: prevents NameError even if top-level runtime constants are missing after deploy/merge.
+    try:
+        _nspxn_max_model_images = int(globals().get("NSPXN_MAX_MODEL_IMAGES", os.getenv("NSPXN_MAX_MODEL_IMAGES", "48")))
+    except Exception:
+        _nspxn_max_model_images = 48
+    MAX_IMAGES = max(1, min(48, _nspxn_max_model_images))
     used = 0
     # Coalesce Add\'l Notes from multiple possible frontend field names
     ai_notes_used = ((ai_notes or "").strip() or (addl_notes or "").strip() or (additional_notes or "").strip() or (notes or "").strip())
@@ -4724,30 +4753,11 @@ async def vision_review(
     except Exception:
         pass
 
-    # Return a compact browser payload only. The full report is already in the PDF/email.
-    # This prevents long runs from ending with a large JSON response that the frontend/XHR may treat as a network failure.
-    try:
-        absolute_pdf_url = str(request.base_url).rstrip("/") + pdf_url
-    except Exception:
-        absolute_pdf_url = pdf_url
-
     return {
-        "status": "success",
-        "file_number": str(file_number or ""),
-        "request_type": str(result.get("request_type") or req_label or ""),
-        "claim_number": str(result.get("claim_number") or ""),
-        "vin": str(result.get("vin") or ""),
-        "vin_verification": str(result.get("vin_verification") or ""),
-        "vehicle": _format_vehicle_value(result.get("vehicle")),
-        "odometer_estimate_only": str(result.get("odometer_estimate_only") or ""),
-        "compliance_score": str(result.get("compliance_score") or ""),
-        "redaction_status": str(result.get("redaction_status") or ""),
-        "web_summary": _api_cap(result_api.get("summary_brief"), 1200),
-        "gpt_output": _api_cap(result_api.get("summary_markdown"), 6000),
-        "summary_markdown": _api_cap(result_api.get("summary_markdown"), 6000),
+        **result_api,
+        "web_summary": _api_cap(result_api.get("summary_brief"), 2500),
+        "gpt_output": _api_cap(result_api.get("summary_markdown"), NSPXN_API_TEXT_LIMIT),
         "pdf_url": pdf_url,
-        "download_url": pdf_url,
-        "absolute_pdf_url": absolute_pdf_url,
         "pdf_filename": pdf_filename
     }
 
