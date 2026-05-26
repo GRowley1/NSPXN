@@ -57,6 +57,19 @@ try:
 except Exception:
     NSPXN_MAX_MODEL_IMAGES = 48
 
+# Runtime browser/API response cap.
+# Keep the browser JSON small enough to return reliably after PDF/email generation.
+try:
+    NSPXN_API_TEXT_LIMIT = int(os.getenv("NSPXN_API_TEXT_LIMIT", "12000"))
+except Exception:
+    NSPXN_API_TEXT_LIMIT = 12000
+
+# Comprehensive photo thumbnails are disabled unless explicitly enabled.
+try:
+    NSPXN_ENABLE_PHOTO_THUMBNAILS = os.getenv("NSPXN_ENABLE_PHOTO_THUMBNAILS", "0").strip().lower() in {"1", "true", "yes", "on"}
+except Exception:
+    NSPXN_ENABLE_PHOTO_THUMBNAILS = False
+
 if not os.getenv("OPENAI_API_KEY"):
     raise RuntimeError("OPENAI_API_KEY missing")
 try:
@@ -2921,8 +2934,6 @@ async def vision_review(
         if not client_rules_supplied or ai_intent not in {"comprehensive", "guidelines_only"}:
             return t
         t = _scrub_false_missing_client_rules_claims(t)
-        if re.search(r"(?im)^##\s*Client\s+Guidelines\s+Comparison\b", t):
-            return t
         fragments = _extract_client_rule_fragments(client_rules or resolved_rules_text or "")
         bullets: List[str] = []
         if fragments:
@@ -2931,6 +2942,18 @@ async def vision_review(
         else:
             bullets.append("- Client guidelines were supplied from the frontend selection/pasted Client Rules box and must be applied to this review.")
         section = "## Client Guidelines Comparison\n" + "\n".join(bullets)
+
+        m_sec = re.search(r"(?im)^##\s*Client\s+Guidelines\s+Comparison\b", t)
+        if m_sec:
+            after = t[m_sec.end():]
+            next_h = re.search(r"(?m)^##\s+", after)
+            body = after[:next_h.start()] if next_h else after
+            # If the model printed only the heading, inject fallback bullets instead of leaving a blank section.
+            if not re.search(r"(?m)^\s*[-*]\s+\S", body):
+                insert_at = m_sec.end()
+                return (t[:insert_at].rstrip() + "\n" + "\n".join(bullets) + t[insert_at:]).strip()
+            return t
+
         return (t + "\n\n" + section).strip() if t else section
 
     def _scrub_comprehensive_rationale_text(md_text: str) -> str:
@@ -3240,27 +3263,9 @@ async def vision_review(
         return bool(re.search(r"(?i)\bDeduction\b\s*:?\s*-\s*\d+|\((?:-|–)\s*\d+\)|Total\s*=\s*100\s*-", t))
 
     def _prevent_advisory_score_collapse(result_obj: dict) -> dict:
-        """Do not accept a very low GPT/stage score from advisory Not Evidenced list output
-        unless there is an explicit numeric deduction rationale supporting it."""
-        try:
-            raw_score = str(result_obj.get("compliance_score") or "").strip()
-            m = re.search(r"\d{1,3}", raw_score)
-            if not m:
-                return result_obj
-            score = max(0, min(100, int(m.group(0))))
-            sm = str(result_obj.get("summary_markdown") or "")
-            if score < 60 and not _has_explicit_score_rationale(sm):
-                result_obj["compliance_score"] = "100"
-                result_obj["summary_markdown"] = (
-                    sm.rstrip()
-                    + "\n\n## Compliance Score Rationale\n"
-                    + "Starting from 100.\n"
-                    + "- No code-owned numeric deductions were supported by an explicit material deduction rationale in the final report body. Advisory-only Not Evidenced/Not Aligned guideline notes were not allowed to collapse the score.\n"
-                    + "Final compliance score: **100**.\n"
-                    + "Total = 100 = 100."
-                ).strip()
-        except Exception:
-            pass
+        """Preserve the model/staged score output.
+        Do not inject internal score-protection language into customer reports.
+        """
         return result_obj
 
     def _apply_locked_final_postprocessor(result_obj: dict) -> dict:
