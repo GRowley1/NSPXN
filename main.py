@@ -17,6 +17,7 @@ from main_photos_only_locked import app as photos_only_app
 
 
 init_auth_db()
+logging.warning("NSPXN ROUTER COMPACT LOCK ACTIVE 2026-05-26-2255")
 
 
 _ALLOWED_CORS_ORIGINS = {
@@ -332,21 +333,27 @@ class IntentRouterApp:
                 "more_body": False,
             }
 
-        response_state = {"status": 500, "headers": {}, "started": False, "completed": False, "sent_to_client": False}
-        compact_vision_response = path == "/vision-review"
-        compact_body_chunks = []
-        compact_body_bytes = 0
-        MAX_COMPACT_CAPTURE_BYTES = 1024 * 1024  # enough for blocked JSON / current report JSON; prevents browser-heavy responses
+        # Router-level compact response lock. This is the authoritative place to stop
+        # /vision-review from sending a huge report JSON body back to the browser.
+        # The mounted comprehensive/photos app may still create/email/store the PDF,
+        # but this wrapper only returns a small browser payload.
+        response_state = {
+            "status": 500,
+            "headers": {},
+            "started": False,
+            "completed": False,
+            "sent_to_client": False,
+            "body_bytes": 0,
+        }
+        captured_chunks = []
+        CAPTURE_LIMIT = 64 * 1024  # enough for blocked/error JSON; success bodies are discarded
 
-        async def _send_compact_or_passthrough_body():
-            """For /vision-review, never forward a huge report JSON body to the browser.
-            The PDF/email are the durable outputs; the browser only needs a status and download URL.
-            This router-level guard prevents older mounted modules from returning 200KB+ JSON payloads.
-            """
-            nonlocal compact_body_chunks, compact_body_bytes
+        def _compact_download_url() -> str:
+            safe_file = quote(str(file_number or ""), safe="")
+            return f"/download-pdf?file_number={safe_file}"
 
+        async def _send_compact_response(raw_body: bytes = b""):
             status_code = int(response_state.get("status", 500))
-            raw_body = b"".join(compact_body_chunks) if compact_body_chunks else b""
             payload = None
             if raw_body:
                 try:
@@ -356,6 +363,7 @@ class IntentRouterApp:
 
             if 200 <= status_code < 300:
                 if isinstance(payload, dict) and payload.get("status") == "blocked":
+                    logging.warning("NSPXN ROUTER COMPACT LOCK returning blocked JSON file_number=%s bytes_in=%s", file_number, response_state.get("body_bytes"))
                     response_state["sent_to_client"] = True
                     await _send_json(send, 200, payload, scope=scope)
                     return
@@ -369,9 +377,8 @@ class IntentRouterApp:
                         or payload.get("report_url")
                         or ""
                     ).strip()
-
                 if not pdf_url:
-                    pdf_url = f"/download-pdf?file_number={quote(str(file_number or ''))}"
+                    pdf_url = _compact_download_url()
 
                 compact_payload = {
                     "status": "success",
@@ -382,46 +389,31 @@ class IntentRouterApp:
                     "absolute_pdf_url": pdf_url,
                     "gpt_output": "Report complete. Click Download PDF.",
                     "summary_brief": "Report complete. Click Download PDF.",
+                    "router_compact_lock": "ACTIVE_2026_05_26_2255",
                 }
-
-                # Preserve a few lightweight headers/fields if the mounted app returned them.
                 if isinstance(payload, dict):
                     for key in ("claim_number", "vin", "vehicle", "compliance_score", "redaction_status", "pdf_filename"):
                         if payload.get(key) not in (None, ""):
                             compact_payload[key] = payload.get(key)
 
+                logging.warning("NSPXN ROUTER COMPACT LOCK returning compact success file_number=%s bytes_in=%s", file_number, response_state.get("body_bytes"))
                 response_state["sent_to_client"] = True
                 await _send_json(send, 200, compact_payload, scope=scope)
                 return
 
-            # Non-success: forward a compact error instead of a large/invalid body.
             error_payload = payload if isinstance(payload, dict) else {
-                "status": "blocked" if status_code < 500 else "error",
+                "status": "error" if status_code >= 500 else "blocked",
                 "error": "Report processing failed." if status_code >= 500 else "Report was not completed.",
                 "detail": (raw_body.decode("utf-8", "ignore")[:1000] if raw_body else "No response body returned."),
-                "file_number": file_number,
                 "ai_intent": ai_intent,
+                "file_number": file_number,
+                "router_compact_lock": "ACTIVE_2026_05_26_2255",
             }
+            logging.warning("NSPXN ROUTER COMPACT LOCK returning compact error status=%s file_number=%s bytes_in=%s", status_code, file_number, response_state.get("body_bytes"))
             response_state["sent_to_client"] = True
             await _send_json(send, status_code, error_payload, scope=scope)
 
         async def tracking_send(message):
-            # For /vision-review, intercept the mounted app response and replace any large
-            # report JSON with a compact success/block JSON. For all other routes, pass through.
-            if not compact_vision_response:
-                if message["type"] == "http.response.start":
-                    response_state["started"] = True
-                    response_state["status"] = int(message.get("status", 500))
-                    response_state["headers"] = {
-                        k.decode("latin1").lower(): v.decode("latin1")
-                        for k, v in message.get("headers", [])
-                    }
-                elif message["type"] == "http.response.body" and not message.get("more_body", False):
-                    response_state["completed"] = True
-                response_state["sent_to_client"] = True
-                await send(message)
-                return
-
             if message["type"] == "http.response.start":
                 response_state["started"] = True
                 response_state["status"] = int(message.get("status", 500))
@@ -429,25 +421,25 @@ class IntentRouterApp:
                     k.decode("latin1").lower(): v.decode("latin1")
                     for k, v in message.get("headers", [])
                 }
+                # Do not forward mounted-app headers for /vision-review. We will send
+                # one compact response after the mounted app finishes.
                 return
 
             if message["type"] == "http.response.body":
                 chunk = message.get("body", b"") or b""
-                if compact_body_bytes + len(chunk) <= MAX_COMPACT_CAPTURE_BYTES:
-                    compact_body_chunks.append(chunk)
-                compact_body_bytes += len(chunk)
+                response_state["body_bytes"] += len(chunk)
+                if sum(len(c) for c in captured_chunks) + len(chunk) <= CAPTURE_LIMIT:
+                    captured_chunks.append(chunk)
                 if not message.get("more_body", False):
                     response_state["completed"] = True
-                    await _send_compact_or_passthrough_body()
+                    await _send_compact_response(b"".join(captured_chunks))
                 return
 
         try:
+            logging.warning("NSPXN ROUTER COMPACT LOCK intercepting /vision-review file_number=%s ai_intent=%s", file_number, ai_intent)
             await target_app(scope, replay_receive, tracking_send)
         except Exception as exc:
             logging.exception("NSPXN Comprehensive/Photos router exception", exc_info=exc)
-            # If a response was already sent to the client, do not send a second ASGI response.
-            # In compact /vision-review mode, headers may be captured but not yet sent, so
-            # started/completed alone must not suppress the router's error JSON.
             if response_state.get("sent_to_client"):
                 return
 
@@ -469,6 +461,7 @@ class IntentRouterApp:
                         "detail": "The AI report could not be completed because the OpenAI API quota or rate limit was reached. Check the OpenAI billing/usage limit, then resubmit.",
                         "ai_intent": ai_intent,
                         "file_number": file_number,
+                        "router_compact_lock": "ACTIVE_2026_05_26_2255",
                     },
                     scope=scope,
                 )
@@ -482,6 +475,7 @@ class IntentRouterApp:
                     "detail": detail,
                     "ai_intent": ai_intent,
                     "file_number": file_number,
+                    "router_compact_lock": "ACTIVE_2026_05_26_2255",
                 },
                 scope=scope,
             )
