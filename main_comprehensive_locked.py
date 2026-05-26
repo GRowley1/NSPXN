@@ -41,6 +41,15 @@ from presidio_anonymizer.entities import OperatorConfig  # required for anonymiz
 PDF_DIR = os.getenv("PDF_DIR", "/tmp"); os.makedirs(PDF_DIR, exist_ok=True)
 CLIENT_RULES_DIR = os.getenv("CLIENT_RULES_DIR", "client_rules")
 
+# Comprehensive runtime limits / feature flags
+# Defaults preserve current Comprehensive behavior and keep thumbnails OFF.
+try:
+    NSPXN_MAX_MODEL_IMAGES = int(os.getenv("NSPXN_MAX_MODEL_IMAGES", "48"))
+except Exception:
+    NSPXN_MAX_MODEL_IMAGES = 48
+
+NSPXN_ENABLE_PHOTO_THUMBNAILS = False
+
 logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s")
 log = logging.getLogger("nspxn")
 log.info(f"Using CLIENT_RULES_DIR={CLIENT_RULES_DIR}")
