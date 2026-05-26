@@ -51,6 +51,30 @@ MODEL = os.getenv("OAI_MODEL") or os.getenv("OPENAI_MODEL") or "gpt-5.2"
 # GPT-5.x models use max_completion_tokens; GPT-4.x uses max_tokens
 _token_kw = "max_completion_tokens"
 
+# Runtime model/image cap. REQUIRED before vision_review() uses NSPXN_MAX_MODEL_IMAGES.
+try:
+    NSPXN_MAX_MODEL_IMAGES = int(os.getenv("NSPXN_MAX_MODEL_IMAGES", "48"))
+except Exception:
+    NSPXN_MAX_MODEL_IMAGES = 48
+
+# Runtime browser/API response cap. Keep browser JSON small after PDF/email generation.
+try:
+    NSPXN_API_TEXT_LIMIT = int(os.getenv("NSPXN_API_TEXT_LIMIT", "12000"))
+except Exception:
+    NSPXN_API_TEXT_LIMIT = 12000
+
+# Comprehensive photo thumbnails are disabled unless explicitly enabled.
+try:
+    NSPXN_ENABLE_PHOTO_THUMBNAILS = os.getenv("NSPXN_ENABLE_PHOTO_THUMBNAILS", "0").strip().lower() in {"1", "true", "yes", "on"}
+except Exception:
+    NSPXN_ENABLE_PHOTO_THUMBNAILS = False
+
+# Extra staged GPT calls are disabled by default to reduce runtime.
+try:
+    NSPXN_ENABLE_STAGED_REVIEW = os.getenv("NSPXN_ENABLE_STAGED_REVIEW", "0").strip().lower() in {"1", "true", "yes", "on"}
+except Exception:
+    NSPXN_ENABLE_STAGED_REVIEW = False
+
 if not os.getenv("OPENAI_API_KEY"):
     raise RuntimeError("OPENAI_API_KEY missing")
 try:
