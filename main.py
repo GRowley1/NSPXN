@@ -1,7 +1,7 @@
 import json
 import logging
 import re
-from urllib.parse import parse_qs
+from urllib.parse import parse_qs, quote
 
 from fastapi import HTTPException
 
@@ -332,11 +332,96 @@ class IntentRouterApp:
                 "more_body": False,
             }
 
-        response_state = {"status": 500, "headers": {}, "started": False, "completed": False}
+        response_state = {"status": 500, "headers": {}, "started": False, "completed": False, "sent_to_client": False}
+        compact_vision_response = path == "/vision-review"
+        compact_body_chunks = []
+        compact_body_bytes = 0
+        MAX_COMPACT_CAPTURE_BYTES = 1024 * 1024  # enough for blocked JSON / current report JSON; prevents browser-heavy responses
+
+        async def _send_compact_or_passthrough_body():
+            """For /vision-review, never forward a huge report JSON body to the browser.
+            The PDF/email are the durable outputs; the browser only needs a status and download URL.
+            This router-level guard prevents older mounted modules from returning 200KB+ JSON payloads.
+            """
+            nonlocal compact_body_chunks, compact_body_bytes
+
+            status_code = int(response_state.get("status", 500))
+            raw_body = b"".join(compact_body_chunks) if compact_body_chunks else b""
+            payload = None
+            if raw_body:
+                try:
+                    payload = json.loads(raw_body.decode("utf-8", "ignore"))
+                except Exception:
+                    payload = None
+
+            if 200 <= status_code < 300:
+                if isinstance(payload, dict) and payload.get("status") == "blocked":
+                    response_state["sent_to_client"] = True
+                    await _send_json(send, 200, payload, scope=scope)
+                    return
+
+                pdf_url = ""
+                if isinstance(payload, dict):
+                    pdf_url = str(
+                        payload.get("absolute_pdf_url")
+                        or payload.get("download_url")
+                        or payload.get("pdf_url")
+                        or payload.get("report_url")
+                        or ""
+                    ).strip()
+
+                if not pdf_url:
+                    pdf_url = f"/download-pdf?file_number={quote(str(file_number or ''))}"
+
+                compact_payload = {
+                    "status": "success",
+                    "file_number": file_number,
+                    "ai_intent": ai_intent,
+                    "download_url": pdf_url,
+                    "pdf_url": pdf_url,
+                    "absolute_pdf_url": pdf_url,
+                    "gpt_output": "Report complete. Click Download PDF.",
+                    "summary_brief": "Report complete. Click Download PDF.",
+                }
+
+                # Preserve a few lightweight headers/fields if the mounted app returned them.
+                if isinstance(payload, dict):
+                    for key in ("claim_number", "vin", "vehicle", "compliance_score", "redaction_status", "pdf_filename"):
+                        if payload.get(key) not in (None, ""):
+                            compact_payload[key] = payload.get(key)
+
+                response_state["sent_to_client"] = True
+                await _send_json(send, 200, compact_payload, scope=scope)
+                return
+
+            # Non-success: forward a compact error instead of a large/invalid body.
+            error_payload = payload if isinstance(payload, dict) else {
+                "status": "blocked" if status_code < 500 else "error",
+                "error": "Report processing failed." if status_code >= 500 else "Report was not completed.",
+                "detail": (raw_body.decode("utf-8", "ignore")[:1000] if raw_body else "No response body returned."),
+                "file_number": file_number,
+                "ai_intent": ai_intent,
+            }
+            response_state["sent_to_client"] = True
+            await _send_json(send, status_code, error_payload, scope=scope)
 
         async def tracking_send(message):
-            # Header-only tracking. Do NOT buffer or parse the response body here;
-            # buffering the full report response can break large PDF/report responses.
+            # For /vision-review, intercept the mounted app response and replace any large
+            # report JSON with a compact success/block JSON. For all other routes, pass through.
+            if not compact_vision_response:
+                if message["type"] == "http.response.start":
+                    response_state["started"] = True
+                    response_state["status"] = int(message.get("status", 500))
+                    response_state["headers"] = {
+                        k.decode("latin1").lower(): v.decode("latin1")
+                        for k, v in message.get("headers", [])
+                    }
+                elif message["type"] == "http.response.body" and not message.get("more_body", False):
+                    response_state["completed"] = True
+                response_state["sent_to_client"] = True
+                await send(message)
+                return
+
             if message["type"] == "http.response.start":
                 response_state["started"] = True
                 response_state["status"] = int(message.get("status", 500))
@@ -344,18 +429,26 @@ class IntentRouterApp:
                     k.decode("latin1").lower(): v.decode("latin1")
                     for k, v in message.get("headers", [])
                 }
-            elif message["type"] == "http.response.body" and not message.get("more_body", False):
-                response_state["completed"] = True
-            await send(message)
+                return
+
+            if message["type"] == "http.response.body":
+                chunk = message.get("body", b"") or b""
+                if compact_body_bytes + len(chunk) <= MAX_COMPACT_CAPTURE_BYTES:
+                    compact_body_chunks.append(chunk)
+                compact_body_bytes += len(chunk)
+                if not message.get("more_body", False):
+                    response_state["completed"] = True
+                    await _send_compact_or_passthrough_body()
+                return
 
         try:
             await target_app(scope, replay_receive, tracking_send)
         except Exception as exc:
             logging.exception("NSPXN Comprehensive/Photos router exception", exc_info=exc)
-            # If the mounted app already started or completed a response, do not send
-            # a second ASGI response. Sending another response start is what caused
-            # "Unexpected ASGI message 'http.response.start'" and browser Network Error.
-            if response_state.get("started") or response_state.get("completed"):
+            # If a response was already sent to the client, do not send a second ASGI response.
+            # In compact /vision-review mode, headers may be captured but not yet sent, so
+            # started/completed alone must not suppress the router's error JSON.
+            if response_state.get("sent_to_client"):
                 return
 
             detail = str(exc)
