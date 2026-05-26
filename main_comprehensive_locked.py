@@ -51,6 +51,12 @@ MODEL = os.getenv("OAI_MODEL") or os.getenv("OPENAI_MODEL") or "gpt-5.2"
 # GPT-5.x models use max_completion_tokens; GPT-4.x uses max_tokens
 _token_kw = "max_completion_tokens"
 
+# Runtime model/image cap
+try:
+    NSPXN_MAX_MODEL_IMAGES = int(os.getenv("NSPXN_MAX_MODEL_IMAGES", "48"))
+except Exception:
+    NSPXN_MAX_MODEL_IMAGES = 48
+
 if not os.getenv("OPENAI_API_KEY"):
     raise RuntimeError("OPENAI_API_KEY missing")
 try:
