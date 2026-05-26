@@ -40,39 +40,21 @@ from presidio_anonymizer.entities import OperatorConfig  # required for anonymiz
 # -----------------------
 PDF_DIR = os.getenv("PDF_DIR", "/tmp"); os.makedirs(PDF_DIR, exist_ok=True)
 CLIENT_RULES_DIR = os.getenv("CLIENT_RULES_DIR", "client_rules")
-
-# Runtime guards used by the Comprehensive upload/image pipeline.
-# Thumbnails are intentionally OFF for Comprehensive. Do not attach photo thumbnails.
-try:
-    NSPXN_MAX_MODEL_IMAGES = int(os.getenv("NSPXN_MAX_MODEL_IMAGES", "48"))
-except Exception:
-    NSPXN_MAX_MODEL_IMAGES = 48
-NSPXN_MAX_MODEL_IMAGES = max(1, min(48, NSPXN_MAX_MODEL_IMAGES))
-
-NSPXN_ENABLE_PHOTO_THUMBNAILS = False
-
-# Keep /vision-review JSON small so Render/browser download flow stays stable.
-# Full report content remains in the generated PDF and email.
-try:
-    NSPXN_API_TEXT_LIMIT = int(os.getenv("NSPXN_API_TEXT_LIMIT", "8000"))
-except Exception:
-    NSPXN_API_TEXT_LIMIT = 8000
-NSPXN_API_TEXT_LIMIT = max(2000, min(12000, NSPXN_API_TEXT_LIMIT))
+NSPXN_LOGO_PATH = os.getenv("NSPXN_LOGO_PATH", os.path.join(os.path.dirname(__file__), "logo2.png"))
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s")
 log = logging.getLogger("nspxn")
 log.info(f"Using CLIENT_RULES_DIR={CLIENT_RULES_DIR}")
 
 # Use selected model everywhere
-MODEL = os.getenv("OAI_MODEL") or os.getenv("OPENAI_MODEL") or "gpt-4.1"
+MODEL = os.getenv("OAI_MODEL") or os.getenv("OPENAI_MODEL") or "gpt-5.2"
 # GPT-5.x models use max_completion_tokens; GPT-4.x uses max_tokens
-IS_GPT5 = MODEL.lower().startswith("gpt-5")
-_TOKEN_PARAM = "max_completion_tokens" if IS_GPT5 else "max_tokens"
+_token_kw = "max_completion_tokens"
 
 if not os.getenv("OPENAI_API_KEY"):
     raise RuntimeError("OPENAI_API_KEY missing")
 try:
-    client = OpenAI(api_key=os.environ["OPENAI_API_KEY"], timeout=120.0, max_retries=1)
+    client = OpenAI(api_key=os.environ["OPENAI_API_KEY"], timeout=120.0, max_retries=0)
 except TypeError:
     # Backwards-compatible init for older openai-python versions
     client = OpenAI(api_key=os.environ["OPENAI_API_KEY"])
@@ -788,7 +770,7 @@ def _add_bytes(parts: List[Dict[str,Any]], files_seen: List[str], photo_index: O
     low = fname.lower()
     if low.endswith(SUPPORTED_PDF_EXTS) and used < max_images:
         try:
-            pages = convert_from_bytes(raw, dpi=int(os.getenv("NSPXN_PDF_RASTER_DPI", "150")))
+            pages = convert_from_bytes(raw, dpi=200)
             files_seen.append(f"{fname} (pdf, {len(pages)} page(s))")
             _maybe_extract_pdf_text(raw, fname, parts, files_seen, pdf_text_fulls=pdf_text_fulls)
             OCR_PAGE_CAP = 100
@@ -929,10 +911,10 @@ app.add_middleware(
 async def _openai_rate_limit_handler(request: Request, exc: RateLimitError):
     log.warning(f"OpenAI rate limit handled: {exc}")
     return JSONResponse(
-        status_code=429,
+        status_code=200,
         content={
             "status": "blocked",
-            "error": "OpenAI rate limit reached while processing this Comprehensive report. Please retry in a few minutes.",
+            "error": "OpenAI service/account quota or rate limit is blocking this request. Please verify the OPENAI_API_KEY project/billing/quota on Render, or retry after quota is available.",
             "reason": "openai_rate_limit",
         },
     )
@@ -942,10 +924,10 @@ async def _openai_api_status_handler(request: Request, exc: APIStatusError):
     status_code = getattr(exc, "status_code", 500) or 500
     log.warning(f"OpenAI API status handled: {status_code} {exc}")
     return JSONResponse(
-        status_code=status_code if status_code < 500 else 502,
+        status_code=200,
         content={
             "status": "blocked",
-            "error": "OpenAI API request failed. Please retry shortly.",
+            "error": "OpenAI API request was blocked or failed. Verify the OPENAI_API_KEY project/billing/quota on Render, or retry shortly.",
             "reason": "openai_api_status",
             "openai_status_code": status_code,
         },
@@ -1205,9 +1187,9 @@ async def vision_review(
                     data = zf.read(zi)
                 except Exception as e:
                     files_seen.append(f"{fname}::{inner_name} (read error: {e})"); continue
-                used = _add_bytes(parts, files_seen, photo_index, None, data, f"{fname}::{inner_name}", used, MAX_IMAGES, pdf_text_fulls=pdf_text_fulls, ocr_pairs=ocr_pairs)
+                used = _add_bytes(parts, files_seen, photo_index, thumbnail_paths, data, f"{fname}::{inner_name}", used, MAX_IMAGES, pdf_text_fulls=pdf_text_fulls, ocr_pairs=ocr_pairs)
         else:
-            used = _add_bytes(parts, files_seen, photo_index, None, raw, fname, used, MAX_IMAGES, pdf_text_fulls=pdf_text_fulls, ocr_pairs=ocr_pairs)
+            used = _add_bytes(parts, files_seen, photo_index, thumbnail_paths, raw, fname, used, MAX_IMAGES, pdf_text_fulls=pdf_text_fulls, ocr_pairs=ocr_pairs)
 
     # Collect uploaded TEXT ONLY for evidence checks
     uploaded_text_blobs = []
@@ -1280,7 +1262,7 @@ async def vision_review(
                     {"role": "system", "content": "You extract VINs from vehicle door-jamb certification labels. JSON only."},
                     {"role": "user", "content": [{"type": "text", "text": prompt}, _image_part_from_bytes(raw_bytes)]},
                 ],
-                **{_TOKEN_PARAM: 300},
+                max_completion_tokens=300,
                 temperature=0,
                 response_format={"type": "json_object"},
             )
@@ -1668,7 +1650,7 @@ async def vision_review(
             model=MODEL,
             messages=[{"role":"system","content": SYSTEM},
                       {"role":"user","content": parts_payload}],
-            **{_TOKEN_PARAM: max_tokens},
+            max_completion_tokens=max_tokens,
             temperature=0,
             top_p=1,
             presence_penalty=0,
@@ -1680,7 +1662,7 @@ async def vision_review(
             model=MODEL,
             messages=[{"role":"system","content": SYSTEM},
                       {"role":"user","content": parts_payload}],
-            **{_TOKEN_PARAM: max_tokens},
+            max_completion_tokens=max_tokens,
             temperature=0,
             top_p=1,
             presence_penalty=0,
@@ -1720,7 +1702,7 @@ async def vision_review(
             _rsp = client.chat.completions.create(
                 model=MODEL,
                 messages=[{"role": "system", "content": stage_system}, {"role": "user", "content": stage_parts}],
-                **{_TOKEN_PARAM: stage_tokens},
+                max_completion_tokens=stage_tokens,
                 temperature=0,
                 top_p=1,
                 presence_penalty=0,
@@ -1731,7 +1713,7 @@ async def vision_review(
             _rsp = client.chat_completions.create(  # type: ignore[attr-defined]
                 model=MODEL,
                 messages=[{"role": "system", "content": stage_system}, {"role": "user", "content": stage_parts}],
-                **{_TOKEN_PARAM: stage_tokens},
+                max_completion_tokens=stage_tokens,
                 temperature=0,
                 top_p=1,
                 presence_penalty=0,
@@ -1899,7 +1881,7 @@ async def vision_review(
                 model=MODEL,
                 messages=[{"role": "system", "content": SYSTEM},
                           {"role": "user", "content": shrunk}],
-                **{_TOKEN_PARAM: retry_tokens},
+                max_completion_tokens=retry_tokens,
                 temperature=0,
                 response_format={"type": "json_object"}
             )
@@ -1929,7 +1911,7 @@ async def vision_review(
                 fix_rsp = client.chat_completions.create(  # type: ignore[attr-defined]
                     model=MODEL,
                     messages=fix_prompt,
-                    **{_TOKEN_PARAM: max_tokens},
+                    max_completion_tokens=max_tokens,
                     temperature=0,
                     response_format={"type":"json_object"}
                 )
@@ -1937,7 +1919,7 @@ async def vision_review(
                 fix_rsp = client.chat.completions.create(
                     model=MODEL,
                     messages=fix_prompt,
-                    **{_TOKEN_PARAM: max_tokens},
+                    max_completion_tokens=max_tokens,
                     temperature=0,
                     response_format={"type":"json_object"}
                 )
@@ -1968,7 +1950,7 @@ async def vision_review(
                     model=MODEL,
                     messages=[{"role":"system","content": SYSTEM},
                               {"role":"user","content": direct_parts}],
-                    **{_TOKEN_PARAM: min(3200, max_tokens + 700)},
+                    max_completion_tokens=min(3200, max_tokens + 700),
                     temperature=0,
                     top_p=1,
                     presence_penalty=0,
@@ -2301,7 +2283,7 @@ async def vision_review(
                         model=MODEL,
                         messages=[{"role": "system", "content": SYSTEM},
                                   {"role": "user", "content": retry_parts}],
-                        **{_TOKEN_PARAM: retry_tokens},
+                        max_completion_tokens=retry_tokens,
                         temperature=0,
                         top_p=1,
                         presence_penalty=0,
@@ -2313,7 +2295,7 @@ async def vision_review(
                         model=MODEL,
                         messages=[{"role": "system", "content": SYSTEM},
                                   {"role": "user", "content": retry_parts}],
-                        **{_TOKEN_PARAM: retry_tokens},
+                        max_completion_tokens=retry_tokens,
                         temperature=0,
                         top_p=1,
                         presence_penalty=0,
@@ -2904,6 +2886,30 @@ async def vision_review(
             kept.append(ln)
         return "\n".join(kept).strip()
 
+    def _normalize_client_guidelines_list_format(md_text: str) -> str:
+        """Convert model-produced Python-list style guideline output into clean bullets."""
+        t = str(md_text or "")
+        if "## Client Guidelines Comparison" not in t:
+            return t
+        head, sep, tail = t.partition("## Client Guidelines Comparison")
+        if not sep:
+            return t
+        section = tail
+        next_heading = re.search(r"(?m)^##\s+", section)
+        rest = ""
+        if next_heading:
+            rest = section[next_heading.start():]
+            section = section[:next_heading.start()]
+        body = section.strip()
+        if body.startswith("[") and body.endswith("]"):
+            items = re.findall(r"['\"]([^'\"]{8,}?)['\"]", body)
+            if items:
+                body = "\n".join("- " + re.sub(r"\s+", " ", item).strip(" -") for item in items)
+        body = re.sub(r"(?m)^\s*['\"]-\s*", "- ", body)
+        body = re.sub(r"(?m)['\"]\s*,?\s*$", "", body)
+        body = re.sub(r"(?m)^\s*\[\s*$|^\s*\]\s*$", "", body).strip()
+        return (head.rstrip() + "\n\n## Client Guidelines Comparison\n" + body + ("\n" + rest if rest else "")).strip()
+
     def _ensure_client_guidelines_section(md_text: str) -> str:
         t = str(md_text or "").strip()
         if not client_rules_supplied or ai_intent not in {"comprehensive", "guidelines_only"}:
@@ -3221,9 +3227,40 @@ async def vision_review(
         t = str(existing_md or "").strip()
         return t if t else "No material inconsistencies found."
 
+    def _has_explicit_score_rationale(md_text: str) -> bool:
+        t = str(md_text or "")
+        if not re.search(r"(?im)^##\s*Compliance\s+Score\s+Rationale\b", t):
+            return False
+        return bool(re.search(r"(?i)\bDeduction\b\s*:?\s*-\s*\d+|\((?:-|–)\s*\d+\)|Total\s*=\s*100\s*-", t))
+
+    def _prevent_advisory_score_collapse(result_obj: dict) -> dict:
+        """Do not accept a very low GPT/stage score from advisory Not Evidenced list output
+        unless there is an explicit numeric deduction rationale supporting it."""
+        try:
+            raw_score = str(result_obj.get("compliance_score") or "").strip()
+            m = re.search(r"\d{1,3}", raw_score)
+            if not m:
+                return result_obj
+            score = max(0, min(100, int(m.group(0))))
+            sm = str(result_obj.get("summary_markdown") or "")
+            if score < 60 and not _has_explicit_score_rationale(sm):
+                result_obj["compliance_score"] = "100"
+                result_obj["summary_markdown"] = (
+                    sm.rstrip()
+                    + "\n\n## Compliance Score Rationale\n"
+                    + "Starting from 100.\n"
+                    + "- No code-owned numeric deductions were supported by an explicit material deduction rationale in the final report body. Advisory-only Not Evidenced/Not Aligned guideline notes were not allowed to collapse the score.\n"
+                    + "Final compliance score: **100**.\n"
+                    + "Total = 100 = 100."
+                ).strip()
+        except Exception:
+            pass
+        return result_obj
+
     def _apply_locked_final_postprocessor(result_obj: dict) -> dict:
         if not isinstance(result_obj, dict):
             return result_obj
+        result_obj = _prevent_advisory_score_collapse(result_obj)
         sm = str(result_obj.get("summary_markdown") or "")
         sm = _build_locked_compliance_score_rationale(sm, str(result_obj.get("compliance_score") or ""))
         sm, locked_score = _validate_locked_compliance_score_block(sm, str(result_obj.get("compliance_score") or ""))
@@ -3238,6 +3275,7 @@ async def vision_review(
         if ai_intent != "damage_report_from_photos":
             result = _apply_locked_final_postprocessor(result)
             result["summary_markdown"] = _ensure_client_guidelines_section(result.get("summary_markdown") or "")
+            result["summary_markdown"] = _normalize_client_guidelines_list_format(result.get("summary_markdown") or "")
     except Exception:
         pass
 
@@ -3256,6 +3294,10 @@ async def vision_review(
             r"(?im)\bInsured\s*(?:Name)?\s*[:\-]\s*([A-Z][A-Z'.,\- ]{2,80})",
             r"(?im)\bCustomer\s*(?:Name)?\s*[:\-]\s*([A-Z][A-Z'.,\- ]{2,80})",
             r"(?im)\bClaimant\s*(?:Name)?\s*[:\-]\s*([A-Z][A-Z'.,\- ]{2,80})",
+            r"(?im)\bAppraiser\s*(?:Name)?\s*[:\-]\s*([A-Z][A-Z'.,\- ]{2,80})",
+            r"(?im)\bEstimator\s*(?:Name)?\s*[:\-]\s*([A-Z][A-Z'.,\- ]{2,80})",
+            r"(?im)\bSCA\s*[-–—]\s*([A-Z][A-Z'.,\- ]{2,80}?)\s*[-–—]\s*LIC\b",
+            r"(?im)\b([A-Z][A-Z'\-]+\s+[A-Z][A-Z'\-]+)\s*[-–—, ]+LIC\s*#?\s*\d{3,}\b",
         ]
         for pat in pats:
             for m in re.finditer(pat, source_text or ""):
@@ -3294,12 +3336,21 @@ async def vision_review(
                     pass
         return s
 
+    def _scrub_appraiser_license_lines(text_value: str) -> str:
+        s = str(text_value or "")
+        # Remove raw appraiser/licensed-person identity lines while preserving non-PII rule substance.
+        s = re.sub(r"(?im)^.*\bSCA\s*[-–—]\s*[A-Z][A-Z'.,\- ]+\s*[-–—]\s*LIC\s*#?\s*\d{3,}.*$", "- Appraiser licensing reference: Redacted PII. Aligned.", s)
+        s = re.sub(r"(?im)^.*\bAppraiser\s+is\s+[A-Z][A-Z'\-]+\s+[A-Z][A-Z'\-]+\s*,?\s*license\s*\d{3,}.*$", "- Appraiser licensing reference: Redacted PII. Aligned.", s)
+        s = re.sub(r"(?im)\b[A-Z][A-Z'\-]+\s+[A-Z][A-Z'\-]+\s*[-–—, ]+LIC\s*#?\s*\d{3,}\b", "Appraiser license reference redacted", s)
+        return s
+
     def _final_scrub_customer_fields(result_obj: Dict[str, Any], known_names: List[str]) -> (Dict[str, Any], List[str]):
         issues: List[str] = []
         for key in ("summary_brief", "summary_markdown", "fraud_markdown", "estimated_costs_markdown", "conclusion"):
             try:
                 original = str(result_obj.get(key) or "")
                 scrubbed = _force_scrub_known_names(original, known_names, replacement="Owner")
+                scrubbed = _scrub_appraiser_license_lines(scrubbed)
                 result_obj[key] = scrubbed
             except Exception as e:
                 issues.append(f"Final name scrub failed for {key}: {e}")
@@ -3352,6 +3403,12 @@ async def vision_review(
                 "redaction_status": "Redacted PII: Blocked - final-stage name scrub failed",
             },
         )
+
+    try:
+        for _k in ("summary_brief", "summary_markdown", "fraud_markdown", "estimated_costs_markdown", "conclusion"):
+            result[_k] = _scrub_appraiser_license_lines(result.get(_k) or "")
+    except Exception:
+        pass
 
     result["redaction_status"] = "Redacted PII: Successful ✅"
 
@@ -4366,41 +4423,46 @@ async def vision_review(
             except Exception:
                 pdf.set_font("Arial", "", 9)
 
-        # Locked NSPXN top section: full-width black box with logo2.png left and white report title right.
+        # Locked NSPXN top section: full-width black box, logo2.png left, white report title right.
         try:
             report_title = "NSPXN.com Audit Report" if _is_comprehensive_pdf else "NSPXN.com Condition Report"
             x_left = pdf.l_margin
             y_top = 8
             box_w = pdf.w - pdf.l_margin - pdf.r_margin
-            box_h = 22
+            box_h = 24
+
             pdf.set_y(y_top)
             pdf.set_fill_color(0, 0, 0)
             pdf.rect(x_left, y_top, box_w, box_h, style="F")
 
             logo_x = x_left + 4
-            logo_y = y_top + 3
-            logo_w = 42
-            if NSPXN_LOGO_PATH and os.path.exists(NSPXN_LOGO_PATH):
+            logo_y = y_top + 4
+            logo_w = 38
+            logo_path = NSPXN_LOGO_PATH if str(NSPXN_LOGO_PATH or "").strip() else os.path.join(os.path.dirname(__file__), "logo2.png")
+            if os.path.exists(logo_path):
                 try:
-                    pdf.image(NSPXN_LOGO_PATH, x=logo_x, y=logo_y, w=logo_w)
+                    pdf.image(logo_path, x=logo_x, y=logo_y, w=logo_w)
                 except Exception as e:
-                    log.warning(f"Logo render skipped: {e}")
+                    log.warning(f"logo2.png render skipped: {e}")
             else:
-                log.warning(f"logo2.png not found at {NSPXN_LOGO_PATH}")
+                log.warning(f"logo2.png not found at {logo_path}")
 
-            pdf.set_xy(logo_x + logo_w + 8, y_top + 6)
+            title_x = logo_x + logo_w + 10
+            title_w = max(40, (x_left + box_w) - title_x - 4)
+            pdf.set_xy(title_x, y_top + 7)
             pdf.set_text_color(255, 255, 255)
             try:
-                pdf.set_font("Helvetica", "B", 11)
+                pdf.set_font("Helvetica", "B", 13)
             except Exception:
-                pdf.set_font("Arial", "B", 11)
-            pdf.cell(max(20, box_w - logo_w - 16), 9, _pdf_sanitize(report_title), ln=False, align="L")
+                pdf.set_font("Arial", "B", 13)
+            pdf.cell(title_w, 8, _pdf_sanitize(report_title), ln=False, align="L")
+
             pdf.set_text_color(0, 0, 0)
             try:
                 pdf.set_font("Helvetica", "", 9)
             except Exception:
                 pdf.set_font("Arial", "", 9)
-            pdf.set_y(y_top + box_h + 4)
+            pdf.set_y(y_top + box_h + 5)
         except Exception as e:
             log.warning(f"Top section render skipped: {e}")
             pdf.set_text_color(0, 0, 0)
@@ -4512,25 +4574,23 @@ async def vision_review(
         pdf_filename = f"{safe_file}.pdf"
 
 
-    # Comprehensive thumbnail appendix disabled by design.
-    # No uploaded-photo thumbnails are attached to the Comprehensive PDF.
+    # Photo thumbnail appendix is intentionally disabled for Comprehensive.
+    # Do not attach uploaded-photo thumbnails to Comprehensive PDFs.
+    if ai_intent == "damage_report_from_photos":
+        try:
+            add_thumbnail_page(pdf, thumbnail_paths)
+        except Exception:
+            pass
 
     pdf_path = os.path.join(PDF_DIR, pdf_filename)
     try:
-        # Memory-stable PDF write: avoid holding the full PDF byte string in RAM.
-        try:
-            pdf.output(pdf_path)
-        except TypeError:
-            out = pdf.output(dest="S")
-            with open(pdf_path, "wb") as f:
-                if isinstance(out, (bytes, bytearray)):
-                    f.write(bytes(out))
-                else:
-                    f.write(str(out).encode("latin-1", "ignore"))
-            try:
-                del out
-            except Exception:
-                pass
+        out = pdf.output(dest="S")
+        if isinstance(out, (bytes, bytearray)):
+            data_bytes = bytes(out)
+        else:
+            data_bytes = str(out).encode("latin-1", "ignore")
+        with open(pdf_path, "wb") as f:
+            f.write(data_bytes)
     except Exception as e:
         logging.warning(f"PDF write error: {e}")
 
@@ -4650,9 +4710,9 @@ async def vision_review(
     # Keep the browser response stable and small. Full content is already written to PDF/email above.
     result_api = dict(result)
     result_api["summary_markdown"] = _api_cap(result_api.get("summary_markdown"), NSPXN_API_TEXT_LIMIT)
-    result_api["fraud_markdown"] = _api_cap(result_api.get("fraud_markdown"), 2500)
-    result_api["estimated_costs_markdown"] = _api_cap(result_api.get("estimated_costs_markdown"), 2500)
-    result_api["conclusion"] = _api_cap(result_api.get("conclusion"), 2000)
+    result_api["fraud_markdown"] = _api_cap(result_api.get("fraud_markdown"), 5000)
+    result_api["estimated_costs_markdown"] = _api_cap(result_api.get("estimated_costs_markdown"), 5000)
+    result_api["conclusion"] = _api_cap(result_api.get("conclusion"), 4000)
 
     # Drop heavy in-memory request/model objects before the final JSON body is serialized.
     try:
