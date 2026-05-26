@@ -70,6 +70,13 @@ try:
 except Exception:
     NSPXN_ENABLE_PHOTO_THUMBNAILS = False
 
+# Extra staged GPT calls are disabled by default to reduce runtime.
+# The main GPT call still performs the full comprehensive review and client guideline comparison.
+try:
+    NSPXN_ENABLE_STAGED_REVIEW = os.getenv("NSPXN_ENABLE_STAGED_REVIEW", "0").strip().lower() in {"1", "true", "yes", "on"}
+except Exception:
+    NSPXN_ENABLE_STAGED_REVIEW = False
+
 if not os.getenv("OPENAI_API_KEY"):
     raise RuntimeError("OPENAI_API_KEY missing")
 try:
@@ -1745,7 +1752,7 @@ async def vision_review(
         log.info(f"{stage_name} RAW RESPONSE END")
         return _try_parse_json(_raw)
 
-    if ai_intent in {"comprehensive", "guidelines_only"}:
+    if NSPXN_ENABLE_STAGED_REVIEW and ai_intent in {"comprehensive", "guidelines_only"}:
         _stage_text_parts = [p for p in parts_payload if p.get("type") == "text"]
         _stage_image_parts = [p for p in parts_payload if p.get("type") != "text"]
 
@@ -2930,31 +2937,27 @@ async def vision_review(
         return (head.rstrip() + "\n\n## Client Guidelines Comparison\n" + body + ("\n" + rest if rest else "")).strip()
 
     def _ensure_client_guidelines_section(md_text: str) -> str:
+        """Do not generate customer-facing placeholder guideline bullets.
+        GPT must write the actual Client Guidelines Comparison. If it does not,
+        the pre-PDF validator will block the report cleanly.
+        """
         t = str(md_text or "").strip()
         if not client_rules_supplied or ai_intent not in {"comprehensive", "guidelines_only"}:
             return t
         t = _scrub_false_missing_client_rules_claims(t)
-        fragments = _extract_client_rule_fragments(client_rules or resolved_rules_text or "")
-        bullets: List[str] = []
-        if fragments:
-            for frag in fragments:
-                bullets.append(f'- Rule supplied for review: "{frag}" — Compare against the uploaded estimate/photos and confirm Aligned / Not Aligned / Not Evidenced using document or photo citations.')
-        else:
-            bullets.append("- Client guidelines were supplied from the frontend selection/pasted Client Rules box and must be applied to this review.")
-        section = "## Client Guidelines Comparison\n" + "\n".join(bullets)
 
-        m_sec = re.search(r"(?im)^##\s*Client\s+Guidelines\s+Comparison\b", t)
-        if m_sec:
-            after = t[m_sec.end():]
-            next_h = re.search(r"(?m)^##\s+", after)
-            body = after[:next_h.start()] if next_h else after
-            # If the model printed only the heading, inject fallback bullets instead of leaving a blank section.
-            if not re.search(r"(?m)^\s*[-*]\s+\S", body):
-                insert_at = m_sec.end()
-                return (t[:insert_at].rstrip() + "\n" + "\n".join(bullets) + t[insert_at:]).strip()
-            return t
-
-        return (t + "\n\n" + section).strip() if t else section
+        # Remove old backend placeholder fallback lines if they exist from any prior path.
+        cleaned_lines: List[str] = []
+        for ln in t.replace("\r\n", "\n").replace("\r", "\n").splitlines():
+            s = (ln or "").strip()
+            if re.search(r"(?i)^[-*]\s*Rule\s+supplied\s+for\s+review\s*:", s):
+                continue
+            if re.search(r"(?i)Compare\s+against\s+the\s+uploaded\s+estimate/photos", s):
+                continue
+            if re.search(r"(?i)Client\s+guidelines\s+were\s+supplied.*must\s+be\s+applied", s):
+                continue
+            cleaned_lines.append(ln)
+        return "\n".join(cleaned_lines).strip()
 
     def _scrub_comprehensive_rationale_text(md_text: str) -> str:
         """Targeted comprehensive scrub:
@@ -3481,6 +3484,53 @@ async def vision_review(
         ]
         return any(p in low for p in bad_phrases)
 
+    def _predf_score_rationale_invalid(result_obj: Dict[str, Any]) -> bool:
+        """Block any sub-100 score unless the customer report contains explicit numeric deductions."""
+        try:
+            raw_score = str(result_obj.get("compliance_score") or "").strip()
+            m_score = re.search(r"\d{1,3}", raw_score)
+            if not m_score:
+                return False
+            score = max(0, min(100, int(m_score.group(0))))
+            if score >= 100:
+                return False
+            sm = str(result_obj.get("summary_markdown") or "")
+            return not _has_explicit_score_rationale(sm)
+        except Exception:
+            return True
+
+    def _predf_guideline_comparison_invalid(v: Any) -> bool:
+        """Block placeholder or missing Client Guidelines Comparison when rules were supplied."""
+        if not client_rules_supplied:
+            return False
+        s = str(v or "").replace("\r\n", "\n").replace("\r", "\n").strip()
+        if not s:
+            return True
+        m_sec = re.search(r"(?im)^##\s*Client\s+Guidelines\s+Comparison\b", s)
+        if not m_sec:
+            return True
+        after = s[m_sec.end():]
+        next_h = re.search(r"(?m)^##\s+", after)
+        body = (after[:next_h.start()] if next_h else after).strip()
+        if not body:
+            return True
+
+        placeholder_patterns = [
+            r"(?i)Rule\s+supplied\s+for\s+review",
+            r"(?i)Compare\s+against\s+the\s+uploaded\s+estimate/photos",
+            r"(?i)confirm\s+Aligned\s*/\s*Not\s+Aligned\s*/\s*Not\s+Evidenced",
+            r"(?i)Client\s+guidelines\s+were\s+supplied.*must\s+be\s+applied",
+            r"(?i)should\s+be\s+compared\s+against\s+the\s+estimate/photos",
+            r"(?i)detailed\s+rule-by-rule\s+comparison\s+was\s+not\s+finalized",
+        ]
+        if any(re.search(pat, body) for pat in placeholder_patterns):
+            return True
+
+        # A real comparison should contain at least one actual status term and at least one evidence citation.
+        has_status = bool(re.search(r"(?i)\bAligned\b|\bNot\s+Aligned\b|\bNot\s+Evidenced\b|\bCompliant\b|\bNon-compliant\b", body))
+        has_evidence = bool(re.search(r"(?i)\bp\d+\b|\bp\d+/L\d+\b|\bPhoto\s*\d+\b|\bestimate\b|\bclosing\s+report\b", body))
+        return not (has_status and has_evidence)
+
     if ai_intent in {"comprehensive", "guidelines_only"}:
         _predf_reasons: List[str] = []
         if _predf_summary_invalid(result.get("summary_markdown")):
@@ -3489,6 +3539,10 @@ async def vision_review(
             _predf_reasons.append("REPORT BLOCKED: invalid or fallback Approximate Repair Cost Breakdown")
         if _predf_conclusion_invalid(result.get("conclusion")):
             _predf_reasons.append("REPORT BLOCKED: invalid or fallback Conclusion")
+        if _predf_score_rationale_invalid(result):
+            _predf_reasons.append("REPORT BLOCKED: sub-100 Compliance Score has no explicit numeric deduction rationale")
+        if _predf_guideline_comparison_invalid(result.get("summary_markdown")):
+            _predf_reasons.append("REPORT BLOCKED: client guideline comparison was not finalized by model")
         if _predf_reasons:
             log.error("REPORT BLOCKED: pre-PDF validator failure | reasons=%s", _predf_reasons)
             return JSONResponse(
