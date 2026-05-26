@@ -3186,6 +3186,8 @@ async def vision_review(
         deduction_patterns = [
             r"(?i)\bDeduction\b\s*:\s*-\s*(\d+)\b",
             r"(?i)\bDeduction\b\s*-\s*(\d+)\b",
+            # Repair-model formats such as: - **-10:** reason... or - -10: reason...
+            r"(?i)^\s*[-*]\s*\*{0,2}-\s*(\d+)\*{0,2}\s*:",
             r":\s*-\s*(\d+)\b",
             r"(?i)\((?:[^)]*?)\b(?:Minor|Moderate|Major)\b\s*-\s*(\d+)(?:[^)]*?)\)",
             r"\((?:-|–)\s*(\d+)\)",
@@ -3342,7 +3344,7 @@ async def vision_review(
         t = str(md_text or "")
         if not re.search(r"(?im)^##\s*Compliance\s+Score\s+Rationale\b", t):
             return False
-        return bool(re.search(r"(?i)\bDeduction\b\s*:?\s*-\s*\d+|\((?:-|–)\s*\d+\)|Total\s*=\s*100\s*-", t))
+        return bool(re.search(r"(?i)\bDeduction\b\s*:?\s*-\s*\d+|^\s*[-*]\s*\*{0,2}-\s*\d+\*{0,2}\s*:|\((?:-|–)\s*\d+\)|Total\s*=\s*100\s*-|Calculation\s*:\s*100\s*-", t, flags=re.MULTILINE))
 
     def _prevent_advisory_score_collapse(result_obj: dict) -> dict:
         """Preserve the model/staged score output.
@@ -3643,26 +3645,34 @@ async def vision_review(
         return reasons
 
     def _repair_missing_quality_sections_once(result_obj: Dict[str, Any]) -> Dict[str, Any]:
-        """One targeted model repair for only the two guarded sections."""
+        """One targeted model repair for guarded customer-facing sections only.
+        This runs only after the main review is complete and only when the pre-PDF
+        validator would otherwise block. It does not change upload handling,
+        routing, PDF layout, email sending, VIN, claim number, or vehicle fields.
+        """
         try:
             score_txt = str(result_obj.get("compliance_score") or "").strip()
             repair_prompt = (
                 "Return ONLY strict JSON with keys: client_guidelines_comparison_markdown, "
-                "compliance_score_rationale_markdown.\n"
-                "Task: finalize ONLY the two missing customer-facing sections for an NSPXN comprehensive audit.\n"
+                "compliance_score_rationale_markdown, estimated_costs_markdown, conclusion_markdown.\n"
+                "Task: repair ONLY missing or validator-blocked final customer-facing sections for an NSPXN comprehensive audit.\n"
                 "Rules:\n"
-                "- Do not rewrite the detailed report, cost section, fraud section, conclusion, VIN, claim number, or vehicle.\n"
+                "- Do not rewrite the Detailed Condition Report, fraud section, VIN, claim number, vehicle, odometer, request type, routing, PDF layout, or email content.\n"
                 "- Do not invent facts. Use only the existing report narrative, supplied client rules, and evidence snippets below.\n"
                 "- client_guidelines_comparison_markdown MUST be real markdown bullets under ## Client Guidelines Comparison.\n"
-                "- Each guideline bullet must quote or summarize the rule, mark Aligned / Not Aligned / Not Evidenced, and cite p#/L#, Photo #, estimate, or closing report evidence where available.\n"
+                "- Each guideline bullet must quote or summarize the rule, mark Aligned / Not Aligned / Not Evidenced, and cite p#/L#, Photo #, estimate, supplement, Advisor Report, or closing report evidence where available.\n"
                 "- Never output placeholder wording such as 'Compare against the uploaded estimate/photos'.\n"
-                f"- Current compliance_score is {score_txt}. If this score is below 100, compliance_score_rationale_markdown MUST contain ## Compliance Score Rationale, Starting from 100, numeric Deduction: -N item(s), Final compliance score: **{score_txt}**, and Total = 100 - ... = {score_txt}.\n"
-                "- If the existing report narrative says only minor deficiencies, use minor/moderate deductions that exactly reconcile to the current score.\n"
+                f"- Current compliance_score is {score_txt}. If this score is below 100, compliance_score_rationale_markdown MUST contain ## Compliance Score Rationale, Starting from 100, and itemized bullet deductions using exactly this format: '- Deficiency text. Deduction: -10'. The deductions MUST reconcile to {score_txt}.\n"
+                f"- The score rationale MUST end with: 'Final compliance score: **{score_txt}**.' and 'Total = 100 - ... = {score_txt}.'\n"
+                "- estimated_costs_markdown should be populated only if the existing cost section is missing/fallback/thin. Use the estimate/supplement totals and documented dollar amounts from the evidence snippets. Do not create a photos-only approximation in comprehensive mode.\n"
+                "- conclusion_markdown should be populated only if the existing conclusion is missing/fallback. Write a concise professional final conclusion consistent with the existing report findings.\n"
             )
             repair_context = (
                 "EXISTING SUMMARY_MARKDOWN:\n" + str(result_obj.get("summary_markdown") or "")[:9000] + "\n\n"
+                "EXISTING ESTIMATED_COSTS_MARKDOWN:\n" + str(result_obj.get("estimated_costs_markdown") or "")[:3000] + "\n\n"
+                "EXISTING CONCLUSION:\n" + str(result_obj.get("conclusion") or "")[:2000] + "\n\n"
                 "CLIENT_RULES_SUPPLIED:\n" + str(client_rules or resolved_rules_text or "")[:7000] + "\n\n"
-                "EVIDENCE_SNIPPETS_FROM_UPLOADS:\n" + str(uploaded_text_all or "")[:7000] + "\n\n"
+                "EVIDENCE_SNIPPETS_FROM_UPLOADS:\n" + str(uploaded_text_all or "")[:9000] + "\n\n"
                 "FILES_SEEN:\n- " + "\n- ".join(files_seen[:80]) + "\n"
             )
             _rsp_repair = client.chat.completions.create(
@@ -3671,7 +3681,7 @@ async def vision_review(
                     {"role": "system", "content": "You repair missing final audit sections. Return JSON only."},
                     {"role": "user", "content": [{"type": "text", "text": repair_prompt + "\n\n" + repair_context}]},
                 ],
-                max_completion_tokens=int(os.getenv("NSPXN_QUALITY_REPAIR_MAX_TOKENS", "1400")),
+                max_completion_tokens=int(os.getenv("NSPXN_QUALITY_REPAIR_MAX_TOKENS", "2200")),
                 temperature=0,
                 top_p=1,
                 presence_penalty=0,
@@ -3688,11 +3698,17 @@ async def vision_review(
             sm = str(result_obj.get("summary_markdown") or "")
             guide_md = str(repair_data.get("client_guidelines_comparison_markdown") or "").strip()
             score_md = str(repair_data.get("compliance_score_rationale_markdown") or "").strip()
+            cost_md = str(repair_data.get("estimated_costs_markdown") or "").strip()
+            conclusion_md = str(repair_data.get("conclusion_markdown") or "").strip()
             if guide_md:
                 sm = _replace_or_append_markdown_section(sm, "## Client Guidelines Comparison", guide_md)
             if score_md:
                 sm = _replace_or_append_markdown_section(sm, "## Compliance Score Rationale", score_md)
             result_obj["summary_markdown"] = sm
+            if cost_md:
+                result_obj["estimated_costs_markdown"] = cost_md
+            if conclusion_md:
+                result_obj["conclusion"] = conclusion_md
             return result_obj
         except Exception as e:
             log.warning(f"Quality section repair failed: {e}")
@@ -3703,6 +3719,8 @@ async def vision_review(
         _repairable_reasons = {
             "REPORT BLOCKED: sub-100 Compliance Score has no explicit numeric deduction rationale",
             "REPORT BLOCKED: client guideline comparison was not finalized by model",
+            "REPORT BLOCKED: invalid or fallback Approximate Repair Cost Breakdown",
+            "REPORT BLOCKED: invalid or fallback Conclusion",
         }
         if _predf_reasons and any(r in _repairable_reasons for r in _predf_reasons):
             result = _repair_missing_quality_sections_once(result)
