@@ -78,40 +78,108 @@ MAX_UPLOAD_BODY_BYTES = 25 * 1024 * 1024  # allow uploads up to 25 MB
 
 
 def _extract_simple_form_field(body: bytes, content_type: str, field_name: str) -> str:
-    """Extract a simple text field from urlencoded or multipart body."""
+    """Extract one exact simple text field from urlencoded or multipart body.
+
+    This intentionally does NOT use loose regex scanning for multipart fields.
+    Loose regex drift was reading later fields such as appraiser_id/NSPXN ID as
+    file_number. Multipart extraction must be boundary-based and exact-name only.
+    """
     ct = (content_type or "").lower()
+    target_name = str(field_name or "").strip()
 
     if "application/x-www-form-urlencoded" in ct:
         try:
             parsed = parse_qs(body.decode("utf-8", "ignore"), keep_blank_values=True)
-            return str((parsed.get(field_name) or [""])[0]).strip()
+            return str((parsed.get(target_name) or [""])[0]).strip()
         except Exception:
             return ""
 
     if "multipart/form-data" in ct:
         try:
-            escaped = re.escape(field_name.encode("utf-8"))
-            patterns = [
-                rb'name="' + escaped + rb'"(?:;[^\r\n]*)?\r?\n(?:[^\r\n]*\r?\n)*\r?\n([^\r\n-][^\r\n]*)',
-                rb'name=' + escaped + rb'(?:;[^\r\n]*)?\r?\n(?:[^\r\n]*\r?\n)*\r?\n([^\r\n-][^\r\n]*)',
-            ]
-            for pattern in patterns:
-                m = re.search(pattern, body, flags=re.IGNORECASE)
-                if m:
-                    return m.group(1).decode("utf-8", "ignore").strip()
+            boundary_match = re.search(r"boundary=([^;]+)", content_type or "", flags=re.IGNORECASE)
+            if not boundary_match:
+                return ""
+            boundary = boundary_match.group(1).strip().strip('"')
+            marker = ("--" + boundary).encode("utf-8")
 
-            decoded = body.decode("utf-8", "ignore")
-            m = re.search(
-                r'name=["\']?' + re.escape(field_name) + r'["\']?.*?\r?\n\r?\n([^\r\n-]+)',
-                decoded,
-                flags=re.IGNORECASE | re.DOTALL,
-            )
-            if m:
-                return m.group(1).strip()
+            for part in body.split(marker):
+                if not part or part in (b"--", b"--\r\n", b"--\n"):
+                    continue
+
+                if b"\r\n\r\n" in part:
+                    header_blob, value_blob = part.split(b"\r\n\r\n", 1)
+                    line_ending = b"\r\n"
+                elif b"\n\n" in part:
+                    header_blob, value_blob = part.split(b"\n\n", 1)
+                    line_ending = b"\n"
+                else:
+                    continue
+
+                headers_txt = header_blob.decode("utf-8", "ignore")
+                name_match = re.search(r'(?:^|;\s*)name="([^"]+)"', headers_txt, flags=re.IGNORECASE)
+                if not name_match:
+                    name_match = re.search(r"(?:^|;\s*)name=([^;\r\n]+)", headers_txt, flags=re.IGNORECASE)
+                if not name_match:
+                    continue
+
+                part_name = name_match.group(1).strip().strip('"')
+                if part_name != target_name:
+                    continue
+
+                # Never treat upload file parts as form text.
+                if re.search(r'filename="', headers_txt, flags=re.IGNORECASE):
+                    return ""
+
+                # Remove multipart terminator/footer and surrounding CRLF only.
+                value_blob = value_blob.strip()
+                if value_blob.endswith(b"--"):
+                    value_blob = value_blob[:-2].strip()
+                value_blob = value_blob.rstrip(line_ending).strip()
+                return value_blob.decode("utf-8", "ignore").strip()
         except Exception:
             return ""
 
     return ""
+
+
+def _extract_simple_form_keys(body: bytes, content_type: str) -> list[str]:
+    """Return non-file multipart/urlencoded field names for safe diagnostics."""
+    ct = (content_type or "").lower()
+    out = []
+    if "application/x-www-form-urlencoded" in ct:
+        try:
+            parsed = parse_qs(body.decode("utf-8", "ignore"), keep_blank_values=True)
+            return [str(k) for k in parsed.keys()]
+        except Exception:
+            return out
+
+    if "multipart/form-data" in ct:
+        try:
+            boundary_match = re.search(r"boundary=([^;]+)", content_type or "", flags=re.IGNORECASE)
+            if not boundary_match:
+                return out
+            boundary = boundary_match.group(1).strip().strip('"')
+            marker = ("--" + boundary).encode("utf-8")
+            for part in body.split(marker):
+                if not part or part in (b"--", b"--\r\n", b"--\n"):
+                    continue
+                if b"\r\n\r\n" in part:
+                    header_blob = part.split(b"\r\n\r\n", 1)[0]
+                elif b"\n\n" in part:
+                    header_blob = part.split(b"\n\n", 1)[0]
+                else:
+                    continue
+                headers_txt = header_blob.decode("utf-8", "ignore")
+                if re.search(r'filename="', headers_txt, flags=re.IGNORECASE):
+                    continue
+                name_match = re.search(r'(?:^|;\s*)name="([^"]+)"', headers_txt, flags=re.IGNORECASE)
+                if not name_match:
+                    name_match = re.search(r"(?:^|;\s*)name=([^;\r\n]+)", headers_txt, flags=re.IGNORECASE)
+                if name_match:
+                    out.append(name_match.group(1).strip().strip('"'))
+        except Exception:
+            return out
+    return out
 
 
 def _extract_ai_intent_from_body(body: bytes, content_type: str) -> str:
@@ -359,6 +427,28 @@ class IntentRouterApp:
             or _extract_simple_form_field(body, content_type, "file-number")
             or _extract_simple_form_field(body, content_type, "fileNumber")
         )
+
+        # Guard against multipart parser drift: file_number must never be the
+        # authenticated NSPXN User ID/appraiser_id.
+        if re.fullmatch(r"(?i)NSPXN\d+", str(file_number or "").strip()):
+            logging.error(
+                "NSPXN ROUTER FIELD ERROR: parsed file_number was NSPXN user id; clearing value. ai_intent=%s",
+                ai_intent,
+            )
+            file_number = ""
+
+        if ai_intent in DV_INTENTS:
+            try:
+                _form_keys = _extract_simple_form_keys(body, content_type)
+                _state_keys = [k for k in _form_keys if any(tok in str(k).lower() for tok in ("state", "jurisdiction", "location"))]
+                logging.warning(
+                    "NSPXN DV ROUTER FIELD DEBUG file_number_present=%s state_keys=%s form_keys=%s",
+                    bool(str(file_number or "").strip()),
+                    _state_keys[:20],
+                    _form_keys[:80],
+                )
+            except Exception:
+                pass
 
         sent = False
 
