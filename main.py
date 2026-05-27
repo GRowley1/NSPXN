@@ -12,12 +12,33 @@ from auth_phase1 import (
     log_usage_event,
     require_auth_from_authorization_header,
 )
-from main_comprehensive_locked import app as comprehensive_app
-from main_photos_only_locked import app as photos_only_app
+# Heavy report apps are lazy-loaded below. Do NOT import them at startup.
+# Importing both comprehensive and photos-only modules loads duplicate Presidio/spaCy
+# stacks and can exceed Render memory before a request even completes.
+comprehensive_app = None
+photos_only_app = None
+
+
+def _get_comprehensive_app():
+    global comprehensive_app
+    if comprehensive_app is None:
+        logging.warning("NSPXN LAZY LOAD comprehensive_app")
+        from main_comprehensive_locked import app as loaded_app
+        comprehensive_app = loaded_app
+    return comprehensive_app
+
+
+def _get_photos_only_app():
+    global photos_only_app
+    if photos_only_app is None:
+        logging.warning("NSPXN LAZY LOAD photos_only_app")
+        from main_photos_only_locked import app as loaded_app
+        photos_only_app = loaded_app
+    return photos_only_app
 
 
 init_auth_db()
-logging.warning("NSPXN ROUTER PDF-ONLY RESPONSE LOCK ACTIVE 2026-05-27")
+logging.warning("NSPXN ROUTER LAZY PDF-ONLY RESPONSE LOCK ACTIVE 2026-05-27")
 
 
 _ALLOWED_CORS_ORIGINS = {
@@ -231,14 +252,12 @@ def _is_completed_response(status_code: int, body: bytes) -> bool:
 
 
 class IntentRouterApp:
-    def __init__(self, comprehensive, photos_only, auth):
-        self.comprehensive = comprehensive
-        self.photos_only = photos_only
+    def __init__(self, auth):
         self.auth = auth
 
     async def __call__(self, scope, receive, send):
         if scope["type"] != "http":
-            await self.comprehensive(scope, receive, send)
+            await _get_comprehensive_app()(scope, receive, send)
             return
 
         path = scope.get("path", "")
@@ -254,7 +273,7 @@ class IntentRouterApp:
 
         # Keep all non-/vision-review and non-/download-pdf routes on the comprehensive app.
         if path not in {"/vision-review", "/download-pdf"}:
-            await self.comprehensive(scope, receive, send)
+            await _get_comprehensive_app()(scope, receive, send)
             return
 
         headers = _header_dict(scope)
@@ -269,7 +288,7 @@ class IntentRouterApp:
             return
 
         if path == "/download-pdf":
-            await self.comprehensive(scope, receive, send)
+            await _get_comprehensive_app()(scope, receive, send)
             return
 
         body = b""
@@ -304,9 +323,9 @@ class IntentRouterApp:
             ai_intent = _extract_ai_intent_from_body(body, content_type)
 
         if ai_intent == "damage_report_from_photos":
-            target_app = self.photos_only
+            target_app = _get_photos_only_app()
         elif ai_intent == "comprehensive":
-            target_app = self.comprehensive
+            target_app = _get_comprehensive_app()
         else:
             await _send_json(
                 send,
@@ -407,9 +426,11 @@ class IntentRouterApp:
             await _send_json(send, status_code, error_payload, scope=scope)
 
         async def tracking_send(message):
-            # Do not forward the mounted app's /vision-review body to the browser.
-            # The PDF/email/report generation still happens in the mounted app;
-            # the browser only gets a tiny completion + download payload.
+            # TRUE SWALLOW sender for mounted /vision-review app.
+            # Never forward http.response.start or http.response.body from the mounted app.
+            # We collect headers/status and at most CAPTURE_LIMIT bytes only so blocked/error
+            # JSON can still be surfaced. The browser receives one compact response after
+            # the mounted app fully returns.
             if message["type"] == "http.response.start":
                 response_state["started"] = True
                 response_state["status"] = int(message.get("status", 500))
@@ -422,16 +443,18 @@ class IntentRouterApp:
             if message["type"] == "http.response.body":
                 chunk = message.get("body", b"") or b""
                 response_state["body_bytes"] += len(chunk)
-                if sum(len(c) for c in captured_chunks) + len(chunk) <= CAPTURE_LIMIT:
-                    captured_chunks.append(chunk)
+                current_capture = sum(len(c) for c in captured_chunks)
+                if current_capture < CAPTURE_LIMIT:
+                    captured_chunks.append(chunk[: max(0, CAPTURE_LIMIT - current_capture)])
                 if not message.get("more_body", False):
                     response_state["completed"] = True
-                    await _send_compact_response(b"".join(captured_chunks))
                 return
 
         try:
-            logging.warning("NSPXN ROUTER PDF-ONLY RESPONSE intercepting /vision-review file_number=%s ai_intent=%s", file_number, ai_intent)
+            logging.warning("NSPXN ROUTER TRUE-SWALLOW PDF-ONLY RESPONSE intercepting /vision-review file_number=%s ai_intent=%s", file_number, ai_intent)
             await target_app(scope, replay_receive, tracking_send)
+            if not response_state.get("sent_to_client"):
+                await _send_compact_response(b"".join(captured_chunks))
         except Exception as exc:
             logging.exception("NSPXN Comprehensive/Photos router exception", exc_info=exc)
             if response_state.get("sent_to_client"):
@@ -512,4 +535,4 @@ class IntentRouterApp:
                 )
 
 
-app = IntentRouterApp(comprehensive_app, photos_only_app, auth_app)
+app = IntentRouterApp(auth_app)
