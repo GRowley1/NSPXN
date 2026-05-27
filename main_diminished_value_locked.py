@@ -59,10 +59,54 @@ def _looks_like_nspxn_user_id(value: Any) -> bool:
     return bool(re.fullmatch(r"(?i)NSPXN\d+", str(value or "").strip()))
 
 
+US_STATE_ABBRS = {
+    "AL","AK","AZ","AR","CA","CO","CT","DE","FL","GA","HI","IA","ID","IL","IN","KS","KY","LA","MA","MD",
+    "ME","MI","MN","MO","MS","MT","NC","ND","NE","NH","NJ","NM","NV","NY","OH","OK","OR","PA","RI","SC",
+    "SD","TN","TX","UT","VA","VT","WA","WI","WV","WY","DC"
+}
+
+US_STATE_NAMES = {
+    "ALABAMA": "AL", "ALASKA": "AK", "ARIZONA": "AZ", "ARKANSAS": "AR", "CALIFORNIA": "CA",
+    "COLORADO": "CO", "CONNECTICUT": "CT", "DELAWARE": "DE", "FLORIDA": "FL", "GEORGIA": "GA",
+    "HAWAII": "HI", "IDAHO": "ID", "ILLINOIS": "IL", "INDIANA": "IN", "IOWA": "IA",
+    "KANSAS": "KS", "KENTUCKY": "KY", "LOUISIANA": "LA", "MAINE": "ME", "MARYLAND": "MD",
+    "MASSACHUSETTS": "MA", "MICHIGAN": "MI", "MINNESOTA": "MN", "MISSISSIPPI": "MS", "MISSOURI": "MO",
+    "MONTANA": "MT", "NEBRASKA": "NE", "NEVADA": "NV", "NEW HAMPSHIRE": "NH", "NEW JERSEY": "NJ",
+    "NEW MEXICO": "NM", "NEW YORK": "NY", "NORTH CAROLINA": "NC", "NORTH DAKOTA": "ND", "OHIO": "OH",
+    "OKLAHOMA": "OK", "OREGON": "OR", "PENNSYLVANIA": "PA", "RHODE ISLAND": "RI", "SOUTH CAROLINA": "SC",
+    "SOUTH DAKOTA": "SD", "TENNESSEE": "TN", "TEXAS": "TX", "UTAH": "UT", "VERMONT": "VT",
+    "VIRGINIA": "VA", "WASHINGTON": "WA", "WEST VIRGINIA": "WV", "WISCONSIN": "WI", "WYOMING": "WY",
+    "DISTRICT OF COLUMBIA": "DC",
+}
+
 def _normalize_state_value(value: Any) -> str:
-    s = str(value or "").strip().upper()
-    if re.fullmatch(r"[A-Z]{2}", s):
-        return s
+    raw = str(value or "").strip()
+    if not raw or _looks_like_nspxn_user_id(raw):
+        return ""
+
+    s = re.sub(r"(?i)^\s*(?:state|loss\s*state|claim\s*state|vehicle\s*state)\s*[:=\-]\s*", "", raw).strip()
+    up = re.sub(r"\s+", " ", s.upper()).strip()
+
+    # Critical: do NOT allow Yes/No fields to become fake state codes.
+    if up in {"N/A", "NA", "NONE", "NULL", "UNKNOWN", "SELECT", "SELECT STATE", "-- SELECT STATE --",
+              "YES", "NO", "Y", "N", "TRUE", "FALSE", "ON", "OFF"}:
+        return ""
+
+    if re.fullmatch(r"[A-Z]{2}", up) and up in US_STATE_ABBRS:
+        return up
+
+    # Common select display values: "CO - Colorado", "CO/Colorado", "CO (Colorado)".
+    m = re.search(r"\b([A-Z]{2})\b", up)
+    if m and m.group(1) in US_STATE_ABBRS:
+        return m.group(1)
+
+    cleaned_name = re.sub(r"[^A-Z ]+", " ", up)
+    cleaned_name = re.sub(r"\s+", " ", cleaned_name).strip()
+    if cleaned_name in US_STATE_NAMES:
+        return US_STATE_NAMES[cleaned_name]
+    for name, abbr in US_STATE_NAMES.items():
+        if re.search(r"\b" + re.escape(name) + r"\b", cleaned_name):
+            return abbr
     return ""
 
 
@@ -297,7 +341,9 @@ async def vision_review(
                 "loss_state", "lossState", "loss_state_select", "lossStateSelect",
                 "loss_location_state", "lossLocationState", "vehicle_state", "vehicleState",
                 "jurisdiction_state", "jurisdictionState", "dv_jurisdiction", "dvJurisdiction",
-                "selected_state", "selectedState", "claim_jurisdiction", "claimJurisdiction",
+                "selected_state", "selectedState", "selected-state", "state_selected", "stateSelected",
+                "dv_selected_state", "dvSelectedState", "dv-state-selected", "dvStateSelected",
+                "claim_jurisdiction", "claimJurisdiction", "claim-jurisdiction",
             ):
                 candidate = _normalize_state_value(form.get(key, ""))
                 if candidate:
@@ -322,24 +368,6 @@ async def vision_review(
                     except Exception:
                         continue
 
-            # Last-resort scan: any short non-file form value that is a valid state.
-            if not resolved_state:
-                for key in form.keys():
-                    try:
-                        value = form.get(key, "")
-                        if hasattr(value, "filename"):
-                            continue
-                        if str(key) not in _safe_form_keys:
-                            _safe_form_keys.append(str(key))
-                        value_s = str(value or "").strip()
-                        if not value_s or len(value_s) > 40:
-                            continue
-                        candidate = _normalize_state_value(value_s)
-                        if candidate:
-                            resolved_state = candidate
-                            break
-                    except Exception:
-                        continue
         except Exception:
             pass
 
