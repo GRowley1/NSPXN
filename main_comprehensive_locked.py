@@ -3469,15 +3469,43 @@ async def vision_review(
         ]
         return any(p in low for p in bad_phrases)
 
+    def _predf_estimate_record_available() -> bool:
+        """Comprehensive/guidelines reports can use the uploaded estimate/supplement
+        total as the cost basis. Do not require a photos-only style approximate
+        repair cost breakdown when estimate-of-record totals are present.
+        """
+        try:
+            parsed = _extract_estimate_record_totals_strict(uploaded_text_all or "")
+            if parsed.get("estimate_total") is not None:
+                return True
+            money_fields = [
+                parsed.get("labor_subtotal"),
+                parsed.get("parts_subtotal"),
+                parsed.get("paint_materials"),
+                parsed.get("sales_tax"),
+            ]
+            if sum(1 for x in money_fields if x is not None) >= 2:
+                return True
+            txt = str(uploaded_text_all or "")
+            if re.search(r"(?im)^\s*(?:estimate\s+total|grand\s+total|net\s+amount|total\s+amount|supplement\s+total)\b.*\$\s*[0-9]", txt):
+                return True
+        except Exception:
+            pass
+        return False
+
     def _predf_cost_invalid(v: Any) -> bool:
         s = str(v or "").strip()
         if not s:
-            return True
+            return not _predf_estimate_record_available()
         low = s.lower()
+
+        # Comprehensive uses the uploaded estimate/supplement as the estimate of record.
+        # If record totals exist, a short Estimate of Record Cost Summary is acceptable
+        # and must not be blocked for lacking a photos-only approximate breakdown.
+        if ai_intent in {"comprehensive", "guidelines_only"} and _predf_estimate_record_available():
+            return False
+
         bad_phrases = [
-            "approximate repair cost evaluation should reflect the estimate lines",
-            "final repair amounts remain subject to estimate validation and qualified appraiser review",
-            "any final amount remains subject to estimate validation and appraiser review",
             "estimate of record totals could not be extracted with confidence",
             "unable to generate cost approximation on this run",
         ]
@@ -3492,16 +3520,28 @@ async def vision_review(
         if not s:
             return True
         low = s.lower()
+        # Only block truly blank/internal/fallback conclusions. Do not block a
+        # professional cautionary conclusion just because it asks for final review.
         bad_phrases = [
             "the uploaded files were processed successfully",
             "the available review evidence was preserved",
-            "final claim handling should proceed after confirmation",
-            "should not be relied upon as fully documented until",
-            "available estimate and photo requirements",
+            "deterministic fallback",
+            "structured narrative response did not fully validate",
+            "json did not validate",
+            "model compliance error",
+            "please re-run",
         ]
         return any(p in low for p in bad_phrases)
 
     if ai_intent in {"comprehensive", "guidelines_only"}:
+        # If the model/generic fallback did not produce a photos-only style cost block,
+        # rebuild it as an Estimate of Record Cost Summary when estimate totals exist.
+        try:
+            if _predf_cost_invalid(result.get("estimated_costs_markdown")) and _predf_estimate_record_available():
+                result["estimated_costs_markdown"] = _build_comprehensive_cost_from_estimate_text()
+        except Exception:
+            pass
+
         _predf_reasons: List[str] = []
         if _predf_summary_invalid(result.get("summary_markdown")):
             _predf_reasons.append("REPORT BLOCKED: invalid or fallback Detailed Condition Report")
