@@ -4,6 +4,7 @@ from typing import Optional, List, Dict, Any
 import os
 import re
 import glob
+import logging
 
 from fastapi import FastAPI, UploadFile, File, Form, Response, Request
 from fastapi.responses import JSONResponse, FileResponse
@@ -129,7 +130,9 @@ def _mileage_multiplier(mileage: float) -> float:
         return 0.40
     if mileage < 100000:
         return 0.20
-    return 0.00
+    # Do not let the 17c reference calculation collapse to $0 solely because
+    # mileage is over 100,000. Keep a conservative floor for high-mileage units.
+    return 0.10
 
 
 def _damage_multiplier(severity: str, structural_damage: str, airbag_deployment: str) -> float:
@@ -337,6 +340,13 @@ async def vision_review(
     if not resolved_state or _looks_like_nspxn_user_id(dv_state):
         try:
             form = await request.form()
+            # Debug-safe: log only field names and resolved status, not customer values.
+            try:
+                logging.warning("NSPXN DV STATE DEBUG keys=%s dv_state_param_present=%s", list(form.keys()), bool(str(dv_state or "").strip()))
+            except Exception:
+                pass
+
+            # Prefer known frontend field names first.
             for key in (
                 "dv_state", "dv-state", "dvState", "dv_state_input", "dvStateInput",
                 "dv_state_select", "dvStateSelect", "dv_state_value", "dvStateValue",
@@ -345,21 +355,49 @@ async def vision_review(
                 "claim_state", "claimState", "claim_state_select", "claimStateSelect",
                 "loss_state", "lossState", "loss_state_select", "lossStateSelect",
                 "loss_location_state", "lossLocationState", "vehicle_state", "vehicleState",
-                "jurisdiction_state", "jurisdictionState", "dv_jurisdiction", "dvJurisdiction"
+                "jurisdiction_state", "jurisdictionState", "dv_jurisdiction", "dvJurisdiction",
+                "dv_state_hidden", "dvStateHidden", "dvStateDropdown", "dv_state_dropdown",
+                "stateDropdown", "state_dropdown", "selected_state", "selectedState",
+                "dv_selected_state", "dvSelectedState", "claim_jurisdiction", "claimJurisdiction"
             ):
                 candidate = _normalize_state_value(form.get(key, ""))
                 if candidate:
                     resolved_state = candidate
                     break
+
+            # Then any key containing state/jurisdiction/location.
             if not resolved_state:
                 for key in form.keys():
                     key_l = str(key or "").lower()
-                    if "state" not in key_l:
+                    if not any(token in key_l for token in ("state", "jurisdiction", "location")):
                         continue
                     candidate = _normalize_state_value(form.get(key, ""))
                     if candidate:
                         resolved_state = candidate
                         break
+
+            # Last-resort defensive fallback: scan all short non-file form values.
+            # This catches frontends that submit the state under an unexpected field name.
+            if not resolved_state:
+                for key in form.keys():
+                    try:
+                        value = form.get(key, "")
+                        if hasattr(value, "filename"):
+                            continue
+                        value_s = str(value or "").strip()
+                        if not value_s or len(value_s) > 40:
+                            continue
+                        candidate = _normalize_state_value(value_s)
+                        if candidate:
+                            resolved_state = candidate
+                            break
+                    except Exception:
+                        continue
+
+            try:
+                logging.warning("NSPXN DV STATE DEBUG resolved_state=%s", resolved_state or "N/A")
+            except Exception:
+                pass
         except Exception:
             pass
     if not resolved_state:
