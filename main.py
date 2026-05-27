@@ -13,10 +13,18 @@ from auth_phase1 import (
     require_auth_from_authorization_header,
 )
 # Heavy report apps are lazy-loaded below. Do NOT import them at startup.
-# Importing both comprehensive and photos-only modules loads duplicate Presidio/spaCy
-# stacks and can exceed Render memory before a request even completes.
+# Importing all report modules loads duplicate Presidio/spaCy stacks and can
+# exceed Render memory before a request even completes.
 comprehensive_app = None
 photos_only_app = None
+diminished_value_app = None
+
+DV_INTENTS = {
+    "preliminary_diminished_value_screening",
+    "preliminary_diminished_value",
+    "diminished_value_screening",
+    "dv_screening",
+}
 
 
 def _get_comprehensive_app():
@@ -37,8 +45,23 @@ def _get_photos_only_app():
     return photos_only_app
 
 
+def _get_diminished_value_app():
+    global diminished_value_app
+    if diminished_value_app is None:
+        logging.warning("NSPXN LAZY LOAD diminished_value_app")
+        from main_diminished_value_locked import app as loaded_app
+        diminished_value_app = loaded_app
+    return diminished_value_app
+
+
+def _normalize_ai_intent_value(value: str) -> str:
+    s = str(value or "").strip().lower()
+    s = re.sub(r"[\s\-]+", "_", s)
+    return s
+
+
 init_auth_db()
-logging.warning("NSPXN ROUTER LAZY PDF-ONLY RESPONSE LOCK ACTIVE 2026-05-27")
+logging.warning("NSPXN ROUTER LAZY TRUE-SWALLOW DV ROUTE ACTIVE 2026-05-27")
 
 
 _ALLOWED_CORS_ORIGINS = {
@@ -66,32 +89,6 @@ def _extract_simple_form_field(body: bytes, content_type: str, field_name: str) 
             return ""
 
     if "multipart/form-data" in ct:
-        # Prefer boundary-based parsing. This avoids regex drift where file_number
-        # can accidentally be read as appraiser_id/NSPXN ID from a later field.
-        try:
-            boundary_match = re.search(r"boundary=([^;]+)", content_type or "", flags=re.IGNORECASE)
-            if boundary_match:
-                boundary = boundary_match.group(1).strip().strip('"')
-                marker = ("--" + boundary).encode("utf-8")
-                for part in body.split(marker):
-                    if not part or part in (b"--", b"--\r\n"):
-                        continue
-                    if b"\r\n\r\n" in part:
-                        header_blob, value_blob = part.split(b"\r\n\r\n", 1)
-                    elif b"\n\n" in part:
-                        header_blob, value_blob = part.split(b"\n\n", 1)
-                    else:
-                        continue
-                    headers_txt = header_blob.decode("utf-8", "ignore")
-                    if re.search(r'name="' + re.escape(field_name) + r'"', headers_txt, flags=re.IGNORECASE):
-                        if re.search(r'filename="', headers_txt, flags=re.IGNORECASE):
-                            continue
-                        value_blob = value_blob.replace(b"\r\n--", b"--")
-                        return value_blob.strip().rstrip(b"-").strip().decode("utf-8", "ignore").strip()
-        except Exception:
-            pass
-
-        # Legacy fallback regexes.
         try:
             escaped = re.escape(field_name.encode("utf-8"))
             patterns = [
@@ -102,6 +99,15 @@ def _extract_simple_form_field(body: bytes, content_type: str, field_name: str) 
                 m = re.search(pattern, body, flags=re.IGNORECASE)
                 if m:
                     return m.group(1).decode("utf-8", "ignore").strip()
+
+            decoded = body.decode("utf-8", "ignore")
+            m = re.search(
+                r'name=["\']?' + re.escape(field_name) + r'["\']?.*?\r?\n\r?\n([^\r\n-]+)',
+                decoded,
+                flags=re.IGNORECASE | re.DOTALL,
+            )
+            if m:
+                return m.group(1).strip()
         except Exception:
             return ""
 
@@ -110,7 +116,7 @@ def _extract_simple_form_field(body: bytes, content_type: str, field_name: str) 
 
 def _extract_ai_intent_from_body(body: bytes, content_type: str) -> str:
     """Robustly extract ai_intent. Do not let photos-only silently fall into comprehensive."""
-    return _extract_simple_form_field(body, content_type, "ai_intent").lower()
+    return _normalize_ai_intent_value(_extract_simple_form_field(body, content_type, "ai_intent"))
 
 
 def _cors_headers(scope):
@@ -318,7 +324,7 @@ class IntentRouterApp:
 
         # Prefer explicit frontend header, then fall back to multipart body parsing.
         # Never silently default to comprehensive when the user selected photos-only.
-        ai_intent = (headers.get("x-nspxn-ai-intent") or "").strip().lower()
+        ai_intent = _normalize_ai_intent_value(headers.get("x-nspxn-ai-intent") or "")
         if not ai_intent:
             ai_intent = _extract_ai_intent_from_body(body, content_type)
 
@@ -326,13 +332,15 @@ class IntentRouterApp:
             target_app = _get_photos_only_app()
         elif ai_intent == "comprehensive":
             target_app = _get_comprehensive_app()
+        elif ai_intent in DV_INTENTS:
+            target_app = _get_diminished_value_app()
         else:
             await _send_json(
                 send,
                 400,
                 {
                     "error": "Missing or invalid AI Review request type.",
-                    "detail": "Missing or invalid ai_intent. Select Comprehensive or Create a Condition/Damage Report from Photos and resubmit.",
+                    "detail": "Missing or invalid ai_intent. Select Comprehensive, Preliminary Diminished Value Screening, or Create a Condition/Damage Report from Photos and resubmit.",
                     "ai_intent_received": ai_intent,
                 },
                 scope=scope,
@@ -408,8 +416,9 @@ class IntentRouterApp:
                     "pdf_url": download_url,
                 }
                 logging.warning(
-                    "NSPXN ROUTER PDF-ONLY RESPONSE returning compact success file_number=%s mounted_body_bytes=%s",
+                    "NSPXN ROUTER PDF-ONLY RESPONSE returning compact success file_number=%s ai_intent=%s mounted_body_bytes=%s",
                     file_number,
+                    ai_intent,
                     response_state.get("body_bytes"),
                 )
                 response_state["sent_to_client"] = True
@@ -451,12 +460,16 @@ class IntentRouterApp:
                 return
 
         try:
-            logging.warning("NSPXN ROUTER TRUE-SWALLOW PDF-ONLY RESPONSE intercepting /vision-review file_number=%s ai_intent=%s", file_number, ai_intent)
+            logging.warning(
+                "NSPXN ROUTER TRUE-SWALLOW PDF-ONLY RESPONSE intercepting /vision-review file_number=%s ai_intent=%s",
+                file_number,
+                ai_intent,
+            )
             await target_app(scope, replay_receive, tracking_send)
             if not response_state.get("sent_to_client"):
                 await _send_compact_response(b"".join(captured_chunks))
         except Exception as exc:
-            logging.exception("NSPXN Comprehensive/Photos router exception", exc_info=exc)
+            logging.exception("NSPXN Comprehensive/Photos/DV router exception", exc_info=exc)
             if response_state.get("sent_to_client"):
                 return
 
@@ -522,9 +535,10 @@ class IntentRouterApp:
                         compliance_score = None
                         score_source = None
 
-            # For Comprehensive reports, only count fully completed report responses that set
-            # the analytics header. This avoids counting blocked comprehensive quality-gate output.
-            if ai_intent != "comprehensive" or report_completed:
+            # For Comprehensive and Diminished Value reports, only count fully completed
+            # report responses that set the analytics header. This avoids counting blocked
+            # quality-gate output as completed usage.
+            if (ai_intent not in ({"comprehensive"} | DV_INTENTS)) or report_completed:
                 log_usage_event(
                     current_user=current_user,
                     ai_intent=ai_intent,
