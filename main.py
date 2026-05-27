@@ -17,7 +17,7 @@ from main_photos_only_locked import app as photos_only_app
 
 
 init_auth_db()
-logging.warning("NSPXN ROUTER COMPACT LOCK ACTIVE 2026-05-26-2255")
+logging.warning("NSPXN ROUTER PDF-ONLY RESPONSE LOCK ACTIVE 2026-05-27")
 
 
 _ALLOWED_CORS_ORIGINS = {
@@ -45,6 +45,32 @@ def _extract_simple_form_field(body: bytes, content_type: str, field_name: str) 
             return ""
 
     if "multipart/form-data" in ct:
+        # Prefer boundary-based parsing. This avoids regex drift where file_number
+        # can accidentally be read as appraiser_id/NSPXN ID from a later field.
+        try:
+            boundary_match = re.search(r"boundary=([^;]+)", content_type or "", flags=re.IGNORECASE)
+            if boundary_match:
+                boundary = boundary_match.group(1).strip().strip('"')
+                marker = ("--" + boundary).encode("utf-8")
+                for part in body.split(marker):
+                    if not part or part in (b"--", b"--\r\n"):
+                        continue
+                    if b"\r\n\r\n" in part:
+                        header_blob, value_blob = part.split(b"\r\n\r\n", 1)
+                    elif b"\n\n" in part:
+                        header_blob, value_blob = part.split(b"\n\n", 1)
+                    else:
+                        continue
+                    headers_txt = header_blob.decode("utf-8", "ignore")
+                    if re.search(r'name="' + re.escape(field_name) + r'"', headers_txt, flags=re.IGNORECASE):
+                        if re.search(r'filename="', headers_txt, flags=re.IGNORECASE):
+                            continue
+                        value_blob = value_blob.replace(b"\r\n--", b"--")
+                        return value_blob.strip().rstrip(b"-").strip().decode("utf-8", "ignore").strip()
+        except Exception:
+            pass
+
+        # Legacy fallback regexes.
         try:
             escaped = re.escape(field_name.encode("utf-8"))
             patterns = [
@@ -55,15 +81,6 @@ def _extract_simple_form_field(body: bytes, content_type: str, field_name: str) 
                 m = re.search(pattern, body, flags=re.IGNORECASE)
                 if m:
                     return m.group(1).decode("utf-8", "ignore").strip()
-
-            decoded = body.decode("utf-8", "ignore")
-            m = re.search(
-                r'name=["\']?' + re.escape(field_name) + r'["\']?.*?\r?\n\r?\n([^\r\n-]+)',
-                decoded,
-                flags=re.IGNORECASE | re.DOTALL,
-            )
-            if m:
-                return m.group(1).strip()
         except Exception:
             return ""
 
@@ -333,10 +350,6 @@ class IntentRouterApp:
                 "more_body": False,
             }
 
-        # Router-level compact response lock. This is the authoritative place to stop
-        # /vision-review from sending a huge report JSON body back to the browser.
-        # The mounted comprehensive/photos app may still create/email/store the PDF,
-        # but this wrapper only returns a small browser payload.
         response_state = {
             "status": 500,
             "headers": {},
@@ -363,40 +376,23 @@ class IntentRouterApp:
 
             if 200 <= status_code < 300:
                 if isinstance(payload, dict) and payload.get("status") == "blocked":
-                    logging.warning("NSPXN ROUTER COMPACT LOCK returning blocked JSON file_number=%s bytes_in=%s", file_number, response_state.get("body_bytes"))
                     response_state["sent_to_client"] = True
                     await _send_json(send, 200, payload, scope=scope)
                     return
 
-                pdf_url = ""
-                if isinstance(payload, dict):
-                    pdf_url = str(
-                        payload.get("absolute_pdf_url")
-                        or payload.get("download_url")
-                        or payload.get("pdf_url")
-                        or payload.get("report_url")
-                        or ""
-                    ).strip()
-                if not pdf_url:
-                    pdf_url = _compact_download_url()
-
+                download_url = _compact_download_url()
                 compact_payload = {
                     "status": "success",
+                    "message": "Completed. Download the PDF below.",
                     "file_number": file_number,
-                    "ai_intent": ai_intent,
-                    "download_url": pdf_url,
-                    "pdf_url": pdf_url,
-                    "absolute_pdf_url": pdf_url,
-                    "gpt_output": "Report complete. Click Download PDF.",
-                    "summary_brief": "Report complete. Click Download PDF.",
-                    "router_compact_lock": "ACTIVE_2026_05_26_2255",
+                    "download_url": download_url,
+                    "pdf_url": download_url,
                 }
-                if isinstance(payload, dict):
-                    for key in ("claim_number", "vin", "vehicle", "compliance_score", "redaction_status", "pdf_filename"):
-                        if payload.get(key) not in (None, ""):
-                            compact_payload[key] = payload.get(key)
-
-                logging.warning("NSPXN ROUTER COMPACT LOCK returning compact success file_number=%s bytes_in=%s", file_number, response_state.get("body_bytes"))
+                logging.warning(
+                    "NSPXN ROUTER PDF-ONLY RESPONSE returning compact success file_number=%s mounted_body_bytes=%s",
+                    file_number,
+                    response_state.get("body_bytes"),
+                )
                 response_state["sent_to_client"] = True
                 await _send_json(send, 200, compact_payload, scope=scope)
                 return
@@ -405,15 +401,15 @@ class IntentRouterApp:
                 "status": "error" if status_code >= 500 else "blocked",
                 "error": "Report processing failed." if status_code >= 500 else "Report was not completed.",
                 "detail": (raw_body.decode("utf-8", "ignore")[:1000] if raw_body else "No response body returned."),
-                "ai_intent": ai_intent,
                 "file_number": file_number,
-                "router_compact_lock": "ACTIVE_2026_05_26_2255",
             }
-            logging.warning("NSPXN ROUTER COMPACT LOCK returning compact error status=%s file_number=%s bytes_in=%s", status_code, file_number, response_state.get("body_bytes"))
             response_state["sent_to_client"] = True
             await _send_json(send, status_code, error_payload, scope=scope)
 
         async def tracking_send(message):
+            # Do not forward the mounted app's /vision-review body to the browser.
+            # The PDF/email/report generation still happens in the mounted app;
+            # the browser only gets a tiny completion + download payload.
             if message["type"] == "http.response.start":
                 response_state["started"] = True
                 response_state["status"] = int(message.get("status", 500))
@@ -421,8 +417,6 @@ class IntentRouterApp:
                     k.decode("latin1").lower(): v.decode("latin1")
                     for k, v in message.get("headers", [])
                 }
-                # Do not forward mounted-app headers for /vision-review. We will send
-                # one compact response after the mounted app finishes.
                 return
 
             if message["type"] == "http.response.body":
@@ -436,7 +430,7 @@ class IntentRouterApp:
                 return
 
         try:
-            logging.warning("NSPXN ROUTER COMPACT LOCK intercepting /vision-review file_number=%s ai_intent=%s", file_number, ai_intent)
+            logging.warning("NSPXN ROUTER PDF-ONLY RESPONSE intercepting /vision-review file_number=%s ai_intent=%s", file_number, ai_intent)
             await target_app(scope, replay_receive, tracking_send)
         except Exception as exc:
             logging.exception("NSPXN Comprehensive/Photos router exception", exc_info=exc)
@@ -461,7 +455,6 @@ class IntentRouterApp:
                         "detail": "The AI report could not be completed because the OpenAI API quota or rate limit was reached. Check the OpenAI billing/usage limit, then resubmit.",
                         "ai_intent": ai_intent,
                         "file_number": file_number,
-                        "router_compact_lock": "ACTIVE_2026_05_26_2255",
                     },
                     scope=scope,
                 )
@@ -475,7 +468,6 @@ class IntentRouterApp:
                     "detail": detail,
                     "ai_intent": ai_intent,
                     "file_number": file_number,
-                    "router_compact_lock": "ACTIVE_2026_05_26_2255",
                 },
                 scope=scope,
             )
