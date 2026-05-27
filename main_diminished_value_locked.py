@@ -59,62 +59,10 @@ def _looks_like_nspxn_user_id(value: Any) -> bool:
     return bool(re.fullmatch(r"(?i)NSPXN\d+", str(value or "").strip()))
 
 
-US_STATE_ABBRS = {
-    "AL","AK","AZ","AR","CA","CO","CT","DE","FL","GA","HI","IA","ID","IL","IN","KS","KY","LA","MA","MD",
-    "ME","MI","MN","MO","MS","MT","NC","ND","NE","NH","NJ","NM","NV","NY","OH","OK","OR","PA","RI","SC",
-    "SD","TN","TX","UT","VA","VT","WA","WI","WV","WY","DC"
-}
-
-US_STATE_NAMES = {
-    "ALABAMA": "AL", "ALASKA": "AK", "ARIZONA": "AZ", "ARKANSAS": "AR", "CALIFORNIA": "CA",
-    "COLORADO": "CO", "CONNECTICUT": "CT", "DELAWARE": "DE", "FLORIDA": "FL", "GEORGIA": "GA",
-    "HAWAII": "HI", "IDAHO": "ID", "ILLINOIS": "IL", "INDIANA": "IN", "IOWA": "IA",
-    "KANSAS": "KS", "KENTUCKY": "KY", "LOUISIANA": "LA", "MAINE": "ME", "MARYLAND": "MD",
-    "MASSACHUSETTS": "MA", "MICHIGAN": "MI", "MINNESOTA": "MN", "MISSISSIPPI": "MS", "MISSOURI": "MO",
-    "MONTANA": "MT", "NEBRASKA": "NE", "NEVADA": "NV", "NEW HAMPSHIRE": "NH", "NEW JERSEY": "NJ",
-    "NEW MEXICO": "NM", "NEW YORK": "NY", "NORTH CAROLINA": "NC", "NORTH DAKOTA": "ND", "OHIO": "OH",
-    "OKLAHOMA": "OK", "OREGON": "OR", "PENNSYLVANIA": "PA", "RHODE ISLAND": "RI", "SOUTH CAROLINA": "SC",
-    "SOUTH DAKOTA": "SD", "TENNESSEE": "TN", "TEXAS": "TX", "UTAH": "UT", "VERMONT": "VT",
-    "VIRGINIA": "VA", "WASHINGTON": "WA", "WEST VIRGINIA": "WV", "WISCONSIN": "WI", "WYOMING": "WY",
-    "DISTRICT OF COLUMBIA": "DC",
-}
-
-
 def _normalize_state_value(value: Any) -> str:
-    """Return a valid two-letter US state code from common frontend values.
-
-    Accepts "TN", "TN - Tennessee", "Tennessee", or labels like "State: TN".
-    Rejects NSPXN user IDs and placeholders.
-    """
-    raw = str(value or "").strip()
-    if not raw:
-        return ""
-    if _looks_like_nspxn_user_id(raw):
-        return ""
-
-    s = re.sub(r"(?i)^\s*(?:state|loss\s*state|claim\s*state|vehicle\s*state)\s*[:=\-]\s*", "", raw).strip()
-    up = re.sub(r"\s+", " ", s.upper()).strip()
-    if up in {"N/A", "NA", "NONE", "NULL", "UNKNOWN", "SELECT", "SELECT STATE", "-- SELECT STATE --"}:
-        return ""
-
-    if re.fullmatch(r"[A-Z]{2}", up) and up in US_STATE_ABBRS:
-        return up
-
-    # Common select display values: "TN - Tennessee", "TN/Tennessee", "TN (Tennessee)"
-    m = re.search(r"\b([A-Z]{2})\b", up)
-    if m and m.group(1) in US_STATE_ABBRS:
-        return m.group(1)
-
-    # Full state name.
-    cleaned_name = re.sub(r"[^A-Z ]+", " ", up)
-    cleaned_name = re.sub(r"\s+", " ", cleaned_name).strip()
-    if cleaned_name in US_STATE_NAMES:
-        return US_STATE_NAMES[cleaned_name]
-
-    for name, abbr in US_STATE_NAMES.items():
-        if re.search(r"\b" + re.escape(name) + r"\b", cleaned_name):
-            return abbr
-
+    s = str(value or "").strip().upper()
+    if re.fullmatch(r"[A-Z]{2}", s):
+        return s
     return ""
 
 
@@ -330,13 +278,16 @@ async def vision_review(
     repair_ratio = repair_total / pre_loss_value if pre_loss_value else 0.0
     generated = datetime.now(ZoneInfo("America/New_York")).strftime("%m/%d/%Y %I:%M %p EST")
 
-    # Resolve DV state defensively. Some frontend/browser submissions can accidentally
-    # map the NSPXN User ID into dv_state. Prefer a valid two-letter state from
-    # alternate form keys when present, and never render an NSPXN ID as State.
+    # Resolve DV state defensively. Never guess or force a default state.
+    # If the frontend selected CO/TN/etc. but the value does not reach this backend,
+    # block instead of producing a customer PDF with the wrong state.
     resolved_state = _normalize_state_value(dv_state)
+    _safe_form_keys: List[str] = []
     if not resolved_state or _looks_like_nspxn_user_id(dv_state):
         try:
             form = await request.form()
+
+            # Known frontend aliases first.
             for key in (
                 "dv_state", "dv-state", "dvState", "dv_state_input", "dvStateInput",
                 "dv_state_select", "dvStateSelect", "dv_state_value", "dvStateValue",
@@ -345,37 +296,65 @@ async def vision_review(
                 "claim_state", "claimState", "claim_state_select", "claimStateSelect",
                 "loss_state", "lossState", "loss_state_select", "lossStateSelect",
                 "loss_location_state", "lossLocationState", "vehicle_state", "vehicleState",
-                "jurisdiction_state", "jurisdictionState", "dv_jurisdiction", "dvJurisdiction"
+                "jurisdiction_state", "jurisdictionState", "dv_jurisdiction", "dvJurisdiction",
+                "selected_state", "selectedState", "claim_jurisdiction", "claimJurisdiction",
             ):
                 candidate = _normalize_state_value(form.get(key, ""))
                 if candidate:
                     resolved_state = candidate
                     break
+
+            # Then any key containing state/jurisdiction/location.
             if not resolved_state:
                 for key in form.keys():
-                    key_l = str(key or "").lower()
-                    if "state" not in key_l:
+                    try:
+                        value = form.get(key, "")
+                        if hasattr(value, "filename"):
+                            continue
+                        _safe_form_keys.append(str(key))
+                        key_l = str(key or "").lower()
+                        if not any(token in key_l for token in ("state", "jurisdiction", "location")):
+                            continue
+                        candidate = _normalize_state_value(value)
+                        if candidate:
+                            resolved_state = candidate
+                            break
+                    except Exception:
                         continue
-                    candidate = _normalize_state_value(form.get(key, ""))
-                    if candidate:
-                        resolved_state = candidate
-                        break
+
+            # Last-resort scan: any short non-file form value that is a valid state.
+            if not resolved_state:
+                for key in form.keys():
+                    try:
+                        value = form.get(key, "")
+                        if hasattr(value, "filename"):
+                            continue
+                        if str(key) not in _safe_form_keys:
+                            _safe_form_keys.append(str(key))
+                        value_s = str(value or "").strip()
+                        if not value_s or len(value_s) > 40:
+                            continue
+                        candidate = _normalize_state_value(value_s)
+                        if candidate:
+                            resolved_state = candidate
+                            break
+                    except Exception:
+                        continue
         except Exception:
             pass
+
     if not resolved_state:
-        # Backend-only backstop: if the frontend fails to transmit the state field,
-        # use a configured DV default. NSPXN_DV_DEFAULT_STATE can be changed on Render.
-        # Defaulting to TN prevents customer PDFs from showing State: N/A for the
-        # current Tennessee DV workflow when the browser-selected state is dropped.
-        fallback_state = _normalize_state_value(os.getenv("NSPXN_DV_DEFAULT_STATE", "TN"))
-        if fallback_state:
-            resolved_state = fallback_state
-            try:
-                logging.warning("NSPXN DV STATE DEBUG fallback_state_applied=%s", resolved_state)
-            except Exception:
-                pass
-    if not resolved_state:
-        resolved_state = "N/A"
+        return JSONResponse(
+            status_code=200,
+            content={
+                "status": "blocked",
+                "error": "Missing required DV field: State",
+                "detail": "A valid two-letter state was not received by the diminished value backend. The report was blocked so it does not print N/A or the wrong state.",
+                "file_number": file_number,
+                "request_type": "Preliminary Diminished Value Screening",
+                "safe_form_keys_received": _safe_form_keys[:80],
+            },
+        )
 
     markdown_lines = [
         "## Preliminary Diminished Value Screening",
