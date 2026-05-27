@@ -59,10 +59,62 @@ def _looks_like_nspxn_user_id(value: Any) -> bool:
     return bool(re.fullmatch(r"(?i)NSPXN\d+", str(value or "").strip()))
 
 
+US_STATE_ABBRS = {
+    "AL","AK","AZ","AR","CA","CO","CT","DE","FL","GA","HI","IA","ID","IL","IN","KS","KY","LA","MA","MD",
+    "ME","MI","MN","MO","MS","MT","NC","ND","NE","NH","NJ","NM","NV","NY","OH","OK","OR","PA","RI","SC",
+    "SD","TN","TX","UT","VA","VT","WA","WI","WV","WY","DC"
+}
+
+US_STATE_NAMES = {
+    "ALABAMA": "AL", "ALASKA": "AK", "ARIZONA": "AZ", "ARKANSAS": "AR", "CALIFORNIA": "CA",
+    "COLORADO": "CO", "CONNECTICUT": "CT", "DELAWARE": "DE", "FLORIDA": "FL", "GEORGIA": "GA",
+    "HAWAII": "HI", "IDAHO": "ID", "ILLINOIS": "IL", "INDIANA": "IN", "IOWA": "IA",
+    "KANSAS": "KS", "KENTUCKY": "KY", "LOUISIANA": "LA", "MAINE": "ME", "MARYLAND": "MD",
+    "MASSACHUSETTS": "MA", "MICHIGAN": "MI", "MINNESOTA": "MN", "MISSISSIPPI": "MS", "MISSOURI": "MO",
+    "MONTANA": "MT", "NEBRASKA": "NE", "NEVADA": "NV", "NEW HAMPSHIRE": "NH", "NEW JERSEY": "NJ",
+    "NEW MEXICO": "NM", "NEW YORK": "NY", "NORTH CAROLINA": "NC", "NORTH DAKOTA": "ND", "OHIO": "OH",
+    "OKLAHOMA": "OK", "OREGON": "OR", "PENNSYLVANIA": "PA", "RHODE ISLAND": "RI", "SOUTH CAROLINA": "SC",
+    "SOUTH DAKOTA": "SD", "TENNESSEE": "TN", "TEXAS": "TX", "UTAH": "UT", "VERMONT": "VT",
+    "VIRGINIA": "VA", "WASHINGTON": "WA", "WEST VIRGINIA": "WV", "WISCONSIN": "WI", "WYOMING": "WY",
+    "DISTRICT OF COLUMBIA": "DC",
+}
+
+
 def _normalize_state_value(value: Any) -> str:
-    s = str(value or "").strip().upper()
-    if re.fullmatch(r"[A-Z]{2}", s):
-        return s
+    """Return a valid two-letter US state code from common frontend values.
+
+    Accepts "TN", "TN - Tennessee", "Tennessee", or labels like "State: TN".
+    Rejects NSPXN user IDs and placeholders.
+    """
+    raw = str(value or "").strip()
+    if not raw:
+        return ""
+    if _looks_like_nspxn_user_id(raw):
+        return ""
+
+    s = re.sub(r"(?i)^\s*(?:state|loss\s*state|claim\s*state|vehicle\s*state)\s*[:=\-]\s*", "", raw).strip()
+    up = re.sub(r"\s+", " ", s.upper()).strip()
+    if up in {"N/A", "NA", "NONE", "NULL", "UNKNOWN", "SELECT", "SELECT STATE", "-- SELECT STATE --"}:
+        return ""
+
+    if re.fullmatch(r"[A-Z]{2}", up) and up in US_STATE_ABBRS:
+        return up
+
+    # Common select display values: "TN - Tennessee", "TN/Tennessee", "TN (Tennessee)"
+    m = re.search(r"\b([A-Z]{2})\b", up)
+    if m and m.group(1) in US_STATE_ABBRS:
+        return m.group(1)
+
+    # Full state name.
+    cleaned_name = re.sub(r"[^A-Z ]+", " ", up)
+    cleaned_name = re.sub(r"\s+", " ", cleaned_name).strip()
+    if cleaned_name in US_STATE_NAMES:
+        return US_STATE_NAMES[cleaned_name]
+
+    for name, abbr in US_STATE_NAMES.items():
+        if re.search(r"\b" + re.escape(name) + r"\b", cleaned_name):
+            return abbr
+
     return ""
 
 
@@ -286,8 +338,14 @@ async def vision_review(
         try:
             form = await request.form()
             for key in (
-                "dv_state", "dv-state", "dvState", "state", "claim_state",
-                "claimState", "loss_state", "lossState", "vehicle_state", "vehicleState"
+                "dv_state", "dv-state", "dvState", "dv_state_input", "dvStateInput",
+                "dv_state_select", "dvStateSelect", "dv_state_value", "dvStateValue",
+                "dv_claim_state", "dvClaimState", "dv_loss_state", "dvLossState",
+                "dv-loss-state", "dv-claim-state", "state", "state_select", "stateSelect",
+                "claim_state", "claimState", "claim_state_select", "claimStateSelect",
+                "loss_state", "lossState", "loss_state_select", "lossStateSelect",
+                "loss_location_state", "lossLocationState", "vehicle_state", "vehicleState",
+                "jurisdiction_state", "jurisdictionState", "dv_jurisdiction", "dvJurisdiction"
             ):
                 candidate = _normalize_state_value(form.get(key, ""))
                 if candidate:
