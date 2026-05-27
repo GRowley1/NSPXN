@@ -1,7 +1,7 @@
 import json
 import logging
 import re
-from urllib.parse import parse_qs, quote
+from urllib.parse import parse_qs
 
 from fastapi import HTTPException
 
@@ -12,56 +12,11 @@ from auth_phase1 import (
     log_usage_event,
     require_auth_from_authorization_header,
 )
-# Heavy report apps are lazy-loaded below. Do NOT import them at startup.
-# Importing all report modules loads duplicate Presidio/spaCy stacks and can
-# exceed Render memory before a request even completes.
-comprehensive_app = None
-photos_only_app = None
-diminished_value_app = None
-
-DV_INTENTS = {
-    "preliminary_diminished_value_screening",
-    "preliminary_diminished_value",
-    "diminished_value_screening",
-    "dv_screening",
-}
-
-
-def _get_comprehensive_app():
-    global comprehensive_app
-    if comprehensive_app is None:
-        logging.warning("NSPXN LAZY LOAD comprehensive_app")
-        from main_comprehensive_locked import app as loaded_app
-        comprehensive_app = loaded_app
-    return comprehensive_app
-
-
-def _get_photos_only_app():
-    global photos_only_app
-    if photos_only_app is None:
-        logging.warning("NSPXN LAZY LOAD photos_only_app")
-        from main_photos_only_locked import app as loaded_app
-        photos_only_app = loaded_app
-    return photos_only_app
-
-
-def _get_diminished_value_app():
-    global diminished_value_app
-    if diminished_value_app is None:
-        logging.warning("NSPXN LAZY LOAD diminished_value_app")
-        from main_diminished_value_locked import app as loaded_app
-        diminished_value_app = loaded_app
-    return diminished_value_app
-
-
-def _normalize_ai_intent_value(value: str) -> str:
-    s = str(value or "").strip().lower()
-    s = re.sub(r"[\s\-]+", "_", s)
-    return s
+from main_comprehensive_locked import app as comprehensive_app
+from main_photos_only_locked import app as photos_only_app
 
 
 init_auth_db()
-logging.warning("NSPXN ROUTER LAZY TRUE-SWALLOW DV ROUTE ACTIVE 2026-05-27")
 
 
 _ALLOWED_CORS_ORIGINS = {
@@ -80,9 +35,8 @@ MAX_UPLOAD_BODY_BYTES = 25 * 1024 * 1024  # allow uploads up to 25 MB
 def _extract_simple_form_field(body: bytes, content_type: str, field_name: str) -> str:
     """Extract one exact simple text field from urlencoded or multipart body.
 
-    This intentionally does NOT use loose regex scanning for multipart fields.
-    Loose regex drift was reading later fields such as appraiser_id/NSPXN ID as
-    file_number. Multipart extraction must be boundary-based and exact-name only.
+    Multipart parsing is boundary-based and exact-name only. Do not use loose regex
+    scanning because it can drift into later fields like appraiser_id/NSPXN ID.
     """
     ct = (content_type or "").lower()
     target_name = str(field_name or "").strip()
@@ -105,13 +59,10 @@ def _extract_simple_form_field(body: bytes, content_type: str, field_name: str) 
             for part in body.split(marker):
                 if not part or part in (b"--", b"--\r\n", b"--\n"):
                     continue
-
                 if b"\r\n\r\n" in part:
                     header_blob, value_blob = part.split(b"\r\n\r\n", 1)
-                    line_ending = b"\r\n"
                 elif b"\n\n" in part:
                     header_blob, value_blob = part.split(b"\n\n", 1)
-                    line_ending = b"\n"
                 else:
                     continue
 
@@ -121,20 +72,15 @@ def _extract_simple_form_field(body: bytes, content_type: str, field_name: str) 
                     name_match = re.search(r"(?:^|;\s*)name=([^;\r\n]+)", headers_txt, flags=re.IGNORECASE)
                 if not name_match:
                     continue
-
                 part_name = name_match.group(1).strip().strip('"')
                 if part_name != target_name:
                     continue
-
-                # Never treat upload file parts as form text.
                 if re.search(r'filename="', headers_txt, flags=re.IGNORECASE):
                     return ""
 
-                # Remove multipart terminator/footer and surrounding CRLF only.
                 value_blob = value_blob.strip()
                 if value_blob.endswith(b"--"):
                     value_blob = value_blob[:-2].strip()
-                value_blob = value_blob.rstrip(line_ending).strip()
                 return value_blob.decode("utf-8", "ignore").strip()
         except Exception:
             return ""
@@ -143,7 +89,7 @@ def _extract_simple_form_field(body: bytes, content_type: str, field_name: str) 
 
 
 def _extract_simple_form_keys(body: bytes, content_type: str) -> list[str]:
-    """Return non-file multipart/urlencoded field names for safe diagnostics."""
+    """Return non-file field names for safe router diagnostics."""
     ct = (content_type or "").lower()
     out = []
     if "application/x-www-form-urlencoded" in ct:
@@ -180,6 +126,39 @@ def _extract_simple_form_keys(body: bytes, content_type: str) -> list[str]:
         except Exception:
             return out
     return out
+
+
+_STATE_NAMES = {
+    "ALABAMA":"AL", "ALASKA":"AK", "ARIZONA":"AZ", "ARKANSAS":"AR", "CALIFORNIA":"CA", "COLORADO":"CO",
+    "CONNECTICUT":"CT", "DELAWARE":"DE", "FLORIDA":"FL", "GEORGIA":"GA", "HAWAII":"HI", "IDAHO":"ID",
+    "ILLINOIS":"IL", "INDIANA":"IN", "IOWA":"IA", "KANSAS":"KS", "KENTUCKY":"KY", "LOUISIANA":"LA",
+    "MAINE":"ME", "MARYLAND":"MD", "MASSACHUSETTS":"MA", "MICHIGAN":"MI", "MINNESOTA":"MN", "MISSISSIPPI":"MS",
+    "MISSOURI":"MO", "MONTANA":"MT", "NEBRASKA":"NE", "NEVADA":"NV", "NEW HAMPSHIRE":"NH", "NEW JERSEY":"NJ",
+    "NEW MEXICO":"NM", "NEW YORK":"NY", "NORTH CAROLINA":"NC", "NORTH DAKOTA":"ND", "OHIO":"OH", "OKLAHOMA":"OK",
+    "OREGON":"OR", "PENNSYLVANIA":"PA", "RHODE ISLAND":"RI", "SOUTH CAROLINA":"SC", "SOUTH DAKOTA":"SD",
+    "TENNESSEE":"TN", "TEXAS":"TX", "UTAH":"UT", "VERMONT":"VT", "VIRGINIA":"VA", "WASHINGTON":"WA",
+    "WEST VIRGINIA":"WV", "WISCONSIN":"WI", "WYOMING":"WY", "DISTRICT OF COLUMBIA":"DC",
+}
+_STATE_ABBRS = set(_STATE_NAMES.values()) | {"DC"}
+_BAD_STATE_VALUES = {"", "N/A", "NA", "NONE", "NULL", "UNKNOWN", "SELECT", "SELECT STATE", "-- SELECT STATE --", "YES", "NO", "Y", "N", "TRUE", "FALSE", "ON", "OFF"}
+
+
+def _normalize_us_state_value(value: str) -> str:
+    raw = str(value or "").strip()
+    if not raw:
+        return ""
+    up = re.sub(r"\s+", " ", raw.upper()).strip()
+    up = re.sub(r"^\s*(STATE|DV STATE|CLAIM STATE|LOSS STATE|VEHICLE STATE)\s*[:=\-]\s*", "", up).strip()
+    if re.fullmatch(r"NSPXN\d+", up) or up in _BAD_STATE_VALUES:
+        return ""
+    if re.fullmatch(r"[A-Z]{2}", up) and up in _STATE_ABBRS:
+        return up
+    m = re.search(r"\b([A-Z]{2})\b", up)
+    if m and m.group(1) in _STATE_ABBRS:
+        return m.group(1)
+    cleaned = re.sub(r"[^A-Z ]+", " ", up)
+    cleaned = re.sub(r"\s+", " ", cleaned).strip()
+    return _STATE_NAMES.get(cleaned, "")
 
 
 def _extract_ai_intent_from_body(body: bytes, content_type: str) -> str:
@@ -246,8 +225,8 @@ def _blocked_payload_from_exception(exc: HTTPException) -> tuple[int, dict]:
 
 
 def _replace_or_add_form_field(body: bytes, content_type: str, field_name: str, value: str) -> bytes:
+    """Replace or add one exact simple text field in urlencoded/multipart body."""
     ct = (content_type or "").lower()
-    safe_value = (value or "").encode("utf-8")
 
     if "application/x-www-form-urlencoded" in ct:
         try:
@@ -262,24 +241,47 @@ def _replace_or_add_form_field(body: bytes, content_type: str, field_name: str, 
         return body
 
     try:
-        # Replace existing simple text field value. The frontend already sends appraiser_id.
-        pattern = (
-            rb'(name="' + re.escape(field_name.encode("utf-8")) +
-            rb'"\r\n(?:[^\r\n]*\r\n)*\r\n)([^\r\n]*)'
-        )
-        if re.search(pattern, body, flags=re.IGNORECASE):
-            return re.sub(pattern, rb'\g<1>' + safe_value, body, count=1, flags=re.IGNORECASE)
-
-        # If the field is missing, add it before the closing multipart boundary.
         boundary_match = re.search(r"boundary=([^;]+)", content_type or "", flags=re.IGNORECASE)
         if not boundary_match:
             return body
-
         boundary = boundary_match.group(1).strip().strip('"')
+        marker = ("--" + boundary).encode("utf-8")
+        chunks = body.split(marker)
+        changed = False
+        rebuilt = []
+
+        for part in chunks:
+            if not part:
+                rebuilt.append(part)
+                continue
+            if part in (b"--", b"--\r\n", b"--\n"):
+                rebuilt.append(part)
+                continue
+            sep = b"\r\n\r\n" if b"\r\n\r\n" in part else (b"\n\n" if b"\n\n" in part else None)
+            if not sep:
+                rebuilt.append(part)
+                continue
+            header_blob, value_blob = part.split(sep, 1)
+            headers_txt = header_blob.decode("utf-8", "ignore")
+            name_match = re.search(r'(?:^|;\s*)name="([^"]+)"', headers_txt, flags=re.IGNORECASE)
+            if not name_match:
+                name_match = re.search(r"(?:^|;\s*)name=([^;\r\n]+)", headers_txt, flags=re.IGNORECASE)
+            part_name = name_match.group(1).strip().strip('"') if name_match else ""
+            if part_name == field_name and not re.search(r'filename="', headers_txt, flags=re.IGNORECASE):
+                ending = b"\r\n" if part.endswith(b"\r\n") else (b"\n" if part.endswith(b"\n") else b"")
+                rebuilt.append(header_blob + sep + (value or "").encode("utf-8") + ending)
+                changed = True
+            else:
+                rebuilt.append(part)
+
+        if changed:
+            return marker.join(rebuilt)
+
         closing = ("\r\n--" + boundary + "--").encode("utf-8")
         if closing not in body:
-            return body
-
+            closing = ("--" + boundary + "--").encode("utf-8")
+            if closing not in body:
+                return body
         insertion = (
             "\r\n--" + boundary +
             f"\r\nContent-Disposition: form-data; name=\"{field_name}\"\r\n\r\n" +
@@ -428,27 +430,54 @@ class IntentRouterApp:
             or _extract_simple_form_field(body, content_type, "fileNumber")
         )
 
-        # Guard against multipart parser drift: file_number must never be the
-        # authenticated NSPXN User ID/appraiser_id.
+        # Guard against multipart parser drift: File # must never be the NSPXN User ID.
         if re.fullmatch(r"(?i)NSPXN\d+", str(file_number or "").strip()):
-            logging.error(
-                "NSPXN ROUTER FIELD ERROR: parsed file_number was NSPXN user id; clearing value. ai_intent=%s",
-                ai_intent,
-            )
+            logging.error("NSPXN ROUTER FIELD ERROR: parsed file_number was NSPXN user id; clearing value. ai_intent=%s", ai_intent)
             file_number = ""
 
         if ai_intent in DV_INTENTS:
-            try:
-                _form_keys = _extract_simple_form_keys(body, content_type)
-                _state_keys = [k for k in _form_keys if any(tok in str(k).lower() for tok in ("state", "jurisdiction", "location"))]
-                logging.warning(
-                    "NSPXN DV ROUTER FIELD DEBUG file_number_present=%s state_keys=%s form_keys=%s",
-                    bool(str(file_number or "").strip()),
-                    _state_keys[:20],
-                    _form_keys[:80],
+            _form_keys = _extract_simple_form_keys(body, content_type)
+            _state_keys = [k for k in _form_keys if any(tok in str(k).lower() for tok in ("state", "jurisdiction", "location"))]
+            _raw_state = (
+                _extract_simple_form_field(body, content_type, "dv_state")
+                or _extract_simple_form_field(body, content_type, "dv-state")
+                or _extract_simple_form_field(body, content_type, "dvState")
+                or _extract_simple_form_field(body, content_type, "state")
+                or _extract_simple_form_field(body, content_type, "claim_state")
+                or _extract_simple_form_field(body, content_type, "loss_state")
+            )
+            _normalized_state = _normalize_us_state_value(_raw_state)
+            logging.warning(
+                "NSPXN DV ROUTER STATE VALUE DEBUG file_number=%s dv_state_raw=%r normalized=%s state_keys=%s form_keys=%s",
+                file_number,
+                _raw_state,
+                _normalized_state or "",
+                _state_keys[:20],
+                _form_keys[:80],
+            )
+            if not _normalized_state:
+                await _send_json(
+                    send,
+                    200,
+                    {
+                        "status": "blocked",
+                        "error": "Missing required DV field: State",
+                        "detail": "The router received the DV request but did not receive a valid two-letter state value. Check the frontend field value for dv_state.",
+                        "file_number": file_number,
+                        "ai_intent": ai_intent,
+                        "dv_state_received": _raw_state,
+                        "state_keys_received": _state_keys[:20],
+                        "safe_form_keys_received": _form_keys[:80],
+                    },
+                    scope=scope,
                 )
-            except Exception:
-                pass
+                return
+
+            # Force canonical values into the replayed multipart body before the DV app sees it.
+            body = _replace_or_add_form_field(body, content_type, "dv_state", _normalized_state)
+            body = _replace_or_add_form_field(body, content_type, "ai_intent", "preliminary_diminished_value_screening")
+            scope = _scope_with_updated_content_length(scope, body)
+            ai_intent = "preliminary_diminished_value_screening"
 
         sent = False
 
@@ -467,69 +496,11 @@ class IntentRouterApp:
                 "more_body": False,
             }
 
-        response_state = {
-            "status": 500,
-            "headers": {},
-            "started": False,
-            "completed": False,
-            "sent_to_client": False,
-            "body_bytes": 0,
-        }
-        captured_chunks = []
-        CAPTURE_LIMIT = 64 * 1024  # enough for blocked/error JSON; success bodies are discarded
-
-        def _compact_download_url() -> str:
-            safe_file = quote(str(file_number or ""), safe="")
-            return f"/download-pdf?file_number={safe_file}"
-
-        async def _send_compact_response(raw_body: bytes = b""):
-            status_code = int(response_state.get("status", 500))
-            payload = None
-            if raw_body:
-                try:
-                    payload = json.loads(raw_body.decode("utf-8", "ignore"))
-                except Exception:
-                    payload = None
-
-            if 200 <= status_code < 300:
-                if isinstance(payload, dict) and payload.get("status") == "blocked":
-                    response_state["sent_to_client"] = True
-                    await _send_json(send, 200, payload, scope=scope)
-                    return
-
-                download_url = _compact_download_url()
-                compact_payload = {
-                    "status": "success",
-                    "message": "Completed. Download the PDF below.",
-                    "file_number": file_number,
-                    "download_url": download_url,
-                    "pdf_url": download_url,
-                }
-                logging.warning(
-                    "NSPXN ROUTER PDF-ONLY RESPONSE returning compact success file_number=%s ai_intent=%s mounted_body_bytes=%s",
-                    file_number,
-                    ai_intent,
-                    response_state.get("body_bytes"),
-                )
-                response_state["sent_to_client"] = True
-                await _send_json(send, 200, compact_payload, scope=scope)
-                return
-
-            error_payload = payload if isinstance(payload, dict) else {
-                "status": "error" if status_code >= 500 else "blocked",
-                "error": "Report processing failed." if status_code >= 500 else "Report was not completed.",
-                "detail": (raw_body.decode("utf-8", "ignore")[:1000] if raw_body else "No response body returned."),
-                "file_number": file_number,
-            }
-            response_state["sent_to_client"] = True
-            await _send_json(send, status_code, error_payload, scope=scope)
+        response_state = {"status": 500, "headers": {}, "started": False, "completed": False}
 
         async def tracking_send(message):
-            # TRUE SWALLOW sender for mounted /vision-review app.
-            # Never forward http.response.start or http.response.body from the mounted app.
-            # We collect headers/status and at most CAPTURE_LIMIT bytes only so blocked/error
-            # JSON can still be surfaced. The browser receives one compact response after
-            # the mounted app fully returns.
+            # Header-only tracking. Do NOT buffer or parse the response body here;
+            # buffering the full report response can break large PDF/report responses.
             if message["type"] == "http.response.start":
                 response_state["started"] = True
                 response_state["status"] = int(message.get("status", 500))
@@ -537,30 +508,18 @@ class IntentRouterApp:
                     k.decode("latin1").lower(): v.decode("latin1")
                     for k, v in message.get("headers", [])
                 }
-                return
-
-            if message["type"] == "http.response.body":
-                chunk = message.get("body", b"") or b""
-                response_state["body_bytes"] += len(chunk)
-                current_capture = sum(len(c) for c in captured_chunks)
-                if current_capture < CAPTURE_LIMIT:
-                    captured_chunks.append(chunk[: max(0, CAPTURE_LIMIT - current_capture)])
-                if not message.get("more_body", False):
-                    response_state["completed"] = True
-                return
+            elif message["type"] == "http.response.body" and not message.get("more_body", False):
+                response_state["completed"] = True
+            await send(message)
 
         try:
-            logging.warning(
-                "NSPXN ROUTER TRUE-SWALLOW PDF-ONLY RESPONSE intercepting /vision-review file_number=%s ai_intent=%s",
-                file_number,
-                ai_intent,
-            )
             await target_app(scope, replay_receive, tracking_send)
-            if not response_state.get("sent_to_client"):
-                await _send_compact_response(b"".join(captured_chunks))
         except Exception as exc:
             logging.exception("NSPXN Comprehensive/Photos/DV router exception", exc_info=exc)
-            if response_state.get("sent_to_client"):
+            # If the mounted app already started or completed a response, do not send
+            # a second ASGI response. Sending another response start is what caused
+            # "Unexpected ASGI message 'http.response.start'" and browser Network Error.
+            if response_state.get("started") or response_state.get("completed"):
                 return
 
             detail = str(exc)
@@ -625,9 +584,8 @@ class IntentRouterApp:
                         compliance_score = None
                         score_source = None
 
-            # For Comprehensive and Diminished Value reports, only count fully completed
-            # report responses that set the analytics header. This avoids counting blocked
-            # quality-gate output as completed usage.
+            # For Comprehensive reports, only count fully completed report responses that set
+            # the analytics header. This avoids counting blocked comprehensive quality-gate output.
             if (ai_intent not in ({"comprehensive"} | DV_INTENTS)) or report_completed:
                 log_usage_event(
                     current_user=current_user,
