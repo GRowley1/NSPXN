@@ -258,7 +258,7 @@ def _write_pdf(file_number: str, title: str, lines: List[str]) -> str:
             elif ":" in safe_line and len(safe_line.split(":", 1)[0]) <= 36:
                 _draw_key_value(safe_line)
             else:
-                pdf.set_font("Arial", "", 8.5)
+                pdf.set_font("Arial", "", 8)
                 pdf.multi_cell(usable_width, 5, safe_line)
 
     pdf.output(pdf_path)
