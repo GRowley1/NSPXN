@@ -221,7 +221,7 @@ def _write_pdf(file_number: str, title: str, lines: List[str]) -> str:
         pdf.set_font("Arial", "B", 10)
         pdf.cell(usable_width, 7, label.upper(), border=0, ln=True, align="L", fill=True)
         pdf.set_text_color(0, 0, 0)
-        pdf.set_font("Arial", "", 10)
+        pdf.set_font("Arial", "", 9)
         pdf.ln(1)
 
     def _draw_key_value(line: str) -> None:
