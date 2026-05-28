@@ -252,13 +252,13 @@ def _write_pdf(file_number: str, title: str, lines: List[str]) -> str:
             pdf.set_x(pdf.l_margin)
             if safe_line.startswith("This is a Preliminary Diminished Value Screening only"):
                 pdf.set_text_color(110, 110, 110)
-                pdf.set_font("Arial", "", 7)
+                pdf.set_font("Arial", "", 6)
                 pdf.multi_cell(usable_width, 4, safe_line)
                 pdf.set_text_color(0, 0, 0)
             elif ":" in safe_line and len(safe_line.split(":", 1)[0]) <= 36:
                 _draw_key_value(safe_line)
             else:
-                pdf.set_font("Arial", "", 7.5)
+                pdf.set_font("Arial", "", 7)
                 pdf.multi_cell(usable_width, 5, safe_line)
 
     pdf.output(pdf_path)
