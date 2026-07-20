@@ -74,7 +74,7 @@ _ALLOWED_CORS_ORIGINS = {
     "http://127.0.0.1:5500",
 }
 
-MAX_UPLOAD_BODY_BYTES = 25 * 1024 * 1024  # allow uploads up to 25 MB
+MAX_UPLOAD_BODY_BYTES = int(os.getenv("NSPXN_MAX_UPLOAD_MB", "25")) * 1024 * 1024
 
 
 def _extract_simple_form_field(body: bytes, content_type: str, field_name: str) -> str:
