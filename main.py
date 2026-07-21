@@ -382,8 +382,8 @@ class IntentRouterApp:
                 413,
                 {
                     "error": "Upload too large.",
-                    "detail": "Maximum upload size is 50 MB. Please reduce the file size and resubmit.",
-                    "max_upload_mb": 50,
+                    "detail": "Maximum upload size is 25 MB. Please reduce the file size and resubmit.",
+                    "max_upload_mb": 25,
                 },
                 scope=scope,
             )
