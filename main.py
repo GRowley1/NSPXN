@@ -2,6 +2,8 @@ import json
 import logging
 import os
 import re
+import secrets
+from datetime import datetime
 from urllib.parse import parse_qs, quote
 
 from fastapi import HTTPException
@@ -12,6 +14,10 @@ from auth_phase1 import (
     init_auth_db,
     log_usage_event,
     require_auth_from_authorization_header,
+    validate_public_report_token,
+    mark_public_report_started,
+    mark_public_report_completed,
+    mark_public_report_downloaded,
 )
 # Heavy report apps are lazy-loaded below. Do NOT import them at startup.
 # Importing all report modules loads duplicate Presidio/spaCy stacks and can
@@ -202,7 +208,7 @@ def _cors_headers(scope):
     return [
         (b"access-control-allow-origin", allow_origin.encode("latin1")),
         (b"access-control-allow-methods", b"GET,POST,PATCH,OPTIONS"),
-        (b"access-control-allow-headers", b"Authorization,Content-Type,Accept,Origin,X-NSPXN-AI-Intent"),
+        (b"access-control-allow-headers", b"Authorization,Content-Type,Accept,Origin,X-NSPXN-AI-Intent,X-NSPXN-Public-Token"),
         (b"access-control-allow-credentials", b"true"),
         (b"access-control-max-age", b"86400"),
     ]
@@ -330,6 +336,135 @@ class IntentRouterApp:
     def __init__(self, auth):
         self.auth = auth
 
+    async def _handle_public_instant_report(self, scope, receive, send):
+        path = scope.get("path", "")
+        method = scope.get("method", "").upper()
+        headers = _header_dict(scope)
+        public_token = (headers.get("x-nspxn-public-token") or "").strip()
+
+        # Browser downloads may carry the token in the query string because a normal
+        # download link cannot attach a custom header.
+        if not public_token:
+            try:
+                query = parse_qs((scope.get("query_string") or b"").decode("utf-8", "ignore"), keep_blank_values=True)
+                public_token = str((query.get("token") or [""])[0]).strip()
+            except Exception:
+                public_token = ""
+
+        try:
+            purchase = validate_public_report_token(public_token, allow_completed=True)
+        except HTTPException as exc:
+            status_code, payload = _blocked_payload_from_exception(exc)
+            await _send_json(send, status_code, payload, scope=scope)
+            return
+
+        if path == "/public/download-pdf":
+            if purchase.status != "report_completed":
+                await _send_json(send, 403, {"error": "Report is not ready for download."}, scope=scope)
+                return
+            target_app = _get_photos_only_app() if purchase.report_type == "damage_report_from_photos" else _get_diminished_value_app()
+            file_number = (purchase.file_number or "").strip()
+            if not file_number:
+                await _send_json(send, 404, {"error": "Report file number is missing."}, scope=scope)
+                return
+            new_scope = dict(scope)
+            new_scope["path"] = "/download-pdf"
+            new_scope["raw_path"] = b"/download-pdf"
+            new_scope["query_string"] = ("file_number=" + quote(file_number, safe="")).encode("utf-8")
+            response_status = {"code": 500}
+
+            async def download_send(message):
+                if message["type"] == "http.response.start":
+                    response_status["code"] = int(message.get("status", 500))
+                await send(message)
+                if message["type"] == "http.response.body" and not message.get("more_body", False):
+                    if 200 <= response_status["code"] < 300:
+                        mark_public_report_downloaded(public_token)
+
+            await target_app(new_scope, receive, download_send)
+            return
+
+        if method != "POST":
+            await _send_json(send, 405, {"error": "Method not allowed."}, scope=scope)
+            return
+        if purchase.status not in {"paid", "report_started"}:
+            await _send_json(send, 403, {"error": "This Instant Report has already been completed."}, scope=scope)
+            return
+
+        body = b""
+        while True:
+            message = await receive()
+            if message["type"] != "http.request":
+                continue
+            body += message.get("body", b"")
+            if not message.get("more_body", False):
+                break
+
+        if len(body) > MAX_UPLOAD_BODY_BYTES:
+            await _send_json(send, 413, {"error": "Upload too large.", "max_upload_mb": int(MAX_UPLOAD_BODY_BYTES / 1024 / 1024)}, scope=scope)
+            return
+
+        content_type = headers.get("content-type", "")
+        ai_intent = _extract_ai_intent_from_body(body, content_type)
+        if ai_intent != purchase.report_type:
+            await _send_json(send, 403, {"error": "Purchased report type does not match the submitted report type."}, scope=scope)
+            return
+
+        file_number = (
+            _extract_simple_form_field(body, content_type, "file_number")
+            or _extract_simple_form_field(body, content_type, "file-number")
+            or _extract_simple_form_field(body, content_type, "fileNumber")
+        ).strip()
+        if not file_number:
+            file_number = "PPR-" + datetime.utcnow().strftime("%Y%m%d-") + secrets.token_hex(3).upper()
+            body = _replace_or_add_form_field(body, content_type, "file_number", file_number)
+        body = _replace_or_add_form_field(body, content_type, "appraiser_id", "NSPXN Instant Reports")
+        if not _extract_simple_form_field(body, content_type, "ia_company"):
+            body = _replace_or_add_form_field(body, content_type, "ia_company", "NSPXN Instant Reports")
+        new_scope = _scope_with_updated_content_length(scope, body)
+        new_scope["path"] = "/vision-review"
+        new_scope["raw_path"] = b"/vision-review"
+
+        mark_public_report_started(public_token, file_number)
+        target_app = _get_photos_only_app() if ai_intent == "damage_report_from_photos" else _get_diminished_value_app()
+        sent = False
+        async def replay_receive():
+            nonlocal sent
+            if not sent:
+                sent = True
+                return {"type": "http.request", "body": body, "more_body": False}
+            return {"type": "http.request", "body": b"", "more_body": False}
+
+        state = {"status": 500, "headers": {}, "body": bytearray()}
+        async def swallow(message):
+            if message["type"] == "http.response.start":
+                state["status"] = int(message.get("status", 500))
+                state["headers"] = {k.decode("latin1").lower(): v.decode("latin1") for k, v in message.get("headers", [])}
+            elif message["type"] == "http.response.body" and len(state["body"]) < 65536:
+                state["body"].extend((message.get("body", b"") or b"")[:65536-len(state["body"])])
+
+        try:
+            await target_app(new_scope, replay_receive, swallow)
+        except Exception as exc:
+            logging.exception("NSPXN Instant Report processing failed", exc_info=exc)
+            await _send_json(send, 500, {"error": "Instant Report processing failed.", "detail": str(exc)}, scope=scope)
+            return
+
+        payload = None
+        try:
+            payload = json.loads(bytes(state["body"]).decode("utf-8", "ignore"))
+        except Exception:
+            payload = None
+        if 200 <= state["status"] < 300 and not (isinstance(payload, dict) and payload.get("status") == "blocked"):
+            pdf_filename = str((payload or {}).get("pdf_filename") or "").strip() if isinstance(payload, dict) else ""
+            mark_public_report_completed(public_token, file_number, pdf_filename or None)
+            download_url = f"/public/download-pdf?token={quote(public_token, safe='')}"
+            await _send_json(send, 200, {"status": "success", "message": "Completed. Download the PDF below.", "file_number": file_number, "download_url": download_url}, scope=scope)
+            return
+
+        error_payload = payload if isinstance(payload, dict) else {"error": "Instant Report was not completed."}
+        await _send_json(send, state["status"], error_payload, scope=scope)
+
     async def __call__(self, scope, receive, send):
         if scope["type"] != "http":
             await _get_comprehensive_app()(scope, receive, send)
@@ -344,6 +479,15 @@ class IntentRouterApp:
 
         if path in {"/login", "/me"} or path.startswith("/admin"):
             await self.auth(scope, receive, send)
+            return
+
+        # PayPal/config/token validation routes live on the auth/database app.
+        if path.startswith("/public/paypal/") or path in {"/public/instant-reports/config", "/public/instant-reports/validate"}:
+            await self.auth(scope, receive, send)
+            return
+
+        if path in {"/public/vision-review", "/public/download-pdf"}:
+            await self._handle_public_instant_report(scope, receive, send)
             return
 
         # Keep all non-/vision-review and non-/download-pdf routes on the comprehensive app.

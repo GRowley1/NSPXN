@@ -2,6 +2,11 @@ import csv
 import io
 import json
 import os
+import hashlib
+import secrets
+import urllib.error
+import urllib.parse
+import urllib.request
 from datetime import datetime, timedelta, timezone
 from typing import Optional, Tuple, List
 
@@ -129,6 +134,29 @@ class AdminActivityLog(Base):
     created_at = Column(DateTime, default=datetime.utcnow, nullable=False)
 
 
+class OneTimeReportPurchase(Base):
+    __tablename__ = "one_time_report_purchases"
+
+    id = Column(Integer, primary_key=True, index=True)
+    paypal_order_id = Column(String, unique=True, index=True, nullable=False)
+    paypal_capture_id = Column(String, unique=True, index=True, nullable=True)
+    paypal_payer_email = Column(String, nullable=True)
+    report_type = Column(String, index=True, nullable=False)
+    amount_paid = Column(String, nullable=False, default="5.00")
+    currency = Column(String, nullable=False, default="USD")
+    access_token_hash = Column(String, unique=True, index=True, nullable=True)
+    status = Column(String, index=True, nullable=False, default="created")
+    file_number = Column(String, index=True, nullable=True)
+    pdf_filename = Column(String, nullable=True)
+    created_at = Column(DateTime, default=datetime.utcnow, nullable=False)
+    expires_at = Column(DateTime, nullable=True)
+    report_started_at = Column(DateTime, nullable=True)
+    report_completed_at = Column(DateTime, nullable=True)
+    downloaded_at = Column(DateTime, nullable=True)
+    refunded_at = Column(DateTime, nullable=True)
+    failure_message = Column(String, nullable=True)
+
+
 class LoginRequest(BaseModel):
     nspxn_id: str
     password: str
@@ -163,6 +191,15 @@ class CurrentUser(BaseModel):
     company_name: Optional[str] = None
     role: str
     is_active: bool
+
+
+class PublicPayPalOrderRequest(BaseModel):
+    report_type: str
+
+
+class PublicPayPalCaptureRequest(BaseModel):
+    order_id: str
+    report_type: str
 
 
 # ============================================================
@@ -682,6 +719,245 @@ def me(current_user: CurrentUser = Depends(get_current_auth_user)):
         "comprehensive_score_count_this_month": account.get("comprehensive_score_count_this_month") or 0,
         "avg_comprehensive_compliance_score_lifetime": account.get("avg_comprehensive_compliance_score_lifetime"),
         "comprehensive_score_count_lifetime": account.get("comprehensive_score_count_lifetime") or 0,
+    }
+
+
+# ============================================================
+# NSPXN INSTANT REPORTS - PAYPAL + SINGLE-USE ACCESS TOKENS
+# ============================================================
+
+PAYPAL_MODE = os.getenv("PAYPAL_MODE", "sandbox").strip().lower()
+PAYPAL_CLIENT_ID = os.getenv("PAYPAL_CLIENT_ID", "").strip()
+PAYPAL_CLIENT_SECRET = os.getenv("PAYPAL_CLIENT_SECRET", "").strip()
+PAYPAL_DAMAGE_REPORT_PRICE = os.getenv("PAYPAL_DAMAGE_REPORT_PRICE", "5.00").strip()
+PAYPAL_DV_REPORT_PRICE = os.getenv("PAYPAL_DV_REPORT_PRICE", "5.00").strip()
+PUBLIC_REPORT_TOKEN_HOURS = int(os.getenv("PUBLIC_REPORT_TOKEN_HOURS", "24"))
+PUBLIC_REPORT_URL = os.getenv("PUBLIC_REPORT_URL", "https://nspxn.com/consumer-report").strip()
+
+PUBLIC_REPORT_TYPES = {
+    "damage_report_from_photos": PAYPAL_DAMAGE_REPORT_PRICE,
+    "preliminary_diminished_value_screening": PAYPAL_DV_REPORT_PRICE,
+}
+
+
+def _paypal_api_base() -> str:
+    return "https://api-m.paypal.com" if PAYPAL_MODE == "live" else "https://api-m.sandbox.paypal.com"
+
+
+def _paypal_access_token() -> str:
+    if not PAYPAL_CLIENT_ID or not PAYPAL_CLIENT_SECRET:
+        raise HTTPException(status_code=503, detail="PayPal credentials are not configured.")
+    import base64
+    credentials = f"{PAYPAL_CLIENT_ID}:{PAYPAL_CLIENT_SECRET}".encode("utf-8")
+    req = urllib.request.Request(
+        url=_paypal_api_base() + "/v1/oauth2/token",
+        data=b"grant_type=client_credentials",
+        headers={
+            "Accept": "application/json",
+            "Authorization": "Basic " + base64.b64encode(credentials).decode("ascii"),
+            "Content-Type": "application/x-www-form-urlencoded",
+        },
+        method="POST",
+    )
+    try:
+        with urllib.request.urlopen(req, timeout=30) as resp:
+            data = json.loads(resp.read().decode("utf-8", "ignore"))
+    except urllib.error.HTTPError as exc:
+        detail = exc.read().decode("utf-8", "ignore")
+        raise HTTPException(status_code=502, detail=f"PayPal authentication failed ({exc.code}): {detail[:800]}")
+    token = str(data.get("access_token") or "").strip()
+    if not token:
+        raise HTTPException(status_code=502, detail="PayPal did not return an access token.")
+    return token
+
+
+def _paypal_json_request(method: str, path: str, payload: Optional[dict], access_token: str) -> dict:
+    req = urllib.request.Request(
+        url=_paypal_api_base() + path,
+        data=json.dumps(payload).encode("utf-8") if payload is not None else None,
+        headers={"Accept": "application/json", "Content-Type": "application/json", "Authorization": f"Bearer {access_token}"},
+        method=method.upper(),
+    )
+    try:
+        with urllib.request.urlopen(req, timeout=30) as resp:
+            raw = resp.read().decode("utf-8", "ignore")
+            return json.loads(raw) if raw else {}
+    except urllib.error.HTTPError as exc:
+        detail = exc.read().decode("utf-8", "ignore")
+        raise HTTPException(status_code=502, detail=f"PayPal request failed ({exc.code}): {detail[:800]}")
+
+
+def _normalize_public_report_type(report_type: str) -> str:
+    value = (report_type or "").strip().lower()
+    if value not in PUBLIC_REPORT_TYPES:
+        raise HTTPException(status_code=400, detail="Invalid Instant Report type.")
+    return value
+
+
+def _public_token_hash(raw_token: str) -> str:
+    return hashlib.sha256((raw_token or "").encode("utf-8")).hexdigest()
+
+
+def validate_public_report_token(raw_token: str, allow_completed: bool = True) -> OneTimeReportPurchase:
+    db = SessionLocal()
+    try:
+        row = db.query(OneTimeReportPurchase).filter(OneTimeReportPurchase.access_token_hash == _public_token_hash(raw_token)).first()
+        if not row:
+            raise HTTPException(status_code=401, detail="Invalid Instant Reports access token.")
+        if row.expires_at and datetime.utcnow() > row.expires_at:
+            if row.status not in {"downloaded", "refunded"}:
+                row.status = "expired"; db.commit()
+            raise HTTPException(status_code=403, detail="This Instant Reports access token has expired.")
+        allowed = {"paid", "report_started"}
+        if allow_completed:
+            allowed.add("report_completed")
+        if row.status not in allowed:
+            if row.status == "downloaded":
+                raise HTTPException(status_code=403, detail="This Instant Report has already been downloaded.")
+            raise HTTPException(status_code=403, detail=f"This Instant Report is not available (status: {row.status}).")
+        db.expunge(row)
+        return row
+    finally:
+        db.close()
+
+
+def mark_public_report_started(raw_token: str, file_number: str) -> None:
+    db = SessionLocal()
+    try:
+        row = db.query(OneTimeReportPurchase).filter(OneTimeReportPurchase.access_token_hash == _public_token_hash(raw_token)).first()
+        if not row:
+            raise HTTPException(status_code=401, detail="Invalid Instant Reports access token.")
+        row.status = "report_started"
+        row.file_number = (file_number or "").strip()
+        row.report_started_at = row.report_started_at or datetime.utcnow()
+        db.commit()
+    finally:
+        db.close()
+
+
+def mark_public_report_completed(raw_token: str, file_number: str, pdf_filename: Optional[str] = None) -> None:
+    db = SessionLocal()
+    try:
+        row = db.query(OneTimeReportPurchase).filter(OneTimeReportPurchase.access_token_hash == _public_token_hash(raw_token)).first()
+        if row:
+            row.status = "report_completed"
+            row.file_number = (file_number or row.file_number or "").strip()
+            if pdf_filename: row.pdf_filename = pdf_filename
+            row.report_completed_at = datetime.utcnow()
+            db.commit()
+    finally:
+        db.close()
+
+
+def mark_public_report_downloaded(raw_token: str) -> None:
+    db = SessionLocal()
+    try:
+        row = db.query(OneTimeReportPurchase).filter(OneTimeReportPurchase.access_token_hash == _public_token_hash(raw_token)).first()
+        if not row:
+            raise HTTPException(status_code=401, detail="Invalid Instant Reports access token.")
+        row.status = "downloaded"
+        row.downloaded_at = datetime.utcnow()
+        db.commit()
+    finally:
+        db.close()
+
+
+def _instant_purchase_to_dict(row: OneTimeReportPurchase) -> dict:
+    return {
+        "id": row.id, "paypal_order_id": row.paypal_order_id, "paypal_capture_id": row.paypal_capture_id,
+        "paypal_payer_email": row.paypal_payer_email, "report_type": row.report_type,
+        "amount_paid": row.amount_paid, "currency": row.currency, "status": row.status,
+        "file_number": row.file_number, "pdf_filename": row.pdf_filename,
+        "created_at": row.created_at.isoformat() if row.created_at else None,
+        "expires_at": row.expires_at.isoformat() if row.expires_at else None,
+        "report_started_at": row.report_started_at.isoformat() if row.report_started_at else None,
+        "report_completed_at": row.report_completed_at.isoformat() if row.report_completed_at else None,
+        "downloaded_at": row.downloaded_at.isoformat() if row.downloaded_at else None,
+        "failure_message": row.failure_message,
+    }
+
+
+@auth_app.get("/public/instant-reports/config")
+def public_instant_reports_config():
+    return {
+        "brand": "NSPXN Instant Reports", "paypal_client_id": PAYPAL_CLIENT_ID, "paypal_mode": PAYPAL_MODE,
+        "currency": "USD", "products": [
+            {"report_type": "damage_report_from_photos", "name": "Damage Report from Photos", "price": PAYPAL_DAMAGE_REPORT_PRICE},
+            {"report_type": "preliminary_diminished_value_screening", "name": "Preliminary Diminished Value Screening", "price": PAYPAL_DV_REPORT_PRICE},
+        ],
+    }
+
+
+@auth_app.post("/public/paypal/create-order")
+def public_paypal_create_order(payload: PublicPayPalOrderRequest, db: Session = Depends(get_auth_db)):
+    report_type = _normalize_public_report_type(payload.report_type)
+    price = PUBLIC_REPORT_TYPES[report_type]
+    order = _paypal_json_request("POST", "/v2/checkout/orders", {
+        "intent": "CAPTURE",
+        "purchase_units": [{"reference_id": report_type, "description": "NSPXN Instant Report", "custom_id": report_type, "amount": {"currency_code": "USD", "value": price}}],
+        "application_context": {"brand_name": "NSPXN Instant Reports", "user_action": "PAY_NOW", "shipping_preference": "NO_SHIPPING"},
+    }, _paypal_access_token())
+    order_id = str(order.get("id") or "").strip()
+    if not order_id:
+        raise HTTPException(status_code=502, detail="PayPal did not return an order ID.")
+    db.add(OneTimeReportPurchase(paypal_order_id=order_id, report_type=report_type, amount_paid=price, currency="USD", status="created"))
+    db.commit()
+    return {"order_id": order_id}
+
+
+@auth_app.post("/public/paypal/capture-order")
+def public_paypal_capture_order(payload: PublicPayPalCaptureRequest, db: Session = Depends(get_auth_db)):
+    report_type = _normalize_public_report_type(payload.report_type)
+    row = db.query(OneTimeReportPurchase).filter(OneTimeReportPurchase.paypal_order_id == payload.order_id.strip()).first()
+    if not row or row.report_type != report_type:
+        raise HTTPException(status_code=404, detail="Instant Report order was not found.")
+    capture = _paypal_json_request("POST", f"/v2/checkout/orders/{urllib.parse.quote(payload.order_id.strip())}/capture", {}, _paypal_access_token())
+    if str(capture.get("status") or "").upper() != "COMPLETED":
+        row.status = "payment_failed"; db.commit()
+        raise HTTPException(status_code=402, detail="PayPal payment was not completed.")
+    units = capture.get("purchase_units") or []
+    captures = (((units[0] if units else {}).get("payments") or {}).get("captures") or [])
+    cap = captures[0] if captures else {}
+    paid_value = str(((cap.get("amount") or {}).get("value")) or "")
+    paid_currency = str(((cap.get("amount") or {}).get("currency_code")) or "")
+    expected = PUBLIC_REPORT_TYPES[report_type]
+    if paid_value != expected or paid_currency.upper() != "USD":
+        row.status = "payment_mismatch"; db.commit()
+        raise HTTPException(status_code=400, detail="PayPal payment amount did not match the selected report.")
+    raw_token = secrets.token_urlsafe(32)
+    row.paypal_capture_id = str(cap.get("id") or "").strip() or None
+    row.paypal_payer_email = str((capture.get("payer") or {}).get("email_address") or "").strip() or None
+    row.access_token_hash = _public_token_hash(raw_token)
+    row.status = "paid"; row.amount_paid = paid_value; row.currency = "USD"
+    row.expires_at = datetime.utcnow() + timedelta(hours=PUBLIC_REPORT_TOKEN_HOURS)
+    db.commit()
+    return {"status": "paid", "access_token": raw_token, "report_type": report_type, "expires_at": row.expires_at.isoformat(), "consumer_url": PUBLIC_REPORT_URL}
+
+
+@auth_app.get("/public/instant-reports/validate")
+def public_validate_instant_report_token(token: str):
+    row = validate_public_report_token(token, allow_completed=True)
+    return {"valid": True, "report_type": row.report_type, "status": row.status, "file_number": row.file_number, "expires_at": row.expires_at.isoformat() if row.expires_at else None}
+
+
+@auth_app.get("/admin/instant-reports")
+def admin_instant_reports(status: Optional[str] = None, report_type: Optional[str] = None, limit: int = 250,
+                          admin_user: CurrentUser = Depends(get_current_auth_user), db: Session = Depends(get_auth_db)):
+    if (admin_user.role or "").lower() != "admin":
+        raise HTTPException(status_code=403, detail="Admin access required.")
+    query = db.query(OneTimeReportPurchase)
+    if status and status != "all": query = query.filter(OneTimeReportPurchase.status == status)
+    if report_type and report_type != "all": query = query.filter(OneTimeReportPurchase.report_type == report_type)
+    rows = query.order_by(OneTimeReportPurchase.created_at.desc()).limit(max(1, min(int(limit or 250), 1000))).all()
+    revenue_statuses = {"paid", "report_started", "report_completed", "downloaded"}
+    return {
+        "summary": {
+            "records": len(rows), "revenue": round(sum(float(r.amount_paid or 0) for r in rows if r.status in revenue_statuses), 2),
+            "paid": sum(1 for r in rows if r.status == "paid"), "processing": sum(1 for r in rows if r.status == "report_started"),
+            "completed": sum(1 for r in rows if r.status == "report_completed"), "downloaded": sum(1 for r in rows if r.status == "downloaded"),
+            "expired": sum(1 for r in rows if r.status == "expired"),
+        },
+        "purchases": [_instant_purchase_to_dict(r) for r in rows],
     }
 
 
