@@ -463,7 +463,12 @@ class IntentRouterApp:
             return
 
         error_payload = payload if isinstance(payload, dict) else {"error": "Instant Report was not completed."}
-        await _send_json(send, state["status"], error_payload, scope=scope)
+        # Mounted report apps may intentionally return HTTP 200 with status=blocked.
+        # Do not let the public frontend mistake that for a completed report.
+        public_error_status = int(state["status"] or 500)
+        if isinstance(error_payload, dict) and error_payload.get("status") == "blocked" and 200 <= public_error_status < 300:
+            public_error_status = 422
+        await _send_json(send, public_error_status, error_payload, scope=scope)
 
     async def __call__(self, scope, receive, send):
         if scope["type"] != "http":
