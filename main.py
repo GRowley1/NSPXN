@@ -253,13 +253,14 @@ def _blocked_payload_from_exception(exc: HTTPException) -> tuple[int, dict]:
 
 
 def _replace_or_add_form_field(body: bytes, content_type: str, field_name: str, value: str) -> bytes:
+    """Replace or add one exact simple text field without touching later multipart fields."""
     ct = (content_type or "").lower()
-    safe_value = (value or "").encode("utf-8")
+    safe_value = str(value or "")
 
     if "application/x-www-form-urlencoded" in ct:
         try:
             parsed = parse_qs(body.decode("utf-8", "ignore"), keep_blank_values=True)
-            parsed[field_name] = [value or ""]
+            parsed[field_name] = [safe_value]
             from urllib.parse import urlencode
             return urlencode(parsed, doseq=True).encode("utf-8")
         except Exception:
@@ -269,33 +270,71 @@ def _replace_or_add_form_field(body: bytes, content_type: str, field_name: str, 
         return body
 
     try:
-        # Replace existing simple text field value. The frontend already sends appraiser_id.
-        pattern = (
-            rb'(name="' + re.escape(field_name.encode("utf-8")) +
-            rb'"\r\n(?:[^\r\n]*\r\n)*\r\n)([^\r\n]*)'
-        )
-        if re.search(pattern, body, flags=re.IGNORECASE):
-            return re.sub(pattern, rb'\g<1>' + safe_value, body, count=1, flags=re.IGNORECASE)
-
-        # If the field is missing, add it before the closing multipart boundary.
         boundary_match = re.search(r"boundary=([^;]+)", content_type or "", flags=re.IGNORECASE)
         if not boundary_match:
             return body
 
         boundary = boundary_match.group(1).strip().strip('"')
-        closing = ("\r\n--" + boundary + "--").encode("utf-8")
-        if closing not in body:
+        marker = ("--" + boundary).encode("utf-8")
+        parts = body.split(marker)
+        replacement = safe_value.encode("utf-8")
+        replaced = False
+
+        for index, part in enumerate(parts):
+            if not part or part in (b"--", b"--\r\n", b"--\n"):
+                continue
+
+            if b"\r\n\r\n" in part:
+                header_blob, value_blob = part.split(b"\r\n\r\n", 1)
+                separator = b"\r\n\r\n"
+                trailing = b"\r\n" if value_blob.endswith(b"\r\n") else b""
+            elif b"\n\n" in part:
+                header_blob, value_blob = part.split(b"\n\n", 1)
+                separator = b"\n\n"
+                trailing = b"\n" if value_blob.endswith(b"\n") else b""
+            else:
+                continue
+
+            headers_txt = header_blob.decode("utf-8", "ignore")
+            if re.search(r'filename="', headers_txt, flags=re.IGNORECASE):
+                continue
+
+            name_match = re.search(r'(?:^|;\s*)name="([^"]+)"', headers_txt, flags=re.IGNORECASE)
+            if not name_match:
+                name_match = re.search(r"(?:^|;\s*)name=([^;\r\n]+)", headers_txt, flags=re.IGNORECASE)
+            if not name_match:
+                continue
+
+            part_name = name_match.group(1).strip().strip('"')
+            if part_name != field_name:
+                continue
+
+            parts[index] = header_blob + separator + replacement + trailing
+            replaced = True
+            break
+
+        if replaced:
+            return marker.join(parts)
+
+        closing_index = None
+        for index in range(len(parts) - 1, -1, -1):
+            if parts[index].startswith(b"--"):
+                closing_index = index
+                break
+        if closing_index is None:
             return body
 
-        insertion = (
-            "\r\n--" + boundary +
-            f"\r\nContent-Disposition: form-data; name=\"{field_name}\"\r\n\r\n" +
-            (value or "")
-        ).encode("utf-8")
-        return body.replace(closing, insertion + closing, 1)
+        new_part = (
+            b"\r\nContent-Disposition: form-data; name=\""
+            + field_name.encode("utf-8")
+            + b"\"\r\n\r\n"
+            + replacement
+            + b"\r\n"
+        )
+        parts.insert(closing_index, new_part)
+        return marker.join(parts)
     except Exception:
         return body
-
 
 def _scope_with_updated_content_length(scope, body: bytes):
     headers = []
