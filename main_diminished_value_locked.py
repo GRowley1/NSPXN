@@ -4,6 +4,8 @@ from typing import Optional, List, Dict, Any
 import os
 import re
 import glob
+import smtplib  # email transport
+from email.message import EmailMessage
 
 from fastapi import FastAPI, UploadFile, File, Form, Response, Request
 from fastapi.responses import JSONResponse, FileResponse
@@ -427,6 +429,60 @@ async def vision_review(
     ]
     summary_markdown = "\n".join(markdown_lines)
     pdf_filename = _write_pdf(str(file_number), "Preliminary Diminished Value Screening", markdown_lines)
+    pdf_path = os.path.join(PDF_DIR, pdf_filename)
+
+    # -----------------------
+    # Email — info-only (attach PDF)
+    # Same SMTP configuration used by the Photos-Only report.
+    # -----------------------
+    try:
+        msg = EmailMessage()
+        msg["Subject"] = f"NSPXN.com Preliminary DV Screening: {file_number or ''}".strip()
+        msg["From"] = "info@nspxn.com"
+        msg["To"] = "info@nspxn.com"
+        msg["Cc"] = "growley@ractrak.com"
+        msg.set_content(
+            "NSPXN.com Preliminary Diminished Value Screening\n\n"
+            f"Generated: {generated}\n"
+            f"File Number: {file_number or 'N/A'}\n"
+            f"Inspected For: {ia_company or 'N/A'}\n"
+            f"NSPXN User ID #: {appraiser_id or 'N/A'}\n"
+            f"VIN: {_clean(dv_vin)}\n"
+            f"Vehicle: {_clean(dv_year_make_model)}\n"
+            f"Mileage: {mileage:,.0f}\n"
+            f"State: {resolved_state}\n"
+            f"Claim Type: {_clean(dv_claim_type)}\n"
+            f"Pre-Loss Value: {_money(pre_loss_value)}\n"
+            f"Pre-Loss Value Source: {_clean(dv_pre_loss_value_source)}\n"
+            f"Repair Total: {_money(repair_total)}\n"
+            f"Damage Severity: {_clean(dv_damage_severity)}\n"
+            f"Structural Damage: {_clean(dv_structural_damage)}\n"
+            f"Airbag Deployment: {_clean(dv_airbag_deployment)}\n"
+            f"Prior Accident History: {_clean(dv_prior_accident_history)}\n\n"
+            f"17c Reference DV: {_money(dv_17c)}\n"
+            f"Market-Based DV Range: {_money(market_low)} - {_money(market_high)}\n"
+            f"Preliminary Review Position: {_money(recommended)}\n\n"
+            f"{summary_markdown}\n"
+        )
+
+        try:
+            with open(pdf_path, "rb") as f:
+                pdf_bytes = f.read()
+            msg.add_attachment(
+                pdf_bytes,
+                maintype="application",
+                subtype="pdf",
+                filename=pdf_filename,
+            )
+        except Exception as e:
+            logging.warning(f"Failed to attach DV PDF to email: {e}")
+
+        with smtplib.SMTP_SSL("mail.tierra.net", 465, timeout=20) as smtp:
+            smtp.login("info@nspxn.com", "grr2025GRR")
+            smtp.send_message(msg)
+        logging.info("DV email sent to info@nspxn.com")
+    except Exception as e:
+        logging.error(f"DV email error: {e}")
 
     response.headers["X-NSPXN-Report-Completed"] = "true"
     response.headers["X-NSPXN-AI-Intent"] = "preliminary_diminished_value_screening"
