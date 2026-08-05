@@ -526,7 +526,11 @@ class IntentRouterApp:
             return
 
         # PayPal/config/token validation routes live on the auth/database app.
-        if path.startswith("/public/paypal/") or path in {"/public/instant-reports/config", "/public/instant-reports/validate"}:
+        if path.startswith("/public/paypal/") or path in {
+            "/public/instant-reports/config",
+            "/public/instant-reports/validate",
+            "/public/paypal/webhook",
+        }:
             await self.auth(scope, receive, send)
             return
 

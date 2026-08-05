@@ -17,7 +17,7 @@ from pydantic import BaseModel
 from sqlalchemy import Boolean, Column, DateTime, Float, ForeignKey, Integer, String, create_engine, func, inspect, text
 from sqlalchemy.orm import Session, declarative_base, sessionmaker
 
-from fastapi import Depends, FastAPI, Header, HTTPException, Response
+from fastapi import Depends, FastAPI, Header, HTTPException, Response, Request
 from fastapi.middleware.cors import CORSMiddleware
 
 
@@ -729,6 +729,7 @@ def me(current_user: CurrentUser = Depends(get_current_auth_user)):
 PAYPAL_MODE = os.getenv("PAYPAL_MODE", "sandbox").strip().lower()
 PAYPAL_CLIENT_ID = os.getenv("PAYPAL_CLIENT_ID", "").strip()
 PAYPAL_CLIENT_SECRET = os.getenv("PAYPAL_CLIENT_SECRET", "").strip()
+PAYPAL_WEBHOOK_ID = os.getenv("PAYPAL_WEBHOOK_ID", "").strip()
 PAYPAL_DAMAGE_REPORT_PRICE = os.getenv("PAYPAL_DAMAGE_REPORT_PRICE", "5.00").strip()
 PAYPAL_DV_REPORT_PRICE = os.getenv("PAYPAL_DV_REPORT_PRICE", "5.00").strip()
 PUBLIC_REPORT_TOKEN_HOURS = int(os.getenv("PUBLIC_REPORT_TOKEN_HOURS", "24"))
@@ -932,6 +933,120 @@ def public_paypal_capture_order(payload: PublicPayPalCaptureRequest, db: Session
     row.expires_at = datetime.utcnow() + timedelta(hours=PUBLIC_REPORT_TOKEN_HOURS)
     db.commit()
     return {"status": "paid", "access_token": raw_token, "report_type": report_type, "expires_at": row.expires_at.isoformat(), "consumer_url": PUBLIC_REPORT_URL}
+
+
+
+def _paypal_webhook_related_ids(resource: dict) -> tuple[str, str]:
+    resource = resource if isinstance(resource, dict) else {}
+    related = ((resource.get("supplementary_data") or {}).get("related_ids") or {})
+    order_id = str(related.get("order_id") or resource.get("order_id") or "").strip()
+    capture_id = str(related.get("capture_id") or "").strip()
+    return order_id, capture_id
+
+
+def _paypal_verify_webhook_signature(headers: dict, event: dict) -> bool:
+    if not PAYPAL_WEBHOOK_ID:
+        raise HTTPException(status_code=503, detail="PAYPAL_WEBHOOK_ID is not configured.")
+
+    payload = {
+        "auth_algo": str(headers.get("paypal-auth-algo") or "").strip(),
+        "cert_url": str(headers.get("paypal-cert-url") or "").strip(),
+        "transmission_id": str(headers.get("paypal-transmission-id") or "").strip(),
+        "transmission_sig": str(headers.get("paypal-transmission-sig") or "").strip(),
+        "transmission_time": str(headers.get("paypal-transmission-time") or "").strip(),
+        "webhook_id": PAYPAL_WEBHOOK_ID,
+        "webhook_event": event,
+    }
+    missing = [k for k in ("auth_algo", "cert_url", "transmission_id", "transmission_sig", "transmission_time") if not payload.get(k)]
+    if missing:
+        raise HTTPException(status_code=400, detail="Missing required PayPal webhook verification header(s): " + ", ".join(missing))
+
+    verification = _paypal_json_request(
+        "POST",
+        "/v1/notifications/verify-webhook-signature",
+        payload,
+        _paypal_access_token(),
+    )
+    return str(verification.get("verification_status") or "").upper() == "SUCCESS"
+
+
+@auth_app.post("/public/paypal/webhook")
+async def public_paypal_webhook(request: Request, db: Session = Depends(get_auth_db)):
+    try:
+        event = await request.json()
+    except Exception:
+        raise HTTPException(status_code=400, detail="Invalid PayPal webhook JSON.")
+
+    if not isinstance(event, dict):
+        raise HTTPException(status_code=400, detail="Invalid PayPal webhook event.")
+
+    headers = {str(k).lower(): str(v) for k, v in request.headers.items()}
+    if not _paypal_verify_webhook_signature(headers, event):
+        raise HTTPException(status_code=400, detail="PayPal webhook signature verification failed.")
+
+    event_type = str(event.get("event_type") or "").strip().upper()
+    resource = event.get("resource") if isinstance(event.get("resource"), dict) else {}
+
+    order_id, capture_id = _paypal_webhook_related_ids(resource)
+    resource_id = str(resource.get("id") or "").strip()
+
+    if event_type == "CHECKOUT.ORDER.APPROVED":
+        order_id = resource_id or order_id
+    elif event_type in {"PAYMENT.CAPTURE.COMPLETED", "PAYMENT.CAPTURE.DENIED", "PAYMENT.CAPTURE.REVERSED"}:
+        capture_id = resource_id or capture_id
+
+    row = None
+    if order_id:
+        row = db.query(OneTimeReportPurchase).filter(OneTimeReportPurchase.paypal_order_id == order_id).first()
+    if not row and capture_id:
+        row = db.query(OneTimeReportPurchase).filter(OneTimeReportPurchase.paypal_capture_id == capture_id).first()
+
+    if not row:
+        return {"status": "ignored", "event_type": event_type, "reason": "No matching NSPXN Instant Report purchase."}
+
+    payer_email = str((resource.get("payer") or {}).get("email_address") or resource.get("payer_email") or "").strip()
+    if payer_email:
+        row.paypal_payer_email = payer_email
+    if capture_id and not row.paypal_capture_id:
+        row.paypal_capture_id = capture_id
+
+    amount = resource.get("amount") if isinstance(resource.get("amount"), dict) else {}
+    amount_value = str(amount.get("value") or "").strip()
+    amount_currency = str(amount.get("currency_code") or "").strip().upper()
+    if amount_value:
+        row.amount_paid = amount_value
+    if amount_currency:
+        row.currency = amount_currency
+
+    if event_type == "CHECKOUT.ORDER.APPROVED":
+        if row.status == "created":
+            row.status = "approved"
+        row.failure_message = None
+    elif event_type == "PAYMENT.CAPTURE.COMPLETED":
+        if row.status not in {"paid", "report_started", "report_completed", "downloaded"}:
+            row.status = "payment_completed"
+        row.failure_message = None
+    elif event_type == "PAYMENT.CAPTURE.DENIED":
+        if row.status != "downloaded":
+            row.status = "payment_denied"
+        row.failure_message = "PayPal reported PAYMENT.CAPTURE.DENIED."
+    elif event_type == "PAYMENT.CAPTURE.REFUNDED":
+        row.status = "refunded"
+        row.refunded_at = datetime.utcnow()
+        row.failure_message = "PayPal reported PAYMENT.CAPTURE.REFUNDED."
+    elif event_type == "PAYMENT.CAPTURE.REVERSED":
+        row.status = "payment_reversed"
+        row.failure_message = "PayPal reported PAYMENT.CAPTURE.REVERSED."
+    else:
+        return {"status": "ignored", "event_type": event_type, "reason": "Verified event type is not used by NSPXN."}
+
+    db.commit()
+    return {
+        "status": "ok",
+        "event_type": event_type,
+        "paypal_order_id": row.paypal_order_id,
+        "purchase_status": row.status,
+    }
 
 
 @auth_app.get("/public/instant-reports/validate")
