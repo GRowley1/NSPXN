@@ -426,7 +426,7 @@ async def vision_review(
         "Strict 17c may calculate $0 when mileage exceeds 100,000 miles because the 17c mileage modifier becomes 0.00 at that threshold. This does not mean diminished value exposure is necessarily zero. The Market-Based DV Screening Range is provided separately to reflect potential market stigma, repair severity, repair-to-value ratio, claim type, and vehicle-specific loss factors. This screening uses user-provided pre-loss value, mileage, repair total, damage severity, and known claim indicators. The 17c figure is provided only as a reference calculation and may be lower than market-based diminished value. The market-based range is a preliminary screening position and should be supported with comparable market data when used in a formal claim presentation.",
         "",
         "## Disclaimer",
-        "This is a Preliminary Diminished Value Screening only. It is not a certified diminished value appraisal unless reviewed, finalized, and signed by a qualified appraiser. NSPXN does not independently retrieve third-party valuation data; the pre-loss value is based on user-provided information and should be verified against accepted market valuation sources.",
+        "This is a Preliminary Diminished Value Screening only. It is not a certified diminished value appraisal unless reviewed, finalized, and signed by a qualified appraiser. NSPXN.com does not independently retrieve third-party valuation data; the pre-loss value is based on user-provided information and should be verified against accepted market valuation sources.",
     ]
     summary_markdown = "\n".join(markdown_lines)
     pdf_filename = _write_pdf(str(file_number), "Preliminary Diminished Value Screening", markdown_lines)
